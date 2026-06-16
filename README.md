@@ -134,6 +134,7 @@ Verified so far:
 - Runtime initializer creates missing isolated config/identity/user placeholders without overwriting existing files.
 - Gateway auth enforcement supports verified `none`, `token`, and `password` modes.
 - OpenAI-compatible Gateway skeleton exposes verified `/v1/models` and explicit-not-implemented `/v1/chat/completions` behavior.
+- File-backed JSONL transcript storage under the isolated transcript directory supports append/read/list and reports aggregate counts in `/status`.
 - Native isolated Pi wrapper starts and reports `0.79.4`.
 - Native MindStone overlay packages build.
 - Native Gateway `/health` responds on `19789`.

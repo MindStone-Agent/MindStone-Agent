@@ -1,6 +1,7 @@
 import { loadConfiguredIdentities } from "../identity/index.js";
 import { loadMindStoneConfig, resolveConfigPath, type LoadedMindStoneConfig } from "../config/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
+import { listTranscriptSessions } from "../transcript/index.js";
 
 export type MindStoneAgentStatus = {
   agentId: string;
@@ -23,6 +24,11 @@ export type MindStoneSystemStatus = {
     agentCount: number;
   };
   agents: MindStoneAgentStatus[];
+  transcripts: {
+    dir: string;
+    sessionCount: number;
+    entryCount: number;
+  };
 };
 
 function summarizeAgents(loadedConfig: LoadedMindStoneConfig): MindStoneAgentStatus[] {
@@ -43,6 +49,7 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
   const paths = runtimePathsFromEnv(env);
   const loadedConfig = loadMindStoneConfig(resolveConfigPath(env, paths));
   const agents = loadedConfig.config ? summarizeAgents(loadedConfig) : [];
+  const transcriptSessions = listTranscriptSessions({ paths });
   return {
     ok: !loadedConfig.error && agents.every((agent) => !agent.error),
     paths,
@@ -53,5 +60,10 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
       agentCount: loadedConfig.config?.agents ? Object.keys(loadedConfig.config.agents).length : 0,
     },
     agents,
+    transcripts: {
+      dir: paths.transcriptDir,
+      sessionCount: transcriptSessions.length,
+      entryCount: transcriptSessions.reduce((total, session) => total + session.entries, 0),
+    },
   };
 }

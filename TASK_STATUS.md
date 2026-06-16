@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, transcript store, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -26,6 +26,7 @@
 - [x] Start MindStone Core implementation around identity/config loading beyond metadata.
 - [x] Add Gateway auth modes.
 - [x] Start OpenAI-compatible Gateway endpoint skeleton.
+- [x] Begin transcript/session storage implementation.
 
 ### Completed
 
@@ -52,12 +53,15 @@
 - [x] Added OpenAI-compatible `/v1/models` skeleton.
 - [x] Added explicit `501 not_implemented` `/v1/chat/completions` skeleton.
 - [x] Verified OpenAI-compatible skeleton with `npm run smoke:openai`.
+- [x] Added file-backed JSONL transcript store.
+- [x] Verified append/read/list transcript behavior with `npm run smoke:transcripts`.
+- [x] Added transcript aggregate counts to `/status`.
 - [x] Verified native Pi adapter package registration via RPC `get_commands`.
 - [x] Verified Docker Pi adapter package registration via RPC `get_commands`.
 
 ### Upcoming
 
 - [ ] Replace placeholder initializer with interactive onboarding flow.
-- [ ] Begin transcript/session storage implementation.
 - [ ] Connect `/v1/chat/completions` to real MindStone routing.
+- [ ] Add transcript-backed WebChat history endpoints.
 - [ ] Ask Cairn for review when available.
