@@ -1,0 +1,464 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { resolveContextManagementPolicy, type ContextManagementMode } from "../context/index.js";
+import { runtimePathsFromEnv } from "../paths/runtime.js";
+import { loadMindStoneConfig, resolveConfigPath } from "../config/load.js";
+import type { GatewayAuthConfig, MindStoneConfig, MindStoneRoutingConfig } from "../config/types.js";
+import type { MindStonePrompter, MindStoneSelectOption } from "./prompter.js";
+
+export type MindStoneConfigWizardSection =
+  | "all"
+  | "workspace"
+  | "gateway"
+  | "routing"
+  | "context"
+  | "memory"
+  | "identity";
+
+export type MindStoneConfigWizardOptions = {
+  configPath?: string;
+  sections?: MindStoneConfigWizardSection[];
+  dryRun?: boolean;
+};
+
+export type MindStoneConfigWizardResult = {
+  path: string;
+  wrote: boolean;
+  config: MindStoneConfig;
+  changedSections: string[];
+};
+
+const TITLE = String.raw`
+███╗   ███╗██╗███╗   ██╗██████╗ ███████╗████████╗ ██████╗ ███╗   ██╗███████╗
+████╗ ████║██║████╗  ██║██╔══██╗██╔════╝╚══██╔══╝██╔═══██╗████╗  ██║██╔════╝
+██╔████╔██║██║██╔██╗ ██║██║  ██║███████╗   ██║   ██║   ██║██╔██╗ ██║█████╗  
+██║╚██╔╝██║██║██║╚██╗██║██║  ██║╚════██║   ██║   ██║   ██║██║╚██╗██║██╔══╝  
+██║ ╚═╝ ██║██║██║ ╚████║██████╔╝███████║   ██║   ╚██████╔╝██║ ╚████║███████╗
+╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝ ╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚══════╝
+                         🔶 Agent Configuration
+`;
+
+const SECTION_OPTIONS: Array<MindStoneSelectOption<MindStoneConfigWizardSection>> = [
+  { value: "all", label: "All core sections", hint: "workspace, gateway, routing, context, memory, identity" },
+  { value: "workspace", label: "Workspace", hint: "project root / working directory" },
+  { value: "gateway", label: "Gateway", hint: "host, port, auth, HTTP surfaces" },
+  { value: "routing", label: "Routing / provider", hint: "placeholder, mock, or isolated Pi provider" },
+  { value: "context", label: "Context management", hint: "sliding-window or auto-compact policy" },
+  { value: "memory", label: "Memory", hint: "autoRecall, vector store, embedding provider" },
+  { value: "identity", label: "Identity / user", hint: "default agent identity and user paths" },
+];
+
+function asPositivePort(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 65535) return fallback;
+  return parsed;
+}
+
+function asPercent(value: string, fallback: number): number {
+  const parsed = Number.parseFloat(value.trim());
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, 1), 99);
+}
+
+function asPositiveInteger(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return parsed;
+}
+
+function trimOrUndefined(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function sectionList(selection: MindStoneConfigWizardSection): MindStoneConfigWizardSection[] {
+  if (selection === "all") return ["workspace", "gateway", "routing", "context", "memory", "identity"];
+  return [selection];
+}
+
+function stableJson(config: MindStoneConfig): string {
+  return `${JSON.stringify(config, null, 2)}\n`;
+}
+
+export function formatMindStoneConfigHeader(): string {
+  return TITLE;
+}
+
+export function formatConfigSummary(config: MindStoneConfig): string {
+  const auth = config.gateway?.auth?.mode ?? "none";
+  const routing = config.routing?.mode ?? "placeholder";
+  const context = resolveContextManagementPolicy(config.contextManagement);
+  const defaultAgent = config.routing?.defaultAgentId ?? "default";
+  return [
+    `workspace.root: ${config.workspace?.root ?? "."}`,
+    `gateway: ${config.gateway?.host ?? "127.0.0.1"}:${config.gateway?.port ?? 19789} auth=${auth}`,
+    `gateway.http.chatCompletions: ${config.gateway?.http?.chatCompletions?.enabled ?? false}`,
+    `gateway.http.responses: ${config.gateway?.http?.responses?.enabled ?? false}`,
+    `routing.mode: ${routing}`,
+    `routing.defaultAgentId: ${defaultAgent}`,
+    `routing.defaultModel: ${config.routing?.defaultModel ?? config.agents?.[defaultAgent]?.defaultModel ?? "unset"}`,
+    `contextManagement.mode: ${context.mode}`,
+    `memory.autoRecall: ${config.memory?.autoRecall ?? false}`,
+    `memory.vectorStore: ${config.memory?.vectorStore ?? "sqlite-vec"}`,
+    `memory.embeddingProvider: ${config.memory?.embeddingProvider ?? "unset"}`,
+  ].join("\n");
+}
+
+export function formatConfigChangeSummary(before: MindStoneConfig, after: MindStoneConfig): string {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  const changed = [...keys].filter(
+    (key) => JSON.stringify((before as Record<string, unknown>)[key]) !== JSON.stringify((after as Record<string, unknown>)[key]),
+  );
+  if (changed.length === 0) return "No changes.";
+  return changed.map((key) => `~ ${key}`).join("\n");
+}
+
+export function validateMindStoneConfig(config: MindStoneConfig): string[] {
+  const issues: string[] = [];
+  const port = config.gateway?.port;
+  if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+    issues.push("gateway.port must be an integer from 1 to 65535");
+  }
+  const host = config.gateway?.host;
+  if (host !== undefined && host.trim() === "") issues.push("gateway.host cannot be blank");
+
+  const auth = config.gateway?.auth;
+  if (auth?.mode === "token" && !auth.tokenEnv && !auth.tokenFile) {
+    issues.push("gateway.auth token mode should use tokenEnv or tokenFile");
+  }
+  if (auth?.mode === "password" && !auth.passwordEnv) {
+    issues.push("gateway.auth password mode should use passwordEnv");
+  }
+
+  const routingMode = config.routing?.mode;
+  if (routingMode && !["placeholder", "mock", "pi"].includes(routingMode)) {
+    issues.push("routing.mode must be placeholder, mock, or pi");
+  }
+
+  const context = resolveContextManagementPolicy(config.contextManagement);
+  if (context.mode === "sliding_window" && context.floorPercent >= context.ceilingPercent) {
+    issues.push("contextManagement.floorPercent must be lower than ceilingPercent");
+  }
+  return issues;
+}
+
+export function writeMindStoneConfig(configPath: string, config: MindStoneConfig): void {
+  mkdirSync(dirname(configPath), { recursive: true });
+  writeFileSync(configPath, stableJson(config), "utf-8");
+}
+
+async function configureWorkspace(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
+  const root = await prompter.text({
+    message: "Workspace root",
+    placeholder: ".",
+    initialValue: config.workspace?.root ?? ".",
+  });
+  return { ...config, workspace: { ...config.workspace, root: root.trim() || "." } };
+}
+
+async function configureGateway(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
+  const gateway = config.gateway ?? {};
+  const host = await prompter.text({
+    message: "Gateway host",
+    placeholder: "127.0.0.1",
+    initialValue: gateway.host ?? "127.0.0.1",
+  });
+  const portRaw = await prompter.text({
+    message: "Gateway port",
+    placeholder: "19789",
+    initialValue: String(gateway.port ?? 19789),
+  });
+  const authMode = await prompter.select<GatewayAuthConfig["mode"]>({
+    message: "Gateway auth mode",
+    options: [
+      { value: "none", label: "None", hint: "local/dev only" },
+      { value: "token", label: "Token", hint: "recommended for exposed Gateway" },
+      { value: "password", label: "Password", hint: "read password from env" },
+    ],
+    initialValue: gateway.auth?.mode ?? "none",
+  });
+
+  let auth: GatewayAuthConfig = { mode: "none" };
+  if (authMode === "token") {
+    const tokenEnv = await prompter.text({
+      message: "Token environment variable",
+      placeholder: "MINDSTONE_GATEWAY_TOKEN",
+      initialValue: gateway.auth?.mode === "token" ? gateway.auth.tokenEnv ?? "MINDSTONE_GATEWAY_TOKEN" : "MINDSTONE_GATEWAY_TOKEN",
+    });
+    auth = { mode: "token", tokenEnv: tokenEnv.trim() || "MINDSTONE_GATEWAY_TOKEN" };
+  } else if (authMode === "password") {
+    const passwordEnv = await prompter.text({
+      message: "Password environment variable",
+      placeholder: "MINDSTONE_GATEWAY_PASSWORD",
+      initialValue: gateway.auth?.mode === "password" ? gateway.auth.passwordEnv ?? "MINDSTONE_GATEWAY_PASSWORD" : "MINDSTONE_GATEWAY_PASSWORD",
+    });
+    auth = { mode: "password", passwordEnv: passwordEnv.trim() || "MINDSTONE_GATEWAY_PASSWORD" };
+  }
+
+  const chatCompletions = await prompter.confirm({
+    message: "Enable OpenAI-compatible /v1/chat/completions?",
+    initialValue: gateway.http?.chatCompletions?.enabled ?? false,
+  });
+  const responses = await prompter.confirm({
+    message: "Enable OpenAI-compatible /v1/responses?",
+    initialValue: gateway.http?.responses?.enabled ?? false,
+  });
+
+  return {
+    ...config,
+    gateway: {
+      ...gateway,
+      host: host.trim() || "127.0.0.1",
+      port: asPositivePort(portRaw, gateway.port ?? 19789),
+      auth,
+      http: {
+        ...gateway.http,
+        chatCompletions: { ...gateway.http?.chatCompletions, enabled: chatCompletions },
+        responses: { ...gateway.http?.responses, enabled: responses },
+      },
+    },
+  };
+}
+
+async function configureRouting(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
+  const paths = runtimePathsFromEnv();
+  const routing = config.routing ?? {};
+  const mode = await prompter.select<NonNullable<MindStoneRoutingConfig["mode"]>>({
+    message: "Routing/provider mode",
+    options: [
+      { value: "placeholder", label: "Placeholder", hint: "safe transcript-aware not-implemented behavior" },
+      { value: "mock", label: "Mock", hint: "deterministic local provider for smoke tests" },
+      { value: "pi", label: "Pi", hint: "isolated vendored Pi provider adapter" },
+    ],
+    initialValue: routing.mode ?? "placeholder",
+  });
+  const defaultAgentId = await prompter.text({
+    message: "Default agent id",
+    placeholder: "default",
+    initialValue: routing.defaultAgentId ?? "default",
+  });
+  const defaultModel = trimOrUndefined(
+    await prompter.text({
+      message: "Default model (blank to leave unset)",
+      placeholder: "openai-codex/gpt-5.5",
+      initialValue: routing.defaultModel ?? "",
+    }),
+  );
+
+  const nextRouting: MindStoneRoutingConfig = {
+    ...routing,
+    mode,
+    defaultAgentId: defaultAgentId.trim() || "default",
+    defaultModel,
+  };
+
+  if (mode === "mock") {
+    const responsePrefix = await prompter.text({
+      message: "Mock response prefix",
+      placeholder: "Mock response",
+      initialValue: routing.mock?.responsePrefix ?? "Mock response",
+    });
+    nextRouting.mock = { ...routing.mock, responsePrefix: responsePrefix.trim() || "Mock response" };
+  }
+
+  if (mode === "pi") {
+    const agentDir = await prompter.text({
+      message: "Isolated Pi agent dir",
+      placeholder: paths.piAgentDir,
+      initialValue: routing.pi?.agentDir ?? paths.piAgentDir,
+    });
+    nextRouting.pi = { ...routing.pi, agentDir: agentDir.trim() || paths.piAgentDir };
+  }
+
+  return { ...config, routing: nextRouting };
+}
+
+async function configureContext(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
+  const current = resolveContextManagementPolicy(config.contextManagement);
+  const mode = await prompter.select<ContextManagementMode>({
+    message: "Context management mode",
+    options: [
+      { value: "sliding_window", label: "Sliding window", hint: "MindStone proper default; prune prompt window only" },
+      { value: "auto_compact", label: "Auto compact", hint: "Pi/Claude-style checkpoint/handoff/compact" },
+    ],
+    initialValue: current.mode,
+  });
+
+  if (mode === "auto_compact") {
+    const checkpointWarningPercent = asPercent(
+      await prompter.text({ message: "Checkpoint/handoff warning percent", placeholder: "85", initialValue: String(current.mode === "auto_compact" ? current.checkpointWarningPercent : 85) }),
+      85,
+    );
+    const compactTargetPercent = asPercent(
+      await prompter.text({ message: "Auto compact target percent", placeholder: "92", initialValue: String(current.mode === "auto_compact" ? current.compactTargetPercent : 92) }),
+      92,
+    );
+    const keepRecentTokens = asPositiveInteger(
+      await prompter.text({ message: "Keep recent tokens", placeholder: "20000", initialValue: String(current.mode === "auto_compact" ? current.keepRecentTokens : 20_000) }),
+      20_000,
+    );
+    return {
+      ...config,
+      contextManagement: {
+        mode,
+        checkpointWarningPercent,
+        compactTargetPercent,
+        keepRecentTokens,
+        emergencyAutoHandoff: false,
+      },
+    };
+  }
+
+  const ceilingPercent = asPercent(
+    await prompter.text({ message: "Sliding-window ceiling percent", placeholder: "92", initialValue: String(current.mode === "sliding_window" ? current.ceilingPercent : 92) }),
+    92,
+  );
+  const floorPercent = asPercent(
+    await prompter.text({ message: "Sliding-window floor percent", placeholder: "70", initialValue: String(current.mode === "sliding_window" ? current.floorPercent : 70) }),
+    70,
+  );
+  const minRecentMessages = asPositiveInteger(
+    await prompter.text({ message: "Minimum recent messages", placeholder: "24", initialValue: String(current.mode === "sliding_window" ? current.minRecentMessages : 24) }),
+    24,
+  );
+  return {
+    ...config,
+    contextManagement: {
+      mode,
+      ceilingPercent,
+      floorPercent: Math.min(floorPercent, ceilingPercent - 1),
+      minRecentMessages,
+      preserveTranscript: true,
+    },
+  };
+}
+
+async function configureMemory(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
+  const memory = config.memory ?? {};
+  const autoRecall = await prompter.confirm({
+    message: "Enable automatic memory recall in prompt assembly?",
+    initialValue: memory.autoRecall ?? false,
+  });
+  const vectorStore = await prompter.select<"lancedb" | "sqlite-vec" | "memory">({
+    message: "Vector store",
+    options: [
+      { value: "sqlite-vec", label: "sqlite-vec", hint: "simple local default" },
+      { value: "lancedb", label: "LanceDB", hint: "MindStone lineage vector store" },
+      { value: "memory", label: "Memory", hint: "ephemeral/testing only" },
+    ],
+    initialValue: memory.vectorStore ?? "sqlite-vec",
+  });
+  const embeddingProvider = trimOrUndefined(
+    await prompter.text({
+      message: "Embedding provider (blank to leave unset)",
+      placeholder: "ollama:nomic-embed-text",
+      initialValue: memory.embeddingProvider ?? "",
+    }),
+  );
+  return { ...config, memory: { ...memory, autoRecall, vectorStore, embeddingProvider } };
+}
+
+async function configureIdentity(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
+  const currentDefault = config.routing?.defaultAgentId ?? "default";
+  const id = (await prompter.text({ message: "Agent id", placeholder: "default", initialValue: currentDefault })).trim() || "default";
+  const currentAgent = config.agents?.[id] ?? { id };
+  const identityPath = await prompter.text({
+    message: "Identity file path",
+    placeholder: `agents/${id}/IDENTITY.md`,
+    initialValue: currentAgent.identityPath ?? `agents/${id}/IDENTITY.md`,
+  });
+  const userPath = await prompter.text({
+    message: "User file path",
+    placeholder: `agents/${id}/USER.md`,
+    initialValue: currentAgent.userPath ?? `agents/${id}/USER.md`,
+  });
+  return {
+    ...config,
+    routing: { ...config.routing, defaultAgentId: id },
+    agents: {
+      ...config.agents,
+      [id]: {
+        ...currentAgent,
+        id,
+        identityPath: identityPath.trim() || `agents/${id}/IDENTITY.md`,
+        userPath: userPath.trim() || `agents/${id}/USER.md`,
+      },
+    },
+  };
+}
+
+async function configureSection(
+  section: MindStoneConfigWizardSection,
+  config: MindStoneConfig,
+  prompter: MindStonePrompter,
+): Promise<MindStoneConfig> {
+  switch (section) {
+    case "workspace":
+      return configureWorkspace(config, prompter);
+    case "gateway":
+      return configureGateway(config, prompter);
+    case "routing":
+      return configureRouting(config, prompter);
+    case "context":
+      return configureContext(config, prompter);
+    case "memory":
+      return configureMemory(config, prompter);
+    case "identity":
+      return configureIdentity(config, prompter);
+    case "all":
+      return config;
+  }
+}
+
+export async function runMindStoneConfigWizard(
+  prompter: MindStonePrompter,
+  options: MindStoneConfigWizardOptions = {},
+): Promise<MindStoneConfigWizardResult> {
+  const configPath = resolve(options.configPath ?? resolveConfigPath());
+  const loaded = loadMindStoneConfig(configPath);
+  if (loaded.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loaded.error}`);
+
+  const before = loaded.config ?? {};
+  let after: MindStoneConfig = { ...before };
+
+  await prompter.intro?.("MindStone configuration");
+  await prompter.note(formatMindStoneConfigHeader(), "MindStone 🔶");
+  await prompter.note(formatConfigSummary(after), loaded.exists ? "Current config" : "No config found; starting from defaults");
+
+  const selected = options.sections?.length
+    ? options.sections
+    : sectionList(
+        await prompter.select({
+          message: "Configuration section",
+          options: SECTION_OPTIONS,
+          initialValue: "all",
+        }),
+      );
+
+  const changedSections: string[] = [];
+  for (const section of selected) {
+    if (section === "all") continue;
+    const next = await configureSection(section, after, prompter);
+    if (JSON.stringify(next) !== JSON.stringify(after)) changedSections.push(section);
+    after = next;
+  }
+
+  const issues = validateMindStoneConfig(after);
+  if (issues.length > 0) {
+    await prompter.note(issues.map((issue) => `- ${issue}`).join("\n"), "Config validation failed");
+    throw new Error("MindStone config validation failed");
+  }
+
+  await prompter.note(formatConfigChangeSummary(before, after), "Proposed config diff");
+  await prompter.note(formatConfigSummary(after), "Proposed config summary");
+
+  const shouldWrite = !options.dryRun && (await prompter.confirm({ message: `Write config to ${configPath}?`, initialValue: true }));
+  if (shouldWrite) {
+    writeMindStoneConfig(configPath, after);
+    await prompter.outro?.(`MindStone config written: ${configPath}`);
+  } else {
+    await prompter.outro?.("MindStone config not written.");
+  }
+
+  return { path: configPath, wrote: shouldWrite, config: after, changedSections };
+}

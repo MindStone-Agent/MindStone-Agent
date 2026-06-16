@@ -8,6 +8,7 @@ export * from "./memory/types.js";
 export * from "./scri/types.js";
 export * from "./channels/types.js";
 export * from "./wizard/prompter.js";
+export * from "./wizard/config.js";
 export * from "./routing/session.js";
 export * from "./security/policy.js";
 export * from "./security/gateway-auth.js";

@@ -26,7 +26,8 @@
     "smoke:context-window": "./scripts/smoke-context-window.sh",
     "smoke:sliding-window": "./scripts/smoke-sliding-window.sh",
     "smoke:router-mock": "./scripts/smoke-router-mock.sh",
-    "smoke:pi-provider-config": "./scripts/smoke-pi-provider-config.sh"
+    "smoke:pi-provider-config": "./scripts/smoke-pi-provider-config.sh",
+    "smoke:config-wizard": "./scripts/smoke-config-wizard.sh"
   },
   "engines": {
     "node": ">=22.19.0"
