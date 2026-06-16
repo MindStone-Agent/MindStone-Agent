@@ -8,11 +8,11 @@
 | Area | Status | Notes |
 |------|--------|-------|
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
-| Isolation | In progress | Native wrapper isolates Pi config/sessions under `.runtime/` |
+| Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
 | Core/Gateway | Scaffolded | Core contracts and minimal Gateway health server build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
-| Docker install | Scaffolded | Dockerfile/Compose use project-specific volumes |
+| Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
 ## Current Sprint
 
@@ -21,7 +21,7 @@
 - [x] Validate vendored Pi build.
 - [x] Validate isolated wrapper startup.
 - [x] Establish MindStone overlay package structure.
-- [ ] Add first real Pi adapter integration test.
+- [x] Add first real Pi adapter integration test.
 - [ ] Expand Gateway beyond `/health`.
 
 ### Completed
@@ -36,10 +36,15 @@
 - [x] Added MindStone Core/Gateway/Pi adapter package scaffold.
 - [x] Verified `npm run build:mindstone`.
 - [x] Verified Gateway `/health` on isolated port `19789`.
+- [x] Verified Docker build.
+- [x] Verified Docker Pi wrapper reports `0.79.4`.
+- [x] Verified Docker Gateway `/health` inside the container.
+- [x] Verified native Pi adapter package registration via RPC `get_commands`.
+- [x] Verified Docker Pi adapter package registration via RPC `get_commands`.
 
 ### Upcoming
 
-- [ ] Create native install path.
-- [ ] Create Docker build path.
-- [ ] Start MindStone Core package on top of Pi base.
+- [ ] Expand Gateway beyond `/health`.
+- [ ] Start MindStone Core implementation around identity/config loading.
+- [ ] Add automated smoke-test script for native and Docker validation.
 - [ ] Ask Cairn for review when available.

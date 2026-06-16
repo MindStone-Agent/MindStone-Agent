@@ -10,20 +10,20 @@ services:
       PI_CODING_AGENT_DIR: /home/node/.pi/agent
       PI_CODING_AGENT_SESSION_DIR: /home/node/.pi-sessions
       PI_PACKAGE_DIR: /workspace/MindStone-Agent/vendor/pi/packages/coding-agent
-      MINDSTONE_AGENT_RUNTIME_DIR: /var/lib/mindstone-agent/runtime
-      MINDSTONE_AGENT_DATA_DIR: /var/lib/mindstone-agent/data
+      MINDSTONE_AGENT_RUNTIME_DIR: /home/node/.mindstone-agent/runtime
+      MINDSTONE_AGENT_DATA_DIR: /home/node/.mindstone-agent/data
       MINDSTONE_AGENT_GATEWAY_HOST: 0.0.0.0
       MINDSTONE_AGENT_GATEWAY_PORT: "19789"
       PI_SKIP_VERSION_CHECK: "1"
       PI_OFFLINE: "1"
     volumes:
-      - mindstone-agent-pi-agent:/home/node/.pi/agent
-      - mindstone-agent-pi-sessions:/home/node/.pi-sessions
-      - mindstone-agent-data:/var/lib/mindstone-agent
+      - mindstone-agent-pi-agent-state:/home/node/.pi/agent
+      - mindstone-agent-pi-session-state:/home/node/.pi-sessions
+      - mindstone-agent-runtime-state:/home/node/.mindstone-agent
     ports:
       - "19789:19789"
 
 volumes:
-  mindstone-agent-pi-agent:
-  mindstone-agent-pi-sessions:
-  mindstone-agent-data:
+  mindstone-agent-pi-agent-state:
+  mindstone-agent-pi-session-state:
+  mindstone-agent-runtime-state:

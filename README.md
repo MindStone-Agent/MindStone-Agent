@@ -49,8 +49,17 @@ This builds the vendored Pi base and runs it with isolated project-local config/
 
 ## Docker Setup
 
+Build and validate the isolated Pi runtime:
+
 ```bash
-docker compose up --build
+docker compose build
+docker compose run --rm mindstone-agent-pi --version
+```
+
+Run the Gateway inside the container:
+
+```bash
+docker compose run --rm --entrypoint ./scripts/start-gateway.sh mindstone-agent-pi
 ```
 
 Docker uses MindStone-Agent-specific named volumes. It must not mount host `~/.pi/agent`.
@@ -83,3 +92,13 @@ The default MindStone-Agent Gateway port is `19789` to avoid colliding with exis
 ## Status
 
 Initial foundation in progress. Not production-ready.
+
+Verified so far:
+
+- Native isolated Pi wrapper starts and reports `0.79.4`.
+- Native MindStone overlay packages build.
+- Native Gateway `/health` responds on `19789`.
+- Docker image builds vendored Pi and MindStone overlay packages.
+- Docker isolated Pi wrapper starts and reports `0.79.4`.
+- Docker Gateway `/health` responds inside the container.
+- Native and Docker Pi package registration discover `/mindstone-agent-status` through RPC `get_commands`.

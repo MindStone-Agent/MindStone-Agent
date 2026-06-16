@@ -89,12 +89,29 @@ Docker must use MindStone-Agent-specific named volumes. Do not mount host `~/.pi
 Recommended volumes:
 
 ```text
-mindstone-agent-pi-agent:/home/node/.pi/agent
-mindstone-agent-pi-sessions:/home/node/.pi-sessions
-mindstone-agent-data:/var/lib/mindstone-agent
+mindstone-agent-pi-agent-state:/home/node/.pi/agent
+mindstone-agent-pi-session-state:/home/node/.pi-sessions
+mindstone-agent-runtime-state:/home/node/.mindstone-agent
 ```
 
+The MindStone-Agent data volume is mounted under the `node` user's home directory so the non-root container process can create runtime, token, vector, and transcript directories without host/global state. The image pre-creates and chowns all three mountpoints before switching to the non-root `node` user.
+
 Mounting host `~/.pi/agent` into a container would expose host auth, settings, sessions, and extensions to the container. Do not do that.
+
+Verified Docker smoke checks:
+
+```bash
+docker compose build
+docker compose run --rm mindstone-agent-pi --version
+docker compose run --rm --entrypoint bash mindstone-agent-pi -lc './scripts/start-gateway.sh >/tmp/gateway.log 2>&1 & pid=$!; sleep 1; node -e "const r=await fetch(\"http://127.0.0.1:19789/health\"); if(!r.ok) process.exit(1); console.log(await r.text())"; kill $pid'
+```
+
+The Pi adapter package can be registered and discovered inside Docker with:
+
+```bash
+docker compose run --rm mindstone-agent-pi install ./packages/mindstone-pi-adapter
+docker compose run --rm --entrypoint bash mindstone-agent-pi -lc 'printf "%s\n" "{\"id\":\"1\",\"type\":\"get_commands\"}" | ./scripts/pi-agent --mode rpc --no-session --no-context-files'
+```
 
 ## Package isolation
 

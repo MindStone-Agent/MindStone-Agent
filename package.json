@@ -10,10 +10,12 @@
     "build:pi": "./scripts/build-pi-base.sh",
     "pi": "./scripts/pi-agent",
     "docker:build": "docker build -t mindstone-agent:local .",
-    "docker:run": "docker run --rm -it -v mindstone-agent-pi-agent:/home/node/.pi/agent -v mindstone-agent-pi-sessions:/home/node/.pi-sessions -v mindstone-agent-data:/var/lib/mindstone-agent -p 18789:18789 mindstone-agent:local",
+    "docker:run": "docker run --rm -it -v mindstone-agent-pi-agent-state:/home/node/.pi/agent -v mindstone-agent-pi-session-state:/home/node/.pi-sessions -v mindstone-agent-runtime-state:/home/node/.mindstone-agent -p 19789:19789 mindstone-agent:local",
     "build:mindstone": "tsc -b packages/mindstone-core packages/mindstone-gateway packages/mindstone-pi-adapter",
     "dev:gateway": "./scripts/dev-gateway.sh",
-    "start:gateway": "./scripts/start-gateway.sh"
+    "start:gateway": "./scripts/start-gateway.sh",
+    "smoke:native": "./scripts/smoke-native.sh",
+    "smoke:docker": "./scripts/smoke-docker.sh"
   },
   "engines": {
     "node": ">=22.19.0"
