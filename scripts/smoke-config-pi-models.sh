@@ -24,14 +24,15 @@ const providers: MindStoneProviderInfo[] = [
   {
     id: "openai-codex",
     name: "OpenAI Codex",
-    authStatus: { configured: true, source: "stored", label: "stored" },
+    authStatus: { configured: false },
     modelCount: 1,
     availableModelCount: 1,
   },
 ];
 const texts: string[] = [];
-const selects = ["pi", "provider:openai-codex", "model:openai-codex/gpt-5.5", "done"];
+const selects = ["pi", "provider:openai-codex", "env", "keep", "model:openai-codex/gpt-5.5", "done"];
 const confirms = [true];
+let authRequest: unknown;
 
 const prompter: MindStonePrompter = {
   note: async () => undefined,
@@ -58,6 +59,10 @@ const result = await runMindStoneConfigWizard(prompter, {
   sections: ["routing"],
   availableModels: discovered,
   availableProviders: providers,
+  setupProviderAuth: async (request) => {
+    authRequest = request;
+    return "auth saved";
+  },
 });
 if (!result.wrote) throw new Error("Wizard did not write config");
 if (texts.length || selects.length || confirms.length) throw new Error("Smoke prompt queues were not fully consumed");
@@ -66,6 +71,9 @@ const config = JSON.parse(readFileSync(result.path, "utf-8")) as any;
 if (config.routing?.mode !== "pi") throw new Error("Routing pi mode was not written");
 if (config.routing?.defaultModel !== "openai-codex/gpt-5.5") throw new Error("Discovered Pi model was not written");
 if (!config.routing?.pi?.agentDir) throw new Error("Pi agent dir was not written");
+if (JSON.stringify(authRequest) !== JSON.stringify({ providerId: "openai-codex", mode: "env", envVar: "OPENAI_API_KEY" })) {
+  throw new Error(`Provider auth setup request was not captured: ${JSON.stringify(authRequest)}`);
+}
 
 console.log(`config pi model smoke passed: ${result.path}`);
 TS

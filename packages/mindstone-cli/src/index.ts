@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
@@ -10,6 +12,7 @@ import {
   runMindStoneOnboardingWizard,
   runtimePathsFromEnv,
   type MindStoneModelInfo,
+  type MindStoneProviderAuthSetupRequest,
   type MindStoneProviderInfo,
   type MindStonePrompter,
   type MindStoneSelectOption,
@@ -134,6 +137,42 @@ function selectWithArrows<T extends string>(params: {
   });
 }
 
+function inputHidden(message: string, placeholder?: string): Promise<string> {
+  if (!input.isTTY || !output.isTTY) return Promise.resolve("");
+  output.write(`${message}${placeholder ? ` [${placeholder}]` : ""}: `);
+  return new Promise<string>((resolve, reject) => {
+    const wasRaw = input.isRaw;
+    let value = "";
+    input.setRawMode(true);
+    input.resume();
+    const cleanup = () => {
+      input.off("data", onData);
+      input.setRawMode(wasRaw);
+    };
+    const onData = (chunk: Buffer) => {
+      const data = chunk.toString("utf8");
+      if (data === "\u0003") {
+        cleanup();
+        output.write("\n");
+        reject(new Error("Cancelled"));
+        return;
+      }
+      if (data === "\r" || data === "\n") {
+        cleanup();
+        output.write("\n");
+        resolve(value);
+        return;
+      }
+      if (data === "\u007f") {
+        value = value.slice(0, -1);
+        return;
+      }
+      value += data;
+    };
+    input.on("data", onData);
+  });
+}
+
 function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
   const rl = createInterface({ input, output });
 
@@ -183,12 +222,10 @@ function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
     },
     text: async ({ message, placeholder, initialValue, sensitive, validate }) => {
       const fallback = initialValue ?? "";
-      const hint = fallback || placeholder ? ` [${fallback || placeholder}]` : "";
-      const value = await ask(`${message}${hint}: `);
+      const value = sensitive ? await inputHidden(message, placeholder) : await ask(`${message}${fallback || placeholder ? ` [${fallback || placeholder}]` : ""}: `);
       const resolved = value || fallback;
       const issue = validate?.(resolved);
       if (issue) throw new Error(issue);
-      if (sensitive && value) return value;
       return resolved;
     },
   };
@@ -203,6 +240,31 @@ async function discoverPiModels(): Promise<{ models: MindStoneModelInfo[]; provi
   } catch (error) {
     return { models: [], providers: [], error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function setupProviderAuth(request: MindStoneProviderAuthSetupRequest): string | undefined {
+  const paths = runtimePathsFromEnv();
+  if (request.mode === "login") {
+    return [
+      "Subscription/OAuth login is handled by isolated Pi.",
+      "After this wizard, run:",
+      `  ./scripts/pi-agent`,
+      "Then inside Pi:",
+      `  /login ${request.providerId}`,
+      "This will store OAuth credentials in the isolated MindStone-Agent Pi auth file.",
+    ].join("\n");
+  }
+
+  const authPath = join(paths.piAgentDir, "auth.json");
+  mkdirSync(dirname(authPath), { recursive: true, mode: 0o700 });
+  const existing = existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf-8")) as Record<string, unknown> : {};
+  existing[request.providerId] = request.mode === "env"
+    ? { type: "api_key", key: `$${request.envVar}` }
+    : { type: "api_key", key: request.apiKey };
+  writeFileSync(authPath, `${JSON.stringify(existing, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+  return request.mode === "env"
+    ? `Stored ${request.providerId} auth reference in isolated auth.json: $${request.envVar}`
+    : `Stored ${request.providerId} API key in isolated auth.json.`;
 }
 
 function printStatus(): void {
@@ -249,6 +311,7 @@ async function main(): Promise<void> {
         availableModels: discovery.models,
         availableProviders: discovery.providers,
         modelDiscoveryError: discovery.error,
+        setupProviderAuth,
       });
     } else {
       await runMindStoneConfigWizard(prompter, {
@@ -256,6 +319,7 @@ async function main(): Promise<void> {
         availableModels: discovery.models,
         availableProviders: discovery.providers,
         modelDiscoveryError: discovery.error,
+        setupProviderAuth,
       });
     }
   } finally {

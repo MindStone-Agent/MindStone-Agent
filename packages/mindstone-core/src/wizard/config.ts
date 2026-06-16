@@ -18,6 +18,11 @@ export type MindStoneConfigWizardSection =
 
 export type MindStoneOnboardingMode = "quickstart" | "manual";
 
+export type MindStoneProviderAuthSetupRequest =
+  | { providerId: string; mode: "env"; envVar: string }
+  | { providerId: string; mode: "api_key"; apiKey: string }
+  | { providerId: string; mode: "login" };
+
 export type MindStoneConfigWizardOptions = {
   configPath?: string;
   sections?: MindStoneConfigWizardSection[];
@@ -28,6 +33,7 @@ export type MindStoneConfigWizardOptions = {
   availableModels?: MindStoneModelInfo[];
   availableProviders?: MindStoneProviderInfo[];
   modelDiscoveryError?: string;
+  setupProviderAuth?: (request: MindStoneProviderAuthSetupRequest) => Promise<string | undefined> | string | undefined;
 };
 
 export type MindStoneConfigWizardResult = {
@@ -383,12 +389,92 @@ function favoriteModelScore(model: MindStoneModelInfo): number {
   return index === -1 ? 1000 : index;
 }
 
+function defaultProviderEnvVar(providerId: string): string {
+  const map: Record<string, string> = {
+    anthropic: "ANTHROPIC_API_KEY",
+    openai: "OPENAI_API_KEY",
+    google: "GEMINI_API_KEY",
+    openrouter: "OPENROUTER_API_KEY",
+    mistral: "MISTRAL_API_KEY",
+    groq: "GROQ_API_KEY",
+    deepseek: "DEEPSEEK_API_KEY",
+    nvidia: "NVIDIA_API_KEY",
+    cerebras: "CEREBRAS_API_KEY",
+    together: "TOGETHER_API_KEY",
+    fireworks: "FIREWORKS_API_KEY",
+    "vercel-ai-gateway": "AI_GATEWAY_API_KEY",
+    "cloudflare-ai-gateway": "CLOUDFLARE_API_KEY",
+    "cloudflare-workers-ai": "CLOUDFLARE_API_KEY",
+    "openai-codex": "OPENAI_API_KEY",
+    "github-copilot": "GITHUB_TOKEN",
+  };
+  return map[providerId] ?? `${providerId.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+}
+
+function supportsSubscriptionLogin(providerId: string): boolean {
+  return ["openai-codex", "anthropic", "github-copilot"].includes(providerId);
+}
+
+async function maybeSetupProviderAuth(params: {
+  prompter: MindStonePrompter;
+  provider: MindStoneProviderInfo;
+  setupProviderAuth?: MindStoneConfigWizardOptions["setupProviderAuth"];
+}): Promise<void> {
+  if (params.provider.authStatus?.configured || !params.setupProviderAuth) return;
+
+  type AuthChoice = "skip" | "login" | "env" | "api_key";
+  const authOptions: Array<MindStoneSelectOption<AuthChoice>> = [
+    { value: "skip", label: "Skip auth for now", hint: "model can be selected, live calls will fail until auth exists" },
+  ];
+  if (supportsSubscriptionLogin(params.provider.id)) {
+    authOptions.push({ value: "login", label: "Use subscription/OAuth login", hint: "opens through isolated Pi /login" });
+  }
+  authOptions.push(
+    { value: "env", label: "Use environment variable reference", hint: `store $${defaultProviderEnvVar(params.provider.id)} in isolated auth.json` },
+    { value: "api_key", label: "Enter API key now", hint: "stored in isolated auth.json" },
+  );
+
+  const choice = await params.prompter.select<AuthChoice>({
+    message: `${params.provider.name} authentication`,
+    options: authOptions,
+    initialValue: supportsSubscriptionLogin(params.provider.id) ? "login" : "env",
+  });
+  if (choice === "skip") return;
+
+  if (choice === "login") {
+    const message = await params.setupProviderAuth({ providerId: params.provider.id, mode: "login" });
+    if (message) await params.prompter.note(message, "Subscription/OAuth login");
+    return;
+  }
+
+  if (choice === "env") {
+    const envVar = await chooseString({
+      prompter: params.prompter,
+      message: "API key environment variable",
+      current: defaultProviderEnvVar(params.provider.id),
+    });
+    const message = await params.setupProviderAuth({ providerId: params.provider.id, mode: "env", envVar });
+    if (message) await params.prompter.note(message, "Provider auth saved");
+    return;
+  }
+
+  const apiKey = await params.prompter.text({
+    message: `${params.provider.name} API key`,
+    placeholder: "paste API key",
+    sensitive: true,
+  });
+  if (!apiKey.trim()) return;
+  const message = await params.setupProviderAuth({ providerId: params.provider.id, mode: "api_key", apiKey: apiKey.trim() });
+  if (message) await params.prompter.note(message, "Provider auth saved");
+}
+
 async function choosePiModel(params: {
   prompter: MindStonePrompter;
   current?: string;
   availableModels?: MindStoneModelInfo[];
   availableProviders?: MindStoneProviderInfo[];
   discoveryError?: string;
+  setupProviderAuth?: MindStoneConfigWizardOptions["setupProviderAuth"];
 }): Promise<string | undefined> {
   const allModels = params.availableModels ?? [];
   const providersFromModels: MindStoneProviderInfo[] = [...new Set(allModels.map((model) => model.provider))].map((provider) => ({
@@ -438,11 +524,11 @@ async function choosePiModel(params: {
     await params.prompter.note(
       [
         `${provider.name} is not configured in this isolated runtime.`,
-        "Use isolated Pi /login for subscription providers, or store an API key in the isolated auth file/env before live calls.",
-        "You can still select a model now; live calls will fail until auth is configured.",
+        `Supported setup: ${providerAuthMethod(provider.id)}.`,
       ].join("\n"),
       "Provider auth",
     );
+    await maybeSetupProviderAuth({ prompter: params.prompter, provider, setupProviderAuth: params.setupProviderAuth });
   }
 
   const providerModels = allModels
@@ -544,6 +630,7 @@ async function configureRouting(
       availableModels: options.availableModels,
       availableProviders: options.availableProviders,
       discoveryError: options.modelDiscoveryError,
+      setupProviderAuth: options.setupProviderAuth,
     });
   }
 
