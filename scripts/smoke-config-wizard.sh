@@ -28,7 +28,6 @@ import { readFileSync } from "node:fs";
 import { runMindStoneConfigWizard, type MindStonePrompter, type MindStoneSelectOption } from "./packages/mindstone-core/src/index.ts";
 
 const texts = [
-  ".",
   "127.0.0.1",
   "19789",
   "MINDSTONE_GATEWAY_TOKEN",
@@ -43,7 +42,7 @@ const texts = [
   "agents/default/IDENTITY.md",
   "agents/default/USER.md",
 ];
-const selects = ["token", "mock", "sliding_window", "sqlite-vec"];
+const selects = ["keep", "token", "mock", "sliding_window", "sqlite-vec"];
 const confirms = [true, false, true, true];
 
 const prompter: MindStonePrompter = {

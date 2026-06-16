@@ -205,12 +205,24 @@ function withDefaultOnboardingConfig(config: MindStoneConfig): MindStoneConfig {
 }
 
 async function configureWorkspace(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
-  const root = await prompter.text({
-    message: "Workspace root (press Enter to keep default)",
-    placeholder: ".",
-    initialValue: config.workspace?.root ?? ".",
+  const currentRoot = config.workspace?.root ?? ".";
+  const action = await prompter.select<"keep" | "custom">({
+    message: "Workspace root",
+    options: [
+      { value: "keep", label: `Use ${currentRoot}`, hint: "recommended" },
+      { value: "custom", label: "Enter a custom workspace path", hint: "advanced" },
+    ],
+    initialValue: "keep",
   });
-  return { ...config, workspace: { ...config.workspace, root: root.trim() || "." } };
+  if (action === "keep") {
+    return { ...config, workspace: { ...config.workspace, root: currentRoot } };
+  }
+  const root = await prompter.text({
+    message: "Custom workspace root",
+    placeholder: currentRoot,
+    initialValue: currentRoot,
+  });
+  return { ...config, workspace: { ...config.workspace, root: root.trim() || currentRoot } };
 }
 
 async function configureGateway(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
@@ -706,6 +718,13 @@ export async function runMindStoneOnboardingWizard(
       changedSections: JSON.stringify(before) === JSON.stringify(after) ? [] : ["quickstart"],
     };
   } else {
+    await prompter.note(
+      [
+        "Manual setup walks each core section.",
+        "Most prompts have a safe default. Use arrow keys for choices; text entry appears only when a custom value is needed.",
+      ].join("\n"),
+      "Manual setup",
+    );
     configResult = await runMindStoneConfigWizard(prompter, {
       ...options,
       configPath,
