@@ -42,13 +42,92 @@ function parseCommand(argv: string[]): Command {
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
-function numberedOptions<T extends string>(options: Array<MindStoneSelectOption<T>>): string {
-  return options
-    .map((option, index) => {
-      const hint = option.hint ? dim(` — ${option.hint}`) : "";
-      return `  ${index + 1}) ${option.label}${hint}`;
-    })
-    .join("\n");
+function arrowOptionLines<T extends string>(
+  options: Array<MindStoneSelectOption<T>>,
+  selectedIndex: number,
+): string[] {
+  return options.map((option, index) => {
+    const selected = index === selectedIndex;
+    const pointer = selected ? gold("◆") : " ";
+    const label = selected ? bold(gold(option.label)) : option.label;
+    const hint = option.hint ? dim(` — ${option.hint}`) : "";
+    return ` ${pointer} ${label}${hint}`;
+  });
+}
+
+function selectWithArrows<T extends string>(params: {
+  message: string;
+  options: Array<MindStoneSelectOption<T>>;
+  initialValue?: T;
+}): Promise<T> {
+  if (!input.isTTY || !output.isTTY) {
+    return Promise.resolve(
+      params.options.find((option) => option.value === params.initialValue)?.value ?? params.options[0].value,
+    );
+  }
+
+  let selectedIndex = Math.max(
+    0,
+    params.initialValue ? params.options.findIndex((option) => option.value === params.initialValue) : 0,
+  );
+  if (selectedIndex < 0) selectedIndex = 0;
+  let renderedLines = 0;
+
+  const render = () => {
+    if (renderedLines > 0) output.write(`\x1b[${renderedLines}A\x1b[0J`);
+    const lines = [
+      bold(params.message),
+      dim("Use ↑/↓ arrows, Enter to select, Ctrl+C to cancel."),
+      ...arrowOptionLines(params.options, selectedIndex),
+    ];
+    renderedLines = lines.length;
+    output.write(`${lines.join("\n")}\n`);
+  };
+
+  return new Promise<T>((resolve, reject) => {
+    const wasRaw = input.isRaw;
+    input.setRawMode(true);
+    input.resume();
+    output.write("\x1b[?25l");
+
+    const cleanup = () => {
+      input.off("data", onData);
+      input.setRawMode(wasRaw);
+      output.write("\x1b[?25h");
+    };
+
+    const finish = (value: T) => {
+      cleanup();
+      output.write("\n");
+      resolve(value);
+    };
+
+    const onData = (chunk: Buffer) => {
+      const data = chunk.toString("utf8");
+      if (data === "\u0003") {
+        cleanup();
+        output.write("\n");
+        reject(new Error("Cancelled"));
+        return;
+      }
+      if (data === "\r" || data === "\n") {
+        finish(params.options[selectedIndex].value);
+        return;
+      }
+      if (data === "\u001b[A" || data === "k" || data === "\u0010") {
+        selectedIndex = (selectedIndex - 1 + params.options.length) % params.options.length;
+        render();
+        return;
+      }
+      if (data === "\u001b[B" || data === "j" || data === "\u000e") {
+        selectedIndex = (selectedIndex + 1) % params.options.length;
+        render();
+      }
+    };
+
+    input.on("data", onData);
+    render();
+  });
 }
 
 function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
@@ -80,15 +159,11 @@ function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
       options: Array<MindStoneSelectOption<T>>;
       initialValue?: T;
     }): Promise<T> => {
-      output.write(`${message}\n${numberedOptions(options)}\n`);
-      const defaultIndex = initialValue ? options.findIndex((option) => option.value === initialValue) + 1 : 0;
-      while (true) {
-        const answer = await ask(defaultIndex > 0 ? `Select [${defaultIndex}]: ` : "Select: ");
-        const index = answer ? Number.parseInt(answer, 10) : defaultIndex;
-        if (Number.isInteger(index) && index >= 1 && index <= options.length) return options[index - 1].value;
-        const byValue = options.find((option) => option.value === answer);
-        if (byValue) return byValue.value;
-        output.write(`Choose 1-${options.length} or an option value.\n`);
+      rl.pause();
+      try {
+        return await selectWithArrows({ message, options, initialValue });
+      } finally {
+        rl.resume();
       }
     },
     text: async ({ message, placeholder, initialValue, sensitive, validate }) => {
@@ -141,7 +216,7 @@ async function main(): Promise<void> {
 
   const prompter = makeTerminalPrompter();
   try {
-    await runMindStoneConfigWizard(prompter);
+    await runMindStoneConfigWizard(prompter, { showHeader: false });
   } finally {
     prompter.close();
   }

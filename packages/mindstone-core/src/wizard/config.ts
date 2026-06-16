@@ -19,6 +19,7 @@ export type MindStoneConfigWizardOptions = {
   configPath?: string;
   sections?: MindStoneConfigWizardSection[];
   dryRun?: boolean;
+  showHeader?: boolean;
 };
 
 export type MindStoneConfigWizardResult = {
@@ -422,7 +423,9 @@ export async function runMindStoneConfigWizard(
   let after: MindStoneConfig = { ...before };
 
   await prompter.intro?.("MindStone configuration");
-  await prompter.note(formatMindStoneConfigHeader(), "MindStone 🔶");
+  if (options.showHeader ?? true) {
+    await prompter.note(formatMindStoneConfigHeader(), "MindStone 🔶");
+  }
   await prompter.note(formatConfigSummary(after), loaded.exists ? "Current config" : "No config found; starting from defaults");
 
   const selected = options.sections?.length
