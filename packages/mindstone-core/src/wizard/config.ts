@@ -1,8 +1,8 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { resolveContextManagementPolicy, type ContextManagementMode } from "../context/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
-import { loadMindStoneConfig, resolveConfigPath } from "../config/load.js";
+import { loadMindStoneConfig, resolveConfigPath, resolvePathRelativeToConfig } from "../config/load.js";
 import type { GatewayAuthConfig, MindStoneConfig, MindStoneRoutingConfig } from "../config/types.js";
 import type { MindStonePrompter, MindStoneSelectOption } from "./prompter.js";
 
@@ -27,6 +27,13 @@ export type MindStoneConfigWizardResult = {
   wrote: boolean;
   config: MindStoneConfig;
   changedSections: string[];
+};
+
+export type MindStoneOnboardingResult = MindStoneConfigWizardResult & {
+  identityPath?: string;
+  userPath?: string;
+  identityCreated: boolean;
+  userCreated: boolean;
 };
 
 const TITLE = String.raw`
@@ -464,4 +471,176 @@ export async function runMindStoneConfigWizard(
   }
 
   return { path: configPath, wrote: shouldWrite, config: after, changedSections };
+}
+
+function markdownEscape(value: string): string {
+  return value.replace(/\r\n/g, "\n").trim();
+}
+
+function resolveOnboardingAgentPaths(config: MindStoneConfig, configPath: string): {
+  agentId: string;
+  identityPath: string;
+  userPath: string;
+} {
+  const agentId = config.routing?.defaultAgentId ?? "default";
+  const agent = config.agents?.[agentId];
+  return {
+    agentId,
+    identityPath: resolvePathRelativeToConfig(agent?.identityPath ?? `agents/${agentId}/IDENTITY.md`, configPath),
+    userPath: resolvePathRelativeToConfig(agent?.userPath ?? `agents/${agentId}/USER.md`, configPath),
+  };
+}
+
+function writeIfMissing(path: string, body: string): boolean {
+  if (existsSync(path)) return false;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${body.trimEnd()}\n`, "utf-8");
+  return true;
+}
+
+async function createOnboardingIdentityFiles(params: {
+  prompter: MindStonePrompter;
+  config: MindStoneConfig;
+  configPath: string;
+}): Promise<Pick<MindStoneOnboardingResult, "identityPath" | "userPath" | "identityCreated" | "userCreated">> {
+  const paths = resolveOnboardingAgentPaths(params.config, params.configPath);
+  const identityExists = existsSync(paths.identityPath);
+  const userExists = existsSync(paths.userPath);
+
+  if (identityExists && userExists) {
+    await params.prompter.note(
+      [`Identity already exists: ${paths.identityPath}`, `User context already exists: ${paths.userPath}`, "No identity/user files were overwritten."].join("\n"),
+      "Identity scaffold",
+    );
+    return { identityPath: paths.identityPath, userPath: paths.userPath, identityCreated: false, userCreated: false };
+  }
+
+  await params.prompter.note(
+    [
+      "MindStone does not ask the human to name the agent or define its whole identity up front.",
+      "Onboarding writes a minimal scaffold and a user/project seed.",
+      "The agent should develop its identity through first activation and collaboration.",
+    ].join("\n"),
+    "Identity model",
+  );
+
+  const purpose = markdownEscape(
+    await params.prompter.text({
+      message: "What should this MindStone agent help with?",
+      placeholder: "software engineering, research, operations, personal assistant...",
+    }),
+  );
+  const userContext = markdownEscape(
+    await params.prompter.text({
+      message: "Important user/project context for first activation",
+      placeholder: "preferences, boundaries, project facts, collaboration style...",
+    }),
+  );
+
+  const now = new Date().toISOString();
+  const identityBody = `# MindStone Agent Identity Pending
+
+This identity scaffold was created by \`mindstone onboard\` on ${now}.
+
+The agent has not yet established a durable name, voice, or self-description. On first activation, it should read the user context, understand the requested purpose, and collaboratively form its own identity rather than pretending a complete identity already exists.
+
+## Purpose seed
+
+${purpose || "No purpose seed provided."}
+
+## Operating notes
+
+- Be honest about uncertainty.
+- Do not overclaim unverified work.
+- Protect user files, credentials, and memory.
+- Prefer durable continuity over performative personality.
+`;
+
+  const userBody = `# User Context
+
+This user/project context scaffold was created by \`mindstone onboard\` on ${now}.
+
+## Initial purpose
+
+${purpose || "No initial purpose provided."}
+
+## Initial context
+
+${userContext || "No initial context provided."}
+
+## Collaboration defaults
+
+- Ask before destructive filesystem, git, database, credential, or memory operations.
+- State what was verified versus inferred.
+- Preserve useful context in memory/checkpoints when appropriate.
+`;
+
+  const identityCreated = writeIfMissing(paths.identityPath, identityBody);
+  const userCreated = writeIfMissing(paths.userPath, userBody);
+  await params.prompter.note(
+    [
+      `${identityCreated ? "Created" : "Kept existing"}: ${paths.identityPath}`,
+      `${userCreated ? "Created" : "Kept existing"}: ${paths.userPath}`,
+    ].join("\n"),
+    "Identity scaffold",
+  );
+
+  return { identityPath: paths.identityPath, userPath: paths.userPath, identityCreated, userCreated };
+}
+
+export async function runMindStoneOnboardingWizard(
+  prompter: MindStonePrompter,
+  options: MindStoneConfigWizardOptions = {},
+): Promise<MindStoneOnboardingResult> {
+  const runtimePaths = runtimePathsFromEnv();
+  await prompter.intro?.("MindStone onboarding");
+  if (options.showHeader ?? true) {
+    await prompter.note(formatMindStoneConfigHeader(), "MindStone 🔶");
+  }
+  await prompter.note(
+    [
+      "MindStone is powerful agent infrastructure. It can read files, call tools, and eventually run through channels and Gateway surfaces.",
+      "Use least privilege. Keep secrets out of reachable context where possible. Do not expose Gateway or channel surfaces without auth and pairing/allowlist controls.",
+    ].join("\n"),
+    "Security / risk acknowledgement",
+  );
+  const accepted = await prompter.confirm({
+    message: "I understand this is powerful and inherently risky. Continue onboarding?",
+    initialValue: false,
+  });
+  if (!accepted) throw new Error("Onboarding cancelled: risk not accepted");
+
+  await prompter.note(
+    [
+      `Root: ${runtimePaths.root}`,
+      `Runtime dir: ${runtimePaths.runtimeDir}`,
+      `Pi agent dir: ${runtimePaths.piAgentDir}`,
+      `Pi session dir: ${runtimePaths.piSessionDir}`,
+      `Data dir: ${runtimePaths.dataDir}`,
+      "This runtime is project-local and must not share global ~/.pi/agent state.",
+    ].join("\n"),
+    "Runtime isolation",
+  );
+
+  const configResult = await runMindStoneConfigWizard(prompter, {
+    ...options,
+    showHeader: false,
+    sections: ["workspace", "gateway", "routing", "context", "memory", "identity"],
+  });
+
+  const identityResult = configResult.wrote
+    ? await createOnboardingIdentityFiles({ prompter, config: configResult.config, configPath: configResult.path })
+    : { identityPath: undefined, userPath: undefined, identityCreated: false, userCreated: false };
+
+  await prompter.outro?.(
+    [
+      "MindStone onboarding complete.",
+      "Next useful commands:",
+      "  mindstone status",
+      "  mindstone config",
+      "  mindstone gateway start",
+    ].join("\n"),
+  );
+
+  return { ...configResult, ...identityResult };
 }

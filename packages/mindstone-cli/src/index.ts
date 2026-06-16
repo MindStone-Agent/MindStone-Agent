@@ -7,6 +7,7 @@ import {
   loadMindStoneConfig,
   resolveConfigPath,
   runMindStoneConfigWizard,
+  runMindStoneOnboardingWizard,
   runtimePathsFromEnv,
   type MindStonePrompter,
   type MindStoneSelectOption,
@@ -24,7 +25,7 @@ function usage(): string {
     "",
     "Usage:",
     "  mindstone config       Configure MindStone-Agent runtime settings",
-    "  mindstone onboard      First-run onboarding (currently same core flow as config)",
+    "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone help         Show this help",
     "",
@@ -216,7 +217,11 @@ async function main(): Promise<void> {
 
   const prompter = makeTerminalPrompter();
   try {
-    await runMindStoneConfigWizard(prompter, { showHeader: false });
+    if (command === "onboard") {
+      await runMindStoneOnboardingWizard(prompter, { showHeader: false });
+    } else {
+      await runMindStoneConfigWizard(prompter, { showHeader: false });
+    }
   } finally {
     prompter.close();
   }

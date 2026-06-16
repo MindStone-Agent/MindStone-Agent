@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, context-management policy + sliding-window selector, router/provider abstraction, transcript store, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard, native CLI, context-management policy + sliding-window selector, router/provider abstraction, transcript store, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -34,6 +34,8 @@
 - [x] Add selectable context-management policy config for `auto_compact` vs `sliding_window`.
 - [x] Implement Core sliding-window prompt selector and Gateway pruning event path.
 - [x] Add router/provider abstraction with placeholder, mock, and Pi-backed provider modes.
+- [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
+- [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
 
 ### Completed
 
@@ -84,7 +86,7 @@
 
 ### Upcoming
 
-- [ ] Replace placeholder initializer with interactive onboarding flow.
+- [x] Replace placeholder initializer with interactive onboarding flow.
 - [ ] Connect transcript-aware `/v1/chat/completions` to real MindStone routing.
 - [x] Add WebSocket transport over the method-name RPC bridge.
 - [x] Add run manager abstraction for active/abortable Gateway runs.

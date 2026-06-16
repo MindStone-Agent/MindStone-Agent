@@ -83,13 +83,15 @@ Build them with:
 npm run build:mindstone
 ```
 
-Configure MindStone-Agent through the native CLI wrapper:
+Configure or onboard MindStone-Agent through the native CLI wrapper:
 
 ```bash
 ./scripts/mindstone status
 ./scripts/mindstone config
 ./scripts/mindstone onboard
 ```
+
+`config` edits selected runtime config sections. `onboard` is the first-run flow: risk acknowledgement, runtime isolation display, full core config, and non-overwriting identity/user scaffold creation.
 
 The workspace package also exposes a `mindstone` bin under `node_modules/.bin` after `npm install`:
 
