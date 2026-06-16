@@ -20,6 +20,7 @@ export type MindStoneConfigWizardOptions = {
   sections?: MindStoneConfigWizardSection[];
   dryRun?: boolean;
   showHeader?: boolean;
+  showIntro?: boolean;
 };
 
 export type MindStoneConfigWizardResult = {
@@ -429,7 +430,9 @@ export async function runMindStoneConfigWizard(
   const before = loaded.config ?? {};
   let after: MindStoneConfig = { ...before };
 
-  await prompter.intro?.("MindStone configuration");
+  if (options.showIntro ?? true) {
+    await prompter.intro?.("MindStone configuration");
+  }
   if (options.showHeader ?? true) {
     await prompter.note(formatMindStoneConfigHeader(), "MindStone 🔶");
   }
@@ -625,6 +628,7 @@ export async function runMindStoneOnboardingWizard(
   const configResult = await runMindStoneConfigWizard(prompter, {
     ...options,
     showHeader: false,
+    showIntro: false,
     sections: ["workspace", "gateway", "routing", "context", "memory", "identity"],
   });
 
