@@ -73,13 +73,19 @@ The preferred order is:
 
 ### Tasks
 
-- [ ] Extract wizard logic to use Core `MindStonePrompter` only.
+- [x] Extract wizard logic to use Core `MindStonePrompter` only.
 - [ ] Implement Pi prompter adapter using current Pi `ctx.ui` APIs.
+- [x] Add native CLI command for setup/onboarding.
+- [x] Add native CLI command for section reconfiguration.
 - [ ] Add command for setup/onboarding in Pi adapter.
-- [ ] Add command for section reconfiguration.
+- [ ] Add command for section reconfiguration in Pi adapter.
+- [ ] Add default onboarding profiles with write-in option.
+- [ ] Add `Integration Builder` as an initial profile/skill.
+- [ ] Add “getting to know the user” onboarding phase for preferences, boundaries, style, and project/domain context.
+- [ ] Add naming/identity emergence phase without forcing human-assigned names.
 - [ ] Preserve channel onboarding adapters for Telegram, Signal, Discord, Slack.
-- [ ] Add fake prompter tests for wizard sections.
-- [ ] Ensure sensitive fields avoid echo/logging.
+- [x] Add fake prompter smoke tests for wizard sections.
+- [x] Ensure sensitive provider API-key entry avoids echo/logging.
 
 ### Candidate files
 
@@ -91,6 +97,8 @@ The preferred order is:
 ### Exit criteria
 
 - [ ] Wizard runs through at least identity + memory + gateway sections in Pi.
+- [x] Native CLI onboarding/config can run core setup and section reconfiguration.
+- [ ] Onboarding can select a profile/write-in purpose, gather interaction preferences, and create identity/user scaffolds from that seed.
 - [ ] Channel setup section lists available plugins.
 - [ ] Reconfiguration can run by section.
 
@@ -163,8 +171,11 @@ The preferred order is:
 - [ ] Add dream-cycle hook for compaction/session/pruning boundary.
 - [x] Implement sliding-window prompt pruning: trigger at `ceilingPercent`, prune toward `floorPercent`, retain `minRecentMessages`, preserve transcript.
 - [x] Connect sliding-window prompt selection to router prompt messages for mock and Pi provider modes.
+- [ ] Implement real auto-recall prompt insertion behind `memory.autoRecall`.
+- [ ] Implement embedding/provider configuration beyond the placeholder `embeddingProvider` field.
 - [ ] Live-test selected prompt messages against Pi-backed provider with isolated credentials/config.
 - [ ] Implement auto-compact runtime policy for compatible substrates.
+- [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle.
 - [ ] Add manual backfill command.
 - [ ] Add memory status and diagnostics.
 - [ ] Add tests for recall injection formatting.
@@ -232,6 +243,8 @@ The preferred order is:
 
 ### Tasks
 
+- [ ] Add explicit session policy config for single shared MindStone session/transcript by default.
+- [ ] Ensure Gateway WebChat, OpenWebUI, Pi adapter, Telegram, and future channels can route to the same default session key.
 - [ ] Enable Gateway OpenAI-compatible endpoint in local config.
 - [ ] Start Gateway with auth.
 - [ ] Configure OpenWebUI custom OpenAI provider with Gateway base URL.
@@ -239,6 +252,7 @@ The preferred order is:
 - [ ] Validate streaming response.
 - [ ] Validate stable session routing through `user` or configured session key.
 - [ ] Document setup instructions.
+- [ ] Add WebChat setup/config UX for Gateway enablement, auth, session policy, and connection instructions.
 - [ ] Add compatibility shim only if validation shows a concrete gap.
 
 ### Exit criteria

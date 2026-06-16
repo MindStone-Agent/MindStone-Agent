@@ -95,3 +95,86 @@
 - [ ] Live-test Pi-backed model calls with isolated credentials/config.
 - [ ] Implement auto-compact runtime policy for compatible substrates.
 - [ ] Ask Cairn for review when available.
+
+## Core MVP Remaining
+
+This is the current functional backlog for making MindStone-Agent feel like MindStone proper rather than only a Gateway/router scaffold.
+
+### Onboarding and identity
+
+- [ ] Add default onboarding profiles with a write-in option.
+  - Profiles provide the base job description and inform the agent’s eventual name/identity choice.
+  - Examples to define: general assistant, software engineer, ops/devops, research analyst, security analyst, creative collaborator, integration builder.
+- [ ] Add the “getting to know the user” phase.
+  - interaction preferences
+  - communication style
+  - boundaries and approval rules
+  - project/domain context
+  - how the agent should ask clarifying questions
+- [ ] Add the naming/identity emergence phase.
+  - Do not force the human to name the agent.
+  - Use selected profile + user context as identity seed.
+  - Preserve the MindStone model where the agent forms/chooses its identity collaboratively.
+- [ ] Build the initial `Integration Builder` skill/profile.
+  - Helps create and configure new integrations/channels/tools.
+  - Should become both an onboarding profile and reusable skill surface.
+
+### Memory and context
+
+- [ ] Implement real auto-recall config, not only the `memory.autoRecall` toggle.
+  - recall query construction
+  - vector search
+  - relevance scoring
+  - dedup
+  - prompt-budget insertion
+- [ ] Implement embedding/provider configuration.
+  - embedding provider selection
+  - API key/env/reference handling
+  - local/Ollama defaults
+  - model choice
+  - vector backend compatibility
+- [x] Support choosing `sliding_window` vs `auto_compact` context mode.
+- [ ] Finish auto-compact runtime policy.
+  - checkpoint/handoff trigger
+  - compact target/reserve-token mapping
+  - post-compact archive/embed/dream-cycle hook
+- [x] Implement sliding-window prompt pruning and config.
+- [ ] Polish sliding-window config UX and diagnostics.
+
+### Sessions and transcripts
+
+- [ ] Add explicit session policy config.
+  - default should support one shared MindStone session/transcript across channels/surfaces.
+  - candidate config:
+    ```json
+    {
+      "session": {
+        "mode": "single",
+        "defaultSessionKey": "mindstone"
+      }
+    }
+    ```
+- [ ] Ensure Telegram, WebChat, OpenWebUI, Pi adapter, and future channels can route into the same session/transcript by default.
+- [ ] Preserve channel/source metadata inside the unified transcript without splitting memory continuity.
+
+### Channels and surfaces
+
+- [ ] Add Telegram channel setup/config.
+  - bot token
+  - DM pairing/allowlist
+  - group/mention policy
+  - polling/webhook choice
+  - status/probe
+- [ ] Add WebChat setup/config UX.
+  - Gateway enablement
+  - auth mode
+  - session policy
+  - WebSocket/REST status
+  - user-facing connection instructions
+- [ ] Preserve WebChat as an internal Gateway surface, not a deliverable outbound channel, while still making it first-class in setup.
+
+### Provider/routing validation
+
+- [ ] Live-test Pi-backed model calls with isolated credentials/config.
+- [ ] Add `mindstone doctor` checks for provider auth/model availability.
+- [ ] Ensure provider setup follows provider → auth method → model, never a flat global model list.
