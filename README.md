@@ -90,6 +90,24 @@ curl http://127.0.0.1:19789/health
 curl http://127.0.0.1:19789/status
 ```
 
+The Gateway exposes the old MindStone/WebChat method-name bridge over both HTTP and WebSocket:
+
+```text
+POST /rpc
+WS   /rpc
+WS   /ws
+```
+
+Current RPC methods:
+
+```text
+chat.sessions
+chat.history
+chat.inject
+chat.send
+chat.abort
+```
+
 The default MindStone-Agent Gateway port is `19789` to avoid colliding with existing MindStone/Pi services that may use `18789`.
 
 Gateway authentication is configured in the isolated MindStone config file. `/health` remains unauthenticated for liveness checks. Other endpoints enforce the configured auth mode:
@@ -172,6 +190,7 @@ Verified so far:
   - `POST /chat/send` persists the user message and returns explicit `501 not_implemented` until routing exists
   - `POST /chat/abort` records an abort event and reports that no active run manager exists yet
   - `POST /rpc` supports old-style Gateway method names: `chat.sessions`, `chat.history`, `chat.inject`, `chat.send`, and `chat.abort`
+  - WebSocket RPC on `/rpc` and `/ws` uses the same method executor as HTTP `POST /rpc`
 - Native isolated Pi wrapper starts and reports `0.79.4`.
 - Native MindStone overlay packages build.
 - Native Gateway `/health` responds on `19789`.

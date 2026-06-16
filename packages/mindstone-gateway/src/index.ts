@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import {
   appendTranscriptEntry,
   decideGatewayAuth,
@@ -142,38 +144,33 @@ function labelMessage(label: unknown, message: string): string {
   return typeof label === "string" && label.trim() ? `[${label.trim()}]\n\n${message}` : message;
 }
 
-async function handleGatewayRpc(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  let body: unknown;
-  try {
-    body = await readJsonBody(req);
-  } catch (error) {
-    sendJson(res, 400, rpcError(null, "invalid_json", error instanceof Error ? error.message : String(error)));
-    return;
-  }
+type GatewayRpcExecution = {
+  status: number;
+  body: unknown;
+};
 
-  const rpc = body as GatewayRpcRequest;
+async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExecution> {
   const id = rpc.id;
   const method = rpc.method;
   const params = typeof rpc.params === "object" && rpc.params !== null ? rpc.params as Record<string, unknown> : {};
   if (!method) {
-    sendJson(res, 400, rpcError(id, "invalid_request", "method is required"));
-    return;
+    return { status: 400, body: rpcError(id, "invalid_request", "method is required") };
   }
 
   if (method === "chat.sessions") {
-    sendJson(res, 200, rpcSuccess(id, { sessions: listTranscriptSessions() }));
-    return;
+    return { status: 200, body: rpcSuccess(id, { sessions: listTranscriptSessions() }) };
   }
 
   if (method === "chat.history") {
     const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
     if (!sessionKey) {
-      sendJson(res, 400, rpcError(id, "invalid_request", "sessionKey is required"));
-      return;
+      return { status: 400, body: rpcError(id, "invalid_request", "sessionKey is required") };
     }
     const limit = typeof params.limit === "number" ? params.limit : undefined;
-    sendJson(res, 200, rpcSuccess(id, { sessionKey, entries: readTranscriptEntries(sessionKey, limit ? { limit } : {}) }));
-    return;
+    return {
+      status: 200,
+      body: rpcSuccess(id, { sessionKey, entries: readTranscriptEntries(sessionKey, limit ? { limit } : {}) }),
+    };
   }
 
   if (method === "chat.inject") {
@@ -181,8 +178,7 @@ async function handleGatewayRpc(req: IncomingMessage, res: ServerResponse): Prom
     const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
     const message = typeof params.message === "string" ? params.message : typeof params.text === "string" ? params.text : "";
     if (!sessionKey || !message.trim()) {
-      sendJson(res, 400, rpcError(id, "invalid_request", "sessionKey and message are required"));
-      return;
+      return { status: 400, body: rpcError(id, "invalid_request", "sessionKey and message are required") };
     }
     const entry = appendTranscriptEntry({
       sessionKey,
@@ -191,8 +187,7 @@ async function handleGatewayRpc(req: IncomingMessage, res: ServerResponse): Prom
       text: labelMessage(params.label, message),
       metadata: { source: "gateway-rpc", method: "chat.inject" },
     });
-    sendJson(res, 200, rpcSuccess(id, { ok: true, entry }));
-    return;
+    return { status: 200, body: rpcSuccess(id, { ok: true, entry }) };
   }
 
   if (method === "chat.send") {
@@ -200,8 +195,7 @@ async function handleGatewayRpc(req: IncomingMessage, res: ServerResponse): Prom
     const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
     const message = typeof params.message === "string" ? params.message : typeof params.text === "string" ? params.text : "";
     if (!sessionKey || !message.trim()) {
-      sendJson(res, 400, rpcError(id, "invalid_request", "sessionKey and message are required"));
-      return;
+      return { status: 400, body: rpcError(id, "invalid_request", "sessionKey and message are required") };
     }
     const userEntry = appendTranscriptEntry({
       sessionKey,
@@ -218,21 +212,22 @@ async function handleGatewayRpc(req: IncomingMessage, res: ServerResponse): Prom
       parentId: userEntry.id,
       metadata: { event: "routing_not_implemented", source: "gateway-rpc", method: "chat.send" },
     });
-    sendJson(res, 200, rpcSuccess(id, {
-      ok: false,
-      code: "not_implemented",
-      persisted: true,
-      entries: [userEntry, eventEntry],
-    }));
-    return;
+    return {
+      status: 200,
+      body: rpcSuccess(id, {
+        ok: false,
+        code: "not_implemented",
+        persisted: true,
+        entries: [userEntry, eventEntry],
+      }),
+    };
   }
 
   if (method === "chat.abort") {
     const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
     const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
     if (!sessionKey) {
-      sendJson(res, 400, rpcError(id, "invalid_request", "sessionKey is required"));
-      return;
+      return { status: 400, body: rpcError(id, "invalid_request", "sessionKey is required") };
     }
     const entry = appendTranscriptEntry({
       sessionKey,
@@ -246,11 +241,191 @@ async function handleGatewayRpc(req: IncomingMessage, res: ServerResponse): Prom
         runId: typeof params.runId === "string" ? params.runId : undefined,
       },
     });
-    sendJson(res, 200, rpcSuccess(id, { ok: true, aborted: false, entry }));
+    return { status: 200, body: rpcSuccess(id, { ok: true, aborted: false, entry }) };
+  }
+
+  return { status: 404, body: rpcError(id, "method_not_found", `Unknown Gateway RPC method: ${method}`) };
+}
+
+async function handleGatewayRpc(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: unknown;
+  try {
+    body = await readJsonBody(req);
+  } catch (error) {
+    sendJson(res, 400, rpcError(null, "invalid_json", error instanceof Error ? error.message : String(error)));
     return;
   }
 
-  sendJson(res, 404, rpcError(id, "method_not_found", `Unknown Gateway RPC method: ${method}`));
+  const result = await executeGatewayRpc(body as GatewayRpcRequest);
+  sendJson(res, result.status, result.body);
+}
+
+function writeWebSocketFrame(socket: Socket, opcode: number, payload: Buffer): void {
+  const header: number[] = [0x80 | opcode];
+  if (payload.length < 126) {
+    header.push(payload.length);
+  } else if (payload.length <= 0xffff) {
+    header.push(126, (payload.length >> 8) & 0xff, payload.length & 0xff);
+  } else {
+    const length = BigInt(payload.length);
+    header.push(
+      127,
+      Number((length >> 56n) & 0xffn),
+      Number((length >> 48n) & 0xffn),
+      Number((length >> 40n) & 0xffn),
+      Number((length >> 32n) & 0xffn),
+      Number((length >> 24n) & 0xffn),
+      Number((length >> 16n) & 0xffn),
+      Number((length >> 8n) & 0xffn),
+      Number(length & 0xffn),
+    );
+  }
+  socket.write(Buffer.concat([Buffer.from(header), payload]));
+}
+
+function writeWebSocketJson(socket: Socket, body: unknown): void {
+  writeWebSocketFrame(socket, 0x1, Buffer.from(JSON.stringify(body), "utf-8"));
+}
+
+function closeWebSocket(socket: Socket, code = 1000, reason = ""): void {
+  const reasonBuffer = Buffer.from(reason, "utf-8");
+  const payload = Buffer.alloc(2 + reasonBuffer.length);
+  payload.writeUInt16BE(code, 0);
+  reasonBuffer.copy(payload, 2);
+  writeWebSocketFrame(socket, 0x8, payload);
+  socket.end();
+}
+
+function acceptWebSocket(req: IncomingMessage, socket: Socket): boolean {
+  const key = req.headers["sec-websocket-key"];
+  if (typeof key !== "string" || !key.trim()) return false;
+  const accept = createHash("sha1")
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest("base64");
+  socket.write([
+    "HTTP/1.1 101 Switching Protocols",
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    `Sec-WebSocket-Accept: ${accept}`,
+    "",
+    "",
+  ].join("\r\n"));
+  return true;
+}
+
+function rejectWebSocket(socket: Socket, status: number, message: string): void {
+  const body = `${message}\n`;
+  socket.write([
+    `HTTP/1.1 ${status} ${message}`,
+    "content-type: text/plain; charset=utf-8",
+    `content-length: ${Buffer.byteLength(body)}`,
+    "connection: close",
+    "",
+    body,
+  ].join("\r\n"));
+  socket.end();
+}
+
+function authorizeGatewayUpgrade(req: IncomingMessage, socket: Socket): boolean {
+  const paths = runtimePathsFromEnv();
+  const configPath = resolveConfigPath(process.env, paths);
+  const loadedConfig = loadMindStoneConfig(configPath);
+  const requirement = resolveGatewayAuthRequirement({
+    config: loadedConfig.config?.gateway?.auth,
+    configPath,
+  });
+  const decision = decideGatewayAuth(requirement, req.headers);
+  if (decision.allowed) return true;
+  rejectWebSocket(socket, decision.status, decision.reason);
+  return false;
+}
+
+async function handleWebSocketText(socket: Socket, text: string): Promise<void> {
+  let request: GatewayRpcRequest;
+  try {
+    request = JSON.parse(text) as GatewayRpcRequest;
+  } catch (error) {
+    writeWebSocketJson(socket, rpcError(null, "invalid_json", error instanceof Error ? error.message : String(error)));
+    return;
+  }
+
+  const result = await executeGatewayRpc(request);
+  writeWebSocketJson(socket, result.body);
+}
+
+function attachGatewayRpcWebSocket(socket: Socket): void {
+  let buffer = Buffer.alloc(0);
+
+  socket.on("data", (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    while (buffer.length >= 2) {
+      const first = buffer[0];
+      const second = buffer[1];
+      const opcode = first & 0x0f;
+      const masked = (second & 0x80) !== 0;
+      let length = second & 0x7f;
+      let offset = 2;
+
+      if (length === 126) {
+        if (buffer.length < offset + 2) return;
+        length = buffer.readUInt16BE(offset);
+        offset += 2;
+      } else if (length === 127) {
+        if (buffer.length < offset + 8) return;
+        const bigLength = buffer.readBigUInt64BE(offset);
+        if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) {
+          closeWebSocket(socket, 1009, "frame too large");
+          return;
+        }
+        length = Number(bigLength);
+        offset += 8;
+      }
+
+      const maskLength = masked ? 4 : 0;
+      if (buffer.length < offset + maskLength + length) return;
+      const mask = masked ? buffer.subarray(offset, offset + 4) : undefined;
+      offset += maskLength;
+      const payload = Buffer.from(buffer.subarray(offset, offset + length));
+      buffer = buffer.subarray(offset + length);
+
+      if (mask) {
+        for (let index = 0; index < payload.length; index += 1) {
+          payload[index] ^= mask[index % 4];
+        }
+      }
+
+      if (opcode === 0x8) {
+        closeWebSocket(socket);
+        return;
+      }
+      if (opcode === 0x9) {
+        writeWebSocketFrame(socket, 0xA, payload);
+        continue;
+      }
+      if (opcode !== 0x1) {
+        closeWebSocket(socket, 1003, "unsupported frame");
+        return;
+      }
+
+      void handleWebSocketText(socket, payload.toString("utf-8")).catch((error: unknown) => {
+        writeWebSocketJson(socket, rpcError(null, "internal_error", error instanceof Error ? error.message : String(error)));
+      });
+    }
+  });
+}
+
+function handleGatewayUpgrade(req: IncomingMessage, socket: Socket): void {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  if (url.pathname !== "/rpc" && url.pathname !== "/ws") {
+    rejectWebSocket(socket, 404, "not found");
+    return;
+  }
+  if (!authorizeGatewayUpgrade(req, socket)) return;
+  if (!acceptWebSocket(req, socket)) {
+    rejectWebSocket(socket, 400, "bad websocket request");
+    return;
+  }
+  attachGatewayRpcWebSocket(socket);
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -507,6 +682,9 @@ export async function startGateway(options: GatewayOptions = {}): Promise<{ clos
     void handleRequest(req, res).catch((error: unknown) => {
       sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
     });
+  });
+  server.on("upgrade", (req, socket) => {
+    handleGatewayUpgrade(req, socket as Socket);
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);

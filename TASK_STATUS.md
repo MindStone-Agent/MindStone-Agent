@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, context-management policy types, transcript store, REST/RPC chat endpoints, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, context-management policy types, transcript store, REST/RPC/WebSocket chat endpoints, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -30,6 +30,7 @@
 - [x] Add transcript-backed WebChat history endpoints.
 - [x] Add transcript-backed WebChat send/abort placeholders.
 - [x] Add old-style Gateway method-name RPC bridge for WebChat lineage.
+- [x] Add WebSocket transport for old-style Gateway RPC method names.
 - [x] Add selectable context-management policy config for `auto_compact` vs `sliding_window`.
 
 ### Completed
@@ -66,7 +67,9 @@
 - [x] Added `/chat/abort` placeholder that records abort-requested events.
 - [x] Verified chat history/send/abort endpoints with `npm run smoke:chat`.
 - [x] Added `POST /rpc` bridge for `chat.sessions`, `chat.history`, `chat.inject`, `chat.send`, and `chat.abort`.
-- [x] Verified RPC bridge with `npm run smoke:rpc`.
+- [x] Verified HTTP RPC bridge with `npm run smoke:rpc`.
+- [x] Added WebSocket RPC transport on `/rpc` and `/ws` using the same method executor.
+- [x] Verified WebSocket RPC bridge with `npm run smoke:ws-rpc`.
 - [x] Verified native Pi adapter package registration via RPC `get_commands`.
 - [x] Verified Docker Pi adapter package registration via RPC `get_commands`.
 
@@ -74,7 +77,7 @@
 
 - [ ] Replace placeholder initializer with interactive onboarding flow.
 - [ ] Connect transcript-aware `/v1/chat/completions` to real MindStone routing.
-- [ ] Add WebSocket transport over the method-name RPC bridge.
+- [x] Add WebSocket transport over the method-name RPC bridge.
 - [ ] Add run manager abstraction for active/abortable Gateway runs.
 - [ ] Implement runtime context management: auto-compact policy and sliding-window prompt pruning.
 - [ ] Ask Cairn for review when available.

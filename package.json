@@ -21,7 +21,8 @@
     "smoke:openai": "./scripts/smoke-openai.sh",
     "smoke:transcripts": "./scripts/smoke-transcripts.sh",
     "smoke:chat": "./scripts/smoke-chat-history.sh",
-    "smoke:rpc": "./scripts/smoke-rpc.sh"
+    "smoke:rpc": "./scripts/smoke-rpc.sh",
+    "smoke:ws-rpc": "./scripts/smoke-ws-rpc.sh"
   },
   "engines": {
     "node": ">=22.19.0"
