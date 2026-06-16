@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/env.sh"
+
+CLI="${MINDSTONE_AGENT_ROOT}/packages/mindstone-cli/dist/index.js"
+if [[ ! -f "${CLI}" ]]; then
+  echo "MindStone-Agent CLI is not built yet." >&2
+  echo "Run: npm run build:mindstone" >&2
+  exit 1
+fi
+
+exec node "${CLI}" "$@"

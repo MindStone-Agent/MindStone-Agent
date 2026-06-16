@@ -3,6 +3,7 @@
   "references": [
     { "path": "./packages/mindstone-core" },
     { "path": "./packages/mindstone-gateway" },
-    { "path": "./packages/mindstone-pi-adapter" }
+    { "path": "./packages/mindstone-pi-adapter" },
+    { "path": "./packages/mindstone-cli" }
   ]
 }

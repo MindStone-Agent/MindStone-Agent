@@ -74,6 +74,7 @@ MindStone-owned packages live outside the vendored Pi tree:
 packages/mindstone-core
 packages/mindstone-gateway
 packages/mindstone-pi-adapter
+packages/mindstone-cli
 ```
 
 Build them with:
@@ -81,6 +82,22 @@ Build them with:
 ```bash
 npm run build:mindstone
 ```
+
+Configure MindStone-Agent through the native CLI wrapper:
+
+```bash
+./scripts/mindstone status
+./scripts/mindstone config
+./scripts/mindstone onboard
+```
+
+The workspace package also exposes a `mindstone` bin under `node_modules/.bin` after `npm install`:
+
+```bash
+./node_modules/.bin/mindstone status
+```
+
+The CLI uses the same project-local isolation environment as the other scripts. Override the config path for safe testing with `MINDSTONE_AGENT_CONFIG=/path/to/config.test.json`.
 
 Run the minimal Gateway server with:
 

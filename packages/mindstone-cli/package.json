@@ -1,0 +1,17 @@
+{
+  "name": "@mindstone-agent/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "mindstone": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@mindstone-agent/core": "0.0.0"
+  }
+}
