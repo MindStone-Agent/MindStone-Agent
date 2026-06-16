@@ -141,6 +141,7 @@ Verified so far:
   - `POST /chat/inject`
   - `POST /chat/send` persists the user message and returns explicit `501 not_implemented` until routing exists
   - `POST /chat/abort` records an abort event and reports that no active run manager exists yet
+  - `POST /rpc` supports old-style Gateway method names: `chat.sessions`, `chat.history`, `chat.inject`, `chat.send`, and `chat.abort`
 - Native isolated Pi wrapper starts and reports `0.79.4`.
 - Native MindStone overlay packages build.
 - Native Gateway `/health` responds on `19789`.

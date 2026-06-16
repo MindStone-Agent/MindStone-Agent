@@ -20,7 +20,8 @@
     "smoke:auth": "./scripts/smoke-gateway-auth.sh",
     "smoke:openai": "./scripts/smoke-openai.sh",
     "smoke:transcripts": "./scripts/smoke-transcripts.sh",
-    "smoke:chat": "./scripts/smoke-chat-history.sh"
+    "smoke:chat": "./scripts/smoke-chat-history.sh",
+    "smoke:rpc": "./scripts/smoke-rpc.sh"
   },
   "engines": {
     "node": ">=22.19.0"

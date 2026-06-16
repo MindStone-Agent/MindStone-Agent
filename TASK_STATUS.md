@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, transcript store, chat history/send/abort endpoints, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, transcript store, REST/RPC chat endpoints, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -29,6 +29,7 @@
 - [x] Begin transcript/session storage implementation.
 - [x] Add transcript-backed WebChat history endpoints.
 - [x] Add transcript-backed WebChat send/abort placeholders.
+- [x] Add old-style Gateway method-name RPC bridge for WebChat lineage.
 
 ### Completed
 
@@ -63,6 +64,8 @@
 - [x] Added `/chat/send` placeholder that persists user messages and records routing-not-implemented events.
 - [x] Added `/chat/abort` placeholder that records abort-requested events.
 - [x] Verified chat history/send/abort endpoints with `npm run smoke:chat`.
+- [x] Added `POST /rpc` bridge for `chat.sessions`, `chat.history`, `chat.inject`, `chat.send`, and `chat.abort`.
+- [x] Verified RPC bridge with `npm run smoke:rpc`.
 - [x] Verified native Pi adapter package registration via RPC `get_commands`.
 - [x] Verified Docker Pi adapter package registration via RPC `get_commands`.
 
@@ -70,5 +73,6 @@
 
 - [ ] Replace placeholder initializer with interactive onboarding flow.
 - [ ] Connect transcript-aware `/v1/chat/completions` to real MindStone routing.
+- [ ] Add WebSocket transport over the method-name RPC bridge.
 - [ ] Add run manager abstraction for active/abortable Gateway runs.
 - [ ] Ask Cairn for review when available.

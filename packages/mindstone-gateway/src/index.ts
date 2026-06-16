@@ -123,6 +123,136 @@ function enforceGatewayAuth(req: IncomingMessage, res: ServerResponse): boolean 
   return false;
 }
 
+
+type GatewayRpcRequest = {
+  id?: string | number | null;
+  method?: string;
+  params?: unknown;
+};
+
+function rpcSuccess(id: GatewayRpcRequest["id"], result: unknown): unknown {
+  return { id: id ?? null, ok: true, result };
+}
+
+function rpcError(id: GatewayRpcRequest["id"], code: string, message: string): unknown {
+  return { id: id ?? null, ok: false, error: { code, message } };
+}
+
+function labelMessage(label: unknown, message: string): string {
+  return typeof label === "string" && label.trim() ? `[${label.trim()}]\n\n${message}` : message;
+}
+
+async function handleGatewayRpc(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body: unknown;
+  try {
+    body = await readJsonBody(req);
+  } catch (error) {
+    sendJson(res, 400, rpcError(null, "invalid_json", error instanceof Error ? error.message : String(error)));
+    return;
+  }
+
+  const rpc = body as GatewayRpcRequest;
+  const id = rpc.id;
+  const method = rpc.method;
+  const params = typeof rpc.params === "object" && rpc.params !== null ? rpc.params as Record<string, unknown> : {};
+  if (!method) {
+    sendJson(res, 400, rpcError(id, "invalid_request", "method is required"));
+    return;
+  }
+
+  if (method === "chat.sessions") {
+    sendJson(res, 200, rpcSuccess(id, { sessions: listTranscriptSessions() }));
+    return;
+  }
+
+  if (method === "chat.history") {
+    const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+    if (!sessionKey) {
+      sendJson(res, 400, rpcError(id, "invalid_request", "sessionKey is required"));
+      return;
+    }
+    const limit = typeof params.limit === "number" ? params.limit : undefined;
+    sendJson(res, 200, rpcSuccess(id, { sessionKey, entries: readTranscriptEntries(sessionKey, limit ? { limit } : {}) }));
+    return;
+  }
+
+  if (method === "chat.inject") {
+    const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+    const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
+    const message = typeof params.message === "string" ? params.message : typeof params.text === "string" ? params.text : "";
+    if (!sessionKey || !message.trim()) {
+      sendJson(res, 400, rpcError(id, "invalid_request", "sessionKey and message are required"));
+      return;
+    }
+    const entry = appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "assistant",
+      text: labelMessage(params.label, message),
+      metadata: { source: "gateway-rpc", method: "chat.inject" },
+    });
+    sendJson(res, 200, rpcSuccess(id, { ok: true, entry }));
+    return;
+  }
+
+  if (method === "chat.send") {
+    const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+    const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
+    const message = typeof params.message === "string" ? params.message : typeof params.text === "string" ? params.text : "";
+    if (!sessionKey || !message.trim()) {
+      sendJson(res, 400, rpcError(id, "invalid_request", "sessionKey and message are required"));
+      return;
+    }
+    const userEntry = appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "user",
+      text: message,
+      metadata: { source: "gateway-rpc", method: "chat.send" },
+    });
+    const eventEntry = appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "event",
+      text: "MindStone routing is not implemented yet; message persisted but no assistant run was started.",
+      parentId: userEntry.id,
+      metadata: { event: "routing_not_implemented", source: "gateway-rpc", method: "chat.send" },
+    });
+    sendJson(res, 200, rpcSuccess(id, {
+      ok: false,
+      code: "not_implemented",
+      persisted: true,
+      entries: [userEntry, eventEntry],
+    }));
+    return;
+  }
+
+  if (method === "chat.abort") {
+    const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+    const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
+    if (!sessionKey) {
+      sendJson(res, 400, rpcError(id, "invalid_request", "sessionKey is required"));
+      return;
+    }
+    const entry = appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "event",
+      text: "Abort requested, but no active run manager is implemented yet.",
+      metadata: {
+        event: "abort_requested",
+        source: "gateway-rpc",
+        method: "chat.abort",
+        runId: typeof params.runId === "string" ? params.runId : undefined,
+      },
+    });
+    sendJson(res, 200, rpcSuccess(id, { ok: true, aborted: false, entry }));
+    return;
+  }
+
+  sendJson(res, 404, rpcError(id, "method_not_found", `Unknown Gateway RPC method: ${method}`));
+}
+
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   if (req.method === "GET" && url.pathname === "/health") {
@@ -146,6 +276,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       version: "0.0.0",
       ...status,
     });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/rpc") {
+    await handleGatewayRpc(req, res);
     return;
   }
 
