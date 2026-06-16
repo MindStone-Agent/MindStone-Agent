@@ -182,7 +182,8 @@ Verified so far:
 - Gateway auth enforcement supports verified `none`, `token`, and `password` modes.
 - OpenAI-compatible Gateway skeleton exposes verified `/v1/models` and explicit-not-implemented `/v1/chat/completions` behavior.
 - File-backed JSONL transcript storage under the isolated transcript directory supports append/read/list and reports aggregate counts in `/status`.
-- Core context-management policy types support selectable `auto_compact` and `sliding_window` modes; runtime pruning/compaction execution is not wired yet.
+- Core context-management supports selectable `auto_compact` and `sliding_window` modes.
+- Sliding-window prompt selection is implemented and smoke-tested; Gateway send/completions paths record `context_window_pruned` transcript events when pruning occurs. Real model routing does not consume the pruned prompt window yet.
 - Gateway-native chat primitives are verified:
   - `GET /chat/sessions`
   - `GET /chat/history?sessionKey=...`

@@ -46,7 +46,8 @@ Sequence:
 2. When utilization reaches `ceilingPercent`, prune older prompt-window messages.
 3. Prune down toward `floorPercent`, while retaining at least `minRecentMessages` recent messages.
 4. Keep full transcript/session history on disk for recall, replay, audit, dream cycle, and WebChat history.
-5. SCRI/vector recall can reintroduce relevant older material without keeping the full transcript in prompt context.
+5. Record a `context_window_pruned` transcript event when pruning happens.
+6. SCRI/vector recall can reintroduce relevant older material without keeping the full transcript in prompt context.
 
 Config shape:
 
@@ -68,10 +69,33 @@ MindStone-Agent defaults to `sliding_window` because it is rebuilding MindStone 
 
 MS4PI should keep the `auto_compact` checkpoint/handoff/compact behavior because it runs inside Pi and inherits Pi's episodic session constraints.
 
+## Current implementation status
+
+Implemented:
+
+- Core `buildPromptWindow()` selector.
+- Prompt roles: `system`, `user`, `assistant`, and `tool` are eligible for prompt-window selection.
+- Transcript `event` entries remain transcript-only by default.
+- Sliding-window pruning by old prompt units/turn-ish groups.
+- System entries and explicit protected entries stay pinned.
+- At least `minRecentMessages` recent prompt entries are retained.
+- Gateway `/chat/send`, RPC `chat.send`, WebSocket RPC `chat.send`, and `/v1/chat/completions` build a prompt-window summary after persisting inbound messages.
+- When pruning occurs, Gateway appends a transcript event with `event: context_window_pruned` and pruned/kept entry IDs.
+- Smoke coverage:
+  - `npm run smoke:context-window`
+  - `npm run smoke:sliding-window`
+
+Still pending:
+
+- Real model routing must consume `promptEntries` as the actual model input.
+- Token estimation is currently conservative character-based estimation, not provider tokenizer-specific.
+- Tool-call/tool-result semantics need richer grouping once real tool transcripts are flowing.
+- SCRI recall integration should happen after pruning and before final prompt assembly.
+
 ## Implementation notes
 
 - Percentages are always relative to the current model's configured maximum context window.
 - `floorPercent` is the target utilization after pruning, not a transcript-retention setting.
-- `minRecentMessages` is the hard recent-message floor for the active prompt window.
+- `minRecentMessages` is the hard recent-message floor for the active prompt window; if the recent floor alone exceeds the floor token target, the recent floor wins.
 - `preserveTranscript` should remain true for normal MindStone behavior.
 - Runtime routing must choose exactly one policy mode per agent/session unless an explicit migration flow changes it.

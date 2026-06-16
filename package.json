@@ -22,7 +22,9 @@
     "smoke:transcripts": "./scripts/smoke-transcripts.sh",
     "smoke:chat": "./scripts/smoke-chat-history.sh",
     "smoke:rpc": "./scripts/smoke-rpc.sh",
-    "smoke:ws-rpc": "./scripts/smoke-ws-rpc.sh"
+    "smoke:ws-rpc": "./scripts/smoke-ws-rpc.sh",
+    "smoke:context-window": "./scripts/smoke-context-window.sh",
+    "smoke:sliding-window": "./scripts/smoke-sliding-window.sh"
   },
   "engines": {
     "node": ">=22.19.0"

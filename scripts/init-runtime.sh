@@ -53,7 +53,9 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
     "default": {
       "id": "default",
       "identityPath": "agents/default/IDENTITY.md",
-      "userPath": "agents/default/USER.md"
+      "userPath": "agents/default/USER.md",
+      "defaultModel": "mindstone/default",
+      "contextWindowTokens": 128000
     }
   },
   "memory": {

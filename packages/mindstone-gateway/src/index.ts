@@ -4,6 +4,7 @@ import type { Socket } from "node:net";
 import { GatewayRunManager } from "./run-manager.js";
 import {
   appendTranscriptEntry,
+  buildPromptWindow,
   decideGatewayAuth,
   getMindStoneSystemStatus,
   listTranscriptSessions,
@@ -49,6 +50,45 @@ function openAiError(message: string, type: string, code: string): { error: { me
 
 function isChatCompletionsEnabled(config: MindStoneConfig | undefined): boolean {
   return config?.gateway?.http?.chatCompletions?.enabled === true;
+}
+
+function numberFromMetadata(metadata: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function resolveContextWindowTokens(config: MindStoneConfig | undefined, agentId: string, metadata?: Record<string, unknown>): number {
+  return numberFromMetadata(metadata, "contextWindowTokens") ?? config?.agents?.[agentId]?.contextWindowTokens ?? 128_000;
+}
+
+function resolveReservedPromptTokens(metadata?: Record<string, unknown>): number {
+  return numberFromMetadata(metadata, "reservedTokens") ?? 0;
+}
+
+function maybeRecordPromptWindowEvent(input: {
+  sessionKey: string;
+  agentId: string;
+  config: MindStoneConfig | undefined;
+  metadata?: Record<string, unknown>;
+}): ReturnType<typeof buildPromptWindow> {
+  const result = buildPromptWindow({
+    entries: readTranscriptEntries(input.sessionKey),
+    contextWindowTokens: resolveContextWindowTokens(input.config, input.agentId, input.metadata),
+    reservedTokens: resolveReservedPromptTokens(input.metadata),
+    policy: input.config?.contextManagement,
+  });
+
+  if (result.pruneEvent) {
+    appendTranscriptEntry({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      role: "event",
+      text: `Context window pruned from ${result.tokensBefore} to ${result.tokensAfter} estimated tokens. Transcript preserved.`,
+      metadata: result.pruneEvent,
+    });
+  }
+
+  return result;
 }
 
 function openAiModels(config: MindStoneConfig | undefined): unknown {
@@ -220,6 +260,8 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
       text: message,
       metadata: { source: "gateway-rpc", method: "chat.send" },
     });
+    const loadedConfig = loadGatewayConfig();
+    const promptWindow = maybeRecordPromptWindowEvent({ sessionKey, agentId, config: loadedConfig.config });
     const eventEntry = appendTranscriptEntry({
       sessionKey,
       agentId,
@@ -234,6 +276,14 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
         ok: false,
         code: "not_implemented",
         persisted: true,
+        promptWindow: {
+          mode: promptWindow.policy.mode,
+          pruned: promptWindow.pruned,
+          tokensBefore: promptWindow.tokensBefore,
+          tokensAfter: promptWindow.tokensAfter,
+          promptEntries: promptWindow.promptEntries.length,
+          prunedEntries: promptWindow.prunedEntries.length,
+        },
         entries: [userEntry, eventEntry],
       }),
     };
@@ -517,13 +567,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 400, { ok: false, error: "sessionKey, agentId, and text are required" });
       return;
     }
+    const metadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : undefined;
     const userEntry = appendTranscriptEntry({
       sessionKey,
       agentId,
       role: "user",
       text,
-      metadata: typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : undefined,
+      metadata,
     });
+    const loadedConfig = loadGatewayConfig();
+    const promptWindow = maybeRecordPromptWindowEvent({ sessionKey, agentId, config: loadedConfig.config, metadata });
     const eventEntry = appendTranscriptEntry({
       sessionKey,
       agentId,
@@ -537,6 +590,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       error: "MindStone routing is not implemented yet",
       code: "not_implemented",
       persisted: true,
+      promptWindow: {
+        mode: promptWindow.policy.mode,
+        pruned: promptWindow.pruned,
+        tokensBefore: promptWindow.tokensBefore,
+        tokensAfter: promptWindow.tokensAfter,
+        promptEntries: promptWindow.promptEntries.length,
+        prunedEntries: promptWindow.prunedEntries.length,
+      },
       entries: [userEntry, eventEntry],
     });
     return;
@@ -673,6 +734,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         },
       });
     });
+    const promptWindow = maybeRecordPromptWindowEvent({ sessionKey, agentId, config: loadedConfig.config, metadata });
     const eventEntry = appendTranscriptEntry({
       sessionKey,
       agentId,
@@ -690,6 +752,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       mindstone: {
         persisted: true,
         sessionKey,
+        promptWindow: {
+          mode: promptWindow.policy.mode,
+          pruned: promptWindow.pruned,
+          tokensBefore: promptWindow.tokensBefore,
+          tokensAfter: promptWindow.tokensAfter,
+          promptEntries: promptWindow.promptEntries.length,
+          prunedEntries: promptWindow.prunedEntries.length,
+        },
         entries: [...persistedEntries, eventEntry],
       },
     });

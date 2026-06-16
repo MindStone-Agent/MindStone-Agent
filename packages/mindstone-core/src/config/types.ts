@@ -10,6 +10,8 @@ export type MindStoneAgentConfig = {
   identityPath?: string;
   userPath?: string;
   defaultModel?: string;
+  /** Configured maximum context window for the agent's current/default model. */
+  contextWindowTokens?: number;
 };
 
 export type MindStoneMemoryConfig = {
