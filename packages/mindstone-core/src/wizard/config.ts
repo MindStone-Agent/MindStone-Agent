@@ -225,18 +225,80 @@ async function configureWorkspace(config: MindStoneConfig, prompter: MindStonePr
   return { ...config, workspace: { ...config.workspace, root: root.trim() || currentRoot } };
 }
 
+async function chooseString(params: {
+  prompter: MindStonePrompter;
+  message: string;
+  current: string;
+  keepLabel?: string;
+  customLabel?: string;
+  customHint?: string;
+}): Promise<string> {
+  const action = await params.prompter.select<"keep" | "custom">({
+    message: params.message,
+    options: [
+      { value: "keep", label: params.keepLabel ?? `Use ${params.current}`, hint: "recommended" },
+      { value: "custom", label: params.customLabel ?? "Enter a custom value", hint: params.customHint ?? "advanced" },
+    ],
+    initialValue: "keep",
+  });
+  if (action === "keep") return params.current;
+  const value = await params.prompter.text({
+    message: params.customLabel ?? params.message,
+    placeholder: params.current,
+    initialValue: params.current,
+  });
+  return value.trim() || params.current;
+}
+
+async function chooseOptionalString(params: {
+  prompter: MindStonePrompter;
+  message: string;
+  current?: string;
+  suggested?: string;
+  unsetLabel?: string;
+  suggestedLabel?: string;
+}): Promise<string | undefined> {
+  type Choice = "unset" | "current" | "suggested" | "custom";
+  const options: Array<MindStoneSelectOption<Choice>> = [
+    { value: "unset", label: params.unsetLabel ?? "Leave unset", hint: "safe default" },
+  ];
+  if (params.current) options.push({ value: "current", label: `Use current: ${params.current}` });
+  if (params.suggested) options.push({ value: "suggested", label: params.suggestedLabel ?? `Use ${params.suggested}` });
+  options.push({ value: "custom", label: "Enter a custom value", hint: "manual" });
+  const choice = await params.prompter.select<Choice>({
+    message: params.message,
+    options,
+    initialValue: params.current ? "current" : "unset",
+  });
+  if (choice === "unset") return undefined;
+  if (choice === "current") return params.current;
+  if (choice === "suggested") return params.suggested;
+  const value = await params.prompter.text({
+    message: `Custom ${params.message}`,
+    placeholder: params.suggested ?? params.current ?? "",
+    initialValue: params.current ?? "",
+  });
+  return trimOrUndefined(value);
+}
+
 async function configureGateway(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
   const gateway = config.gateway ?? {};
-  const host = await prompter.text({
-    message: "Gateway host",
-    placeholder: "127.0.0.1",
-    initialValue: gateway.host ?? "127.0.0.1",
+  let host = gateway.host ?? "127.0.0.1";
+  let port = gateway.port ?? 19789;
+  const network = await prompter.select<"local" | "custom">({
+    message: "Gateway network",
+    options: [
+      { value: "local", label: `Use local Gateway ${host}:${port}`, hint: "recommended" },
+      { value: "custom", label: "Customize host/port", hint: "advanced" },
+    ],
+    initialValue: "local",
   });
-  const portRaw = await prompter.text({
-    message: "Gateway port",
-    placeholder: "19789",
-    initialValue: String(gateway.port ?? 19789),
-  });
+  if (network === "custom") {
+    host = await chooseString({ prompter, message: "Gateway host", current: host });
+    const portRaw = await chooseString({ prompter, message: "Gateway port", current: String(port) });
+    port = asPositivePort(portRaw, port);
+  }
+
   const authMode = await prompter.select<GatewayAuthConfig["mode"]>({
     message: "Gateway auth mode",
     options: [
@@ -249,19 +311,19 @@ async function configureGateway(config: MindStoneConfig, prompter: MindStoneProm
 
   let auth: GatewayAuthConfig = { mode: "none" };
   if (authMode === "token") {
-    const tokenEnv = await prompter.text({
-      message: "Token environment variable",
-      placeholder: "MINDSTONE_GATEWAY_TOKEN",
-      initialValue: gateway.auth?.mode === "token" ? gateway.auth.tokenEnv ?? "MINDSTONE_GATEWAY_TOKEN" : "MINDSTONE_GATEWAY_TOKEN",
+    const tokenEnv = await chooseString({
+      prompter,
+      message: "Gateway token environment variable",
+      current: gateway.auth?.mode === "token" ? gateway.auth.tokenEnv ?? "MINDSTONE_GATEWAY_TOKEN" : "MINDSTONE_GATEWAY_TOKEN",
     });
-    auth = { mode: "token", tokenEnv: tokenEnv.trim() || "MINDSTONE_GATEWAY_TOKEN" };
+    auth = { mode: "token", tokenEnv };
   } else if (authMode === "password") {
-    const passwordEnv = await prompter.text({
-      message: "Password environment variable",
-      placeholder: "MINDSTONE_GATEWAY_PASSWORD",
-      initialValue: gateway.auth?.mode === "password" ? gateway.auth.passwordEnv ?? "MINDSTONE_GATEWAY_PASSWORD" : "MINDSTONE_GATEWAY_PASSWORD",
+    const passwordEnv = await chooseString({
+      prompter,
+      message: "Gateway password environment variable",
+      current: gateway.auth?.mode === "password" ? gateway.auth.passwordEnv ?? "MINDSTONE_GATEWAY_PASSWORD" : "MINDSTONE_GATEWAY_PASSWORD",
     });
-    auth = { mode: "password", passwordEnv: passwordEnv.trim() || "MINDSTONE_GATEWAY_PASSWORD" };
+    auth = { mode: "password", passwordEnv };
   }
 
   const chatCompletions = await prompter.confirm({
@@ -277,8 +339,8 @@ async function configureGateway(config: MindStoneConfig, prompter: MindStoneProm
     ...config,
     gateway: {
       ...gateway,
-      host: host.trim() || "127.0.0.1",
-      port: asPositivePort(portRaw, gateway.port ?? 19789),
+      host,
+      port,
       auth,
       http: {
         ...gateway.http,
@@ -301,42 +363,42 @@ async function configureRouting(config: MindStoneConfig, prompter: MindStoneProm
     ],
     initialValue: routing.mode ?? "placeholder",
   });
-  const defaultAgentId = await prompter.text({
+  const defaultAgentId = await chooseString({
+    prompter,
     message: "Default agent id",
-    placeholder: "default",
-    initialValue: routing.defaultAgentId ?? "default",
+    current: routing.defaultAgentId ?? "default",
   });
-  const defaultModel = trimOrUndefined(
-    await prompter.text({
-      message: "Default model (blank to leave unset)",
-      placeholder: "openai-codex/gpt-5.5",
-      initialValue: routing.defaultModel ?? "",
-    }),
-  );
+  const defaultModel = await chooseOptionalString({
+    prompter,
+    message: "Default model",
+    current: routing.defaultModel,
+    suggested: "openai-codex/gpt-5.5",
+    suggestedLabel: "Use openai-codex/gpt-5.5",
+  });
 
   const nextRouting: MindStoneRoutingConfig = {
     ...routing,
     mode,
-    defaultAgentId: defaultAgentId.trim() || "default",
+    defaultAgentId,
     defaultModel,
   };
 
   if (mode === "mock") {
-    const responsePrefix = await prompter.text({
+    const responsePrefix = await chooseString({
+      prompter,
       message: "Mock response prefix",
-      placeholder: "Mock response",
-      initialValue: routing.mock?.responsePrefix ?? "Mock response",
+      current: routing.mock?.responsePrefix ?? "Mock response",
     });
-    nextRouting.mock = { ...routing.mock, responsePrefix: responsePrefix.trim() || "Mock response" };
+    nextRouting.mock = { ...routing.mock, responsePrefix };
   }
 
   if (mode === "pi") {
-    const agentDir = await prompter.text({
+    const agentDir = await chooseString({
+      prompter,
       message: "Isolated Pi agent dir",
-      placeholder: paths.piAgentDir,
-      initialValue: routing.pi?.agentDir ?? paths.piAgentDir,
+      current: routing.pi?.agentDir ?? paths.piAgentDir,
     });
-    nextRouting.pi = { ...routing.pi, agentDir: agentDir.trim() || paths.piAgentDir };
+    nextRouting.pi = { ...routing.pi, agentDir };
   }
 
   return { ...config, routing: nextRouting };
@@ -353,17 +415,39 @@ async function configureContext(config: MindStoneConfig, prompter: MindStoneProm
     initialValue: current.mode,
   });
 
+  const preset = await prompter.select<"recommended" | "custom">({
+    message: `${mode === "sliding_window" ? "Sliding-window" : "Auto-compact"} policy`,
+    options: [
+      { value: "recommended", label: "Use recommended/current values", hint: "recommended" },
+      { value: "custom", label: "Customize policy numbers", hint: "advanced" },
+    ],
+    initialValue: "recommended",
+  });
+
   if (mode === "auto_compact") {
+    const currentAuto = current.mode === "auto_compact" ? current : undefined;
+    if (preset === "recommended") {
+      return {
+        ...config,
+        contextManagement: {
+          mode,
+          checkpointWarningPercent: currentAuto?.checkpointWarningPercent ?? 85,
+          compactTargetPercent: currentAuto?.compactTargetPercent ?? 92,
+          keepRecentTokens: currentAuto?.keepRecentTokens ?? 20_000,
+          emergencyAutoHandoff: currentAuto?.emergencyAutoHandoff ?? false,
+        },
+      };
+    }
     const checkpointWarningPercent = asPercent(
-      await prompter.text({ message: "Checkpoint/handoff warning percent", placeholder: "85", initialValue: String(current.mode === "auto_compact" ? current.checkpointWarningPercent : 85) }),
+      await prompter.text({ message: "Checkpoint/handoff warning percent", placeholder: "85", initialValue: String(currentAuto?.checkpointWarningPercent ?? 85) }),
       85,
     );
     const compactTargetPercent = asPercent(
-      await prompter.text({ message: "Auto compact target percent", placeholder: "92", initialValue: String(current.mode === "auto_compact" ? current.compactTargetPercent : 92) }),
+      await prompter.text({ message: "Auto compact target percent", placeholder: "92", initialValue: String(currentAuto?.compactTargetPercent ?? 92) }),
       92,
     );
     const keepRecentTokens = asPositiveInteger(
-      await prompter.text({ message: "Keep recent tokens", placeholder: "20000", initialValue: String(current.mode === "auto_compact" ? current.keepRecentTokens : 20_000) }),
+      await prompter.text({ message: "Keep recent tokens", placeholder: "20000", initialValue: String(currentAuto?.keepRecentTokens ?? 20_000) }),
       20_000,
     );
     return {
@@ -373,21 +457,34 @@ async function configureContext(config: MindStoneConfig, prompter: MindStoneProm
         checkpointWarningPercent,
         compactTargetPercent,
         keepRecentTokens,
-        emergencyAutoHandoff: false,
+        emergencyAutoHandoff: currentAuto?.emergencyAutoHandoff ?? false,
       },
     };
   }
 
+  const currentSliding = current.mode === "sliding_window" ? current : undefined;
+  if (preset === "recommended") {
+    return {
+      ...config,
+      contextManagement: {
+        mode,
+        ceilingPercent: currentSliding?.ceilingPercent ?? 92,
+        floorPercent: currentSliding?.floorPercent ?? 70,
+        minRecentMessages: currentSliding?.minRecentMessages ?? 24,
+        preserveTranscript: currentSliding?.preserveTranscript ?? true,
+      },
+    };
+  }
   const ceilingPercent = asPercent(
-    await prompter.text({ message: "Sliding-window ceiling percent", placeholder: "92", initialValue: String(current.mode === "sliding_window" ? current.ceilingPercent : 92) }),
+    await prompter.text({ message: "Sliding-window ceiling percent", placeholder: "92", initialValue: String(currentSliding?.ceilingPercent ?? 92) }),
     92,
   );
   const floorPercent = asPercent(
-    await prompter.text({ message: "Sliding-window floor percent", placeholder: "70", initialValue: String(current.mode === "sliding_window" ? current.floorPercent : 70) }),
+    await prompter.text({ message: "Sliding-window floor percent", placeholder: "70", initialValue: String(currentSliding?.floorPercent ?? 70) }),
     70,
   );
   const minRecentMessages = asPositiveInteger(
-    await prompter.text({ message: "Minimum recent messages", placeholder: "24", initialValue: String(current.mode === "sliding_window" ? current.minRecentMessages : 24) }),
+    await prompter.text({ message: "Minimum recent messages", placeholder: "24", initialValue: String(currentSliding?.minRecentMessages ?? 24) }),
     24,
   );
   return {
@@ -417,29 +514,29 @@ async function configureMemory(config: MindStoneConfig, prompter: MindStonePromp
     ],
     initialValue: memory.vectorStore ?? "sqlite-vec",
   });
-  const embeddingProvider = trimOrUndefined(
-    await prompter.text({
-      message: "Embedding provider (blank to leave unset)",
-      placeholder: "ollama:nomic-embed-text",
-      initialValue: memory.embeddingProvider ?? "",
-    }),
-  );
+  const embeddingProvider = await chooseOptionalString({
+    prompter,
+    message: "Embedding provider",
+    current: memory.embeddingProvider,
+    suggested: "ollama:nomic-embed-text",
+    suggestedLabel: "Use Ollama / nomic-embed-text",
+  });
   return { ...config, memory: { ...memory, autoRecall, vectorStore, embeddingProvider } };
 }
 
 async function configureIdentity(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
   const currentDefault = config.routing?.defaultAgentId ?? "default";
-  const id = (await prompter.text({ message: "Agent id", placeholder: "default", initialValue: currentDefault })).trim() || "default";
+  const id = await chooseString({ prompter, message: "Agent id", current: currentDefault });
   const currentAgent = config.agents?.[id] ?? { id };
-  const identityPath = await prompter.text({
+  const identityPath = await chooseString({
+    prompter,
     message: "Identity file path",
-    placeholder: `agents/${id}/IDENTITY.md`,
-    initialValue: currentAgent.identityPath ?? `agents/${id}/IDENTITY.md`,
+    current: currentAgent.identityPath ?? `agents/${id}/IDENTITY.md`,
   });
-  const userPath = await prompter.text({
+  const userPath = await chooseString({
+    prompter,
     message: "User file path",
-    placeholder: `agents/${id}/USER.md`,
-    initialValue: currentAgent.userPath ?? `agents/${id}/USER.md`,
+    current: currentAgent.userPath ?? `agents/${id}/USER.md`,
   });
   return {
     ...config,
@@ -449,8 +546,8 @@ async function configureIdentity(config: MindStoneConfig, prompter: MindStonePro
       [id]: {
         ...currentAgent,
         id,
-        identityPath: identityPath.trim() || `agents/${id}/IDENTITY.md`,
-        userPath: userPath.trim() || `agents/${id}/USER.md`,
+        identityPath,
+        userPath,
       },
     },
   };

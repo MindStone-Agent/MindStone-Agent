@@ -28,21 +28,28 @@ import { readFileSync } from "node:fs";
 import { runMindStoneConfigWizard, type MindStonePrompter, type MindStoneSelectOption } from "./packages/mindstone-core/src/index.ts";
 
 const texts = [
-  "127.0.0.1",
-  "19789",
-  "MINDSTONE_GATEWAY_TOKEN",
-  "default",
-  "openai-codex/gpt-5.5",
   "Mock says",
   "91",
   "70",
   "20",
-  "ollama:nomic-embed-text",
-  "default",
-  "agents/default/IDENTITY.md",
-  "agents/default/USER.md",
 ];
-const selects = ["keep", "token", "mock", "sliding_window", "sqlite-vec"];
+const selects = [
+  "keep",
+  "local",
+  "token",
+  "keep",
+  "mock",
+  "keep",
+  "suggested",
+  "custom",
+  "sliding_window",
+  "custom",
+  "sqlite-vec",
+  "suggested",
+  "keep",
+  "keep",
+  "keep",
+];
 const confirms = [true, false, true, true];
 
 const prompter: MindStonePrompter = {

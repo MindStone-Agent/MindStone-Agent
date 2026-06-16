@@ -150,10 +150,21 @@ function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
       output.write(`${message}\n\n`);
     },
     confirm: async ({ message, initialValue }) => {
-      const suffix = initialValue ? "Y/n" : "y/N";
-      const answer = (await ask(`${message} [${suffix}] `)).toLowerCase();
-      if (!answer) return initialValue ?? false;
-      return answer === "y" || answer === "yes";
+      rl.pause();
+      try {
+        return (
+          (await selectWithArrows({
+            message,
+            options: [
+              { value: "yes", label: "Yes" },
+              { value: "no", label: "No" },
+            ],
+            initialValue: initialValue ? "yes" : "no",
+          })) === "yes"
+        );
+      } finally {
+        rl.resume();
+      }
     },
     select: async <T extends string>({ message, options, initialValue }: {
       message: string;
