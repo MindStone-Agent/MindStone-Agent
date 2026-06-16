@@ -1,0 +1,19 @@
+.DS_Store
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+
+# private MindStone runtime state
+.mindstone/
+mindstone-data/
+*.token
+*.key
+*.pem
+vectors/
+vectors.db
+*.lance/
+transcripts/
+logs/
