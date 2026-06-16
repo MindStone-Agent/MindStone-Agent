@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, context-management policy + sliding-window selector, transcript store, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, context-management policy + sliding-window selector, router/provider abstraction, transcript store, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -33,6 +33,7 @@
 - [x] Add WebSocket transport for old-style Gateway RPC method names.
 - [x] Add selectable context-management policy config for `auto_compact` vs `sliding_window`.
 - [x] Implement Core sliding-window prompt selector and Gateway pruning event path.
+- [x] Add router/provider abstraction with placeholder, mock, and Pi-backed provider modes.
 
 ### Completed
 
@@ -76,6 +77,8 @@
 - [x] Added Gateway prompt-window build/prune event path for `/chat/send`, RPC/WS `chat.send`, and `/v1/chat/completions`.
 - [x] Verified Core context-window behavior with `npm run smoke:context-window`.
 - [x] Verified Gateway sliding-window pruning/transcript preservation with `npm run smoke:sliding-window`.
+- [x] Added mock router and verified `/chat/send`, RPC `chat.send`, and `/v1/chat/completions` with `npm run smoke:router-mock`.
+- [x] Added isolated Pi provider config adapter and verified model metadata discovery with `npm run smoke:pi-provider-config`.
 - [x] Verified native Pi adapter package registration via RPC `get_commands`.
 - [x] Verified Docker Pi adapter package registration via RPC `get_commands`.
 
@@ -85,6 +88,7 @@
 - [ ] Connect transcript-aware `/v1/chat/completions` to real MindStone routing.
 - [x] Add WebSocket transport over the method-name RPC bridge.
 - [x] Add run manager abstraction for active/abortable Gateway runs.
-- [ ] Connect real model routing to consume the selected sliding-window `promptEntries`.
+- [x] Connect router flow to consume selected sliding-window `promptEntries` for mock and Pi provider modes.
+- [ ] Live-test Pi-backed model calls with isolated credentials/config.
 - [ ] Implement auto-compact runtime policy for compatible substrates.
 - [ ] Ask Cairn for review when available.

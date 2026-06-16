@@ -62,6 +62,11 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
     "autoRecall": false,
     "vectorStore": "sqlite-vec"
   },
+  "routing": {
+    "mode": "placeholder",
+    "defaultAgentId": "default",
+    "defaultModel": "mindstone/default"
+  },
   "contextManagement": {
     "mode": "sliding_window",
     "ceilingPercent": 92,

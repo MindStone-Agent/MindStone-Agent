@@ -24,7 +24,9 @@
     "smoke:rpc": "./scripts/smoke-rpc.sh",
     "smoke:ws-rpc": "./scripts/smoke-ws-rpc.sh",
     "smoke:context-window": "./scripts/smoke-context-window.sh",
-    "smoke:sliding-window": "./scripts/smoke-sliding-window.sh"
+    "smoke:sliding-window": "./scripts/smoke-sliding-window.sh",
+    "smoke:router-mock": "./scripts/smoke-router-mock.sh",
+    "smoke:pi-provider-config": "./scripts/smoke-pi-provider-config.sh"
   },
   "engines": {
     "node": ">=22.19.0"

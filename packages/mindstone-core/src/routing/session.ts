@@ -1,3 +1,5 @@
+export * from "./run.js";
+
 export type SessionRouteInput = {
   agentId: string;
   substrate?: string;

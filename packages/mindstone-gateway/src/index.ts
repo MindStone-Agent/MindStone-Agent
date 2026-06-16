@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
+import { MockMindStoneProvider } from "./mock-provider.js";
+import { PiMindStoneProvider } from "./pi-provider.js";
 import { GatewayRunManager } from "./run-manager.js";
 import {
   appendTranscriptEntry,
@@ -13,8 +15,12 @@ import {
   resolveConfigPath,
   resolveGatewayAuthRequirement,
   resolveSessionKey,
+  runMindStoneRoute,
   runtimePathsFromEnv,
   type MindStoneConfig,
+  type MindStoneModelInfo,
+  type MindStoneModelProvider,
+  type TranscriptEntry,
   type TranscriptRole,
 } from "@mindstone-agent/core";
 
@@ -65,15 +71,43 @@ function resolveReservedPromptTokens(metadata?: Record<string, unknown>): number
   return numberFromMetadata(metadata, "reservedTokens") ?? 0;
 }
 
+function resolveRoutingMode(config: MindStoneConfig | undefined): "placeholder" | "mock" | "pi" {
+  return config?.routing?.mode ?? "placeholder";
+}
+
+function resolveRouteModel(config: MindStoneConfig | undefined, agentId: string, metadata?: Record<string, unknown>): MindStoneModelInfo {
+  const metadataModel = typeof metadata?.model === "string" ? metadata.model : undefined;
+  const configuredAgent = config?.agents?.[agentId];
+  return {
+    id: metadataModel ?? config?.routing?.defaultModel ?? configuredAgent?.defaultModel ?? `mindstone/${agentId}`,
+    provider: resolveRoutingMode(config),
+    contextWindowTokens: resolveContextWindowTokens(config, agentId, metadata),
+  };
+}
+
+function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelProvider | undefined {
+  const mode = resolveRoutingMode(config);
+  if (mode === "mock") return new MockMindStoneProvider(config?.routing?.mock);
+  if (mode === "pi") {
+    return new PiMindStoneProvider({
+      agentDir: config?.routing?.pi?.agentDir,
+      defaultModel: config?.routing?.defaultModel,
+    });
+  }
+  return undefined;
+}
+
 function maybeRecordPromptWindowEvent(input: {
   sessionKey: string;
   agentId: string;
   config: MindStoneConfig | undefined;
   metadata?: Record<string, unknown>;
+  entries?: TranscriptEntry[];
+  model?: MindStoneModelInfo;
 }): ReturnType<typeof buildPromptWindow> {
   const result = buildPromptWindow({
-    entries: readTranscriptEntries(input.sessionKey),
-    contextWindowTokens: resolveContextWindowTokens(input.config, input.agentId, input.metadata),
+    entries: input.entries ?? readTranscriptEntries(input.sessionKey),
+    contextWindowTokens: input.model?.contextWindowTokens ?? resolveContextWindowTokens(input.config, input.agentId, input.metadata),
     reservedTokens: resolveReservedPromptTokens(input.metadata),
     policy: input.config?.contextManagement,
   });
@@ -200,6 +234,100 @@ function abortGatewayRuns(sessionKey: string, runId: unknown): { aborted: boolea
   };
 }
 
+async function runConfiguredRoute(input: {
+  sessionKey: string;
+  agentId: string;
+  config: MindStoneConfig | undefined;
+  metadata?: Record<string, unknown>;
+}): Promise<{
+  routed: boolean;
+  status: number;
+  body: unknown;
+}> {
+  const provider = resolveProvider(input.config);
+  if (!provider) return { routed: false, status: 501, body: undefined };
+
+  const model = resolveRouteModel(input.config, input.agentId, input.metadata);
+  const entries = readTranscriptEntries(input.sessionKey);
+  const run = runManager.start({
+    sessionKey: input.sessionKey,
+    agentId: input.agentId,
+    metadata: { provider: provider.id, model: model.id },
+  });
+
+  try {
+    const route = await runMindStoneRoute({
+      agentId: input.agentId,
+      sessionKey: input.sessionKey,
+      entries,
+      model,
+      provider,
+      contextManagement: input.config?.contextManagement,
+      reservedTokens: resolveReservedPromptTokens(input.metadata),
+      signal: run.abortController.signal,
+      metadata: input.metadata,
+    });
+
+    if (route.promptWindow.pruneEvent) {
+      appendTranscriptEntry({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        role: "event",
+        text: `Context window pruned from ${route.promptWindow.tokensBefore} to ${route.promptWindow.tokensAfter} estimated tokens. Transcript preserved.`,
+        runId: run.id,
+        metadata: route.promptWindow.pruneEvent,
+      });
+    }
+
+    const assistantEntry = appendTranscriptEntry({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      role: "assistant",
+      text: route.result.text,
+      content: route.result.content,
+      runId: run.id,
+      metadata: {
+        event: "assistant_response",
+        provider: provider.id,
+        model: model.id,
+        usage: route.result.usage,
+      },
+    });
+    runManager.complete(run.id);
+
+    return {
+      routed: true,
+      status: 200,
+      body: {
+        ok: true,
+        runId: run.id,
+        provider: provider.id,
+        model: model.id,
+        promptWindow: {
+          mode: route.promptWindow.policy.mode,
+          pruned: route.promptWindow.pruned,
+          tokensBefore: route.promptWindow.tokensBefore,
+          tokensAfter: route.promptWindow.tokensAfter,
+          promptEntries: route.promptWindow.promptEntries.length,
+          prunedEntries: route.promptWindow.prunedEntries.length,
+        },
+        entry: assistantEntry,
+      },
+    };
+  } catch (error) {
+    runManager.fail(run.id);
+    const entry = appendTranscriptEntry({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      role: "event",
+      text: error instanceof Error ? error.message : String(error),
+      runId: run.id,
+      metadata: { event: "routing_failed", provider: provider.id, model: model.id },
+    });
+    return { routed: true, status: 500, body: { ok: false, runId: run.id, error: entry.text, entry } };
+  }
+}
+
 type GatewayRpcExecution = {
   status: number;
   body: unknown;
@@ -261,6 +389,10 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
       metadata: { source: "gateway-rpc", method: "chat.send" },
     });
     const loadedConfig = loadGatewayConfig();
+    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config });
+    if (routed.routed) {
+      return { status: routed.status, body: rpcSuccess(id, { persisted: true, userEntry, ...routed.body as Record<string, unknown> }) };
+    }
     const promptWindow = maybeRecordPromptWindowEvent({ sessionKey, agentId, config: loadedConfig.config });
     const eventEntry = appendTranscriptEntry({
       sessionKey,
@@ -576,6 +708,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       metadata,
     });
     const loadedConfig = loadGatewayConfig();
+    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, metadata });
+    if (routed.routed) {
+      sendJson(res, routed.status, { persisted: true, userEntry, ...(routed.body as Record<string, unknown>) });
+      return;
+    }
     const promptWindow = maybeRecordPromptWindowEvent({ sessionKey, agentId, config: loadedConfig.config, metadata });
     const eventEntry = appendTranscriptEntry({
       sessionKey,
@@ -734,6 +871,35 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         },
       });
     });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, metadata: { ...metadata, model } });
+    if (routed.routed && routed.status === 200) {
+      const routedBody = routed.body as { entry?: TranscriptEntry; promptWindow?: unknown; runId?: string };
+      sendJson(res, 200, {
+        id: `chatcmpl-${routedBody.runId ?? Date.now().toString(36)}`,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: routedBody.entry?.text ?? "" },
+            finish_reason: "stop",
+          },
+        ],
+        mindstone: {
+          persisted: true,
+          sessionKey,
+          promptWindow: routedBody.promptWindow,
+          entries: [...persistedEntries, routedBody.entry].filter(Boolean),
+        },
+      });
+      return;
+    }
+    if (routed.routed) {
+      sendJson(res, routed.status, openAiError("MindStone routing failed", "routing_error", "routing_error"));
+      return;
+    }
+
     const promptWindow = maybeRecordPromptWindowEvent({ sessionKey, agentId, config: loadedConfig.config, metadata });
     const eventEntry = appendTranscriptEntry({
       sessionKey,

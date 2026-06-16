@@ -153,6 +153,46 @@ Alternative auto-compact mode:
 }
 ```
 
+Routing is selectable. The safe default is `placeholder`, which persists transcript entries and returns explicit not-implemented responses. `mock` enables deterministic local routing for tests. `pi` uses the isolated vendored Pi model registry/provider stack when isolated auth/model config is present.
+
+```json
+{
+  "routing": {
+    "mode": "placeholder",
+    "defaultAgentId": "default",
+    "defaultModel": "mindstone/default"
+  }
+}
+```
+
+Mock router smoke config:
+
+```json
+{
+  "routing": {
+    "mode": "mock",
+    "defaultModel": "mindstone/mock",
+    "mock": {
+      "responsePrefix": "router-smoke"
+    }
+  }
+}
+```
+
+Pi-backed router config should point at isolated Pi state, not global `~/.pi/agent`:
+
+```json
+{
+  "routing": {
+    "mode": "pi",
+    "defaultModel": "openai-codex/gpt-5.5",
+    "pi": {
+      "agentDir": ".runtime/pi-agent"
+    }
+  }
+}
+```
+
 The Gateway also has an initial OpenAI-compatible skeleton gated by config:
 
 ```json
@@ -183,7 +223,8 @@ Verified so far:
 - OpenAI-compatible Gateway skeleton exposes verified `/v1/models` and explicit-not-implemented `/v1/chat/completions` behavior.
 - File-backed JSONL transcript storage under the isolated transcript directory supports append/read/list and reports aggregate counts in `/status`.
 - Core context-management supports selectable `auto_compact` and `sliding_window` modes.
-- Sliding-window prompt selection is implemented and smoke-tested; Gateway send/completions paths record `context_window_pruned` transcript events when pruning occurs. Real model routing does not consume the pruned prompt window yet.
+- Sliding-window prompt selection is implemented and smoke-tested; Gateway send/completions paths record `context_window_pruned` transcript events when pruning occurs.
+- Router/provider abstraction is implemented with safe `placeholder`, test `mock`, and isolated Pi-backed provider modes. Mock routing is smoke-tested end-to-end; Pi provider config discovery is smoke-tested without live credential use.
 - Gateway-native chat primitives are verified:
   - `GET /chat/sessions`
   - `GET /chat/history?sessionKey=...`

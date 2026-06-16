@@ -20,6 +20,20 @@ export type MindStoneMemoryConfig = {
   embeddingProvider?: string;
 };
 
+export type MindStoneRoutingConfig = {
+  /** placeholder keeps send/completions transcript-aware without calling a model. */
+  mode?: "placeholder" | "mock" | "pi";
+  defaultAgentId?: string;
+  defaultModel?: string;
+  mock?: {
+    responsePrefix?: string;
+  };
+  pi?: {
+    /** Isolated Pi agent/config directory. Defaults to PI_CODING_AGENT_DIR. */
+    agentDir?: string;
+  };
+};
+
 export type MindStoneConfig = {
   workspace?: { root?: string };
   gateway?: {
@@ -35,4 +49,5 @@ export type MindStoneConfig = {
   channels?: Record<string, unknown>;
   memory?: MindStoneMemoryConfig;
   contextManagement?: ContextManagementPolicy;
+  routing?: MindStoneRoutingConfig;
 };

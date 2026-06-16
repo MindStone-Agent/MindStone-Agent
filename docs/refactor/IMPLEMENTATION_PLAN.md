@@ -162,7 +162,8 @@ The preferred order is:
 - [ ] Port SCRI recall query/scoring/dedup/context-budget behavior.
 - [ ] Add dream-cycle hook for compaction/session/pruning boundary.
 - [x] Implement sliding-window prompt pruning: trigger at `ceilingPercent`, prune toward `floorPercent`, retain `minRecentMessages`, preserve transcript.
-- [ ] Connect sliding-window prompt selection to real model routing.
+- [x] Connect sliding-window prompt selection to router prompt messages for mock and Pi provider modes.
+- [ ] Live-test selected prompt messages against Pi-backed provider with isolated credentials/config.
 - [ ] Implement auto-compact runtime policy for compatible substrates.
 - [ ] Add manual backfill command.
 - [ ] Add memory status and diagnostics.
