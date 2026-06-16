@@ -91,6 +91,21 @@ curl http://127.0.0.1:19789/status
 
 The default MindStone-Agent Gateway port is `19789` to avoid colliding with existing MindStone/Pi services that may use `18789`.
 
+Gateway authentication is configured in the isolated MindStone config file. `/health` remains unauthenticated for liveness checks. Other endpoints enforce the configured auth mode:
+
+```json
+{
+  "gateway": {
+    "auth": {
+      "mode": "token",
+      "tokenEnv": "MINDSTONE_AGENT_GATEWAY_TOKEN"
+    }
+  }
+}
+```
+
+Supported initial modes are `none`, `token`, and `password`. Tokens are accepted via `Authorization: Bearer <token>` or `X-MindStone-Token`. Password mode accepts HTTP Basic auth or `X-MindStone-Password`.
+
 ## Status
 
 Initial foundation in progress. Not production-ready.
@@ -98,6 +113,7 @@ Initial foundation in progress. Not production-ready.
 Verified so far:
 
 - Runtime initializer creates missing isolated config/identity/user placeholders without overwriting existing files.
+- Gateway auth enforcement supports verified `none`, `token`, and `password` modes.
 - Native isolated Pi wrapper starts and reports `0.79.4`.
 - Native MindStone overlay packages build.
 - Native Gateway `/health` responds on `19789`.

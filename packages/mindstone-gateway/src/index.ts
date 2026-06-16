@@ -1,18 +1,51 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { getMindStoneSystemStatus, runtimePathsFromEnv } from "@mindstone-agent/core";
+import {
+  decideGatewayAuth,
+  getMindStoneSystemStatus,
+  loadMindStoneConfig,
+  resolveConfigPath,
+  resolveGatewayAuthRequirement,
+  runtimePathsFromEnv,
+} from "@mindstone-agent/core";
 
 export type GatewayOptions = {
   host?: string;
   port?: number;
 };
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): void {
   const text = JSON.stringify(body, null, 2);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(text),
+    ...headers,
   });
   res.end(text);
+}
+
+function enforceGatewayAuth(req: IncomingMessage, res: ServerResponse): boolean {
+  const paths = runtimePathsFromEnv();
+  const configPath = resolveConfigPath(process.env, paths);
+  const loadedConfig = loadMindStoneConfig(configPath);
+  const requirement = resolveGatewayAuthRequirement({
+    config: loadedConfig.config?.gateway?.auth,
+    configPath,
+  });
+  const decision = decideGatewayAuth(requirement, req.headers);
+  if (decision.allowed) return true;
+
+  sendJson(
+    res,
+    decision.status,
+    { ok: false, error: decision.reason },
+    decision.challenge ? { "www-authenticate": decision.challenge } : {},
+  );
+  return false;
 }
 
 function handleRequest(req: IncomingMessage, res: ServerResponse): void {
@@ -24,6 +57,10 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
       version: "0.0.0",
       paths: runtimePathsFromEnv(),
     });
+    return;
+  }
+
+  if (!enforceGatewayAuth(req, res)) {
     return;
   }
 

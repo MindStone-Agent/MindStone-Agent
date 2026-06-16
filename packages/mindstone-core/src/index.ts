@@ -8,4 +8,5 @@ export * from "./channels/types.js";
 export * from "./wizard/prompter.js";
 export * from "./routing/session.js";
 export * from "./security/policy.js";
+export * from "./security/gateway-auth.js";
 export * from "./status/index.js";

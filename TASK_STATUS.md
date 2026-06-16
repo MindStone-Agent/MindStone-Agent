@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, runtime initializer, and minimal Gateway health/status endpoints build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, runtime initializer, Gateway auth, and minimal health/status endpoints build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -24,6 +24,7 @@
 - [x] Add first real Pi adapter integration test.
 - [x] Expand Gateway beyond `/health` with `/status`.
 - [x] Start MindStone Core implementation around identity/config loading beyond metadata.
+- [x] Add Gateway auth modes.
 
 ### Completed
 
@@ -45,12 +46,14 @@
 - [x] Added `/status` to native and Docker smoke tests.
 - [x] Added non-destructive runtime initializer for config and placeholder identity/user files.
 - [x] Verified `/status` reports initialized default agent metadata.
+- [x] Added Gateway auth enforcement for non-health endpoints.
+- [x] Verified Gateway auth modes `none`, `token`, and `password`.
 - [x] Verified native Pi adapter package registration via RPC `get_commands`.
 - [x] Verified Docker Pi adapter package registration via RPC `get_commands`.
 
 ### Upcoming
 
 - [ ] Replace placeholder initializer with interactive onboarding flow.
-- [ ] Add Gateway auth modes.
 - [ ] Begin transcript/session storage implementation.
+- [ ] Start OpenAI-compatible Gateway endpoint skeleton.
 - [ ] Ask Cairn for review when available.
