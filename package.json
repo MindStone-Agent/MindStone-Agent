@@ -15,7 +15,8 @@
     "dev:gateway": "./scripts/dev-gateway.sh",
     "start:gateway": "./scripts/start-gateway.sh",
     "smoke:native": "./scripts/smoke-native.sh",
-    "smoke:docker": "./scripts/smoke-docker.sh"
+    "smoke:docker": "./scripts/smoke-docker.sh",
+    "init:runtime": "./scripts/init-runtime.sh"
   },
   "engines": {
     "node": ">=22.19.0"

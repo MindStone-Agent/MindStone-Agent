@@ -11,6 +11,7 @@ echo "== Native MindStone-Agent smoke test =="
 npm run build:mindstone
 
 ./scripts/show-isolation.sh
+./scripts/init-runtime.sh
 
 version="$(./scripts/pi-agent --version)"
 echo "Pi version: ${version}"
@@ -26,7 +27,7 @@ cleanup() {
 }
 trap cleanup EXIT
 sleep 1
-node -e 'for (const path of ["/health", "/status"]) { const r=await fetch(`http://127.0.0.1:19789${path}`); if(!r.ok) process.exit(1); const body=await r.json(); if(!body.ok) process.exit(1); console.log(path); console.log(JSON.stringify(body, null, 2)); }'
+node -e 'for (const path of ["/health", "/status"]) { const r=await fetch(`http://127.0.0.1:19789${path}`); if(!r.ok) process.exit(1); const body=await r.json(); if(!body.ok) process.exit(1); if (path === "/status" && (!body.config?.exists || !Array.isArray(body.agents) || body.agents.length < 1)) process.exit(1); console.log(path); console.log(JSON.stringify(body, null, 2)); }'
 cleanup
 trap - EXIT
 

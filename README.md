@@ -43,9 +43,10 @@ Preferred update method is git subtree, documented in `docs/upstream/PI_BASE_STR
 
 ```bash
 ./scripts/install-native.sh
+npm run init:runtime
 ```
 
-This builds the vendored Pi base and runs it with isolated project-local config/session directories.
+This builds the vendored Pi base and initializes isolated project-local config/session/data directories without overwriting existing runtime files.
 
 ## Docker Setup
 
@@ -96,6 +97,7 @@ Initial foundation in progress. Not production-ready.
 
 Verified so far:
 
+- Runtime initializer creates missing isolated config/identity/user placeholders without overwriting existing files.
 - Native isolated Pi wrapper starts and reports `0.79.4`.
 - Native MindStone overlay packages build.
 - Native Gateway `/health` responds on `19789`.

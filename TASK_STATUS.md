@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, and minimal Gateway health/status endpoints build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, runtime initializer, and minimal Gateway health/status endpoints build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -23,7 +23,7 @@
 - [x] Establish MindStone overlay package structure.
 - [x] Add first real Pi adapter integration test.
 - [x] Expand Gateway beyond `/health` with `/status`.
-- [ ] Start MindStone Core implementation around identity/config loading beyond metadata.
+- [x] Start MindStone Core implementation around identity/config loading beyond metadata.
 
 ### Completed
 
@@ -43,12 +43,14 @@
 - [x] Added Gateway `/status` endpoint backed by Core runtime/config/identity metadata.
 - [x] Verified native Gateway `/status`.
 - [x] Added `/status` to native and Docker smoke tests.
+- [x] Added non-destructive runtime initializer for config and placeholder identity/user files.
+- [x] Verified `/status` reports initialized default agent metadata.
 - [x] Verified native Pi adapter package registration via RPC `get_commands`.
 - [x] Verified Docker Pi adapter package registration via RPC `get_commands`.
 
 ### Upcoming
 
-- [ ] Start MindStone Core implementation around identity/config loading beyond metadata.
-- [ ] Add sample config/onboarding flow.
+- [ ] Replace placeholder initializer with interactive onboarding flow.
 - [ ] Add Gateway auth modes.
+- [ ] Begin transcript/session storage implementation.
 - [ ] Ask Cairn for review when available.
