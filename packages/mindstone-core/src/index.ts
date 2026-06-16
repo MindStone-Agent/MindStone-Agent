@@ -1,6 +1,6 @@
 export * from "./paths/runtime.js";
-export * from "./identity/types.js";
-export * from "./config/types.js";
+export * from "./identity/index.js";
+export * from "./config/index.js";
 export * from "./transcript/types.js";
 export * from "./memory/types.js";
 export * from "./scri/types.js";
@@ -8,3 +8,4 @@ export * from "./channels/types.js";
 export * from "./wizard/prompter.js";
 export * from "./routing/session.js";
 export * from "./security/policy.js";
+export * from "./status/index.js";

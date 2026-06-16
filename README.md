@@ -80,11 +80,12 @@ Build them with:
 npm run build:mindstone
 ```
 
-Run the minimal Gateway health server with:
+Run the minimal Gateway server with:
 
 ```bash
 npm run start:gateway
 curl http://127.0.0.1:19789/health
+curl http://127.0.0.1:19789/status
 ```
 
 The default MindStone-Agent Gateway port is `19789` to avoid colliding with existing MindStone/Pi services that may use `18789`.
@@ -100,5 +101,5 @@ Verified so far:
 - Native Gateway `/health` responds on `19789`.
 - Docker image builds vendored Pi and MindStone overlay packages.
 - Docker isolated Pi wrapper starts and reports `0.79.4`.
-- Docker Gateway `/health` responds inside the container.
+- Docker Gateway `/health` and `/status` respond inside the container.
 - Native and Docker Pi package registration discover `/mindstone-agent-status` through RPC `get_commands`.

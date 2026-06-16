@@ -26,7 +26,7 @@ cleanup() {
 }
 trap cleanup EXIT
 sleep 1
-node -e 'const r=await fetch("http://127.0.0.1:19789/health"); if(!r.ok) process.exit(1); const body=await r.json(); if(!body.ok) process.exit(1); console.log(JSON.stringify(body, null, 2));'
+node -e 'for (const path of ["/health", "/status"]) { const r=await fetch(`http://127.0.0.1:19789${path}`); if(!r.ok) process.exit(1); const body=await r.json(); if(!body.ok) process.exit(1); console.log(path); console.log(JSON.stringify(body, null, 2)); }'
 cleanup
 trap - EXIT
 

@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { runtimePathsFromEnv } from "@mindstone-agent/core";
+import { getMindStoneSystemStatus, runtimePathsFromEnv } from "@mindstone-agent/core";
 
 export type GatewayOptions = {
   host?: string;
@@ -26,6 +26,17 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
     });
     return;
   }
+
+  if (req.method === "GET" && url.pathname === "/status") {
+    const status = getMindStoneSystemStatus();
+    sendJson(res, status.ok ? 200 : 503, {
+      service: "mindstone-agent-gateway",
+      version: "0.0.0",
+      ...status,
+    });
+    return;
+  }
+
   sendJson(res, 404, { ok: false, error: "not found" });
 }
 
