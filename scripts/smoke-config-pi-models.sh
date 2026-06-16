@@ -21,7 +21,7 @@ const discovered: MindStoneModelInfo[] = [
   },
 ];
 const texts: string[] = [];
-const selects = ["pi", "keep", "keep", "model:openai-codex/gpt-5.5"];
+const selects = ["pi", "model:openai-codex/gpt-5.5", "done"];
 const confirms = [true];
 
 const prompter: MindStonePrompter = {

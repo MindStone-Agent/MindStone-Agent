@@ -414,67 +414,80 @@ async function configureRouting(
   const paths = runtimePathsFromEnv();
   const routing = config.routing ?? {};
   const mode = await prompter.select<NonNullable<MindStoneRoutingConfig["mode"]>>({
-    message: "Routing/provider mode",
+    message: "Provider mode",
     options: [
-      { value: "placeholder", label: "Placeholder", hint: "safe transcript-aware not-implemented behavior" },
-      { value: "mock", label: "Mock", hint: "deterministic local provider for smoke tests" },
-      { value: "pi", label: "Pi", hint: "isolated vendored Pi provider adapter" },
+      { value: "placeholder", label: "No model yet", hint: "safe setup mode; record transcripts only" },
+      { value: "mock", label: "Mock test model", hint: "deterministic local responses for testing" },
+      { value: "pi", label: "Pi model", hint: "choose from isolated Pi models" },
     ],
     initialValue: routing.mode ?? "placeholder",
-  });
-  const defaultAgentId = await chooseString({
-    prompter,
-    message: "Default agent id",
-    current: routing.defaultAgentId ?? "default",
   });
 
   const nextRouting: MindStoneRoutingConfig = {
     ...routing,
     mode,
-    defaultAgentId,
+    defaultAgentId: routing.defaultAgentId ?? "default",
   };
 
   if (mode === "placeholder") {
-    const keepModel = await prompter.select<"unset" | "keep">({
-      message: "Default model for placeholder mode",
-      options: [
-        { value: "unset", label: "Leave unset", hint: "recommended" },
-        { value: "keep", label: `Keep current: ${routing.defaultModel ?? "none"}`, hint: routing.defaultModel ? undefined : "same as unset" },
-      ],
-      initialValue: routing.defaultModel ? "keep" : "unset",
-    });
-    nextRouting.defaultModel = keepModel === "keep" ? routing.defaultModel : undefined;
+    nextRouting.defaultModel = undefined;
   }
 
   if (mode === "mock") {
-    nextRouting.defaultModel = await chooseOptionalString({
-      prompter,
-      message: "Mock default model label",
-      current: routing.defaultModel,
-      suggested: "mindstone/mock",
-      suggestedLabel: "Use mindstone/mock",
-    });
-    const responsePrefix = await chooseString({
-      prompter,
-      message: "Mock response prefix",
-      current: routing.mock?.responsePrefix ?? "Mock response",
-    });
-    nextRouting.mock = { ...routing.mock, responsePrefix };
+    nextRouting.defaultModel = routing.defaultModel ?? "mindstone/mock";
+    nextRouting.mock = { ...routing.mock, responsePrefix: routing.mock?.responsePrefix ?? "Mock response" };
   }
 
   if (mode === "pi") {
-    const agentDir = await chooseString({
-      prompter,
-      message: "Isolated Pi agent dir",
-      current: routing.pi?.agentDir ?? paths.piAgentDir,
-    });
-    nextRouting.pi = { ...routing.pi, agentDir };
+    nextRouting.pi = { ...routing.pi, agentDir: routing.pi?.agentDir ?? paths.piAgentDir };
     nextRouting.defaultModel = await choosePiModel({
       prompter,
       current: routing.defaultModel,
       availableModels: options.availableModels,
       discoveryError: options.modelDiscoveryError,
     });
+  }
+
+  const advanced = await prompter.select<"done" | "advanced">({
+    message: "Routing setup",
+    options: [
+      { value: "done", label: "Done", hint: "use these routing settings" },
+      { value: "advanced", label: "Advanced routing options", hint: "agent id, Pi runtime path, mock label/prefix" },
+    ],
+    initialValue: "done",
+  });
+
+  if (advanced === "advanced") {
+    nextRouting.defaultAgentId = await chooseString({
+      prompter,
+      message: "Default agent id",
+      current: nextRouting.defaultAgentId ?? "default",
+    });
+
+    if (mode === "mock") {
+      nextRouting.defaultModel = await chooseOptionalString({
+        prompter,
+        message: "Mock default model label",
+        current: nextRouting.defaultModel,
+        suggested: "mindstone/mock",
+        suggestedLabel: "Use mindstone/mock",
+      });
+      const responsePrefix = await chooseString({
+        prompter,
+        message: "Mock response prefix",
+        current: nextRouting.mock?.responsePrefix ?? "Mock response",
+      });
+      nextRouting.mock = { ...nextRouting.mock, responsePrefix };
+    }
+
+    if (mode === "pi") {
+      const agentDir = await chooseString({
+        prompter,
+        message: "Isolated Pi runtime path",
+        current: nextRouting.pi?.agentDir ?? paths.piAgentDir,
+      });
+      nextRouting.pi = { ...nextRouting.pi, agentDir };
+    }
   }
 
   return { ...config, routing: nextRouting };

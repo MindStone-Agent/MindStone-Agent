@@ -28,7 +28,6 @@ import { readFileSync } from "node:fs";
 import { runMindStoneConfigWizard, type MindStonePrompter, type MindStoneSelectOption } from "./packages/mindstone-core/src/index.ts";
 
 const texts = [
-  "Mock says",
   "91",
   "70",
   "20",
@@ -39,9 +38,7 @@ const selects = [
   "token",
   "keep",
   "mock",
-  "keep",
-  "suggested",
-  "custom",
+  "done",
   "sliding_window",
   "custom",
   "sqlite-vec",
