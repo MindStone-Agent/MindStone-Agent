@@ -14,25 +14,11 @@ import { runMindStoneOnboardingWizard, type MindStonePrompter, type MindStoneSel
 
 const configPath = process.env.MINDSTONE_AGENT_CONFIG!;
 const texts = [
-  ".",
-  "127.0.0.1",
-  "19789",
-  "MINDSTONE_GATEWAY_TOKEN",
-  "default",
-  "openai-codex/gpt-5.5",
-  "Mock says",
-  "91",
-  "70",
-  "20",
-  "ollama:nomic-embed-text",
-  "default",
-  "agents/default/IDENTITY.md",
-  "agents/default/USER.md",
   "help build and operate MindStone-Agent",
   "Clint prefers truthful, verified work and no destructive changes without approval.",
 ];
-const selects = ["token", "mock", "sliding_window", "sqlite-vec"];
-const confirms = [true, true, false, true, true];
+const selects = ["quickstart"];
+const confirms = [true, true];
 
 const prompter: MindStonePrompter = {
   intro: async () => undefined,
@@ -64,10 +50,10 @@ if (!result.userCreated) throw new Error("Onboarding did not create user file");
 if (texts.length || selects.length || confirms.length) throw new Error("Smoke prompt queues were not fully consumed");
 
 const config = JSON.parse(readFileSync(result.path, "utf-8")) as any;
-if (config.routing?.mode !== "mock") throw new Error("Routing mock mode was not written");
-if (config.gateway?.auth?.mode !== "token") throw new Error("Gateway token mode was not written");
+if (config.routing?.mode !== "placeholder") throw new Error("QuickStart placeholder routing mode was not written");
+if (config.gateway?.auth?.mode !== "none") throw new Error("QuickStart gateway auth mode was not written");
 if (config.contextManagement?.mode !== "sliding_window") throw new Error("Context mode was not written");
-if (config.memory?.autoRecall !== true) throw new Error("Memory autoRecall was not written");
+if (config.memory?.autoRecall !== false) throw new Error("QuickStart memory autoRecall default was not written");
 
 const identityPath = resolve(dirname(result.path), "agents/default/IDENTITY.md");
 const userPath = resolve(dirname(result.path), "agents/default/USER.md");

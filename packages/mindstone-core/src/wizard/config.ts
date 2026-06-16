@@ -15,12 +15,15 @@ export type MindStoneConfigWizardSection =
   | "memory"
   | "identity";
 
+export type MindStoneOnboardingMode = "quickstart" | "manual";
+
 export type MindStoneConfigWizardOptions = {
   configPath?: string;
   sections?: MindStoneConfigWizardSection[];
   dryRun?: boolean;
   showHeader?: boolean;
   showIntro?: boolean;
+  onboardingMode?: MindStoneOnboardingMode;
 };
 
 export type MindStoneConfigWizardResult = {
@@ -156,9 +159,54 @@ export function writeMindStoneConfig(configPath: string, config: MindStoneConfig
   writeFileSync(configPath, stableJson(config), "utf-8");
 }
 
+function withDefaultOnboardingConfig(config: MindStoneConfig): MindStoneConfig {
+  const defaultAgentId = config.routing?.defaultAgentId ?? "default";
+  return {
+    ...config,
+    workspace: { root: config.workspace?.root ?? ".", ...config.workspace },
+    gateway: {
+      host: "127.0.0.1",
+      port: 19789,
+      auth: { mode: "none" },
+      http: {
+        chatCompletions: { enabled: false },
+        responses: { enabled: false },
+        ...config.gateway?.http,
+      },
+      ...config.gateway,
+    },
+    routing: {
+      mode: "placeholder",
+      defaultAgentId,
+      ...config.routing,
+    },
+    contextManagement: config.contextManagement ?? {
+      mode: "sliding_window",
+      ceilingPercent: 92,
+      floorPercent: 70,
+      minRecentMessages: 24,
+      preserveTranscript: true,
+    },
+    memory: {
+      autoRecall: false,
+      vectorStore: "sqlite-vec",
+      ...config.memory,
+    },
+    agents: {
+      ...config.agents,
+      [defaultAgentId]: {
+        id: defaultAgentId,
+        identityPath: `agents/${defaultAgentId}/IDENTITY.md`,
+        userPath: `agents/${defaultAgentId}/USER.md`,
+        ...config.agents?.[defaultAgentId],
+      },
+    },
+  };
+}
+
 async function configureWorkspace(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
   const root = await prompter.text({
-    message: "Workspace root",
+    message: "Workspace root (press Enter to keep default)",
     placeholder: ".",
     initialValue: config.workspace?.root ?? ".",
   });
@@ -596,6 +644,7 @@ export async function runMindStoneOnboardingWizard(
   options: MindStoneConfigWizardOptions = {},
 ): Promise<MindStoneOnboardingResult> {
   const runtimePaths = runtimePathsFromEnv();
+  const configPath = resolve(options.configPath ?? resolveConfigPath());
   await prompter.intro?.("MindStone onboarding");
   if (options.showHeader ?? true) {
     await prompter.note(formatMindStoneConfigHeader(), "MindStone 🔶");
@@ -625,12 +674,46 @@ export async function runMindStoneOnboardingWizard(
     "Runtime isolation",
   );
 
-  const configResult = await runMindStoneConfigWizard(prompter, {
-    ...options,
-    showHeader: false,
-    showIntro: false,
-    sections: ["workspace", "gateway", "routing", "context", "memory", "identity"],
-  });
+  const mode =
+    options.onboardingMode ??
+    (await prompter.select<MindStoneOnboardingMode>({
+      message: "Onboarding mode",
+      options: [
+        { value: "quickstart", label: "QuickStart", hint: "safe local defaults; only ask identity/user seed" },
+        { value: "manual", label: "Manual", hint: "configure workspace, gateway, routing, context, memory, and identity paths" },
+      ],
+      initialValue: "quickstart",
+    }));
+
+  let configResult: MindStoneConfigWizardResult;
+  if (mode === "quickstart") {
+    const loaded = loadMindStoneConfig(configPath);
+    if (loaded.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loaded.error}`);
+    const before = loaded.config ?? {};
+    const after = withDefaultOnboardingConfig(before);
+    await prompter.note(formatConfigSummary(after), loaded.exists ? "QuickStart existing/defaulted config" : "QuickStart config");
+    const issues = validateMindStoneConfig(after);
+    if (issues.length > 0) {
+      await prompter.note(issues.map((issue) => `- ${issue}`).join("\n"), "Config validation failed");
+      throw new Error("MindStone config validation failed");
+    }
+    const shouldWrite = !options.dryRun && (await prompter.confirm({ message: `Write QuickStart config to ${configPath}?`, initialValue: true }));
+    if (shouldWrite) writeMindStoneConfig(configPath, after);
+    configResult = {
+      path: configPath,
+      wrote: shouldWrite,
+      config: after,
+      changedSections: JSON.stringify(before) === JSON.stringify(after) ? [] : ["quickstart"],
+    };
+  } else {
+    configResult = await runMindStoneConfigWizard(prompter, {
+      ...options,
+      configPath,
+      showHeader: false,
+      showIntro: false,
+      sections: ["workspace", "gateway", "routing", "context", "memory", "identity"],
+    });
+  }
 
   const identityResult = configResult.wrote
     ? await createOnboardingIdentityFiles({ prompter, config: configResult.config, configPath: configResult.path })

@@ -91,7 +91,7 @@ Configure or onboard MindStone-Agent through the native CLI wrapper:
 ./scripts/mindstone onboard
 ```
 
-`config` edits selected runtime config sections. `onboard` is the first-run flow: risk acknowledgement, runtime isolation display, full core config, and non-overwriting identity/user scaffold creation.
+`config` edits selected runtime config sections. `onboard` is the first-run flow: risk acknowledgement, runtime isolation display, QuickStart vs Manual setup, and non-overwriting identity/user scaffold creation. QuickStart applies safe local defaults and asks only for the identity/user seed; Manual walks every core config section.
 
 The workspace package also exposes a `mindstone` bin under `node_modules/.bin` after `npm install`:
 
