@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-openai-smoke.XXXXXX")"
 GATEWAY_PORT="19792"
+SESSION_KEY="agent:default:openai:direct:smoke"
 
 cleanup() {
   if [[ -n "${gateway_pid:-}" ]]; then
@@ -16,6 +17,7 @@ trap cleanup EXIT
 
 export MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}"
 export MINDSTONE_AGENT_GATEWAY_PORT="${GATEWAY_PORT}"
+export SESSION_KEY
 
 cd "${PROJECT_ROOT}"
 
@@ -42,6 +44,7 @@ sleep 1
 
 node <<'NODE'
 const base = `http://127.0.0.1:${process.env.MINDSTONE_AGENT_GATEWAY_PORT}`;
+const sessionKey = process.env.SESSION_KEY;
 
 async function expect(path, init, expectedStatus, check) {
   const response = await fetch(`${base}${path}`, init);
@@ -50,6 +53,7 @@ async function expect(path, init, expectedStatus, check) {
   console.log(JSON.stringify(body, null, 2));
   if (response.status !== expectedStatus) process.exit(1);
   if (check && !check(body)) process.exit(1);
+  return body;
 }
 
 await expect("/v1/models", undefined, 200, (body) => body.object === "list" && Array.isArray(body.data));
@@ -58,11 +62,23 @@ await expect(
   {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "mindstone/default", messages: [{ role: "user", content: "hello" }] }),
+    body: JSON.stringify({
+      model: "mindstone/default",
+      metadata: { sessionKey, agentId: "default" },
+      messages: [
+        { role: "system", content: "You are a smoke test." },
+        { role: "user", content: "hello" },
+      ],
+    }),
   },
   501,
-  (body) => body.error?.code === "not_implemented",
+  (body) => body.error?.code === "not_implemented" && body.mindstone?.persisted === true && body.mindstone?.entries?.length === 3,
 );
+const history = await expect(`/chat/history?sessionKey=${encodeURIComponent(sessionKey)}`, undefined, 200);
+if (!Array.isArray(history.entries) || history.entries.length !== 3) process.exit(1);
+if (history.entries[0].role !== "system") process.exit(1);
+if (history.entries[1].text !== "hello") process.exit(1);
+if (history.entries[2].metadata?.event !== "routing_not_implemented") process.exit(1);
 NODE
 
 echo "OpenAI-compatible Gateway smoke test passed."

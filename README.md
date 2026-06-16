@@ -123,7 +123,7 @@ The Gateway also has an initial OpenAI-compatible skeleton gated by config:
 Currently verified:
 
 - `GET /v1/models` returns configured MindStone model metadata.
-- `POST /v1/chat/completions` returns a structured `501 not_implemented` error until real MindStone routing is connected.
+- `POST /v1/chat/completions` persists compatible input messages to the transcript store, records a routing-not-implemented event, and returns a structured `501 not_implemented` error until real MindStone routing is connected.
 
 ## Status
 

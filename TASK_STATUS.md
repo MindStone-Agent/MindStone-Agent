@@ -54,6 +54,7 @@
 - [x] Verified Gateway auth modes `none`, `token`, and `password`.
 - [x] Added OpenAI-compatible `/v1/models` skeleton.
 - [x] Added explicit `501 not_implemented` `/v1/chat/completions` skeleton.
+- [x] Made `/v1/chat/completions` transcript-aware: compatible input messages are persisted before the not-implemented response.
 - [x] Verified OpenAI-compatible skeleton with `npm run smoke:openai`.
 - [x] Added file-backed JSONL transcript store.
 - [x] Verified append/read/list transcript behavior with `npm run smoke:transcripts`.
@@ -68,6 +69,6 @@
 ### Upcoming
 
 - [ ] Replace placeholder initializer with interactive onboarding flow.
-- [ ] Connect `/v1/chat/completions` to real MindStone routing.
+- [ ] Connect transcript-aware `/v1/chat/completions` to real MindStone routing.
 - [ ] Add run manager abstraction for active/abortable Gateway runs.
 - [ ] Ask Cairn for review when available.

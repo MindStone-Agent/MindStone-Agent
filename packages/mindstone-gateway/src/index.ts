@@ -8,6 +8,7 @@ import {
   readTranscriptEntries,
   resolveConfigPath,
   resolveGatewayAuthRequirement,
+  resolveSessionKey,
   runtimePathsFromEnv,
   type MindStoneConfig,
   type TranscriptRole,
@@ -63,6 +64,28 @@ function openAiModels(config: MindStoneConfig | undefined): unknown {
 
 function isTranscriptRole(value: unknown): value is TranscriptRole {
   return ["user", "assistant", "tool", "system", "event"].includes(String(value));
+}
+
+function transcriptTextFromOpenAiContent(content: unknown): string | undefined {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (typeof part !== "object" || part === null) return undefined;
+        const record = part as Record<string, unknown>;
+        if (record.type === "text" && typeof record.text === "string") return record.text;
+        return undefined;
+      })
+      .filter((part): part is string => Boolean(part));
+    return parts.length > 0 ? parts.join("\n") : undefined;
+  }
+  return undefined;
+}
+
+function openAiRoleToTranscriptRole(role: unknown): TranscriptRole {
+  if (role === "system" || role === "assistant" || role === "tool") return role;
+  return "user";
 }
 
 async function readJsonBody(req: IncomingMessage, maxBytes = 1024 * 1024): Promise<unknown> {
@@ -274,15 +297,68 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 404, openAiError("OpenAI-compatible chat completions are disabled", "disabled", "disabled"));
       return;
     }
-    sendJson(
-      res,
-      501,
-      openAiError(
+
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      sendJson(res, 400, openAiError(error instanceof Error ? error.message : String(error), "invalid_request_error", "invalid_json"));
+      return;
+    }
+
+    const input = body as Record<string, unknown>;
+    const messages = Array.isArray(input.messages) ? input.messages : [];
+    if (messages.length === 0) {
+      sendJson(res, 400, openAiError("messages must be a non-empty array", "invalid_request_error", "invalid_messages"));
+      return;
+    }
+
+    const metadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
+    const metadataSessionKey = typeof metadata.sessionKey === "string" ? metadata.sessionKey : undefined;
+    const model = typeof input.model === "string" ? input.model : "mindstone/default";
+    const agentId = typeof metadata.agentId === "string" ? metadata.agentId : "default";
+    const sessionKey = metadataSessionKey ?? resolveSessionKey({
+      agentId,
+      substrate: "openai",
+      senderId: typeof input.user === "string" ? input.user : model,
+    });
+
+    const persistedEntries = messages.map((message, index) => {
+      const record = typeof message === "object" && message !== null ? message as Record<string, unknown> : {};
+      return appendTranscriptEntry({
+        sessionKey,
+        agentId,
+        role: openAiRoleToTranscriptRole(record.role),
+        text: transcriptTextFromOpenAiContent(record.content),
+        content: record.content,
+        metadata: {
+          source: "openai-chat-completions",
+          model,
+          messageIndex: index,
+          originalRole: record.role,
+        },
+      });
+    });
+    const eventEntry = appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "event",
+      text: "OpenAI-compatible chat completions are not connected to MindStone routing yet.",
+      metadata: { event: "routing_not_implemented", source: "openai-chat-completions", model },
+    });
+
+    sendJson(res, 501, {
+      ...openAiError(
         "OpenAI-compatible chat completions are scaffolded but not connected to MindStone routing yet",
         "not_implemented",
         "not_implemented",
       ),
-    );
+      mindstone: {
+        persisted: true,
+        sessionKey,
+        entries: [...persistedEntries, eventEntry],
+      },
+    });
     return;
   }
 
