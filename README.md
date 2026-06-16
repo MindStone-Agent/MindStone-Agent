@@ -106,6 +106,25 @@ Gateway authentication is configured in the isolated MindStone config file. `/he
 
 Supported initial modes are `none`, `token`, and `password`. Tokens are accepted via `Authorization: Bearer <token>` or `X-MindStone-Token`. Password mode accepts HTTP Basic auth or `X-MindStone-Password`.
 
+The Gateway also has an initial OpenAI-compatible skeleton gated by config:
+
+```json
+{
+  "gateway": {
+    "http": {
+      "chatCompletions": {
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+Currently verified:
+
+- `GET /v1/models` returns configured MindStone model metadata.
+- `POST /v1/chat/completions` returns a structured `501 not_implemented` error until real MindStone routing is connected.
+
 ## Status
 
 Initial foundation in progress. Not production-ready.
@@ -114,6 +133,7 @@ Verified so far:
 
 - Runtime initializer creates missing isolated config/identity/user placeholders without overwriting existing files.
 - Gateway auth enforcement supports verified `none`, `token`, and `password` modes.
+- OpenAI-compatible Gateway skeleton exposes verified `/v1/models` and explicit-not-implemented `/v1/chat/completions` behavior.
 - Native isolated Pi wrapper starts and reports `0.79.4`.
 - Native MindStone overlay packages build.
 - Native Gateway `/health` responds on `19789`.

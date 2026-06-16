@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, runtime initializer, Gateway auth, and minimal health/status endpoints build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -25,6 +25,7 @@
 - [x] Expand Gateway beyond `/health` with `/status`.
 - [x] Start MindStone Core implementation around identity/config loading beyond metadata.
 - [x] Add Gateway auth modes.
+- [x] Start OpenAI-compatible Gateway endpoint skeleton.
 
 ### Completed
 
@@ -48,6 +49,9 @@
 - [x] Verified `/status` reports initialized default agent metadata.
 - [x] Added Gateway auth enforcement for non-health endpoints.
 - [x] Verified Gateway auth modes `none`, `token`, and `password`.
+- [x] Added OpenAI-compatible `/v1/models` skeleton.
+- [x] Added explicit `501 not_implemented` `/v1/chat/completions` skeleton.
+- [x] Verified OpenAI-compatible skeleton with `npm run smoke:openai`.
 - [x] Verified native Pi adapter package registration via RPC `get_commands`.
 - [x] Verified Docker Pi adapter package registration via RPC `get_commands`.
 
@@ -55,5 +59,5 @@
 
 - [ ] Replace placeholder initializer with interactive onboarding flow.
 - [ ] Begin transcript/session storage implementation.
-- [ ] Start OpenAI-compatible Gateway endpoint skeleton.
+- [ ] Connect `/v1/chat/completions` to real MindStone routing.
 - [ ] Ask Cairn for review when available.

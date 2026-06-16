@@ -6,6 +6,7 @@ import {
   resolveConfigPath,
   resolveGatewayAuthRequirement,
   runtimePathsFromEnv,
+  type MindStoneConfig,
 } from "@mindstone-agent/core";
 
 export type GatewayOptions = {
@@ -26,6 +27,34 @@ function sendJson(
     ...headers,
   });
   res.end(text);
+}
+
+function loadGatewayConfig(): ReturnType<typeof loadMindStoneConfig> {
+  const paths = runtimePathsFromEnv();
+  const configPath = resolveConfigPath(process.env, paths);
+  return loadMindStoneConfig(configPath);
+}
+
+function openAiError(message: string, type: string, code: string): { error: { message: string; type: string; code: string } } {
+  return { error: { message, type, code } };
+}
+
+function isChatCompletionsEnabled(config: MindStoneConfig | undefined): boolean {
+  return config?.gateway?.http?.chatCompletions?.enabled === true;
+}
+
+function openAiModels(config: MindStoneConfig | undefined): unknown {
+  const agents = config?.agents ?? {};
+  const data = Object.entries(agents).map(([agentId, agent]) => ({
+    id: agent.defaultModel ?? `mindstone/${agentId}`,
+    object: "model",
+    created: 0,
+    owned_by: "mindstone-agent",
+  }));
+  return {
+    object: "list",
+    data: data.length > 0 ? data : [{ id: "mindstone/default", object: "model", created: 0, owned_by: "mindstone-agent" }],
+  };
 }
 
 function enforceGatewayAuth(req: IncomingMessage, res: ServerResponse): boolean {
@@ -71,6 +100,42 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
       version: "0.0.0",
       ...status,
     });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/v1/models") {
+    const loadedConfig = loadGatewayConfig();
+    if (loadedConfig.error) {
+      sendJson(res, 503, openAiError(loadedConfig.error, "config_error", "config_error"));
+      return;
+    }
+    if (!isChatCompletionsEnabled(loadedConfig.config)) {
+      sendJson(res, 404, openAiError("OpenAI-compatible chat completions are disabled", "disabled", "disabled"));
+      return;
+    }
+    sendJson(res, 200, openAiModels(loadedConfig.config));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
+    const loadedConfig = loadGatewayConfig();
+    if (loadedConfig.error) {
+      sendJson(res, 503, openAiError(loadedConfig.error, "config_error", "config_error"));
+      return;
+    }
+    if (!isChatCompletionsEnabled(loadedConfig.config)) {
+      sendJson(res, 404, openAiError("OpenAI-compatible chat completions are disabled", "disabled", "disabled"));
+      return;
+    }
+    sendJson(
+      res,
+      501,
+      openAiError(
+        "OpenAI-compatible chat completions are scaffolded but not connected to MindStone routing yet",
+        "not_implemented",
+        "not_implemented",
+      ),
+    );
     return;
   }
 

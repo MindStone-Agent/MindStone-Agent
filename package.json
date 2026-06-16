@@ -17,7 +17,8 @@
     "smoke:native": "./scripts/smoke-native.sh",
     "smoke:docker": "./scripts/smoke-docker.sh",
     "init:runtime": "./scripts/init-runtime.sh",
-    "smoke:auth": "./scripts/smoke-gateway-auth.sh"
+    "smoke:auth": "./scripts/smoke-gateway-auth.sh",
+    "smoke:openai": "./scripts/smoke-openai.sh"
   },
   "engines": {
     "node": ">=22.19.0"
