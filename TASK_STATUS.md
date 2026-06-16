@@ -7,18 +7,19 @@
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Repo foundation | In progress | Upstream Pi base being installed under `vendor/pi` |
-| Docs | Drafted | Refactor docs copied to `docs/refactor/` |
-| Core/Gateway | Pending | Will be layered after Pi base import |
-| Native install | Pending | Native install should support dev and service modes |
-| Docker install | Pending | Docker should build from this repo with vendored Pi base |
+| Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
+| Isolation | In progress | Native wrapper isolates Pi config/sessions under `.runtime/` |
+| Docs | Drafted | Refactor and operations docs present |
+| Core/Gateway | Pending | Will be layered after Pi base validation |
+| Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
+| Docker install | Scaffolded | Dockerfile/Compose use project-specific volumes |
 
 ## Current Sprint
 
 ### In Progress
 
-- [ ] Import upstream Pi base.
-- [ ] Document update strategy.
+- [ ] Validate vendored Pi build.
+- [ ] Validate isolated wrapper startup.
 - [ ] Establish MindStone overlay package structure.
 
 ### Completed
@@ -26,6 +27,10 @@
 - [x] Renamed project target to `MindStone-Agent`.
 - [x] Preserved Slate scratch scaffold in sibling backup folder.
 - [x] Copied PRD/design/architecture/implementation docs into `docs/refactor/`.
+- [x] Imported upstream Pi base under `vendor/pi`.
+- [x] Documented upstream Pi update strategy.
+- [x] Added native isolation wrapper scripts.
+- [x] Added Dockerfile and Compose scaffold.
 
 ### Upcoming
 

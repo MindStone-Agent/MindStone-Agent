@@ -17,3 +17,5 @@ vectors.db
 *.lance/
 transcripts/
 logs/
+.runtime/*
+!.runtime/README.md

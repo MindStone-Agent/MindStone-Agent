@@ -1,0 +1,27 @@
+services:
+  mindstone-agent-pi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mindstone-agent:local
+    stdin_open: true
+    tty: true
+    environment:
+      PI_CODING_AGENT_DIR: /home/node/.pi/agent
+      PI_CODING_AGENT_SESSION_DIR: /home/node/.pi-sessions
+      PI_PACKAGE_DIR: /workspace/MindStone-Agent/vendor/pi/packages/coding-agent
+      MINDSTONE_AGENT_RUNTIME_DIR: /var/lib/mindstone-agent/runtime
+      MINDSTONE_AGENT_DATA_DIR: /var/lib/mindstone-agent/data
+      PI_SKIP_VERSION_CHECK: "1"
+      PI_OFFLINE: "1"
+    volumes:
+      - mindstone-agent-pi-agent:/home/node/.pi/agent
+      - mindstone-agent-pi-sessions:/home/node/.pi-sessions
+      - mindstone-agent-data:/var/lib/mindstone-agent
+    ports:
+      - "18789:18789"
+
+volumes:
+  mindstone-agent-pi-agent:
+  mindstone-agent-pi-sessions:
+  mindstone-agent-data:

@@ -1,0 +1,18 @@
+{
+  "name": "mindstone-agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MindStone proper rebuild on a vendored current Pi base with isolated runtime state.",
+  "scripts": {
+    "show:isolation": "./scripts/show-isolation.sh",
+    "install:native": "./scripts/install-native.sh",
+    "build:pi": "./scripts/build-pi-base.sh",
+    "pi": "./scripts/pi-agent",
+    "docker:build": "docker build -t mindstone-agent:local .",
+    "docker:run": "docker run --rm -it -v mindstone-agent-pi-agent:/home/node/.pi/agent -v mindstone-agent-pi-sessions:/home/node/.pi-sessions -v mindstone-agent-data:/var/lib/mindstone-agent -p 18789:18789 mindstone-agent:local"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
