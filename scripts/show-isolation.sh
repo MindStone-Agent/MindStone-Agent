@@ -15,6 +15,7 @@ MindStone data dir:        ${MINDSTONE_AGENT_DATA_DIR}
 MindStone token dir:       ${MINDSTONE_AGENT_TOKEN_DIR}
 MindStone vector dir:      ${MINDSTONE_AGENT_VECTOR_DIR}
 MindStone transcript dir:  ${MINDSTONE_AGENT_TRANSCRIPT_DIR}
+Gateway bind:              ${MINDSTONE_AGENT_GATEWAY_HOST}:${MINDSTONE_AGENT_GATEWAY_PORT}
 
 Host provider env allowed: ${MSA_ALLOW_HOST_PROVIDER_ENV:-0}
 Project env file:          ${MINDSTONE_AGENT_RUNTIME_DIR}/env.local

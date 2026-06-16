@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | In progress | Native wrapper isolates Pi config/sessions under `.runtime/` |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Pending | Will be layered after Pi base validation |
+| Core/Gateway | Scaffolded | Core contracts and minimal Gateway health server build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Scaffolded | Dockerfile/Compose use project-specific volumes |
 
@@ -18,9 +18,11 @@
 
 ### In Progress
 
-- [ ] Validate vendored Pi build.
-- [ ] Validate isolated wrapper startup.
-- [ ] Establish MindStone overlay package structure.
+- [x] Validate vendored Pi build.
+- [x] Validate isolated wrapper startup.
+- [x] Establish MindStone overlay package structure.
+- [ ] Add first real Pi adapter integration test.
+- [ ] Expand Gateway beyond `/health`.
 
 ### Completed
 
@@ -31,6 +33,9 @@
 - [x] Documented upstream Pi update strategy.
 - [x] Added native isolation wrapper scripts.
 - [x] Added Dockerfile and Compose scaffold.
+- [x] Added MindStone Core/Gateway/Pi adapter package scaffold.
+- [x] Verified `npm run build:mindstone`.
+- [x] Verified Gateway `/health` on isolated port `19789`.
 
 ### Upcoming
 

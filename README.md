@@ -55,6 +55,31 @@ docker compose up --build
 
 Docker uses MindStone-Agent-specific named volumes. It must not mount host `~/.pi/agent`.
 
+## MindStone Overlay Packages
+
+MindStone-owned packages live outside the vendored Pi tree:
+
+```text
+packages/mindstone-core
+packages/mindstone-gateway
+packages/mindstone-pi-adapter
+```
+
+Build them with:
+
+```bash
+npm run build:mindstone
+```
+
+Run the minimal Gateway health server with:
+
+```bash
+npm run start:gateway
+curl http://127.0.0.1:19789/health
+```
+
+The default MindStone-Agent Gateway port is `19789` to avoid colliding with existing MindStone/Pi services that may use `18789`.
+
 ## Status
 
 Initial foundation in progress. Not production-ready.

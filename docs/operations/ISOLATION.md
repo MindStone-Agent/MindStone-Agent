@@ -22,7 +22,11 @@ The wrapper exports:
 PI_CODING_AGENT_DIR="$PROJECT_ROOT/.runtime/pi-agent"
 PI_CODING_AGENT_SESSION_DIR="$PROJECT_ROOT/.runtime/pi-sessions"
 PI_PACKAGE_DIR="$PROJECT_ROOT/vendor/pi/packages/coding-agent"
+MINDSTONE_AGENT_GATEWAY_HOST="127.0.0.1"
+MINDSTONE_AGENT_GATEWAY_PORT="19789"
 ```
+
+Port `19789` is intentionally separate from common existing MindStone/Pi gateway defaults such as `18789`.
 
 This means MindStone-Agent does **not** use:
 

@@ -10,9 +10,20 @@
     "build:pi": "./scripts/build-pi-base.sh",
     "pi": "./scripts/pi-agent",
     "docker:build": "docker build -t mindstone-agent:local .",
-    "docker:run": "docker run --rm -it -v mindstone-agent-pi-agent:/home/node/.pi/agent -v mindstone-agent-pi-sessions:/home/node/.pi-sessions -v mindstone-agent-data:/var/lib/mindstone-agent -p 18789:18789 mindstone-agent:local"
+    "docker:run": "docker run --rm -it -v mindstone-agent-pi-agent:/home/node/.pi/agent -v mindstone-agent-pi-sessions:/home/node/.pi-sessions -v mindstone-agent-data:/var/lib/mindstone-agent -p 18789:18789 mindstone-agent:local",
+    "build:mindstone": "tsc -b packages/mindstone-core packages/mindstone-gateway packages/mindstone-pi-adapter",
+    "dev:gateway": "./scripts/dev-gateway.sh",
+    "start:gateway": "./scripts/start-gateway.sh"
   },
   "engines": {
     "node": ">=22.19.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.22.1",
+    "typescript": "^5.9.3"
   }
 }

@@ -1,0 +1,16 @@
+{
+  "name": "@mindstone-agent/gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsx src/main.ts",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@mindstone-agent/core": "0.0.0"
+  }
+}
