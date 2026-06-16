@@ -150,6 +150,78 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/chat/send") {
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    const input = body as Record<string, unknown>;
+    const sessionKey = typeof input.sessionKey === "string" ? input.sessionKey.trim() : "";
+    const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
+    const text = typeof input.text === "string" ? input.text : "";
+    if (!sessionKey || !agentId || !text.trim()) {
+      sendJson(res, 400, { ok: false, error: "sessionKey, agentId, and text are required" });
+      return;
+    }
+    const userEntry = appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "user",
+      text,
+      metadata: typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : undefined,
+    });
+    const eventEntry = appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "event",
+      text: "MindStone routing is not implemented yet; message persisted but no assistant run was started.",
+      parentId: userEntry.id,
+      metadata: { event: "routing_not_implemented" },
+    });
+    sendJson(res, 501, {
+      ok: false,
+      error: "MindStone routing is not implemented yet",
+      code: "not_implemented",
+      persisted: true,
+      entries: [userEntry, eventEntry],
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/chat/abort") {
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    const input = body as Record<string, unknown>;
+    const sessionKey = typeof input.sessionKey === "string" ? input.sessionKey.trim() : "";
+    const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
+    if (!sessionKey || !agentId) {
+      sendJson(res, 400, { ok: false, error: "sessionKey and agentId are required" });
+      return;
+    }
+    const entry = appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "event",
+      text: "Abort requested, but no active run manager is implemented yet.",
+      metadata: { event: "abort_requested", runId: typeof input.runId === "string" ? input.runId : undefined },
+    });
+    sendJson(res, 202, {
+      ok: true,
+      aborted: false,
+      reason: "No active run manager is implemented yet",
+      entry,
+    });
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/chat/inject") {
     let body: unknown;
     try {

@@ -62,14 +62,38 @@ await request(
   201,
 );
 
+const send = await request(
+  "/chat/send",
+  {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionKey, agentId: "default", text: "please route me later" }),
+  },
+  501,
+);
+if (send.persisted !== true || !Array.isArray(send.entries) || send.entries.length !== 2) process.exit(1);
+
+const abort = await request(
+  "/chat/abort",
+  {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionKey, agentId: "default", runId: "smoke-run" }),
+  },
+  202,
+);
+if (abort.aborted !== false || !abort.entry) process.exit(1);
+
 const sessions = await request("/chat/sessions", undefined, 200);
-if (!Array.isArray(sessions.sessions) || sessions.sessions.length !== 1 || sessions.sessions[0].entries !== 2) {
+if (!Array.isArray(sessions.sessions) || sessions.sessions.length !== 1 || sessions.sessions[0].entries !== 5) {
   process.exit(1);
 }
 
 const history = await request(`/chat/history?sessionKey=${encodeURIComponent(sessionKey)}`, undefined, 200);
-if (!Array.isArray(history.entries) || history.entries.length !== 2) process.exit(1);
+if (!Array.isArray(history.entries) || history.entries.length !== 5) process.exit(1);
 if (history.entries[0].text !== "hello webchat") process.exit(1);
+if (history.entries[3].metadata?.event !== "routing_not_implemented") process.exit(1);
+if (history.entries[4].metadata?.event !== "abort_requested") process.exit(1);
 NODE
 
 echo "Chat history Gateway smoke test passed."

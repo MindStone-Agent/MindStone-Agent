@@ -135,10 +135,12 @@ Verified so far:
 - Gateway auth enforcement supports verified `none`, `token`, and `password` modes.
 - OpenAI-compatible Gateway skeleton exposes verified `/v1/models` and explicit-not-implemented `/v1/chat/completions` behavior.
 - File-backed JSONL transcript storage under the isolated transcript directory supports append/read/list and reports aggregate counts in `/status`.
-- Gateway-native chat history primitives are verified:
+- Gateway-native chat primitives are verified:
   - `GET /chat/sessions`
   - `GET /chat/history?sessionKey=...`
   - `POST /chat/inject`
+  - `POST /chat/send` persists the user message and returns explicit `501 not_implemented` until routing exists
+  - `POST /chat/abort` records an abort event and reports that no active run manager exists yet
 - Native isolated Pi wrapper starts and reports `0.79.4`.
 - Native MindStone overlay packages build.
 - Native Gateway `/health` responds on `19789`.
