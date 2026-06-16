@@ -2,6 +2,7 @@ export * from "./paths/runtime.js";
 export * from "./identity/index.js";
 export * from "./config/index.js";
 export * from "./transcript/index.js";
+export * from "./context/index.js";
 export * from "./memory/types.js";
 export * from "./scri/types.js";
 export * from "./channels/types.js";

@@ -148,7 +148,14 @@ Memory services:
 - context budget allocation
 - injection formatting
 
-Dream-cycle behavior should run at compaction/session boundaries and should be callable manually for backfill and recovery.
+Context management must support two selectable modes:
+
+- `auto_compact` — Pi/Claude-style checkpoint/handoff before native compaction, then post-compaction handoff replay and deferred indexing.
+- `sliding_window` — MindStone proper behavior: when active prompt utilization reaches a ceiling percentage of the current model context window, older messages are pruned from the active prompt window down toward a floor percentage while preserving the full transcript.
+
+Sliding-window pruning must never delete transcript entries. It only changes what is sent to the model. SCRI/vector recall can reintroduce relevant older material without keeping the entire transcript in context.
+
+Dream-cycle behavior should run at compaction/session/pruning boundaries and should be callable manually for backfill and recovery.
 
 ## 4. Onboarding and Settings UX
 

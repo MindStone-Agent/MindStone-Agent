@@ -34,6 +34,7 @@ MindStone Core
   ├─ identity + workspace
   ├─ config + migration
   ├─ session + transcript
+  ├─ context management
   ├─ memory + SCRI
   ├─ channel plugin contracts
   ├─ routing + delivery semantics
@@ -204,7 +205,33 @@ export interface ScriEngine {
 
 Core owns the semantics; backends provide storage and embedding implementation.
 
-### 3.4 Transcript interfaces
+### 3.4 Context management interfaces
+
+MindStone-Agent must support both Pi/Claude-style auto compaction and MindStone proper sliding-window pruning.
+
+```ts
+type ContextManagementPolicy =
+  | {
+      mode: "auto_compact";
+      checkpointWarningPercent?: number;
+      compactTargetPercent?: number;
+      keepRecentTokens?: number;
+      emergencyAutoHandoff?: boolean;
+    }
+  | {
+      mode: "sliding_window";
+      ceilingPercent?: number;
+      floorPercent?: number;
+      minRecentMessages?: number;
+      preserveTranscript?: boolean;
+    };
+```
+
+`auto_compact` delegates actual compaction to the substrate where available and preserves continuity through checkpoint/handoff/replay.
+
+`sliding_window` is MindStone proper's normal behavior: when prompt utilization reaches `ceilingPercent` of the current model's configured context window, older messages are removed from the active prompt window down toward `floorPercent`. The transcript store remains append-only and complete.
+
+### 3.5 Transcript interfaces
 
 ```ts
 export interface TranscriptEntry {

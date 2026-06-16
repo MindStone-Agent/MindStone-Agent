@@ -47,6 +47,8 @@ The preferred order is:
 - [ ] Define `MindStonePrompter` interface.
 - [ ] Define transcript/session interfaces.
 - [ ] Define memory source/vector/SCRI interfaces.
+- [x] Define context-management policy config for selectable `auto_compact` vs `sliding_window` modes.
+- [ ] Define runtime context-window pruning contracts and tests.
 - [ ] Define config service interface and migration boundary.
 - [ ] Add dependency direction checks or lint guidance: Core must not import Gateway/Pi.
 - [ ] Add unit tests for pure Core helpers.
@@ -158,7 +160,9 @@ The preferred order is:
 - [ ] Define/port vector backend abstraction.
 - [ ] Decide LanceDB vs sqlite-vec support order.
 - [ ] Port SCRI recall query/scoring/dedup/context-budget behavior.
-- [ ] Add dream-cycle hook for compaction/session boundary.
+- [ ] Add dream-cycle hook for compaction/session/pruning boundary.
+- [ ] Implement sliding-window prompt pruning: trigger at `ceilingPercent`, prune toward `floorPercent`, retain `minRecentMessages`, preserve transcript.
+- [ ] Implement auto-compact runtime policy for compatible substrates.
 - [ ] Add manual backfill command.
 - [ ] Add memory status and diagnostics.
 - [ ] Add tests for recall injection formatting.

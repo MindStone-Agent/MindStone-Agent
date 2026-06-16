@@ -1,3 +1,5 @@
+import type { ContextManagementPolicy } from "../context/index.js";
+
 export type GatewayAuthConfig =
   | { mode: "none" }
   | { mode: "token"; tokenFile?: string; tokenEnv?: string }
@@ -30,4 +32,5 @@ export type MindStoneConfig = {
   agents?: Record<string, MindStoneAgentConfig>;
   channels?: Record<string, unknown>;
   memory?: MindStoneMemoryConfig;
+  contextManagement?: ContextManagementPolicy;
 };

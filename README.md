@@ -9,6 +9,7 @@ This repository vendors upstream Pi under `vendor/pi` and layers MindStone Core,
 - [Refactor PRD](docs/refactor/PRD.md)
 - [Refactor Design](docs/refactor/DESIGN.md)
 - [Refactor Architecture](docs/refactor/ARCHITECTURE.md)
+- [Context Management](docs/refactor/CONTEXT_MANAGEMENT.md)
 - [Implementation Plan](docs/refactor/IMPLEMENTATION_PLAN.md)
 - [Upstream Pi Strategy](docs/upstream/PI_BASE_STRATEGY.md)
 - [Runtime Isolation Model](docs/operations/ISOLATION.md)
@@ -106,6 +107,34 @@ Gateway authentication is configured in the isolated MindStone config file. `/he
 
 Supported initial modes are `none`, `token`, and `password`. Tokens are accepted via `Authorization: Bearer <token>` or `X-MindStone-Token`. Password mode accepts HTTP Basic auth or `X-MindStone-Password`.
 
+MindStone-Agent context management is configured independently from Gateway auth/API flags. MindStone proper defaults to sliding-window pruning, while Pi/Claude-style auto-compaction remains available as a selectable policy:
+
+```json
+{
+  "contextManagement": {
+    "mode": "sliding_window",
+    "ceilingPercent": 92,
+    "floorPercent": 70,
+    "minRecentMessages": 24,
+    "preserveTranscript": true
+  }
+}
+```
+
+Alternative auto-compact mode:
+
+```json
+{
+  "contextManagement": {
+    "mode": "auto_compact",
+    "checkpointWarningPercent": 85,
+    "compactTargetPercent": 92,
+    "keepRecentTokens": 20000,
+    "emergencyAutoHandoff": false
+  }
+}
+```
+
 The Gateway also has an initial OpenAI-compatible skeleton gated by config:
 
 ```json
@@ -135,6 +164,7 @@ Verified so far:
 - Gateway auth enforcement supports verified `none`, `token`, and `password` modes.
 - OpenAI-compatible Gateway skeleton exposes verified `/v1/models` and explicit-not-implemented `/v1/chat/completions` behavior.
 - File-backed JSONL transcript storage under the isolated transcript directory supports append/read/list and reports aggregate counts in `/status`.
+- Core context-management policy types support selectable `auto_compact` and `sliding_window` modes; runtime pruning/compaction execution is not wired yet.
 - Gateway-native chat primitives are verified:
   - `GET /chat/sessions`
   - `GET /chat/history?sessionKey=...`

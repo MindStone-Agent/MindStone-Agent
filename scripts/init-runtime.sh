@@ -59,6 +59,13 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
   "memory": {
     "autoRecall": false,
     "vectorStore": "sqlite-vec"
+  },
+  "contextManagement": {
+    "mode": "sliding_window",
+    "ceilingPercent": 92,
+    "floorPercent": 70,
+    "minRecentMessages": 24,
+    "preserveTranscript": true
   }
 }
 EOF

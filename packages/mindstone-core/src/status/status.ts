@@ -1,5 +1,6 @@
 import { loadConfiguredIdentities } from "../identity/index.js";
 import { loadMindStoneConfig, resolveConfigPath, type LoadedMindStoneConfig } from "../config/index.js";
+import { resolveContextManagementPolicy, type ResolvedContextManagementPolicy } from "../context/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { listTranscriptSessions } from "../transcript/index.js";
 
@@ -29,6 +30,7 @@ export type MindStoneSystemStatus = {
     sessionCount: number;
     entryCount: number;
   };
+  contextManagement: ResolvedContextManagementPolicy;
 };
 
 function summarizeAgents(loadedConfig: LoadedMindStoneConfig): MindStoneAgentStatus[] {
@@ -65,5 +67,6 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
       sessionCount: transcriptSessions.length,
       entryCount: transcriptSessions.reduce((total, session) => total + session.entries, 0),
     },
+    contextManagement: resolveContextManagementPolicy(loadedConfig.config?.contextManagement),
   };
 }
