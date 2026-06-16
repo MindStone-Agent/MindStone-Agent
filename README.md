@@ -188,7 +188,7 @@ Verified so far:
   - `GET /chat/history?sessionKey=...`
   - `POST /chat/inject`
   - `POST /chat/send` persists the user message and returns explicit `501 not_implemented` until routing exists
-  - `POST /chat/abort` records an abort event and reports that no active run manager exists yet
+  - `POST /chat/abort` records an abort event through the Gateway run-manager abstraction and reports no active run until routing starts real runs
   - `POST /rpc` supports old-style Gateway method names: `chat.sessions`, `chat.history`, `chat.inject`, `chat.send`, and `chat.abort`
   - WebSocket RPC on `/rpc` and `/ws` uses the same method executor as HTTP `POST /rpc`
 - Native isolated Pi wrapper starts and reports `0.79.4`.

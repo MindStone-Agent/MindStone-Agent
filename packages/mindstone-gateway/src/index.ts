@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
+import { GatewayRunManager } from "./run-manager.js";
 import {
   appendTranscriptEntry,
   decideGatewayAuth,
@@ -144,6 +145,21 @@ function labelMessage(label: unknown, message: string): string {
   return typeof label === "string" && label.trim() ? `[${label.trim()}]\n\n${message}` : message;
 }
 
+const runManager = new GatewayRunManager();
+
+function abortGatewayRuns(sessionKey: string, runId: unknown): { aborted: boolean; reason: string; runs: unknown[] } {
+  const results = typeof runId === "string" && runId.trim()
+    ? [runManager.abort(runId.trim())]
+    : runManager.abortSession(sessionKey);
+  const aborted = results.some((result) => result.aborted);
+  const firstMiss = results.find((result) => !result.aborted);
+  return {
+    aborted,
+    reason: aborted ? "aborted" : firstMiss && !firstMiss.aborted ? firstMiss.reason : "not_found",
+    runs: results.map((result) => result.run).filter(Boolean),
+  };
+}
+
 type GatewayRpcExecution = {
   status: number;
   body: unknown;
@@ -229,19 +245,21 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
     if (!sessionKey) {
       return { status: 400, body: rpcError(id, "invalid_request", "sessionKey is required") };
     }
+    const abort = abortGatewayRuns(sessionKey, params.runId);
     const entry = appendTranscriptEntry({
       sessionKey,
       agentId,
       role: "event",
-      text: "Abort requested, but no active run manager is implemented yet.",
+      text: abort.aborted ? "Abort requested and active run aborted." : "Abort requested, but no active run was found.",
       metadata: {
         event: "abort_requested",
         source: "gateway-rpc",
         method: "chat.abort",
         runId: typeof params.runId === "string" ? params.runId : undefined,
+        abortReason: abort.reason,
       },
     });
-    return { status: 200, body: rpcSuccess(id, { ok: true, aborted: false, entry }) };
+    return { status: 200, body: rpcSuccess(id, { ok: true, aborted: abort.aborted, reason: abort.reason, runs: abort.runs, entry }) };
   }
 
   return { status: 404, body: rpcError(id, "method_not_found", `Unknown Gateway RPC method: ${method}`) };
@@ -539,17 +557,23 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 400, { ok: false, error: "sessionKey and agentId are required" });
       return;
     }
+    const abort = abortGatewayRuns(sessionKey, input.runId);
     const entry = appendTranscriptEntry({
       sessionKey,
       agentId,
       role: "event",
-      text: "Abort requested, but no active run manager is implemented yet.",
-      metadata: { event: "abort_requested", runId: typeof input.runId === "string" ? input.runId : undefined },
+      text: abort.aborted ? "Abort requested and active run aborted." : "Abort requested, but no active run was found.",
+      metadata: {
+        event: "abort_requested",
+        runId: typeof input.runId === "string" ? input.runId : undefined,
+        abortReason: abort.reason,
+      },
     });
     sendJson(res, 202, {
       ok: true,
-      aborted: false,
-      reason: "No active run manager is implemented yet",
+      aborted: abort.aborted,
+      reason: abort.reason,
+      runs: abort.runs,
       entry,
     });
     return;
