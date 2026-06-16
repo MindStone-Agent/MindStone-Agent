@@ -39,7 +39,7 @@ const provider = new PiMindStoneProvider({ agentDir: process.env.PI_CODING_AGENT
 const models = await provider.listModels();
 const target = models.find((model) => model.id === "openai-codex/gpt-5.5");
 assert.ok(target, "expected openai-codex/gpt-5.5 from vendored Pi model registry");
-assert.equal(target.provider, "pi");
+assert.equal(target.provider, "openai-codex");
 assert.ok((target.contextWindowTokens ?? 0) > 0, "expected context window metadata");
 
 console.log(JSON.stringify({

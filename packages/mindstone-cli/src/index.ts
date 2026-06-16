@@ -10,6 +10,7 @@ import {
   runMindStoneOnboardingWizard,
   runtimePathsFromEnv,
   type MindStoneModelInfo,
+  type MindStoneProviderInfo,
   type MindStonePrompter,
   type MindStoneSelectOption,
 } from "@mindstone-agent/core";
@@ -193,14 +194,14 @@ function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
   };
 }
 
-async function discoverPiModels(): Promise<{ models: MindStoneModelInfo[]; error?: string }> {
+async function discoverPiModels(): Promise<{ models: MindStoneModelInfo[]; providers: MindStoneProviderInfo[]; error?: string }> {
   try {
     const paths = runtimePathsFromEnv();
     const provider = new PiMindStoneProvider({ agentDir: paths.piAgentDir });
-    const models = await provider.listModels();
-    return { models };
+    const [models, providers] = await Promise.all([provider.listModels(), provider.listProviders()]);
+    return { models, providers };
   } catch (error) {
-    return { models: [], error: error instanceof Error ? error.message : String(error) };
+    return { models: [], providers: [], error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -246,12 +247,14 @@ async function main(): Promise<void> {
       await runMindStoneOnboardingWizard(prompter, {
         showHeader: false,
         availableModels: discovery.models,
+        availableProviders: discovery.providers,
         modelDiscoveryError: discovery.error,
       });
     } else {
       await runMindStoneConfigWizard(prompter, {
         showHeader: false,
         availableModels: discovery.models,
+        availableProviders: discovery.providers,
         modelDiscoveryError: discovery.error,
       });
     }

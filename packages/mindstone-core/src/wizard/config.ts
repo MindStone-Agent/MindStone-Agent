@@ -4,7 +4,7 @@ import { resolveContextManagementPolicy, type ContextManagementMode } from "../c
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { loadMindStoneConfig, resolveConfigPath, resolvePathRelativeToConfig } from "../config/load.js";
 import type { GatewayAuthConfig, MindStoneConfig, MindStoneRoutingConfig } from "../config/types.js";
-import type { MindStoneModelInfo } from "../provider/index.js";
+import type { MindStoneModelInfo, MindStoneProviderInfo } from "../provider/index.js";
 import type { MindStonePrompter, MindStoneSelectOption } from "./prompter.js";
 
 export type MindStoneConfigWizardSection =
@@ -26,6 +26,7 @@ export type MindStoneConfigWizardOptions = {
   showIntro?: boolean;
   onboardingMode?: MindStoneOnboardingMode;
   availableModels?: MindStoneModelInfo[];
+  availableProviders?: MindStoneProviderInfo[];
   modelDiscoveryError?: string;
 };
 
@@ -354,56 +355,153 @@ async function configureGateway(config: MindStoneConfig, prompter: MindStoneProm
   };
 }
 
+function providerAuthMethod(providerId: string): string {
+  if (["openai-codex", "github-copilot"].includes(providerId)) return "subscription/OAuth";
+  if (providerId === "anthropic") return "Claude subscription OAuth or API key";
+  return "API key/env/auth file";
+}
+
+function providerHint(provider: MindStoneProviderInfo): string {
+  const auth = provider.authStatus?.configured
+    ? provider.authStatus.label
+      ? `configured via ${provider.authStatus.label}`
+      : `configured${provider.authStatus.source ? ` via ${provider.authStatus.source}` : ""}`
+    : `not configured; ${providerAuthMethod(provider.id)}`;
+  return `${auth} · ${provider.availableModelCount}/${provider.modelCount} models available`;
+}
+
+function favoriteProviderScore(provider: MindStoneProviderInfo): number {
+  const order = ["openai-codex", "anthropic", "github-copilot", "openai", "google", "openrouter", "mistral", "groq"];
+  const index = order.indexOf(provider.id);
+  return index === -1 ? 1000 : index;
+}
+
+function favoriteModelScore(model: MindStoneModelInfo): number {
+  const id = model.id.toLowerCase();
+  const preferred = ["gpt-5.5", "gpt-5.4", "gpt-5.2", "claude-sonnet-4-5", "claude-opus-4-5", "gemini-3", "gemini-2.5-pro"];
+  const index = preferred.findIndex((needle) => id.includes(needle));
+  return index === -1 ? 1000 : index;
+}
+
 async function choosePiModel(params: {
   prompter: MindStonePrompter;
   current?: string;
   availableModels?: MindStoneModelInfo[];
+  availableProviders?: MindStoneProviderInfo[];
   discoveryError?: string;
 }): Promise<string | undefined> {
-  const models = (params.availableModels ?? []).filter((model) => model.provider === "pi" || model.id.includes("/"));
-  if (models.length === 0) {
+  const allModels = params.availableModels ?? [];
+  const providersFromModels: MindStoneProviderInfo[] = [...new Set(allModels.map((model) => model.provider))].map((provider) => ({
+    id: provider,
+    name: provider,
+    modelCount: allModels.filter((model) => model.provider === provider).length,
+    availableModelCount: allModels.filter((model) => model.provider === provider).length,
+  }));
+  const providers = (params.availableProviders?.length ? params.availableProviders : providersFromModels)
+    .filter((provider) => provider.modelCount > 0)
+    .sort((a, b) => favoriteProviderScore(a) - favoriteProviderScore(b) || a.name.localeCompare(b.name));
+
+  if (providers.length === 0) {
     await params.prompter.note(
       [
-        "No isolated Pi models were discovered for this runtime.",
+        "No isolated Pi providers/models were discovered for this runtime.",
         params.discoveryError ? `Discovery error: ${params.discoveryError}` : undefined,
-        "You can continue without a default model, or enter one manually after isolated Pi login/model setup.",
+        "Use the isolated Pi runtime to login or configure API keys, then rerun this wizard.",
       ]
         .filter((line): line is string => Boolean(line))
         .join("\n"),
-      "Pi model discovery",
+      "Pi provider discovery",
     );
-    return chooseOptionalString({
-      prompter: params.prompter,
-      message: "Pi default model",
-      current: params.current,
-      suggested: "openai-codex/gpt-5.5",
-      suggestedLabel: "Enter known model openai-codex/gpt-5.5",
-    });
+    return undefined;
   }
 
-  type Choice = "unset" | "current" | `model:${string}`;
-  const options: Array<MindStoneSelectOption<Choice>> = [{ value: "unset", label: "Leave unset", hint: "use Pi/provider default" }];
-  if (params.current && !models.some((model) => model.id === params.current)) {
-    options.push({ value: "current", label: `Keep current: ${params.current}` });
+  type ProviderChoice = "unset" | "current" | `provider:${string}`;
+  const providerOptions: Array<MindStoneSelectOption<ProviderChoice>> = [{ value: "unset", label: "Leave unset", hint: "use Pi/provider default" }];
+  if (params.current) providerOptions.push({ value: "current", label: `Keep current: ${params.current}` });
+  for (const provider of providers) {
+    providerOptions.push({ value: `provider:${provider.id}`, label: provider.name, hint: providerHint(provider) });
   }
-  for (const model of models) {
+
+  const currentProvider = params.current?.includes("/") ? params.current.split("/")[0] : undefined;
+  const initialProvider: ProviderChoice = currentProvider && providers.some((provider) => provider.id === currentProvider) ? `provider:${currentProvider}` : params.current ? "current" : "unset";
+  const providerChoice = await params.prompter.select<ProviderChoice>({
+    message: "Provider",
+    options: providerOptions,
+    initialValue: initialProvider,
+  });
+  if (providerChoice === "unset") return undefined;
+  if (providerChoice === "current") return params.current;
+
+  const providerId = providerChoice.replace(/^provider:/, "");
+  const provider = providers.find((entry) => entry.id === providerId);
+  if (provider?.authStatus && !provider.authStatus.configured) {
+    await params.prompter.note(
+      [
+        `${provider.name} is not configured in this isolated runtime.`,
+        "Use isolated Pi /login for subscription providers, or store an API key in the isolated auth file/env before live calls.",
+        "You can still select a model now; live calls will fail until auth is configured.",
+      ].join("\n"),
+      "Provider auth",
+    );
+  }
+
+  const providerModels = allModels
+    .filter((model) => model.provider === providerId)
+    .sort((a, b) => favoriteModelScore(a) - favoriteModelScore(b) || a.id.localeCompare(b.id));
+  if (providerModels.length === 0) return undefined;
+
+  type ModelChoice = `model:${string}` | "current" | "custom" | "show_all";
+  const toModelOption = (model: MindStoneModelInfo): MindStoneSelectOption<ModelChoice> => {
+    const modelIdWithoutProvider = model.id.replace(`${providerId}/`, "");
     const meta = [
       model.contextWindowTokens ? `${model.contextWindowTokens.toLocaleString()} ctx` : undefined,
       model.maxOutputTokens ? `${model.maxOutputTokens.toLocaleString()} out` : undefined,
     ]
       .filter(Boolean)
       .join(" · ");
-    options.push({ value: `model:${model.id}`, label: model.id, hint: meta || model.name });
-  }
-  const initialValue: Choice = params.current && models.some((model) => model.id === params.current) ? `model:${params.current}` : params.current ? "current" : "unset";
-  const selected = await params.prompter.select<Choice>({
-    message: "Pi default model",
-    options,
-    initialValue,
+    return { value: `model:${model.id}`, label: modelIdWithoutProvider, hint: meta || model.name };
+  };
+
+  const buildModelOptions = (models: MindStoneModelInfo[], all = false): Array<MindStoneSelectOption<ModelChoice>> => {
+    const modelOptions: Array<MindStoneSelectOption<ModelChoice>> = [];
+    if (params.current && !models.some((model) => model.id === params.current)) {
+      modelOptions.push({ value: "current", label: `Keep current: ${params.current}` });
+    }
+    modelOptions.push(...models.map(toModelOption));
+    if (!all && providerModels.length > models.length) {
+      modelOptions.push({ value: "show_all", label: `Show all ${providerModels.length} ${provider?.name ?? providerId} models`, hint: "advanced" });
+    }
+    modelOptions.push({ value: "custom", label: "Enter model id manually", hint: "advanced" });
+    return modelOptions;
+  };
+
+  const shortList = providerModels.length > 25 ? providerModels.slice(0, 20) : providerModels;
+  let modelOptions = buildModelOptions(shortList, providerModels.length <= 25);
+  let initialModel: ModelChoice = params.current && providerModels.some((model) => model.id === params.current) ? `model:${params.current}` : modelOptions[0].value;
+  let modelChoice = await params.prompter.select<ModelChoice>({
+    message: `${provider?.name ?? providerId} model`,
+    options: modelOptions,
+    initialValue: initialModel,
   });
-  if (selected === "unset") return undefined;
-  if (selected === "current") return params.current;
-  return selected.replace(/^model:/, "");
+  if (modelChoice === "show_all") {
+    modelOptions = buildModelOptions(providerModels, true);
+    initialModel = params.current && providerModels.some((model) => model.id === params.current) ? `model:${params.current}` : modelOptions[0].value;
+    modelChoice = await params.prompter.select<ModelChoice>({
+      message: `All ${provider?.name ?? providerId} models`,
+      options: modelOptions,
+      initialValue: initialModel,
+    });
+  }
+  if (modelChoice === "current") return params.current;
+  if (modelChoice === "custom") {
+    const raw = await params.prompter.text({
+      message: "Model id",
+      placeholder: `${providerId}/model-id`,
+      initialValue: params.current?.startsWith(`${providerId}/`) ? params.current : `${providerId}/`,
+    });
+    return trimOrUndefined(raw);
+  }
+  return modelChoice.replace(/^model:/, "");
 }
 
 async function configureRouting(
@@ -444,6 +542,7 @@ async function configureRouting(
       prompter,
       current: routing.defaultModel,
       availableModels: options.availableModels,
+      availableProviders: options.availableProviders,
       discoveryError: options.modelDiscoveryError,
     });
   }

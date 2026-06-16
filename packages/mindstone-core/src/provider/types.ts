@@ -8,6 +8,20 @@ export type MindStoneModelInfo = {
   maxOutputTokens?: number;
 };
 
+export type MindStoneProviderAuthStatus = {
+  configured: boolean;
+  source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command" | "oauth" | "api_key";
+  label?: string;
+};
+
+export type MindStoneProviderInfo = {
+  id: string;
+  name: string;
+  authStatus?: MindStoneProviderAuthStatus;
+  modelCount: number;
+  availableModelCount: number;
+};
+
 export type MindStoneChatMessage = {
   role: "system" | "user" | "assistant" | "tool";
   text?: string;

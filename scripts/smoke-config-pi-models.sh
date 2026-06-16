@@ -9,19 +9,28 @@ CONFIG="$TMP_DIR/config.json"
 cd "$ROOT"
 MINDSTONE_AGENT_ROOT="$ROOT" MINDSTONE_AGENT_CONFIG="$CONFIG" npx tsx <<'TS'
 import { readFileSync } from "node:fs";
-import { runMindStoneConfigWizard, type MindStoneModelInfo, type MindStonePrompter, type MindStoneSelectOption } from "./packages/mindstone-core/src/index.ts";
+import { runMindStoneConfigWizard, type MindStoneModelInfo, type MindStoneProviderInfo, type MindStonePrompter, type MindStoneSelectOption } from "./packages/mindstone-core/src/index.ts";
 
 const discovered: MindStoneModelInfo[] = [
   {
     id: "openai-codex/gpt-5.5",
-    provider: "pi",
+    provider: "openai-codex",
     name: "GPT 5.5 via isolated Pi",
     contextWindowTokens: 272000,
     maxOutputTokens: 128000,
   },
 ];
+const providers: MindStoneProviderInfo[] = [
+  {
+    id: "openai-codex",
+    name: "OpenAI Codex",
+    authStatus: { configured: true, source: "stored", label: "stored" },
+    modelCount: 1,
+    availableModelCount: 1,
+  },
+];
 const texts: string[] = [];
-const selects = ["pi", "model:openai-codex/gpt-5.5", "done"];
+const selects = ["pi", "provider:openai-codex", "model:openai-codex/gpt-5.5", "done"];
 const confirms = [true];
 
 const prompter: MindStonePrompter = {
@@ -48,6 +57,7 @@ const prompter: MindStonePrompter = {
 const result = await runMindStoneConfigWizard(prompter, {
   sections: ["routing"],
   availableModels: discovered,
+  availableProviders: providers,
 });
 if (!result.wrote) throw new Error("Wizard did not write config");
 if (texts.length || selects.length || confirms.length) throw new Error("Smoke prompt queues were not fully consumed");

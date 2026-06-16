@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider } from "@mindstone-agent/core";
+import type { MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo } from "@mindstone-agent/core";
 
 type PiModel = {
   id: string;
@@ -11,10 +11,18 @@ type PiModel = {
   maxTokens: number;
 };
 
+type PiAuthStatus = {
+  configured: boolean;
+  source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command";
+  label?: string;
+};
+
 type PiRegistry = {
   getAll(): PiModel[];
   getAvailable(): PiModel[];
   find(provider: string, modelId: string): PiModel | undefined;
+  getProviderDisplayName(provider: string): string;
+  getProviderAuthStatus(provider: string): PiAuthStatus;
   getApiKeyAndHeaders(model: PiModel): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> } | { ok: false; error: string }>;
 };
 
@@ -51,7 +59,7 @@ async function loadPiProviderModules(projectRoot: string): Promise<PiProviderMod
 function toModelInfo(model: PiModel): MindStoneModelInfo {
   return {
     id: `${model.provider}/${model.id}`,
-    provider: "pi",
+    provider: model.provider,
     name: model.name,
     contextWindowTokens: model.contextWindow,
     maxOutputTokens: model.maxTokens,
@@ -143,6 +151,25 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
   async listAvailableModels(): Promise<MindStoneModelInfo[]> {
     const { registry } = await this.#load();
     return registry.getAvailable().map(toModelInfo);
+  }
+
+  async listProviders(): Promise<MindStoneProviderInfo[]> {
+    const { registry } = await this.#load();
+    const all = registry.getAll();
+    const available = registry.getAvailable();
+    const providers = [...new Set(all.map((model) => model.provider))].sort((a, b) => registry.getProviderDisplayName(a).localeCompare(registry.getProviderDisplayName(b)));
+    return providers.map((provider) => ({
+      id: provider,
+      name: registry.getProviderDisplayName(provider),
+      authStatus: registry.getProviderAuthStatus(provider),
+      modelCount: all.filter((model) => model.provider === provider).length,
+      availableModelCount: available.filter((model) => model.provider === provider).length,
+    }));
+  }
+
+  async listModelsForProvider(provider: string): Promise<MindStoneModelInfo[]> {
+    const { registry } = await this.#load();
+    return registry.getAll().filter((model) => model.provider === provider).map(toModelInfo);
   }
 
   async #resolvePiModel(requestModelId?: string): Promise<PiModel> {

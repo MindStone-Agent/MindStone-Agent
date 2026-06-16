@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with isolated Pi model selection, native CLI, context-management policy + sliding-window selector, router/provider abstraction, transcript store, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with provider-first isolated Pi model selection, native CLI, context-management policy + sliding-window selector, router/provider abstraction, transcript store, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -36,7 +36,7 @@
 - [x] Add router/provider abstraction with placeholder, mock, and Pi-backed provider modes.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
-- [x] Add isolated Pi model discovery to native config/onboarding routing setup.
+- [x] Add provider-first isolated Pi provider/model discovery to native config/onboarding routing setup.
 
 ### Completed
 

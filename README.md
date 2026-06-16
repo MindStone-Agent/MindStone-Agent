@@ -91,7 +91,7 @@ Configure or onboard MindStone-Agent through the native CLI wrapper:
 ./scripts/mindstone onboard
 ```
 
-`config` edits selected runtime config sections. `onboard` is the first-run flow: risk acknowledgement, runtime isolation display, QuickStart vs Manual setup, and non-overwriting identity/user scaffold creation. QuickStart applies safe local defaults and asks only for the identity/user seed; Manual walks every core config section. When `pi` routing is selected, the CLI discovers isolated Pi models and presents them as arrow-key choices.
+`config` edits selected runtime config sections. `onboard` is the first-run flow: risk acknowledgement, runtime isolation display, QuickStart vs Manual setup, and non-overwriting identity/user scaffold creation. QuickStart applies safe local defaults and asks only for the identity/user seed; Manual walks every core config section. When `pi` routing is selected, the CLI discovers isolated Pi providers, shows provider auth status/method, then presents models only for the selected provider as arrow-key choices.
 
 The workspace package also exposes a `mindstone` bin under `node_modules/.bin` after `npm install`:
 
@@ -172,7 +172,7 @@ Alternative auto-compact mode:
 }
 ```
 
-Routing is selectable. The safe default is `placeholder`, which persists transcript entries and returns explicit not-implemented responses. `mock` enables deterministic local routing for tests. `pi` uses the isolated vendored Pi model registry/provider stack when isolated auth/model config is present. The native CLI can discover isolated Pi model metadata and write the selected model into `routing.defaultModel`.
+Routing is selectable. The safe default is `placeholder`, which persists transcript entries and returns explicit not-implemented responses. `mock` enables deterministic local routing for tests. `pi` uses the isolated vendored Pi model registry/provider stack when isolated auth/model config is present. The native CLI can discover isolated Pi provider/model metadata, guide provider-first selection, and write the selected model into `routing.defaultModel`.
 
 ```json
 {
