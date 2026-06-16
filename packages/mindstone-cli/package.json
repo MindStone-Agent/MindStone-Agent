@@ -12,6 +12,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@mindstone-agent/core": "0.0.0"
+    "@mindstone-agent/core": "0.0.0",
+    "@mindstone-agent/gateway": "0.0.0"
   }
 }

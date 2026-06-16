@@ -4,6 +4,10 @@ import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
 import { PiMindStoneProvider } from "./pi-provider.js";
 import { GatewayRunManager } from "./run-manager.js";
+
+export { MockMindStoneProvider } from "./mock-provider.js";
+export { PiMindStoneProvider } from "./pi-provider.js";
+export { GatewayRunManager } from "./run-manager.js";
 import {
   appendTranscriptEntry,
   buildPromptWindow,

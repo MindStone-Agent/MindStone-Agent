@@ -87,7 +87,7 @@ if (config.gateway?.auth?.tokenEnv !== "MINDSTONE_GATEWAY_TOKEN") throw new Erro
 if (config.gateway?.http?.chatCompletions?.enabled !== true) throw new Error("chatCompletions was not enabled");
 if (config.gateway?.http?.responses?.enabled !== false) throw new Error("responses should remain disabled");
 if (config.routing?.mode !== "mock") throw new Error("Routing mock mode was not written");
-if (config.routing?.defaultModel !== "openai-codex/gpt-5.5") throw new Error("Default model was not written");
+if (config.routing?.defaultModel !== "mindstone/mock") throw new Error("Mock default model label was not written");
 if (config.contextManagement?.mode !== "sliding_window") throw new Error("Context mode was not written");
 if (config.contextManagement?.ceilingPercent !== 91) throw new Error("Context ceiling was not written");
 if (config.memory?.autoRecall !== true) throw new Error("Memory autoRecall was not written");

@@ -9,9 +9,11 @@ import {
   runMindStoneConfigWizard,
   runMindStoneOnboardingWizard,
   runtimePathsFromEnv,
+  type MindStoneModelInfo,
   type MindStonePrompter,
   type MindStoneSelectOption,
 } from "@mindstone-agent/core";
+import { PiMindStoneProvider } from "@mindstone-agent/gateway";
 
 type Command = "config" | "onboard" | "status" | "help";
 
@@ -191,6 +193,17 @@ function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
   };
 }
 
+async function discoverPiModels(): Promise<{ models: MindStoneModelInfo[]; error?: string }> {
+  try {
+    const paths = runtimePathsFromEnv();
+    const provider = new PiMindStoneProvider({ agentDir: paths.piAgentDir });
+    const models = await provider.listModels();
+    return { models };
+  } catch (error) {
+    return { models: [], error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 function printStatus(): void {
   const paths = runtimePathsFromEnv();
   const configPath = resolveConfigPath();
@@ -228,10 +241,19 @@ async function main(): Promise<void> {
 
   const prompter = makeTerminalPrompter();
   try {
+    const discovery = await discoverPiModels();
     if (command === "onboard") {
-      await runMindStoneOnboardingWizard(prompter, { showHeader: false });
+      await runMindStoneOnboardingWizard(prompter, {
+        showHeader: false,
+        availableModels: discovery.models,
+        modelDiscoveryError: discovery.error,
+      });
     } else {
-      await runMindStoneConfigWizard(prompter, { showHeader: false });
+      await runMindStoneConfigWizard(prompter, {
+        showHeader: false,
+        availableModels: discovery.models,
+        modelDiscoveryError: discovery.error,
+      });
     }
   } finally {
     prompter.close();

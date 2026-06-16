@@ -4,6 +4,7 @@ import { resolveContextManagementPolicy, type ContextManagementMode } from "../c
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { loadMindStoneConfig, resolveConfigPath, resolvePathRelativeToConfig } from "../config/load.js";
 import type { GatewayAuthConfig, MindStoneConfig, MindStoneRoutingConfig } from "../config/types.js";
+import type { MindStoneModelInfo } from "../provider/index.js";
 import type { MindStonePrompter, MindStoneSelectOption } from "./prompter.js";
 
 export type MindStoneConfigWizardSection =
@@ -24,6 +25,8 @@ export type MindStoneConfigWizardOptions = {
   showHeader?: boolean;
   showIntro?: boolean;
   onboardingMode?: MindStoneOnboardingMode;
+  availableModels?: MindStoneModelInfo[];
+  modelDiscoveryError?: string;
 };
 
 export type MindStoneConfigWizardResult = {
@@ -351,7 +354,63 @@ async function configureGateway(config: MindStoneConfig, prompter: MindStoneProm
   };
 }
 
-async function configureRouting(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
+async function choosePiModel(params: {
+  prompter: MindStonePrompter;
+  current?: string;
+  availableModels?: MindStoneModelInfo[];
+  discoveryError?: string;
+}): Promise<string | undefined> {
+  const models = (params.availableModels ?? []).filter((model) => model.provider === "pi" || model.id.includes("/"));
+  if (models.length === 0) {
+    await params.prompter.note(
+      [
+        "No isolated Pi models were discovered for this runtime.",
+        params.discoveryError ? `Discovery error: ${params.discoveryError}` : undefined,
+        "You can continue without a default model, or enter one manually after isolated Pi login/model setup.",
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join("\n"),
+      "Pi model discovery",
+    );
+    return chooseOptionalString({
+      prompter: params.prompter,
+      message: "Pi default model",
+      current: params.current,
+      suggested: "openai-codex/gpt-5.5",
+      suggestedLabel: "Enter known model openai-codex/gpt-5.5",
+    });
+  }
+
+  type Choice = "unset" | "current" | `model:${string}`;
+  const options: Array<MindStoneSelectOption<Choice>> = [{ value: "unset", label: "Leave unset", hint: "use Pi/provider default" }];
+  if (params.current && !models.some((model) => model.id === params.current)) {
+    options.push({ value: "current", label: `Keep current: ${params.current}` });
+  }
+  for (const model of models) {
+    const meta = [
+      model.contextWindowTokens ? `${model.contextWindowTokens.toLocaleString()} ctx` : undefined,
+      model.maxOutputTokens ? `${model.maxOutputTokens.toLocaleString()} out` : undefined,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    options.push({ value: `model:${model.id}`, label: model.id, hint: meta || model.name });
+  }
+  const initialValue: Choice = params.current && models.some((model) => model.id === params.current) ? `model:${params.current}` : params.current ? "current" : "unset";
+  const selected = await params.prompter.select<Choice>({
+    message: "Pi default model",
+    options,
+    initialValue,
+  });
+  if (selected === "unset") return undefined;
+  if (selected === "current") return params.current;
+  return selected.replace(/^model:/, "");
+}
+
+async function configureRouting(
+  config: MindStoneConfig,
+  prompter: MindStonePrompter,
+  options: MindStoneConfigWizardOptions = {},
+): Promise<MindStoneConfig> {
   const paths = runtimePathsFromEnv();
   const routing = config.routing ?? {};
   const mode = await prompter.select<NonNullable<MindStoneRoutingConfig["mode"]>>({
@@ -368,22 +427,33 @@ async function configureRouting(config: MindStoneConfig, prompter: MindStoneProm
     message: "Default agent id",
     current: routing.defaultAgentId ?? "default",
   });
-  const defaultModel = await chooseOptionalString({
-    prompter,
-    message: "Default model",
-    current: routing.defaultModel,
-    suggested: "openai-codex/gpt-5.5",
-    suggestedLabel: "Use openai-codex/gpt-5.5",
-  });
 
   const nextRouting: MindStoneRoutingConfig = {
     ...routing,
     mode,
     defaultAgentId,
-    defaultModel,
   };
 
+  if (mode === "placeholder") {
+    const keepModel = await prompter.select<"unset" | "keep">({
+      message: "Default model for placeholder mode",
+      options: [
+        { value: "unset", label: "Leave unset", hint: "recommended" },
+        { value: "keep", label: `Keep current: ${routing.defaultModel ?? "none"}`, hint: routing.defaultModel ? undefined : "same as unset" },
+      ],
+      initialValue: routing.defaultModel ? "keep" : "unset",
+    });
+    nextRouting.defaultModel = keepModel === "keep" ? routing.defaultModel : undefined;
+  }
+
   if (mode === "mock") {
+    nextRouting.defaultModel = await chooseOptionalString({
+      prompter,
+      message: "Mock default model label",
+      current: routing.defaultModel,
+      suggested: "mindstone/mock",
+      suggestedLabel: "Use mindstone/mock",
+    });
     const responsePrefix = await chooseString({
       prompter,
       message: "Mock response prefix",
@@ -399,6 +469,12 @@ async function configureRouting(config: MindStoneConfig, prompter: MindStoneProm
       current: routing.pi?.agentDir ?? paths.piAgentDir,
     });
     nextRouting.pi = { ...routing.pi, agentDir };
+    nextRouting.defaultModel = await choosePiModel({
+      prompter,
+      current: routing.defaultModel,
+      availableModels: options.availableModels,
+      discoveryError: options.modelDiscoveryError,
+    });
   }
 
   return { ...config, routing: nextRouting };
@@ -557,6 +633,7 @@ async function configureSection(
   section: MindStoneConfigWizardSection,
   config: MindStoneConfig,
   prompter: MindStonePrompter,
+  options: MindStoneConfigWizardOptions = {},
 ): Promise<MindStoneConfig> {
   switch (section) {
     case "workspace":
@@ -564,7 +641,7 @@ async function configureSection(
     case "gateway":
       return configureGateway(config, prompter);
     case "routing":
-      return configureRouting(config, prompter);
+      return configureRouting(config, prompter, options);
     case "context":
       return configureContext(config, prompter);
     case "memory":
@@ -608,7 +685,7 @@ export async function runMindStoneConfigWizard(
   const changedSections: string[] = [];
   for (const section of selected) {
     if (section === "all") continue;
-    const next = await configureSection(section, after, prompter);
+    const next = await configureSection(section, after, prompter, options);
     if (JSON.stringify(next) !== JSON.stringify(after)) changedSections.push(section);
     after = next;
   }
