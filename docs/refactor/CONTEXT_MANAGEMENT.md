@@ -2,6 +2,8 @@
 
 MindStone-Agent supports two context-management modes. They are related but not equivalent.
 
+MindStone’s continuity premise is a single shared, append-only JSONL session/transcript across channels. `sliding_window` is the primary live-context policy. `auto_compact` is secondary/fallback behavior for substrates that require summarization under context pressure. In both modes, pruning and compaction affect only the live prompt/session context; they must never delete transcript entries, split continuity by channel, or promote a compaction summary/handoff into durable memory by itself.
+
 ## `auto_compact`
 
 `auto_compact` matches the Pi/Claude-style flow used by MS4PI:
@@ -12,7 +14,7 @@ MindStone-Agent supports two context-management modes. They are related but not 
 4. The next turn replays the handoff and resumes continuity.
 5. Transcript archive/indexing preserves full texture outside the prompt window.
 
-This mode is appropriate for substrates that do not expose or do not want live prompt-window pruning.
+This mode is appropriate for substrates that do not expose or do not want live prompt-window pruning. It is not MindStone-Agent's first-choice continuity model.
 
 Config shape:
 
@@ -49,9 +51,9 @@ Current first-pass runtime behavior:
 
 ## `sliding_window`
 
-`sliding_window` is MindStone proper's preferred long-running behavior.
+`sliding_window` is MindStone proper's preferred long-running behavior and first-choice continuity model.
 
-The transcript is authoritative and append-only. Pruning removes older messages from the active prompt window only; it must not delete transcript entries.
+The transcript is authoritative and append-only. Pruning removes older messages from the active prompt window only; it must not delete transcript entries or fork continuity by channel.
 
 Sequence:
 
@@ -78,7 +80,7 @@ Config shape:
 
 ## Default for MindStone-Agent
 
-MindStone-Agent defaults to `sliding_window` because it is rebuilding MindStone proper, not merely adapting Pi's compaction model.
+MindStone-Agent defaults to `sliding_window` because it is rebuilding MindStone proper, not merely adapting Pi's compaction model. Compaction remains useful as a substrate fallback, but it is not the primary memory or continuity strategy.
 
 MS4PI should keep the `auto_compact` checkpoint/handoff/compact behavior because it runs inside Pi and inherits Pi's episodic session constraints.
 
@@ -106,7 +108,7 @@ Implemented:
 
 Still pending:
 
-- Auto-compact eventing, gated emergency handoff writing, status/doctor visibility, ephemeral handoff replay, post-compact maintenance scaffold eventing, and explicit compaction coordination-result reporting are implemented, but actual in-process Pi `AgentSession.compact()` invocation and post-compact archive/backfill/embed/dream-cycle execution policy are not yet wired.
+- Auto-compact eventing, gated emergency handoff writing, status/doctor visibility, ephemeral handoff replay, post-compact maintenance scaffold eventing, and explicit compaction coordination-result reporting are implemented, but actual in-process Pi `AgentSession.compact()` invocation and post-compact archive/backfill/embed/dream-cycle execution policy are not yet wired. Any future compaction bridge must preserve the single authoritative transcript and remain secondary to sliding-window/SCRI continuity.
 - Real model routing must consume `promptEntries` as the actual model input.
 - Token estimation is currently conservative character-based estimation, not provider tokenizer-specific.
 - Tool-call/tool-result semantics need richer grouping once real tool transcripts are flowing.

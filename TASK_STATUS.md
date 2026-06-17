@@ -94,9 +94,10 @@
 - [x] Add run manager abstraction for active/abortable Gateway runs.
 - [x] Connect router flow to consume selected sliding-window `promptEntries` for mock and Pi provider modes.
 - [ ] Live-test Pi-backed model calls with isolated credentials/config.
-- [ ] Finish auto-compact runtime policy for compatible substrates.
-  - Next decision: use a session-backed Pi runner/provider with SDK `AgentSession.compact()` or a Pi-extension control bridge with `ctx.compact()`.
-  - If that path is too large, defer actual compaction invocation and implement native sqlite-vec packaging/loading next.
+- [ ] Finish auto-compact runtime policy for compatible substrates as a secondary/fallback path behind sliding-window/SCRI.
+  - Primary continuity premise: one shared append-only JSONL session/transcript across channels; pruning/compaction affect only live prompt/session context.
+  - Next decision: use a session-backed Pi runner/provider with SDK `AgentSession.compact()` or a Pi-extension control bridge with `ctx.compact()`, only if it preserves unified transcript authority.
+  - If that path is too large or threatens session authority, defer actual compaction invocation and implement native sqlite-vec packaging/loading or channel/session validation next.
 - [ ] Ask Cairn for review when available.
 
 ## Core MVP Remaining
@@ -169,8 +170,8 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] gated emergency checkpoint/handoff writing trigger when `emergencyAutoHandoff` is enabled
   - [x] current handoff visibility in status/doctor and ephemeral one-shot replay into routed prompt context
   - [x] substrate compaction coordination result reporting (`requested`, `available`, `substrate`, `reason`)
-  - [ ] actual substrate compact invocation for a live in-process Pi `AgentSession` or Pi-extension `ctx.compact()` bridge
-  - [ ] choose session-backed Pi runner/provider vs Pi-extension control bridge based on focused SDK/docs spike
+  - [ ] actual substrate compact invocation for a live in-process Pi `AgentSession` or Pi-extension `ctx.compact()` bridge, without splitting or mutating the authoritative JSONL transcript
+  - [ ] choose session-backed Pi runner/provider vs Pi-extension control bridge based on focused SDK/docs spike and MindStone single-session/SCRI constraints
   - [x] post-compact maintenance scaffold event after handoff replay
   - [ ] actual post-compact archive/backfill/embed/dream-cycle execution policy
 - [x] Implement sliding-window prompt pruning and config.

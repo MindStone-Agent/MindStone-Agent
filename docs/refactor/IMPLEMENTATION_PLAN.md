@@ -208,7 +208,8 @@ The preferred order is:
   - [x] Explicit substrate compaction coordination-result reporting.
   - [x] Post-compact maintenance scaffold event after handoff replay.
   - [ ] Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi session handle or a Pi-extension control path can call `ctx.compact()`.
-  - [ ] Next spike: choose between a session-backed Pi runner/provider using the SDK `AgentSession` API and a Pi-extension bridge that coordinates compaction from inside Pi via `ctx.compact()`.
+  - [ ] Any compaction integration must preserve the MindStone premise: one authoritative append-only session/transcript across channels; compaction may only affect live prompt/session context, never delete or split transcript history.
+  - [ ] Next spike: choose between a session-backed Pi runner/provider using the SDK `AgentSession` API and a Pi-extension bridge that coordinates compaction from inside Pi via `ctx.compact()`, but only after confirming the unified transcript and sliding-window/SCRI path remains primary.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle execution policy.
 - [x] Add manual backfill command.
   - `mindstone memory backfill`
@@ -370,10 +371,16 @@ The preferred order is:
   - `reference_pi_public_docs.md`
   - updates to live-memory/context-management memories
   - recall backfill/archive verification after approval
-- [ ] Perform a focused Pi SDK/docs spike for actual compaction integration:
+- [ ] Re-center the next engineering slice on MindStone continuity fundamentals:
+  - one shared session/transcript across Gateway, WebChat, OpenAI-compatible, Pi adapter, and future channels
+  - JSONL transcript remains append-only and authoritative
+  - sliding-window pruning affects only the active prompt window
+  - SCRI/recall rehydrates relevant older context from transcript/memory layers
+- [ ] Perform a focused Pi SDK/docs spike for compaction only as the secondary fallback path:
   - verify SDK `AgentSession.compact(customInstructions?)` behavior in an isolated runtime
   - verify extension `ctx.compact()` behavior and event ordering from inside Pi
+  - confirm neither approach would split session authority or treat compaction summary as durable memory
   - decide whether MindStone-Agent should add a session-backed Pi runner/provider or a Pi-extension control bridge
-- [ ] If the compaction integration path is clean, implement actual substrate compact invocation behind the existing coordination interface.
-- [ ] If the compaction path requires larger runtime restructuring, defer it explicitly and implement native sqlite-vec packaging/loading next.
-- [ ] Add compact config UX for checkpoint/handoff trigger, compact target, and post-compact archive/backfill/embed/dream-cycle execution policy.
+- [ ] If the compaction integration path is clean and respects unified transcript continuity, implement actual substrate compact invocation behind the existing coordination interface.
+- [ ] If the compaction path requires larger runtime restructuring or threatens transcript/session authority, defer it explicitly and implement native sqlite-vec packaging/loading or channel/session validation next.
+- [ ] Add compact config UX for checkpoint/handoff trigger, compact target, and post-compact archive/backfill/embed/dream-cycle execution policy, framed as fallback policy behind sliding-window/SCRI.

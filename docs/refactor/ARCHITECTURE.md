@@ -207,7 +207,7 @@ Core owns the semantics; backends provide storage and embedding implementation.
 
 ### 3.4 Context management interfaces
 
-MindStone-Agent must support both Pi/Claude-style auto compaction and MindStone proper sliding-window pruning.
+MindStone-Agent must support both Pi/Claude-style auto compaction and MindStone proper sliding-window pruning, but MindStone continuity is anchored by one shared append-only JSONL transcript across channels. Sliding-window/SCRI is the primary live-context strategy; compaction is a secondary/fallback substrate strategy.
 
 ```ts
 type ContextManagementPolicy =
@@ -227,9 +227,9 @@ type ContextManagementPolicy =
     };
 ```
 
-`auto_compact` delegates actual compaction to the substrate where available and preserves continuity through checkpoint/handoff/replay. Current implementation emits threshold events, can write a gated emergency local handoff when `emergencyAutoHandoff` is enabled, replays the current handoff ephemerally, and records an explicit substrate compaction coordination result. Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi session handle.
+`auto_compact` delegates actual compaction to the substrate where available and preserves live-session continuity through checkpoint/handoff/replay. Current implementation emits threshold events, can write a gated emergency local handoff when `emergencyAutoHandoff` is enabled, replays the current handoff ephemerally, and records an explicit substrate compaction coordination result. Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi session handle or a Pi-extension control bridge can call `ctx.compact()`. Any such bridge must affect only live context and must not split, prune, or rewrite the authoritative transcript.
 
-`sliding_window` is MindStone proper's normal behavior: when prompt utilization reaches `ceilingPercent` of the current model's configured context window, older messages are removed from the active prompt window down toward `floorPercent`. The transcript store remains append-only and complete.
+`sliding_window` is MindStone proper's normal behavior: when prompt utilization reaches `ceilingPercent` of the current model's configured context window, older messages are removed from the active prompt window down toward `floorPercent`. The transcript store remains append-only and complete, and SCRI/recall can rehydrate relevant older context without keeping the full transcript in the prompt.
 
 ### 3.5 Transcript interfaces
 
