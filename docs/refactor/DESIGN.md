@@ -16,9 +16,11 @@ The design center is:
 MindStone Core + Gateway daemon + substrate adapters
 ```
 
+A load-bearing design rule: reuse current Pi capabilities and current MindStone methods/shapes by default. Deviate only when current Pi does not support the existing MindStone shape, or when a newer Pi-native approach is clearly better for the same goal. This rebuild should cleanly modernize MindStone; it should not reinvent Pi's harness features or discard proven MindStone continuity shapes without cause.
+
 Current Pi becomes the first clean substrate adapter. The Gateway remains the always-on process that owns channel listeners, WebChat, OpenAI/OpenResponses-compatible HTTP, and service lifecycle. MindStone Core owns the substrate-neutral concepts: identity, memory, SCRI, transcript, config, channel plugin contracts, and routing semantics.
 
-This gives MindStone a clean path forward while preserving the features users actually depend on.
+This gives MindStone a clean path forward while preserving the features users actually depend on. Before inventing a new mechanism, check how current MindStone does it, whether current Pi supports that shape directly, and whether any proposed deviation is necessary rather than accidental wheel-rebuilding.
 
 ## 2. Product Shape
 
@@ -90,20 +92,24 @@ Gateway responsibilities:
 
 The Gateway should be able to run while Pi is closed. Pi should be a client/control surface, not the only runtime.
 
-### 3.3 Current-Pi Adapter
+### 3.3 Current-Pi Adapter and Runtime Runner
 
-The Pi adapter integrates MindStone into current Pi through extensions, commands, tools, context injection, and TUI UI APIs.
+The Pi adapter integrates MindStone into current Pi through extensions, commands, tools, context injection, TUI UI APIs, and — for real model execution — Pi's `AgentSession` / `SessionManager` runtime.
 
-Pi adapter responsibilities:
+This is load-bearing. MindStone-Agent uses Pi for a reason: to leverage Pi's rich harness behavior instead of rebuilding a coding-agent harness from scratch. A raw model completion path may exist as a scaffold or fallback diagnostic, but it is not the target runtime for MVP chat.
+
+Pi adapter/runtime responsibilities:
 
 - load identity/user/core memory context into Pi prompts
 - provide slash commands for setup, status, recall, checkpoint/handoff, and Gateway/channel control
 - expose tools for memory read/search and optional Gateway/channel operations
 - run onboarding/settings wizard via Pi `ctx.ui`
+- execute real chat/model turns through Pi `AgentSession` and `SessionManager`, not only through provider-level `completeSimple` calls
+- preserve Pi tool loops, custom tools, extension lifecycle, streaming/event semantics, prompt hooks, and compaction/control capabilities wherever compatible with MindStone continuity
 - handle Pi lifecycle events such as session start, compaction, and shutdown where useful
 - archive current Pi transcript into MindStone memory pipeline
 
-Pi adapter should not own production channel listeners. It may include dev/test utilities for local channel calls, but the Gateway owns continuous operation.
+Pi adapter should not own production channel listeners. It may include dev/test utilities for local channel calls, but the Gateway owns continuous operation. The Gateway may host a headless/session-backed Pi runner, analogous to current MindStone's embedded Pi runner, so non-Pi surfaces can still benefit from Pi's harness features.
 
 ### 3.4 Channel Plugins
 
@@ -244,6 +250,8 @@ External HTTP clients should use:
 
 For OpenWebUI, the intended design is not a special bespoke integration at first. It should be configured as an OpenAI-compatible provider using the Gateway base URL and bearer token. If validation shows gaps, add compatibility shims at the Gateway HTTP layer rather than in Pi.
 
+Gateway/OpenWebUI requests should still route into the same MindStone runtime semantics as native chat. The model turn should ultimately use the session-backed Pi runner when the selected agent/substrate is Pi-backed, so OpenWebUI/WebChat/Telegram do not silently lose Pi tools, extension behavior, or session lifecycle features.
+
 ## 7. Data and Storage Design
 
 Recommended logical storage:
@@ -293,7 +301,7 @@ The safest path is extraction, not blind porting.
 1. Identify stable concepts in existing MindStone.
 2. Extract Core contracts and pure services.
 3. Make existing Gateway depend on Core contracts.
-4. Build current-Pi adapter against Core/Gateway.
+4. Build current-Pi adapter and session-backed Pi runner against Core/Gateway.
 5. Port channel plugins by replacing monolith imports with Core/runtime service imports.
 6. Keep feature parity tests around memory, WebChat, and channels.
 7. Remove or quarantine OpenClaw-era code only after replacement paths are proven.

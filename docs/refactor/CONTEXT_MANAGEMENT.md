@@ -49,7 +49,7 @@ Current first-pass runtime behavior:
 - On a subsequent routed model call, Gateway replays the current handoff ephemerally into prompt context if that handoff hash has not already been replayed in the session, then records a `handoff_replayed` transcript event with `durable: false`.
 - After `handoff_replayed`, Gateway records a `post_compact_maintenance` scaffold event with `archive`, `backfill`, and `dreamCycle` statuses; it does not automatically write durable memory or journals.
 - Gateway records an explicit substrate compaction coordination result with `requested`, `available`, `substrate`, and `reason` fields.
-- Pi exposes `AgentSession.compact(customInstructions?)`, but MindStone-Agent Gateway currently has no live in-process Pi `AgentSession` handle; the stateless Pi provider path therefore reports compaction as unavailable rather than pretending to request it.
+- Pi exposes `AgentSession.compact(customInstructions?)`, but MindStone-Agent Gateway currently has no live in-process Pi `AgentSession` handle. The lightweight/stateless Pi provider path therefore reports compaction as unavailable rather than pretending to request it. The intended fix is not to rebuild compaction outside Pi; it is to add a session-backed Pi runner that owns a real `AgentSession` and can use Pi lifecycle features directly.
 
 ## `sliding_window`
 
@@ -112,7 +112,7 @@ Implemented:
 
 Still pending:
 
-- Auto-compact eventing, gated emergency handoff writing, status/doctor visibility, ephemeral handoff replay, post-compact maintenance scaffold eventing, and explicit compaction coordination-result reporting are implemented, but actual in-process Pi `AgentSession.compact()` invocation and post-compact archive/backfill/embed/dream-cycle execution policy are not yet wired. Any future compaction bridge must preserve the single authoritative transcript and remain secondary to sliding-window/SCRI continuity.
+- Auto-compact eventing, gated emergency handoff writing, status/doctor visibility, ephemeral handoff replay, post-compact maintenance scaffold eventing, and explicit compaction coordination-result reporting are implemented, but actual in-process Pi `AgentSession.compact()` invocation and post-compact archive/backfill/embed/dream-cycle execution policy are not yet wired. The preferred path is a session-backed Pi runner, modeled on current MindStone's embedded Pi runner, so MindStone-Agent can use Pi `AgentSession` / `SessionManager` features instead of reimplementing the harness. Any future compaction bridge must preserve the single authoritative transcript and remain secondary to sliding-window/SCRI continuity.
 - Real model routing must consume `promptEntries` as the actual model input.
 - Token estimation is currently conservative character-based estimation, not provider tokenizer-specific.
 - Tool-call/tool-result semantics need richer grouping once real tool transcripts are flowing.

@@ -83,7 +83,7 @@ const SECTION_OPTIONS: Array<MindStoneSelectOption<MindStoneConfigWizardSection>
   { value: "all", label: "All core sections", hint: "workspace, gateway, routing, context, memory, identity" },
   { value: "workspace", label: "Workspace", hint: "project root / working directory" },
   { value: "gateway", label: "Gateway", hint: "host, port, auth, HTTP surfaces" },
-  { value: "routing", label: "Routing / provider", hint: "placeholder, mock, or isolated Pi provider" },
+  { value: "routing", label: "Routing / provider", hint: "placeholder, mock, or session-backed Pi" },
   { value: "context", label: "Context management", hint: "sliding-window or auto-compact policy" },
   { value: "memory", label: "Memory", hint: "autoRecall, vector store, embedding provider" },
   { value: "identity", label: "Identity / user", hint: "default agent identity and user paths" },
@@ -201,8 +201,8 @@ export function validateMindStoneConfig(config: MindStoneConfig): string[] {
   }
 
   const routingMode = config.routing?.mode;
-  if (routingMode && !["placeholder", "mock", "pi"].includes(routingMode)) {
-    issues.push("routing.mode must be placeholder, mock, or pi");
+  if (routingMode && !["placeholder", "mock", "pi", "pi-session"].includes(routingMode)) {
+    issues.push("routing.mode must be placeholder, mock, pi, or pi-session");
   }
 
   const context = resolveContextManagementPolicy(config.contextManagement);
@@ -667,7 +667,8 @@ async function configureRouting(
     options: [
       { value: "placeholder", label: "No model yet", hint: "safe setup mode; record transcripts only" },
       { value: "mock", label: "Mock test model", hint: "deterministic local responses for testing" },
-      { value: "pi", label: "Pi model", hint: "choose from isolated Pi models" },
+      { value: "pi-session", label: "Pi AgentSession", hint: "session-backed Pi runner; preserves Pi harness features" },
+      { value: "pi", label: "Pi raw provider scaffold", hint: "advanced/fallback; bypasses AgentSession" },
     ],
     initialValue: routing.mode ?? "placeholder",
   });
@@ -687,7 +688,7 @@ async function configureRouting(
     nextRouting.mock = { ...routing.mock, responsePrefix: routing.mock?.responsePrefix ?? "Mock response" };
   }
 
-  if (mode === "pi") {
+  if (mode === "pi" || mode === "pi-session") {
     nextRouting.pi = { ...routing.pi, agentDir: routing.pi?.agentDir ?? paths.piAgentDir };
     nextRouting.defaultModel = await choosePiModel({
       prompter,
@@ -731,7 +732,7 @@ async function configureRouting(
       nextRouting.mock = { ...nextRouting.mock, responsePrefix };
     }
 
-    if (mode === "pi") {
+    if (mode === "pi" || mode === "pi-session") {
       const agentDir = await chooseString({
         prompter,
         message: "Isolated Pi runtime path",

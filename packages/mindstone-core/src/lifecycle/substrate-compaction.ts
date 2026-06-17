@@ -25,14 +25,14 @@ export interface SubstrateCompactionCoordinator {
   requestCompaction(request: SubstrateCompactionRequest): SubstrateCompactionResult | Promise<SubstrateCompactionResult>;
 }
 
-function routingMode(config: MindStoneConfig | undefined): "placeholder" | "mock" | "pi" {
+function routingMode(config: MindStoneConfig | undefined): "placeholder" | "mock" | "pi" | "pi-session" {
   return config?.routing?.mode ?? "placeholder";
 }
 
 export class GatewaySubstrateCompactionCoordinator implements SubstrateCompactionCoordinator {
   requestCompaction(request: SubstrateCompactionRequest): SubstrateCompactionResult {
     const mode = routingMode(request.config);
-    if (mode === "pi") {
+    if (mode === "pi" || mode === "pi-session") {
       return {
         requested: false,
         available: false,

@@ -237,12 +237,12 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
   }
 
   const routingMode = config?.routing?.mode ?? "placeholder";
-  if (!(["placeholder", "mock", "pi"] as string[]).includes(routingMode)) {
+  if (!(["placeholder", "mock", "pi", "pi-session"] as string[]).includes(routingMode)) {
     check(checks, "fail", "routing.mode", "Routing mode is valid", routingMode);
   } else {
     check(checks, routingMode === "placeholder" ? "warn" : "pass", "routing.mode", "Routing mode is configured", routingMode);
   }
-  if (routingMode === "pi" && !config?.routing?.defaultModel) {
+  if ((routingMode === "pi" || routingMode === "pi-session") && !config?.routing?.defaultModel) {
     check(checks, "warn", "routing.model", "Pi routing default model is configured", "routing.defaultModel is unset");
   } else if (config?.routing?.defaultModel) {
     check(checks, "pass", "routing.model", "Default model is configured", config.routing.defaultModel);

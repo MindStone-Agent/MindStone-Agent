@@ -15,6 +15,9 @@ import {
   loadMindStoneConfig,
   probeMemoryEmbeddingProvider,
   resolveConfigPath,
+  resolveConfiguredSessionKey,
+  resolveMindStoneChatModel,
+  runMindStoneChatTurn,
   runMindStoneConfigWizard,
   runMindStoneOnboardingWizard,
   runtimePathsFromEnv,
@@ -25,9 +28,9 @@ import {
   type MindStonePrompter,
   type MindStoneSelectOption,
 } from "@mindstone-agent/core";
-import { PiMindStoneProvider } from "@mindstone-agent/gateway";
+import { MockMindStoneProvider, PiMindStoneProvider, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 
-type Command = "config" | "onboard" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "config" | "onboard" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;214m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -38,6 +41,8 @@ function usage(): string {
     gold("🔶 MindStone-Agent"),
     "",
     "Usage:",
+    "  mindstone chat         Start native terminal chat over the canonical MindStone session",
+    "  mindstone chat --once \"message\"  Send one chat turn and print the assistant response",
     "  mindstone config       Configure MindStone-Agent runtime settings",
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone status       Show isolated runtime/config status",
@@ -56,7 +61,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "config" || raw === "onboard" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "config" || raw === "onboard" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -302,6 +307,17 @@ function printMemoryStatus(): void {
   output.write("\n");
 }
 
+function optionValue(argv: string[], name: string): string | undefined {
+  const index = argv.indexOf(name);
+  if (index < 0) return undefined;
+  const value = argv[index + 1];
+  return value && !value.startsWith("--") ? value : undefined;
+}
+
+function hasOption(argv: string[], name: string): boolean {
+  return argv.includes(name);
+}
+
 async function runMemoryCommand(argv: string[]): Promise<void> {
   const subcommand = argv[3] ?? "status";
   if (subcommand === "status") {
@@ -337,6 +353,129 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
     return;
   }
   throw new Error(`Unknown memory command: ${subcommand}\n\n${usage()}`);
+}
+
+function resolveChatProvider(config: ReturnType<typeof loadMindStoneConfig>["config"]): MockMindStoneProvider | PiMindStoneProvider | PiSessionMindStoneProvider {
+  const mode = config?.routing?.mode ?? "placeholder";
+  const paths = runtimePathsFromEnv();
+  if (mode === "mock") return new MockMindStoneProvider(config?.routing?.mock);
+  if (mode === "pi-session") {
+    return new PiSessionMindStoneProvider({
+      projectRoot: paths.root,
+      agentDir: config?.routing?.pi?.agentDir ?? paths.piAgentDir,
+      sessionDir: paths.piSessionDir,
+      cwd: config?.workspace?.root,
+      defaultModel: config?.routing?.defaultModel,
+    });
+  }
+  if (mode === "pi") {
+    return new PiMindStoneProvider({
+      agentDir: config?.routing?.pi?.agentDir,
+      defaultModel: config?.routing?.defaultModel,
+    });
+  }
+  throw new Error("MindStone chat requires routing.mode to be mock, pi-session, or pi. Current mode is placeholder; run `mindstone config` or edit config.json first.");
+}
+
+async function runOneChatTurn(params: {
+  argv: string[];
+  message: string;
+  loaded: ReturnType<typeof loadMindStoneConfig>;
+}): Promise<Awaited<ReturnType<typeof runMindStoneChatTurn>>> {
+  const config = params.loaded.config;
+  if (!config) throw new Error(`Config not found. Run ./scripts/init-runtime.sh or mindstone onboard first. Expected: ${params.loaded.path}`);
+  const mode = config.routing?.mode ?? "placeholder";
+  if (mode !== "mock" && mode !== "pi-session" && mode !== "pi") {
+    throw new Error("MindStone chat requires routing.mode to be mock, pi-session, or pi. Current mode is placeholder; run `mindstone config` or edit config.json first.");
+  }
+  const agentId = optionValue(params.argv, "--agent") ?? config.routing?.defaultAgentId ?? "default";
+  const sessionKey = resolveConfiguredSessionKey(config, {
+    agentId,
+    substrate: "mindstone-cli",
+    channel: "terminal",
+    chatType: "direct",
+    senderId: "local",
+    explicitSessionKey: optionValue(params.argv, "--session"),
+  });
+  const metadata: Record<string, unknown> = {
+    source: "mindstone-cli",
+    method: "chat",
+  };
+  const modelOverride = optionValue(params.argv, "--model");
+  if (modelOverride) metadata.model = modelOverride;
+  const provider = resolveChatProvider(config);
+  const model = resolveMindStoneChatModel({ config, agentId, routingMode: mode, metadata });
+  return runMindStoneChatTurn({
+    agentId,
+    sessionKey,
+    message: params.message,
+    config,
+    configPath: params.loaded.path,
+    provider,
+    model,
+    source: {
+      substrate: "mindstone-cli",
+      channel: "terminal",
+      chatType: "direct",
+      senderId: "local",
+    },
+    metadata,
+  });
+}
+
+async function runChatCommand(argv: string[]): Promise<void> {
+  const paths = runtimePathsFromEnv();
+  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+  if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  const once = optionValue(argv, "--once") ?? optionValue(argv, "--message");
+  const json = hasOption(argv, "--json");
+
+  if (once !== undefined) {
+    const result = await runOneChatTurn({ argv, message: once, loaded });
+    output.write(json ? `${JSON.stringify(result, null, 2)}\n` : `${result.assistantEntry.text ?? ""}\n`);
+    return;
+  }
+
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error("Interactive chat requires a TTY. Use `mindstone chat --once \"message\"` for non-interactive use.");
+  }
+
+  output.write(`${gold("🔶 MindStone chat")} ${dim("(/exit to quit)")}\n`);
+  const config = loaded.config;
+  const agentId = optionValue(argv, "--agent") ?? config?.routing?.defaultAgentId ?? "default";
+  const sessionKey = config
+    ? resolveConfiguredSessionKey(config, {
+        agentId,
+        substrate: "mindstone-cli",
+        channel: "terminal",
+        chatType: "direct",
+        senderId: "local",
+        explicitSessionKey: optionValue(argv, "--session"),
+      })
+    : "agent:default:main";
+  output.write(`${dim(`session: ${sessionKey}`)}\n\n`);
+
+  const rl = createInterface({ input, output, prompt: `${gold("you")}> ` });
+  try {
+    rl.prompt();
+    for await (const line of rl) {
+      const message = line.trim();
+      if (!message) {
+        rl.prompt();
+        continue;
+      }
+      if (message === "/exit" || message === "/quit") break;
+      try {
+        const result = await runOneChatTurn({ argv, message, loaded });
+        output.write(`${gold("mindstone")}> ${result.assistantEntry.text ?? ""}\n`);
+      } catch (error) {
+        output.write(`${bold("error")}> ${error instanceof Error ? error.message : String(error)}\n`);
+      }
+      rl.prompt();
+    }
+  } finally {
+    rl.close();
+  }
 }
 
 function printStatus(): void {
@@ -408,6 +547,10 @@ async function main(): Promise<void> {
   }
   if (command === "memory") {
     await runMemoryCommand(process.argv);
+    return;
+  }
+  if (command === "chat") {
+    await runChatCommand(process.argv);
     return;
   }
   if (command === "doctor") {

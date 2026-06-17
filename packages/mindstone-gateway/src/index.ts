@@ -3,11 +3,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
 import { PiMindStoneProvider } from "./pi-provider.js";
+import { PiSessionMindStoneProvider } from "./pi-session-provider.js";
 import { GatewayRunManager } from "./run-manager.js";
 import { WEBCHAT_UI_HTML } from "./webchat-ui.js";
 
 export { MockMindStoneProvider } from "./mock-provider.js";
 export { PiMindStoneProvider } from "./pi-provider.js";
+export { PiSessionMindStoneProvider, piSessionFileForKey } from "./pi-session-provider.js";
 export { GatewayRunManager } from "./run-manager.js";
 import {
   appendTranscriptEntry,
@@ -93,7 +95,7 @@ function resolveReservedPromptTokens(metadata?: Record<string, unknown>): number
   return numberFromMetadata(metadata, "reservedTokens") ?? 0;
 }
 
-function resolveRoutingMode(config: MindStoneConfig | undefined): "placeholder" | "mock" | "pi" {
+function resolveRoutingMode(config: MindStoneConfig | undefined): "placeholder" | "mock" | "pi" | "pi-session" {
   return config?.routing?.mode ?? "placeholder";
 }
 
@@ -110,6 +112,16 @@ function resolveRouteModel(config: MindStoneConfig | undefined, agentId: string,
 function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelProvider | undefined {
   const mode = resolveRoutingMode(config);
   if (mode === "mock") return new MockMindStoneProvider(config?.routing?.mock);
+  if (mode === "pi-session") {
+    const paths = runtimePathsFromEnv();
+    return new PiSessionMindStoneProvider({
+      projectRoot: paths.root,
+      agentDir: config?.routing?.pi?.agentDir ?? paths.piAgentDir,
+      sessionDir: paths.piSessionDir,
+      cwd: config?.workspace?.root,
+      defaultModel: config?.routing?.defaultModel,
+    });
+  }
   if (mode === "pi") {
     return new PiMindStoneProvider({
       agentDir: config?.routing?.pi?.agentDir,

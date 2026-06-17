@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with profile selection and provider-first isolated Pi model selection, native CLI, context-management policy + sliding-window selector, router/provider abstraction, transcript store, file + SQLite memory index/backfill/status, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, canonical unified session key, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with profile selection and provider-first isolated Pi model selection, native CLI chat, context-management policy + sliding-window selector, router/provider abstraction, transcript store, file + SQLite memory index/backfill/status, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, canonical unified session key, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -33,13 +33,17 @@
 - [x] Add WebSocket transport for old-style Gateway RPC method names.
 - [x] Add selectable context-management policy config for `auto_compact` vs `sliding_window`.
 - [x] Implement Core sliding-window prompt selector and Gateway pruning event path.
-- [x] Add router/provider abstraction with placeholder, mock, and Pi-backed provider modes.
+- [x] Add router/provider abstraction with placeholder, mock, and lightweight Pi provider scaffold.
+- [x] Add `pi-session` routing mode scaffold that maps canonical MindStone session keys to deterministic Pi session files and uses Pi `SessionManager` / `createAgentSession` for real turns when isolated auth is available.
+- [ ] Complete event/stream capture and richer prompt/context injection for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
 - [x] Add provider-first isolated Pi provider/model discovery to native config/onboarding routing setup.
 - [x] Add default onboarding profile selection with Custom / Write-in support.
 - [x] Align single-session default with MindStone canonical session key shape: `agent:default:main`, while preserving `mindstone` as a compatibility alias.
 - [x] Add unified session/transcript invariant smoke proving REST, HTTP RPC, WebSocket RPC, and OpenAI-compatible default traffic append to one canonical transcript with distinct source metadata.
+- [x] Add native `mindstone chat` terminal/REPL surface over the canonical session and routed identity/SCRI prompt path.
+- [x] Validate autoRecall/SCRI injection through native `mindstone chat` with `npm run smoke:cli-chat-recall`.
 
 ### Completed
 
@@ -95,7 +99,9 @@
 - [x] Add WebSocket transport over the method-name RPC bridge.
 - [x] Add run manager abstraction for active/abortable Gateway runs.
 - [x] Connect router flow to consume selected sliding-window `promptEntries` for mock and Pi provider modes.
-- [ ] Live-test Pi-backed model calls with isolated credentials/config.
+- [x] Add native `mindstone chat` MVP interaction surface with mock-routed validation.
+- [x] Add first session-backed Pi runner scaffold using Pi `AgentSession` / `SessionManager`; provider-level `completeSimple` remains scaffold/fallback, not the real Pi-backed MVP path.
+- [ ] Live-test Pi-backed model calls through the session-backed runner with isolated credentials/config.
 - [ ] Finish auto-compact runtime policy for compatible substrates as a secondary/fallback path behind sliding-window/SCRI.
   - Primary continuity premise: one shared append-only JSONL session/transcript across channels; pruning/compaction affect only live prompt/session context.
   - Next decision: use a session-backed Pi runner/provider with SDK `AgentSession.compact()` or a Pi-extension control bridge with `ctx.compact()`, only if it preserves unified transcript authority.
@@ -157,6 +163,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] Add embedding-backed recall over embedded SQLite chunks, currently using JS cosine similarity over stored vectors.
   - [x] Add first-pass SCRI ranking layer with provider score, kind/source priority, critical/evergreen boosts, usage boosts, recency/half-life boosts, and score diagnostics.
   - [x] Add dedup against active prompt/session content.
+  - [x] Validate end-to-end autoRecall injection through native `mindstone chat` with transcript `memory_recall_injected` events.
   - [x] Add candidate dedup to avoid repeated chunks/text consuming recall budget.
   - [x] Add sqlite-vec capability probe and explicit fallback diagnostics.
   - [x] Report current vector backend as `sqlite-vec`, `js-cosine`, or `lexical` in memory status/doctor.
@@ -178,7 +185,8 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] current handoff visibility in status/doctor and ephemeral one-shot replay into routed prompt context
   - [x] substrate compaction coordination result reporting (`requested`, `available`, `substrate`, `reason`)
   - [ ] actual substrate compact invocation for a live in-process Pi `AgentSession` or Pi-extension `ctx.compact()` bridge, without splitting or mutating the authoritative JSONL transcript
-  - [ ] choose session-backed Pi runner/provider vs Pi-extension control bridge based on focused SDK/docs spike and MindStone single-session/SCRI constraints
+  - [x] first `pi-session` runner scaffold added; current MindStone proves Pi `SessionManager` can coexist with canonical single-session/SCRI when MindStone owns the session-key → session-file mapping
+  - [ ] complete live-auth validation and event/stream transcript capture
   - [x] post-compact maintenance scaffold event after handoff replay
   - [ ] actual post-compact archive/backfill/embed/dream-cycle execution policy
 - [x] Implement sliding-window prompt pruning and config.
@@ -197,13 +205,15 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
       }
     }
     ```
-- [ ] Ensure Telegram, WebChat, OpenWebUI, Pi adapter, and future channels can route into the same session/transcript by default.
+- [ ] Ensure Telegram, WebChat, OpenWebUI, Pi adapter, native CLI chat, and future channels can route into the same session/transcript by default.
+  - [x] Native `mindstone chat` uses the configured canonical session by default and was validated with `npm run smoke:cli-chat`.
   - [x] Gateway REST chat, HTTP RPC chat, WebSocket RPC chat, and OpenAI chat completions use the configured shared default when `sessionKey` is omitted.
   - [x] `mindstone` legacy alias canonicalizes to `agent:default:main` for compatibility.
   - [x] Verified with `npm run smoke:unified-session`.
   - [x] Built-in WebChat shell validates omitted session key → `agent:default:main` and mock-routed assistant response via `npm run smoke:webchat-ui`.
   - [ ] Telegram/OpenWebUI/Pi adapter final validation still pending.
 - [ ] Preserve channel/source metadata inside the unified transcript without splitting memory continuity.
+  - [x] Native `mindstone chat` writes structured `mindstone-cli` / `terminal` source metadata for user and assistant entries.
   - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, routing events, and assistant responses now write structured `TranscriptEntry.source` metadata.
   - [x] Built-in WebChat shell source metadata validates as `gateway-rest` / `webchat` / `internal`.
   - [ ] Telegram/Pi adapter source metadata still pending final validation.
@@ -234,7 +244,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 
 ### Provider/routing validation
 
-- [ ] Live-test Pi-backed model calls with isolated credentials/config.
+- [ ] Live-test Pi-backed model calls through a session-backed Pi runner with isolated credentials/config.
 - [x] Add first-pass `mindstone doctor` checks for runtime/config/session/identity/memory/routing/provider discovery.
 - [ ] Extend `mindstone doctor` with live provider auth/model-call validation.
 - [ ] Ensure provider setup follows provider → auth method → model, never a flat global model list.

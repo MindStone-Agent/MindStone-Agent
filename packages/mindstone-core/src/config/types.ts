@@ -47,9 +47,11 @@ export type MindStoneSessionConfig = {
   defaultSessionKey?: string;
 };
 
+export type MindStoneRoutingMode = "placeholder" | "mock" | "pi" | "pi-session";
+
 export type MindStoneRoutingConfig = {
   /** placeholder keeps send/completions transcript-aware without calling a model. */
-  mode?: "placeholder" | "mock" | "pi";
+  mode?: MindStoneRoutingMode;
   defaultAgentId?: string;
   defaultModel?: string;
   mock?: {

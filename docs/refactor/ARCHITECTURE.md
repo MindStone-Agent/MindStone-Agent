@@ -8,6 +8,8 @@
 
 ## 1. Architecture Overview
 
+MindStone should be organized into four primary layers. The architecture should reuse current MindStone shapes and methods wherever they still fit current Pi; deviations should be explicit and justified by unsupported old assumptions or a clearly better Pi-native capability.
+
 MindStone should be organized into four primary layers:
 
 1. **MindStone Core** — substrate-neutral semantics and contracts.
@@ -95,7 +97,26 @@ core must not import adapter-pi or gateway.
 channel contracts live in core; channel runtime wiring lives in gateway.
 ```
 
-### 2.2 Current repo mapping
+### 2.2 Pi runtime execution contract
+
+MindStone-Agent should not treat Pi as merely a model registry plus raw completion function. Pi is the harness substrate. The production Pi-backed execution path should use Pi's runtime objects and lifecycle:
+
+```text
+MindStone route
+→ canonical session key
+→ session-backed Pi runner
+→ Pi SessionManager JSONL/session state
+→ createAgentSession(...)
+→ AgentSession.prompt(...)
+→ streamed events/tool loops/extensions
+→ MindStone transcript/source metadata + SCRI memory pipeline
+```
+
+The current lightweight provider-level completion path is acceptable only as a scaffold, smoke-test aid, or fallback diagnostic. It does not preserve enough of Pi's value: tool loop semantics, extension lifecycle, compaction control, session hooks, TUI-compatible event flow, and rich harness behavior. The comparison point should be current MindStone's embedded Pi runner, not a greenfield harness design.
+
+Current MindStone already follows this principle through its embedded Pi runner: it opens a Pi `SessionManager`, creates an `AgentSession`, applies the MindStone system prompt override, subscribes to Pi session events, and calls `activeSession.prompt(...)`. MindStone-Agent should rebuild toward that shape rather than reimplementing the Pi wheel.
+
+### 2.3 Current repo mapping
 
 Likely extraction sources:
 
@@ -227,7 +248,7 @@ type ContextManagementPolicy =
     };
 ```
 
-`auto_compact` delegates actual compaction to the substrate where available and preserves live-session continuity through checkpoint/handoff/replay. Current implementation emits threshold events, can write a gated emergency local handoff when `emergencyAutoHandoff` is enabled, replays the current handoff ephemerally, and records an explicit substrate compaction coordination result. Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi session handle or a Pi-extension control bridge can call `ctx.compact()`. Any such bridge must affect only live context and must not split, prune, or rewrite the authoritative transcript.
+`auto_compact` delegates actual compaction to the substrate where available and preserves live-session continuity through checkpoint/handoff/replay. Current implementation emits threshold events, can write a gated emergency local handoff when `emergencyAutoHandoff` is enabled, replays the current handoff ephemerally, and records an explicit substrate compaction coordination result. Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi `AgentSession` through the session-backed Pi runner or a Pi-extension control bridge can call `ctx.compact()`. Any such bridge must affect only live context and must not split, prune, or rewrite the authoritative transcript.
 
 `sliding_window` is MindStone proper's normal behavior: when prompt utilization reaches `ceilingPercent` of the current model's configured context window, older messages are removed from the active prompt window down toward `floorPercent`. The transcript store remains append-only and complete, and SCRI/recall can rehydrate relevant older context without keeping the full transcript in the prompt.
 
@@ -522,6 +543,7 @@ Telegram outbound send
 - HTTP `/v1/chat/completions`
 - HTTP `/v1/responses`
 - Pi adapter command smoke tests
+- session-backed Pi runner smoke/manual validation proving `AgentSession.prompt(...)` works under isolated runtime state
 - transcript archive/backfill
 
 ### 9.4 Manual validation

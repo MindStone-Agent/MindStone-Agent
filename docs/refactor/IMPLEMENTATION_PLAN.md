@@ -15,7 +15,7 @@ The preferred order is:
 
 1. Approve architecture and contracts.
 2. Extract Core contracts.
-3. Build Pi adapter MVP.
+3. Build Pi adapter MVP and session-backed Pi runner.
 4. Stabilize Gateway API surfaces.
 5. Restore memory/SCRI/dream-cycle behavior.
 6. Port channels incrementally.
@@ -30,7 +30,8 @@ The preferred order is:
 - [ ] Review `docs/design/ARCHITECTURE.md` with Cairn when available.
 - [ ] Get Hearth review on daemon/service/secrets implications.
 - [ ] Decide whether Core starts as `src/core/*` or `packages/core/*`.
-- [ ] Decide whether Gateway continues to own agent execution for MVP or delegates through an `AgentRunner` interface immediately.
+- [x] Decide whether Gateway continues to own agent execution for MVP or delegates through an `AgentRunner` interface immediately.
+  - Decision: Gateway/native CLI should route model turns through a MindStone `AgentRunner` abstraction; the real Pi-backed runner must use Pi `AgentSession` / `SessionManager`, not only provider-level completions.
 
 ### Exit criteria
 
@@ -108,7 +109,7 @@ The preferred order is:
 - [ ] Channel setup section lists available plugins.
 - [ ] Reconfiguration can run by section.
 
-## 5. Phase 3 — Current-Pi Adapter MVP
+## 5. Phase 3 — Current-Pi Adapter and Session-Backed Runner MVP
 
 ### Tasks
 
@@ -120,6 +121,19 @@ The preferred order is:
 - [ ] Add compaction/session lifecycle handling where Pi supports it.
 - [ ] Add Gateway status/check commands.
 - [ ] Add smoke validation instructions.
+- [ ] Add a Core/Gateway `AgentRunner` boundary so CLI, Gateway, WebChat, OpenAI-compatible, and future channel surfaces do not call provider completions directly.
+- [x] Add first `pi-session` routing scaffold with deterministic canonical session-key → Pi session-file mapping and Pi `SessionManager` / `createAgentSession` use.
+- [ ] Complete a session-backed Pi runner modeled on current MindStone's embedded Pi runner:
+  - [x] isolated Pi `agentDir` and session directory
+  - [x] canonical MindStone session key → Pi session file mapping
+  - [x] `SessionManager.open(...)`
+  - [x] `createAgentSession(...)`
+  - [ ] MindStone identity/SCRI prompt injection via system prompt/prompt-build path, not crude prompt concatenation
+  - [ ] Pi tools/custom tools/resource loader/extension lifecycle preserved where available
+  - [x] `AgentSession.prompt(...)` for real turns when isolated auth/model config is available
+  - [ ] streaming/event capture into MindStone transcript/source metadata
+  - [ ] eventual `AgentSession.compact(...)` coordination for secondary auto-compact mode
+- [x] Demote the current provider-level `completeSimple` Pi path to scaffold/fallback status until or unless it can be proven to preserve Pi harness semantics.
 
 ### Candidate commands
 
@@ -199,7 +213,8 @@ The preferred order is:
   - [x] `mindstone memory backfill --embed`.
   - [x] `mindstone doctor` sample embedding probe.
   - [x] Provider-first config wizard UX for embeddings.
-- [ ] Live-test selected prompt messages against Pi-backed provider with isolated credentials/config.
+- [ ] Live-test selected prompt messages through the session-backed Pi runner with isolated credentials/config.
+  - Provider-level `completeSimple` calls are insufficient as the real target because they bypass Pi `AgentSession`, tools, extensions, session lifecycle, and compaction/control semantics.
 - [ ] Implement auto-compact runtime policy for compatible substrates.
   - [x] First-pass threshold eventing for `auto_compact_warning` and `auto_compact_required`.
   - [x] Compact target to reserve-token mapping.
@@ -207,9 +222,9 @@ The preferred order is:
   - [x] Current handoff status/doctor visibility and ephemeral replay into routed prompt context.
   - [x] Explicit substrate compaction coordination-result reporting.
   - [x] Post-compact maintenance scaffold event after handoff replay.
-  - [ ] Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi session handle or a Pi-extension control path can call `ctx.compact()`.
+  - [ ] Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi session handle through the session-backed Pi runner or a Pi-extension control path can call `ctx.compact()`.
   - [ ] Any compaction integration must preserve the MindStone premise: one authoritative append-only session/transcript across channels; compaction may only affect live prompt/session context, never delete or split transcript history.
-  - [ ] Next spike: choose between a session-backed Pi runner/provider using the SDK `AgentSession` API and a Pi-extension bridge that coordinates compaction from inside Pi via `ctx.compact()`, but only after confirming the unified transcript and sliding-window/SCRI path remains primary.
+  - [ ] Next spike: implement the session-backed Pi runner first; keep a Pi-extension `ctx.compact()` bridge as a later option only if direct `AgentSession` control cannot preserve unified transcript authority.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle execution policy.
 - [x] Add manual backfill command.
   - `mindstone memory backfill`
@@ -292,7 +307,7 @@ The preferred order is:
   - [x] Gateway REST chat, HTTP RPC chat, WebSocket RPC chat, and OpenAI chat completions default to the configured shared session when `sessionKey` is omitted.
   - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, routing events, and assistant responses preserve structured transcript source metadata.
   - [x] Verified by `npm run smoke:unified-session`.
-  - [ ] OpenWebUI, Telegram, WebChat UI, and Pi adapter validation still pending.
+  - [ ] OpenWebUI, Telegram, WebChat UI, native CLI chat, and Pi adapter validation through the session-backed Pi runner still pending.
 - [ ] Enable Gateway OpenAI-compatible endpoint in local config.
 - [ ] Start Gateway with auth.
 - [ ] Configure OpenWebUI custom OpenAI provider with Gateway base URL.
@@ -349,7 +364,7 @@ The preferred order is:
 1. **PR 1:** Docs and architecture decision record.
 2. **PR 2:** Core contracts and compatibility exports.
 3. **PR 3:** Wizard prompter interface and Pi prompter adapter.
-4. **PR 4:** Pi adapter MVP commands/tools/context injection.
+4. **PR 4:** Pi adapter MVP commands/tools/context injection plus session-backed Pi runner spike.
 5. **PR 5:** Gateway API stabilization and tests.
 6. **PR 6:** Memory/SCRI extraction and dream-cycle validation.
 7. **PR 7:** Telegram channel port.
