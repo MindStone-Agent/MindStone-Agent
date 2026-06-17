@@ -84,7 +84,8 @@ The preferred order is:
 - [ ] Add reusable `Integration Builder` skill behavior.
 - [x] Add initial “getting to know the user” onboarding phase for preferences, boundaries, style, memory/checkpoint style, and project/domain context.
 - [ ] Expand preference onboarding with richer collaboration-pattern and clarifying-question tuning.
-- [ ] Add naming/identity emergence phase without forcing human-assigned names.
+- [x] Add initial naming/identity emergence phase without forcing human-assigned names.
+- [ ] Expand identity emergence into a real first-activation synthesis step.
 - [ ] Preserve channel onboarding adapters for Telegram, Signal, Discord, Slack.
 - [x] Add fake prompter smoke tests for wizard sections.
 - [x] Ensure sensitive provider API-key entry avoids echo/logging.

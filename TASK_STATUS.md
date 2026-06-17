@@ -115,10 +115,12 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - project/domain context
   - sensitive context/cautions
 - [ ] Expand user-preference onboarding later with richer clarifying-question and collaboration-pattern tuning.
-- [ ] Add the naming/identity emergence phase.
+- [x] Add the initial naming/identity emergence phase.
   - Do not force the human to name the agent.
   - Use selected profile + user context as identity seed.
   - Preserve the MindStone model where the agent forms/chooses its identity collaboratively.
+  - Supports defer, candidate seed, and custom identity direction modes.
+- [ ] Expand identity emergence into a real first-activation synthesis step.
 - [ ] Build the initial `Integration Builder` skill surface.
   - [x] Add Integration Builder as an onboarding profile.
   - [ ] Add reusable Integration Builder skill behavior for creating/configuring integrations/channels/tools.

@@ -42,6 +42,15 @@ export type MindStoneRecommendationStyle = "direct" | "options_tradeoffs" | "ask
 export type MindStoneWorkStyle = "act_directly" | "plan_first" | "ask_first";
 export type MindStoneApprovalMode = "standard" | "strict" | "custom";
 export type MindStoneMemoryStyle = "propose_checkpoint_memories" | "minimal" | "ask_each_time";
+export type MindStoneIdentityEmergenceMode = "defer" | "seed" | "custom";
+
+export type MindStoneOnboardingIdentity = {
+  mode?: MindStoneIdentityEmergenceMode;
+  candidateName?: string;
+  identityDirection?: string;
+  namingNotes?: string;
+  selectedAt?: string;
+};
 
 export type MindStoneOnboardingPreferences = {
   interactionDetail?: MindStoneInteractionDetail;
@@ -58,6 +67,7 @@ export type MindStoneOnboardingPreferences = {
 export type MindStoneOnboardingConfig = {
   profile?: MindStoneSelectedProfile;
   preferences?: MindStoneOnboardingPreferences;
+  identity?: MindStoneOnboardingIdentity;
 };
 
 export type MindStoneConfig = {

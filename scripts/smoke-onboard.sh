@@ -26,6 +26,7 @@ const selects = [
   "standard",
   "propose_checkpoint_memories",
   "none",
+  "defer",
   "quickstart",
 ];
 const confirms = [true, true];
@@ -68,6 +69,7 @@ if (config.onboarding?.profile?.id !== "integration_builder") throw new Error("S
 if (config.onboarding?.preferences?.interactionDetail !== "balanced") throw new Error("Interaction preference was not written");
 if (config.onboarding?.preferences?.recommendationStyle !== "direct") throw new Error("Recommendation preference was not written");
 if (config.onboarding?.preferences?.projectContext !== "MindStone-Agent rebuild on isolated Pi with Gateway, onboarding, memory, and channel work.") throw new Error("Project context preference was not written");
+if (config.onboarding?.identity?.mode !== "defer") throw new Error("Identity emergence mode was not written");
 if (config.agents?.default?.profileId !== "integration_builder") throw new Error("Agent profileId was not written");
 
 const identityPath = resolve(dirname(result.path), "agents/default/IDENTITY.md");
@@ -79,6 +81,7 @@ const user = readFileSync(userPath, "utf-8");
 if (!identity.includes("MindStone Agent Identity Pending")) throw new Error("Identity scaffold content missing");
 if (!identity.includes("Base profile: Integration Builder")) throw new Error("Identity profile seed missing");
 if (!identity.includes("Interaction detail: balanced")) throw new Error("Identity preference seed missing");
+if (!identity.includes("Identity emergence mode: defer")) throw new Error("Identity emergence seed missing");
 if (!user.includes("Base profile: Integration Builder")) throw new Error("User profile seed missing");
 if (!user.includes("Project/domain context: MindStone-Agent rebuild")) throw new Error("User project context missing");
 if (!user.includes("Clint prefers truthful")) throw new Error("User scaffold content missing");

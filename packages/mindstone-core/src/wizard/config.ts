@@ -7,8 +7,10 @@ import type {
   GatewayAuthConfig,
   MindStoneApprovalMode,
   MindStoneConfig,
+  MindStoneIdentityEmergenceMode,
   MindStoneInteractionDetail,
   MindStoneMemoryStyle,
+  MindStoneOnboardingIdentity,
   MindStoneOnboardingPreferences,
   MindStoneRecommendationStyle,
   MindStoneRoutingConfig,
@@ -139,6 +141,12 @@ function selectedPreferencesSummary(preferences: MindStoneOnboardingPreferences 
   ].join(" ");
 }
 
+function selectedIdentitySummary(identity: MindStoneOnboardingIdentity | undefined): string {
+  if (!identity) return "unset";
+  const name = identity.candidateName ? ` name=${identity.candidateName}` : "";
+  return `${preferenceLabel(identity.mode)}${name}`;
+}
+
 export function formatMindStoneConfigHeader(): string {
   return TITLE;
 }
@@ -158,6 +166,7 @@ export function formatConfigSummary(config: MindStoneConfig): string {
     `routing.defaultModel: ${config.routing?.defaultModel ?? config.agents?.[defaultAgent]?.defaultModel ?? "unset"}`,
     `onboarding.profile: ${selectedProfileSummary(config.onboarding?.profile)}`,
     `onboarding.preferences: ${selectedPreferencesSummary(config.onboarding?.preferences)}`,
+    `onboarding.identity: ${selectedIdentitySummary(config.onboarding?.identity)}`,
     `contextManagement.mode: ${context.mode}`,
     `memory.autoRecall: ${config.memory?.autoRecall ?? false}`,
     `memory.vectorStore: ${config.memory?.vectorStore ?? "sqlite-vec"}`,
@@ -1177,6 +1186,95 @@ async function chooseOnboardingPreferences(
   };
 }
 
+function applyOnboardingIdentity(
+  config: MindStoneConfig,
+  identity: MindStoneOnboardingIdentity,
+): MindStoneConfig {
+  return {
+    ...config,
+    onboarding: {
+      ...config.onboarding,
+      identity,
+    },
+  };
+}
+
+function selectedIdentityToLines(identity: MindStoneOnboardingIdentity | undefined): string[] {
+  if (!identity) return ["Identity emergence: unset"];
+  return [
+    `Identity emergence mode: ${preferenceLabel(identity.mode)}`,
+    identity.candidateName ? `Candidate name: ${identity.candidateName}` : undefined,
+    identity.identityDirection ? `Identity direction: ${identity.identityDirection}` : undefined,
+    identity.namingNotes ? `Naming notes: ${identity.namingNotes}` : undefined,
+    "Identity rule: do not pretend the identity is complete until first activation/collaboration makes it real.",
+  ].filter((line): line is string => Boolean(line));
+}
+
+async function chooseOnboardingIdentity(
+  config: MindStoneConfig,
+  prompter: MindStonePrompter,
+): Promise<MindStoneOnboardingIdentity> {
+  const current = config.onboarding?.identity;
+  const mode = await prompter.select<MindStoneIdentityEmergenceMode>({
+    message: "Identity / naming approach",
+    options: [
+      { value: "defer", label: "Defer identity formation", hint: "recommended; agent forms identity on first activation" },
+      { value: "seed", label: "Seed a candidate identity", hint: "capture a possible name/direction without finalizing it" },
+      { value: "custom", label: "Custom identity direction", hint: "write identity/naming guidance" },
+    ],
+    initialValue: current?.mode ?? "defer",
+  });
+
+  if (mode === "defer") {
+    return {
+      mode,
+      selectedAt: new Date().toISOString(),
+    };
+  }
+
+  if (mode === "seed") {
+    const candidateName = markdownEscape(await prompter.text({
+      message: "Candidate name",
+      placeholder: current?.candidateName ?? "leave blank if not known yet",
+      initialValue: current?.candidateName ?? "",
+    }));
+    const identityDirection = markdownEscape(await prompter.text({
+      message: "Candidate identity direction",
+      placeholder: current?.identityDirection ?? "how this agent might describe its role, voice, or stance",
+      initialValue: current?.identityDirection ?? "",
+    }));
+    const namingNotes = markdownEscape(await prompter.text({
+      message: "Naming notes or style preferences",
+      placeholder: current?.namingNotes ?? "optional: names to avoid/prefer, tone, symbols, lineage...",
+      initialValue: current?.namingNotes ?? "",
+    }));
+    return {
+      mode,
+      candidateName: candidateName || undefined,
+      identityDirection: identityDirection || undefined,
+      namingNotes: namingNotes || undefined,
+      selectedAt: new Date().toISOString(),
+    };
+  }
+
+  const identityDirection = markdownEscape(await prompter.text({
+    message: "Custom identity direction",
+    placeholder: current?.identityDirection ?? "identity should emerge as... / should avoid... / should emphasize...",
+    initialValue: current?.identityDirection ?? "",
+  }));
+  const namingNotes = markdownEscape(await prompter.text({
+    message: "Naming notes or style preferences",
+    placeholder: current?.namingNotes ?? "optional: names to avoid/prefer, tone, symbols, lineage...",
+    initialValue: current?.namingNotes ?? "",
+  }));
+  return {
+    mode,
+    identityDirection: identityDirection || undefined,
+    namingNotes: namingNotes || undefined,
+    selectedAt: new Date().toISOString(),
+  };
+}
+
 function resolveOnboardingAgentPaths(config: MindStoneConfig, configPath: string): {
   agentId: string;
   identityPath: string;
@@ -1228,8 +1326,10 @@ async function createOnboardingIdentityFiles(params: {
   const profileDefinition = getBuiltInMindStoneProfile(profile?.id);
   const profileLines = selectedProfileToLines(profile);
   const preferenceLines = selectedPreferencesToLines(params.config.onboarding?.preferences);
+  const identityLines = selectedIdentityToLines(params.config.onboarding?.identity);
   await params.prompter.note(profileLines.join("\n"), "Selected profile seed");
   await params.prompter.note(preferenceLines.join("\n"), "User preference seed");
+  await params.prompter.note(identityLines.join("\n"), "Identity emergence seed");
 
   const purpose = markdownEscape(
     await params.prompter.text({
@@ -1259,6 +1359,10 @@ ${profileLines.join("\n")}
 
 ${preferenceLines.join("\n")}
 
+## Identity emergence seed
+
+${identityLines.join("\n")}
+
 ## Purpose seed
 
 ${purpose || profileDefinition?.purposeSeed || profile?.description || "No purpose seed provided."}
@@ -1269,6 +1373,7 @@ ${purpose || profileDefinition?.purposeSeed || profile?.description || "No purpo
 - Do not overclaim unverified work.
 - Protect user files, credentials, and memory.
 - Prefer durable continuity over performative personality.
+- Treat any candidate name or direction as a seed, not a completed identity, until first activation and collaboration make it real.
 `;
 
   const userBody = `# User Context
@@ -1282,6 +1387,10 @@ ${profileLines.join("\n")}
 ## Interaction and operating preferences
 
 ${preferenceLines.join("\n")}
+
+## Identity emergence
+
+${identityLines.join("\n")}
 
 ## Initial purpose
 
@@ -1350,6 +1459,7 @@ export async function runMindStoneOnboardingWizard(
   if (loadedForProfile.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loadedForProfile.error}`);
   const selectedProfile = await chooseOnboardingProfile(loadedForProfile.config ?? {}, prompter);
   const selectedPreferences = await chooseOnboardingPreferences(loadedForProfile.config ?? {}, prompter);
+  const selectedIdentity = await chooseOnboardingIdentity(loadedForProfile.config ?? {}, prompter);
 
   const mode =
     options.onboardingMode ??
@@ -1367,7 +1477,9 @@ export async function runMindStoneOnboardingWizard(
     const loaded = loadMindStoneConfig(configPath);
     if (loaded.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loaded.error}`);
     const before = loaded.config ?? {};
-    const after = withDefaultOnboardingConfig(applyOnboardingPreferences(applySelectedProfile(before, selectedProfile), selectedPreferences));
+    const after = withDefaultOnboardingConfig(
+      applyOnboardingIdentity(applyOnboardingPreferences(applySelectedProfile(before, selectedProfile), selectedPreferences), selectedIdentity),
+    );
     await prompter.note(formatConfigSummary(after), loaded.exists ? "QuickStart existing/defaulted config" : "QuickStart config");
     const issues = validateMindStoneConfig(after);
     if (issues.length > 0) {
@@ -1397,7 +1509,10 @@ export async function runMindStoneOnboardingWizard(
       showIntro: false,
       sections: ["workspace", "gateway", "routing", "context", "memory", "identity"],
     });
-    const profiledConfig = applyOnboardingPreferences(applySelectedProfile(configResult.config, selectedProfile), selectedPreferences);
+    const profiledConfig = applyOnboardingIdentity(
+      applyOnboardingPreferences(applySelectedProfile(configResult.config, selectedProfile), selectedPreferences),
+      selectedIdentity,
+    );
     const issues = validateMindStoneConfig(profiledConfig);
     if (issues.length > 0) {
       await prompter.note(issues.map((issue) => `- ${issue}`).join("\n"), "Config validation failed");
