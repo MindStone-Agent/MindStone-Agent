@@ -43,6 +43,7 @@ Current first-pass runtime behavior:
 - The current handoff is written to `transcripts/.handoff.md` and may be overwritten by the next compaction boundary; durable continuity belongs in LOG, transcripts, journals, and structured memory, not in archived handoff files.
 - `/status`, `mindstone status`, and `mindstone doctor` report current handoff presence/path/size/hash where available.
 - On a subsequent routed model call, Gateway replays the current handoff ephemerally into prompt context if that handoff hash has not already been replayed in the session, then records a `handoff_replayed` transcript event with `durable: false`.
+- After `handoff_replayed`, Gateway records a `post_compact_maintenance` scaffold event with `archive`, `backfill`, and `dreamCycle` statuses; it does not automatically write durable memory or journals.
 - Gateway records an explicit substrate compaction coordination result with `requested`, `available`, `substrate`, and `reason` fields.
 - Pi exposes `AgentSession.compact(customInstructions?)`, but MindStone-Agent Gateway currently has no live in-process Pi `AgentSession` handle; the stateless Pi provider path therefore reports compaction as unavailable rather than pretending to request it.
 
@@ -98,13 +99,14 @@ Implemented:
 - In `auto_compact` mode, Gateway appends `auto_compact_warning` or `auto_compact_required` transcript events when configured thresholds are crossed.
 - When `emergencyAutoHandoff` is enabled, `auto_compact_required` writes the current emergency handoff to `transcripts/.handoff.md`, then records that path in transcript metadata.
 - Gateway replays the current handoff once per handoff hash/session as ephemeral prompt context and records `handoff_replayed`; it is not indexed or promoted to durable memory.
+- Gateway records `post_compact_maintenance` after handoff replay with archive/backfill/dream-cycle policy diagnostics only.
 - Smoke coverage:
   - `npm run smoke:context-window`
   - `npm run smoke:sliding-window`
 
 Still pending:
 
-- Auto-compact eventing, gated emergency handoff writing, status/doctor visibility, ephemeral handoff replay, and explicit compaction coordination-result reporting are implemented, but actual in-process Pi `AgentSession.compact()` invocation is not yet wired.
+- Auto-compact eventing, gated emergency handoff writing, status/doctor visibility, ephemeral handoff replay, post-compact maintenance scaffold eventing, and explicit compaction coordination-result reporting are implemented, but actual in-process Pi `AgentSession.compact()` invocation and post-compact archive/backfill/embed/dream-cycle execution policy are not yet wired.
 - Real model routing must consume `promptEntries` as the actual model input.
 - Token estimation is currently conservative character-based estimation, not provider tokenizer-specific.
 - Tool-call/tool-result semantics need richer grouping once real tool transcripts are flowing.

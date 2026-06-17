@@ -117,6 +117,14 @@ const replayEvent = history.entries.find((entry) => entry.metadata?.event === "h
 if (!replayEvent) process.exit(1);
 if (replayEvent.metadata?.durable !== false) process.exit(1);
 if (replayEvent.metadata?.handoff?.sha256 !== status.handoff.sha256) process.exit(1);
+const maintenanceEvent = history.entries.find((entry) => entry.metadata?.event === "post_compact_maintenance");
+if (!maintenanceEvent) process.exit(1);
+if (maintenanceEvent.metadata?.archive !== "pending") process.exit(1);
+if (maintenanceEvent.metadata?.backfill !== "skipped") process.exit(1);
+if (maintenanceEvent.metadata?.dreamCycle !== "pending_policy") process.exit(1);
+if (maintenanceEvent.metadata?.durableMemoryWritten !== false) process.exit(1);
+if (maintenanceEvent.metadata?.trigger !== "handoff_replayed") process.exit(1);
+if (maintenanceEvent.metadata?.handoff?.sha256 !== status.handoff.sha256) process.exit(1);
 NODE
 
 echo "Auto-compact runtime policy smoke test passed."

@@ -168,7 +168,8 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] current handoff visibility in status/doctor and ephemeral one-shot replay into routed prompt context
   - [x] substrate compaction coordination result reporting (`requested`, `available`, `substrate`, `reason`)
   - [ ] actual substrate compact invocation for a live in-process Pi `AgentSession`
-  - [ ] post-compact archive/embed/dream-cycle hook
+  - [x] post-compact maintenance scaffold event after handoff replay
+  - [ ] actual post-compact archive/backfill/embed/dream-cycle execution policy
 - [x] Implement sliding-window prompt pruning and config.
 - [ ] Polish sliding-window config UX and diagnostics.
 

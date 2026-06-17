@@ -24,6 +24,7 @@ import {
   resolveGatewayAuthRequirement,
   runMindStoneRoute,
   runtimePathsFromEnv,
+  planPostCompactMaintenance,
   readCurrentHandoff,
   requestGatewaySubstrateCompaction,
   writeAutoCompactHandoff,
@@ -435,6 +436,22 @@ async function runConfiguredRoute(input: {
           },
           durable: false,
         },
+      });
+      const maintenance = planPostCompactMaintenance({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        handoffReplay: route.handoffReplay,
+        config: input.config,
+        runId: run.id,
+      });
+      appendTranscriptEntry({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        role: "event",
+        text: "Post-compact maintenance scaffold recorded after handoff replay; no durable memory was written automatically.",
+        runId: run.id,
+        source,
+        metadata: maintenance,
       });
     }
 
