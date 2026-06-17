@@ -7,6 +7,7 @@ export type MindStoneRuntimePaths = {
   tokenDir: string;
   vectorDir: string;
   transcriptDir: string;
+  handoffDir: string;
   memoryDir: string;
   journalDir: string;
   logPath: string;
@@ -26,6 +27,7 @@ export function runtimePathsFromEnv(env: NodeJS.ProcessEnv = process.env): MindS
     tokenDir: env.MINDSTONE_AGENT_TOKEN_DIR ?? `${dataDir}/tokens`,
     vectorDir: env.MINDSTONE_AGENT_VECTOR_DIR ?? `${dataDir}/vectors`,
     transcriptDir: env.MINDSTONE_AGENT_TRANSCRIPT_DIR ?? `${dataDir}/transcripts`,
+    handoffDir: env.MINDSTONE_AGENT_HANDOFF_DIR ?? `${dataDir}/handoffs`,
     memoryDir: env.MINDSTONE_AGENT_MEMORY_DIR ?? `${dataDir}/memory`,
     journalDir: env.MINDSTONE_AGENT_JOURNAL_DIR ?? `${dataDir}/journals`,
     logPath: env.MINDSTONE_AGENT_LOG_PATH ?? `${dataDir}/LOG.md`,

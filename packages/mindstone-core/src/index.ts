@@ -15,3 +15,4 @@ export * from "./security/policy.js";
 export * from "./security/gateway-auth.js";
 export * from "./status/index.js";
 export * from "./doctor/index.js";
+export * from "./lifecycle/index.js";

@@ -203,7 +203,8 @@ The preferred order is:
 - [ ] Implement auto-compact runtime policy for compatible substrates.
   - [x] First-pass threshold eventing for `auto_compact_warning` and `auto_compact_required`.
   - [x] Compact target to reserve-token mapping.
-  - [ ] Automatic checkpoint/handoff writing and substrate compact request remain pending.
+  - [x] Gated emergency checkpoint/handoff writing when `emergencyAutoHandoff` is enabled.
+  - [ ] Actual substrate compact request remains pending.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle.
 - [x] Add manual backfill command.
   - `mindstone memory backfill`

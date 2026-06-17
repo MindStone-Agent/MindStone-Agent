@@ -24,11 +24,13 @@ import {
   resolveGatewayAuthRequirement,
   runMindStoneRoute,
   runtimePathsFromEnv,
+  writeAutoCompactHandoff,
   type MindStoneConfig,
   type MindStoneModelInfo,
   type MindStoneModelProvider,
   type TranscriptEntry,
   type TranscriptRole,
+  type PromptWindowAutoCompactEvent,
 } from "@mindstone-agent/core";
 
 export type GatewayOptions = {
@@ -104,6 +106,49 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
   return undefined;
 }
 
+function appendAutoCompactTranscriptEvent(input: {
+  sessionKey: string;
+  agentId: string;
+  event: PromptWindowAutoCompactEvent;
+  entries: TranscriptEntry[];
+  source?: TranscriptEntry["source"];
+  runId?: string;
+}): TranscriptEntry {
+  const metadata: Record<string, unknown> = { ...input.event };
+  let text = input.event.event === "auto_compact_required"
+    ? `Auto-compact threshold reached at ${input.event.utilizationPercent.toFixed(1)}% utilization. Checkpoint/handoff/compact should run.`
+    : `Auto-compact warning threshold reached at ${input.event.utilizationPercent.toFixed(1)}% utilization. Prepare checkpoint/handoff.`;
+
+  if (input.event.event === "auto_compact_required") {
+    if (input.event.emergencyAutoHandoff) {
+      const handoff = writeAutoCompactHandoff({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        event: input.event,
+        entries: input.entries,
+        source: input.source,
+        runId: input.runId,
+      });
+      metadata.handoff = handoff;
+      metadata.compaction = { requested: false, reason: "substrate_compaction_request_not_implemented" };
+      text = `${text} Emergency auto-handoff written to ${handoff.latestPath}.`;
+    } else {
+      metadata.handoff = { written: false, reason: "emergency_auto_handoff_disabled" };
+      metadata.compaction = { requested: false, reason: "manual_checkpoint_handoff_required" };
+    }
+  }
+
+  return appendTranscriptEntry({
+    sessionKey: input.sessionKey,
+    agentId: input.agentId,
+    role: "event",
+    text,
+    runId: input.runId,
+    source: input.source,
+    metadata,
+  });
+}
+
 function maybeRecordPromptWindowEvent(input: {
   sessionKey: string;
   agentId: string;
@@ -132,15 +177,12 @@ function maybeRecordPromptWindowEvent(input: {
     });
   }
   if (result.autoCompactEvent) {
-    appendTranscriptEntry({
+    appendAutoCompactTranscriptEvent({
       sessionKey: input.sessionKey,
       agentId: input.agentId,
-      role: "event",
-      text: result.autoCompactEvent.event === "auto_compact_required"
-        ? `Auto-compact threshold reached at ${result.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Checkpoint/handoff/compact should run.`
-        : `Auto-compact warning threshold reached at ${result.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Prepare checkpoint/handoff.`,
+      event: result.autoCompactEvent,
+      entries,
       source,
-      metadata: result.autoCompactEvent,
     });
   }
 
@@ -356,16 +398,13 @@ async function runConfiguredRoute(input: {
       });
     }
     if (route.promptWindow.autoCompactEvent) {
-      appendTranscriptEntry({
+      appendAutoCompactTranscriptEvent({
         sessionKey: input.sessionKey,
         agentId: input.agentId,
-        role: "event",
-        text: route.promptWindow.autoCompactEvent.event === "auto_compact_required"
-          ? `Auto-compact threshold reached at ${route.promptWindow.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Checkpoint/handoff/compact should run.`
-          : `Auto-compact warning threshold reached at ${route.promptWindow.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Prepare checkpoint/handoff.`,
+        event: route.promptWindow.autoCompactEvent,
+        entries: route.promptWindow.entries,
         runId: run.id,
         source,
-        metadata: route.promptWindow.autoCompactEvent,
       });
     }
 

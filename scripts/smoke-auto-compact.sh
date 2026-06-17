@@ -36,7 +36,7 @@ config["contextManagement"] = {
   "checkpointWarningPercent": 20,
   "compactTargetPercent": 30,
   "keepRecentTokens": 120,
-  "emergencyAutoHandoff": False,
+  "emergencyAutoHandoff": True,
 }
 config_path.write_text(json.dumps(config, indent=2) + "\n")
 print(config_path)
@@ -47,6 +47,8 @@ gateway_pid=$!
 sleep 1
 
 node <<'NODE'
+const fs = await import("node:fs");
+const path = await import("node:path");
 const base = `http://127.0.0.1:${process.env.MINDSTONE_AGENT_GATEWAY_PORT}`;
 const text = "Auto compact smoke payload. ".repeat(120);
 
@@ -79,6 +81,13 @@ const compactEvent = history.entries.find((entry) => entry.metadata?.event === "
 if (!compactEvent) process.exit(1);
 if (compactEvent.metadata?.compactTargetPercent !== 30) process.exit(1);
 if (compactEvent.metadata?.keepRecentTokens !== 120) process.exit(1);
+if (compactEvent.metadata?.handoff?.written !== true) process.exit(1);
+if (compactEvent.metadata?.compaction?.requested !== false) process.exit(1);
+if (!fs.existsSync(compactEvent.metadata.handoff.path)) process.exit(1);
+if (!fs.existsSync(compactEvent.metadata.handoff.latestPath)) process.exit(1);
+const latest = path.join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "mindstone", "transcripts", ".handoff.md");
+if (compactEvent.metadata.handoff.latestPath !== latest) process.exit(1);
+if (!fs.readFileSync(latest, "utf-8").includes("MindStone-Agent Auto-Compact Handoff")) process.exit(1);
 NODE
 
 echo "Auto-compact runtime policy smoke test passed."

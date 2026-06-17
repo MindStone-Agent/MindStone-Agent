@@ -227,7 +227,7 @@ type ContextManagementPolicy =
     };
 ```
 
-`auto_compact` delegates actual compaction to the substrate where available and preserves continuity through checkpoint/handoff/replay.
+`auto_compact` delegates actual compaction to the substrate where available and preserves continuity through checkpoint/handoff/replay. Current implementation emits threshold events and can write a gated emergency local handoff when `emergencyAutoHandoff` is enabled; actual substrate compaction requests remain pending.
 
 `sliding_window` is MindStone proper's normal behavior: when prompt utilization reaches `ceilingPercent` of the current model's configured context window, older messages are removed from the active prompt window down toward `floorPercent`. The transcript store remains append-only and complete.
 
