@@ -1,5 +1,5 @@
 import type { TranscriptEntry, TranscriptRole } from "../transcript/index.js";
-import { resolveContextManagementPolicy, type ResolvedContextManagementPolicy, type ResolvedSlidingWindowContextPolicy } from "./policy.js";
+import { reserveTokensForAutoCompactTarget, resolveContextManagementPolicy, type ResolvedAutoCompactContextPolicy, type ResolvedContextManagementPolicy, type ResolvedSlidingWindowContextPolicy } from "./policy.js";
 import type { ContextManagementPolicy } from "./types.js";
 
 export type PromptWindowBuildInput = {
@@ -10,6 +10,20 @@ export type PromptWindowBuildInput = {
   reservedTokens?: number;
   /** Entry IDs that must remain in the prompt window. */
   protectedEntryIds?: string[];
+};
+
+export type PromptWindowAutoCompactEvent = {
+  event: "auto_compact_warning" | "auto_compact_required";
+  mode: "auto_compact";
+  tokens: number;
+  contextWindowTokens: number;
+  utilizationPercent: number;
+  checkpointWarningPercent: number;
+  compactTargetPercent: number;
+  keepRecentTokens: number;
+  reserveTokens: number;
+  emergencyAutoHandoff: boolean;
+  action: "prepare_checkpoint_handoff" | "request_compaction";
 };
 
 export type PromptWindowPruneEvent = {
@@ -38,6 +52,7 @@ export type PromptWindowBuildResult = {
   utilizationAfterPercent: number;
   pruned: boolean;
   pruneEvent?: PromptWindowPruneEvent;
+  autoCompactEvent?: PromptWindowAutoCompactEvent;
 };
 
 type PromptUnit = {
@@ -188,6 +203,29 @@ function buildSlidingWindow(input: PromptWindowBuildInput, policy: ResolvedSlidi
   };
 }
 
+function autoCompactEvent(
+  tokens: number,
+  contextWindowTokens: number,
+  utilization: number,
+  policy: ResolvedAutoCompactContextPolicy,
+): PromptWindowAutoCompactEvent | undefined {
+  if (utilization < policy.checkpointWarningPercent) return undefined;
+  const required = utilization >= policy.compactTargetPercent;
+  return {
+    event: required ? "auto_compact_required" : "auto_compact_warning",
+    mode: "auto_compact",
+    tokens,
+    contextWindowTokens,
+    utilizationPercent: utilization,
+    checkpointWarningPercent: policy.checkpointWarningPercent,
+    compactTargetPercent: policy.compactTargetPercent,
+    keepRecentTokens: policy.keepRecentTokens,
+    reserveTokens: reserveTokensForAutoCompactTarget(contextWindowTokens, policy.compactTargetPercent),
+    emergencyAutoHandoff: policy.emergencyAutoHandoff,
+    action: required ? "request_compaction" : "prepare_checkpoint_handoff",
+  };
+}
+
 export function buildPromptWindow(input: PromptWindowBuildInput): PromptWindowBuildResult {
   const policy = resolveContextManagementPolicy(input.policy);
   if (policy.mode === "auto_compact") {
@@ -204,6 +242,7 @@ export function buildPromptWindow(input: PromptWindowBuildInput): PromptWindowBu
       utilizationBeforePercent: utilization,
       utilizationAfterPercent: utilization,
       pruned: false,
+      autoCompactEvent: autoCompactEvent(tokens, input.contextWindowTokens, utilization, policy),
     };
   }
 

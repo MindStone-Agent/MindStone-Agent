@@ -128,6 +128,17 @@ function maybeRecordPromptWindowEvent(input: {
       metadata: result.pruneEvent,
     });
   }
+  if (result.autoCompactEvent) {
+    appendTranscriptEntry({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      role: "event",
+      text: result.autoCompactEvent.event === "auto_compact_required"
+        ? `Auto-compact threshold reached at ${result.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Checkpoint/handoff/compact should run.`
+        : `Auto-compact warning threshold reached at ${result.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Prepare checkpoint/handoff.`,
+      metadata: result.autoCompactEvent,
+    });
+  }
 
   return result;
 }
@@ -323,6 +334,18 @@ async function runConfiguredRoute(input: {
         metadata: route.promptWindow.pruneEvent,
       });
     }
+    if (route.promptWindow.autoCompactEvent) {
+      appendTranscriptEntry({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        role: "event",
+        text: route.promptWindow.autoCompactEvent.event === "auto_compact_required"
+          ? `Auto-compact threshold reached at ${route.promptWindow.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Checkpoint/handoff/compact should run.`
+          : `Auto-compact warning threshold reached at ${route.promptWindow.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Prepare checkpoint/handoff.`,
+        runId: run.id,
+        metadata: route.promptWindow.autoCompactEvent,
+      });
+    }
 
     if (route.memoryRecall?.hits.length) {
       appendTranscriptEntry({
@@ -381,6 +404,7 @@ async function runConfiguredRoute(input: {
           tokensAfter: route.promptWindow.tokensAfter,
           promptEntries: route.promptWindow.promptEntries.length,
           prunedEntries: route.promptWindow.prunedEntries.length,
+          autoCompact: route.promptWindow.autoCompactEvent,
         },
         memoryRecall: route.memoryRecall
           ? {
@@ -502,6 +526,7 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
           tokensAfter: promptWindow.tokensAfter,
           promptEntries: promptWindow.promptEntries.length,
           prunedEntries: promptWindow.prunedEntries.length,
+          autoCompact: promptWindow.autoCompactEvent,
         },
         entries: [userEntry, eventEntry],
       }),
@@ -826,6 +851,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         tokensAfter: promptWindow.tokensAfter,
         promptEntries: promptWindow.promptEntries.length,
         prunedEntries: promptWindow.prunedEntries.length,
+        autoCompact: promptWindow.autoCompactEvent,
       },
       entries: [userEntry, eventEntry],
     });
@@ -1018,6 +1044,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           tokensAfter: promptWindow.tokensAfter,
           promptEntries: promptWindow.promptEntries.length,
           prunedEntries: promptWindow.prunedEntries.length,
+          autoCompact: promptWindow.autoCompactEvent,
         },
         entries: [...persistedEntries, eventEntry],
       },

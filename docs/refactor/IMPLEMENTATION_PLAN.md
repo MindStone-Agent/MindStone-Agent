@@ -201,6 +201,9 @@ The preferred order is:
   - [x] Provider-first config wizard UX for embeddings.
 - [ ] Live-test selected prompt messages against Pi-backed provider with isolated credentials/config.
 - [ ] Implement auto-compact runtime policy for compatible substrates.
+  - [x] First-pass threshold eventing for `auto_compact_warning` and `auto_compact_required`.
+  - [x] Compact target to reserve-token mapping.
+  - [ ] Automatic checkpoint/handoff writing and substrate compact request remain pending.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle.
 - [x] Add manual backfill command.
   - `mindstone memory backfill`

@@ -161,9 +161,12 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [ ] sqlite-vec native vector backend compatibility
 - [x] Support choosing `sliding_window` vs `auto_compact` context mode.
 - [ ] Finish auto-compact runtime policy.
-  - checkpoint/handoff trigger
-  - compact target/reserve-token mapping
-  - post-compact archive/embed/dream-cycle hook
+  - [x] checkpoint/handoff warning and compact-required threshold eventing
+  - [x] compact target/reserve-token mapping
+  - [x] Gateway transcript events for `auto_compact_warning` and `auto_compact_required`
+  - [ ] actual checkpoint/handoff writing trigger
+  - [ ] actual substrate compact request/coordination
+  - [ ] post-compact archive/embed/dream-cycle hook
 - [x] Implement sliding-window prompt pruning and config.
 - [ ] Polish sliding-window config UX and diagnostics.
 

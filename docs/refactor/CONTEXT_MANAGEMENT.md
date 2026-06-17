@@ -34,6 +34,13 @@ For native Pi compaction, `compactTargetPercent` maps to `reserveTokens` using:
 reserveTokens = contextWindow * (1 - compactTargetPercent / 100)
 ```
 
+Current first-pass runtime behavior:
+
+- When utilization reaches `checkpointWarningPercent`, Gateway records an `auto_compact_warning` transcript event.
+- When utilization reaches `compactTargetPercent`, Gateway records an `auto_compact_required` transcript event.
+- The event includes token counts, utilization, warning/target thresholds, `keepRecentTokens`, computed `reserveTokens`, and the recommended action.
+- This is eventing and coordination metadata only; it does not yet write the checkpoint/handoff or invoke substrate compaction.
+
 ## `sliding_window`
 
 `sliding_window` is MindStone proper's preferred long-running behavior.
@@ -83,12 +90,14 @@ Implemented:
 - At least `minRecentMessages` recent prompt entries are retained.
 - Gateway `/chat/send`, RPC `chat.send`, WebSocket RPC `chat.send`, and `/v1/chat/completions` build a prompt-window summary after persisting inbound messages.
 - When pruning occurs, Gateway appends a transcript event with `event: context_window_pruned` and pruned/kept entry IDs.
+- In `auto_compact` mode, Gateway appends `auto_compact_warning` or `auto_compact_required` transcript events when configured thresholds are crossed.
 - Smoke coverage:
   - `npm run smoke:context-window`
   - `npm run smoke:sliding-window`
 
 Still pending:
 
+- Auto-compact eventing is implemented, but automatic checkpoint/handoff writing and actual substrate compaction are not yet implemented.
 - Real model routing must consume `promptEntries` as the actual model input.
 - Token estimation is currently conservative character-based estimation, not provider tokenizer-specific.
 - Tool-call/tool-result semantics need richer grouping once real tool transcripts are flowing.
