@@ -196,10 +196,12 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] Gateway REST chat, HTTP RPC chat, WebSocket RPC chat, and OpenAI chat completions use the configured shared default when `sessionKey` is omitted.
   - [x] `mindstone` legacy alias canonicalizes to `agent:default:main` for compatibility.
   - [x] Verified with `npm run smoke:unified-session`.
-  - [ ] Telegram/WebChat UI/OpenWebUI/Pi adapter final validation still pending.
+  - [x] Built-in WebChat shell validates omitted session key → `agent:default:main` via `npm run smoke:webchat-ui`.
+  - [ ] Telegram/OpenWebUI/Pi adapter final validation still pending.
 - [ ] Preserve channel/source metadata inside the unified transcript without splitting memory continuity.
   - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, routing events, and assistant responses now write structured `TranscriptEntry.source` metadata.
-  - [ ] Telegram/WebChat UI/Pi adapter source metadata still pending final validation.
+  - [x] Built-in WebChat shell source metadata validates as `gateway-rest` / `webchat` / `internal`.
+  - [ ] Telegram/Pi adapter source metadata still pending final validation.
 
 ### Channels and surfaces
 
@@ -209,7 +211,12 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - group/mention policy
   - polling/webhook choice
   - status/probe
-- [ ] Add WebChat setup/config UX.
+- [x] Add first-pass built-in WebChat shell at `GET /webchat`.
+  - thin native MindStone UI over Gateway WebChat REST endpoints
+  - blank session key uses `agent:default:main`
+  - API calls honor configured Gateway auth
+  - verified with `npm run smoke:webchat-ui`
+- [ ] Add fuller WebChat setup/config UX.
   - Gateway enablement
   - auth mode
   - session policy

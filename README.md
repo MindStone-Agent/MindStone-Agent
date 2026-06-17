@@ -127,6 +127,20 @@ chat.send
 chat.abort
 ```
 
+The Gateway also serves a thin built-in MindStone WebChat shell:
+
+```text
+GET /webchat
+```
+
+The page is a native MindStone surface over the Gateway WebChat REST endpoints, not OpenWebUI. Leave the session key blank in the UI to use the canonical shared default:
+
+```text
+agent:default:main
+```
+
+The static UI shell is served without auth so a browser can load it directly; configured Gateway auth still applies to transcript/status/chat API calls from the page.
+
 The default MindStone-Agent Gateway port is `19789` to avoid colliding with existing MindStone/Pi services that may use `18789`.
 
 Gateway authentication is configured in the isolated MindStone config file. `/health` remains unauthenticated for liveness checks. Other endpoints enforce the configured auth mode:

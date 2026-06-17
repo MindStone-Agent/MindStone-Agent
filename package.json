@@ -24,6 +24,7 @@
     "smoke:chat": "./scripts/smoke-chat-history.sh",
     "smoke:rpc": "./scripts/smoke-rpc.sh",
     "smoke:ws-rpc": "./scripts/smoke-ws-rpc.sh",
+    "smoke:webchat-ui": "./scripts/smoke-webchat-ui.sh",
     "smoke:context-window": "./scripts/smoke-context-window.sh",
     "smoke:sliding-window": "./scripts/smoke-sliding-window.sh",
     "smoke:router-mock": "./scripts/smoke-router-mock.sh",

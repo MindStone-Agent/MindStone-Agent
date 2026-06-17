@@ -4,6 +4,7 @@ import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
 import { PiMindStoneProvider } from "./pi-provider.js";
 import { GatewayRunManager } from "./run-manager.js";
+import { WEBCHAT_UI_HTML } from "./webchat-ui.js";
 
 export { MockMindStoneProvider } from "./mock-provider.js";
 export { PiMindStoneProvider } from "./pi-provider.js";
@@ -54,6 +55,14 @@ function sendJson(
     ...headers,
   });
   res.end(text);
+}
+
+function sendHtml(res: ServerResponse, status: number, html: string): void {
+  res.writeHead(status, {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": Buffer.byteLength(html),
+  });
+  res.end(html);
 }
 
 function loadGatewayConfig(): ReturnType<typeof loadMindStoneConfig> {
@@ -896,6 +905,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       version: "0.0.0",
       paths: runtimePathsFromEnv(),
     });
+    return;
+  }
+
+  if (req.method === "GET" && (url.pathname === "/webchat" || url.pathname === "/webchat/")) {
+    sendHtml(res, 200, WEBCHAT_UI_HTML);
     return;
   }
 
