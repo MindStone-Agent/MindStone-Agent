@@ -5,9 +5,9 @@ import {
   type AgentRunner,
   type MindStoneModelProvider,
 } from "@mindstone-agent/core";
-import { PiSessionMindStoneProvider, type PiSessionMindStoneProviderOptions } from "./pi-session-provider.js";
+import { PiSessionExecutor, type PiSessionExecutorOptions } from "./pi-session-executor.js";
 
-export type PiSessionAgentRunnerOptions = PiSessionMindStoneProviderOptions & {
+export type PiSessionAgentRunnerOptions = PiSessionExecutorOptions & {
   provider?: MindStoneModelProvider;
 };
 
@@ -24,7 +24,7 @@ export class PiSessionAgentRunner implements AgentRunner {
   readonly #provider: MindStoneModelProvider;
 
   constructor(options: PiSessionAgentRunnerOptions = {}) {
-    this.#provider = options.provider ?? new PiSessionMindStoneProvider(options);
+    this.#provider = options.provider ?? new PiSessionExecutor(options);
   }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
