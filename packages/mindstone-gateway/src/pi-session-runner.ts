@@ -13,6 +13,20 @@ export type PiSessionAgentRunnerOptions = PiSessionExecutorOptions & {
   provider?: MindStoneModelProvider;
 };
 
+type PiSessionStreamDiagnostics = {
+  events: unknown[];
+};
+
+function piSessionStreamDiagnosticsFromRaw(raw: unknown): PiSessionStreamDiagnostics | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const record = raw as Record<string, unknown>;
+  const piSession = record.piSession;
+  if (!piSession || typeof piSession !== "object") return undefined;
+  const piRecord = piSession as Record<string, unknown>;
+  const events = Array.isArray(piRecord.events) ? piRecord.events : [];
+  return { events };
+}
+
 /**
  * AgentRunner implementation for Pi AgentSession-backed execution.
  *
@@ -70,6 +84,23 @@ export class PiSessionAgentRunner implements AgentRunner {
     };
     try {
       const result = await this.run({ ...input, runContext });
+      const diagnostics = piSessionStreamDiagnosticsFromRaw(result.result.raw);
+      for (const event of diagnostics?.events ?? []) {
+        yield {
+          type: "substrate_event",
+          sequence: sequence++,
+          timestamp: new Date().toISOString(),
+          runnerId: this.id,
+          runId: runContext.runId,
+          surface: runContext.surface,
+          metadata: {
+            ...runContext.metadata,
+            diagnosticReplay: true,
+          },
+          substrate: "pi",
+          event,
+        };
+      }
       yield {
         type: "run_completed",
         sequence: sequence++,

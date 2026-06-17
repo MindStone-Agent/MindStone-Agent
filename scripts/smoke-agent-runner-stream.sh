@@ -33,6 +33,14 @@ const fakeProvider = {
       role: 'assistant',
       text: `stream response: ${request.messages.at(-1)?.text ?? ''}`,
       model: request.model,
+      raw: {
+        piSession: {
+          events: [
+            { type: 'agent_start' },
+            { type: 'tool_execution_start', toolName: 'read', toolCallId: 'tool-1' },
+          ],
+        },
+      },
     };
   },
 };
@@ -63,7 +71,15 @@ const baseInput = {
 };
 
 assertLifecycle(await collect(createProviderRouteAgentRunner().stream(baseInput)), 'provider-route');
-assertLifecycle(await collect(new PiSessionAgentRunner({ provider: fakeProvider }).stream(baseInput)), 'pi-session');
+
+const piSessionEvents = await collect(new PiSessionAgentRunner({ provider: fakeProvider }).stream(baseInput));
+if (piSessionEvents.length !== 4) throw new Error(`pi-session: expected started+2 substrate+completed events, got ${piSessionEvents.length}`);
+if (piSessionEvents[0].type !== 'run_started') throw new Error('pi-session: first event was not run_started');
+if (piSessionEvents[1].type !== 'substrate_event' || piSessionEvents[1].substrate !== 'pi') throw new Error('pi-session: first diagnostic was not a Pi substrate_event');
+if (piSessionEvents[2].type !== 'substrate_event' || piSessionEvents[2].event.toolName !== 'read') throw new Error('pi-session: tool diagnostic substrate_event missing');
+if (piSessionEvents[3].type !== 'run_completed') throw new Error('pi-session: final event was not run_completed');
+if (piSessionEvents.some((event, index) => event.sequence !== index)) throw new Error('pi-session: stream sequence was not monotonic from zero');
+if (piSessionEvents[3].result.runner.id !== 'pi-session') throw new Error('pi-session: completed result runner diagnostics missing');
 
 const failingProvider = {
   id: 'failing-stream-provider',
@@ -83,7 +99,7 @@ if (failureEvents.length !== 2) throw new Error(`expected started+failed events,
 if (failureEvents[0].type !== 'run_started' || failureEvents[1].type !== 'run_failed') throw new Error('failure stream did not emit started then failed');
 if (failureEvents[1].error.message !== 'stream failure sentinel') throw new Error('failure stream did not serialize error message');
 
-console.log(JSON.stringify({ ok: true, providerRouteEvents: 2, piSessionEvents: 2, failureEvents: 2 }, null, 2));
+console.log(JSON.stringify({ ok: true, providerRouteEvents: 2, piSessionEvents: piSessionEvents.length, failureEvents: 2 }, null, 2));
 NODE
 
 echo "AgentRunner stream contract smoke test passed."
