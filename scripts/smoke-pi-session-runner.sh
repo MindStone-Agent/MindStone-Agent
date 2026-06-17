@@ -43,7 +43,7 @@ writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
 NODE
 
 node --input-type=module <<'NODE'
-import { createPiSessionEventCapture, piSessionFileForKey } from './packages/mindstone-gateway/dist/index.js';
+import { buildPiSessionPromptParts, createPiSessionEventCapture, piSessionFileForKey } from './packages/mindstone-gateway/dist/index.js';
 import { resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
 const actual = piSessionFileForKey(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions`, process.env.CHAT_SESSION_KEY);
@@ -59,6 +59,17 @@ if (capture.events.length !== 3) throw new Error(`expected bounded event capture
 if (capture.eventCounts.agent_start !== 1 || capture.eventCounts.message_end !== 1 || capture.eventCounts.agent_end !== 1) throw new Error('event counts not captured');
 if (capture.lastAssistantText !== 'final assistant text') throw new Error('last assistant text not captured from agent_end');
 if (!capture.events.some((event) => event.toolName === 'read' && event.toolCallId === 'tool-1')) throw new Error('tool event summary not captured');
+
+const promptParts = buildPiSessionPromptParts([
+  { role: 'system', text: 'identity and SCRI context' },
+  { role: 'assistant', text: 'prior assistant text should not become the new prompt' },
+  { role: 'tool', text: 'tool result should not become the new prompt' },
+  { role: 'user', text: 'latest user turn' },
+]);
+if (promptParts.appendSystemPrompt.length !== 1) throw new Error('system context was not moved to appendSystemPrompt');
+if (!promptParts.appendSystemPrompt[0].includes('<mindstone_context index="1">')) throw new Error('system context wrapper missing');
+if (promptParts.promptText !== 'latest user turn') throw new Error('latest user turn was not selected as prompt text');
+if (promptParts.diagnostics.nonUserPromptMessagesSkipped !== 2) throw new Error('non-user prompt skip diagnostics wrong');
 NODE
 
 set +e

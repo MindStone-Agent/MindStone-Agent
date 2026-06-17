@@ -128,7 +128,7 @@ The preferred order is:
   - [x] canonical MindStone session key → Pi session file mapping
   - [x] `SessionManager.open(...)`
   - [x] `createAgentSession(...)`
-  - [ ] MindStone identity/SCRI prompt injection via system prompt/prompt-build path, not crude prompt concatenation
+  - [x] first MindStone identity/SCRI prompt injection via Pi `DefaultResourceLoader.appendSystemPrompt`, with latest user turn sent through `AgentSession.prompt(...)` instead of crude all-message prompt concatenation
   - [ ] Pi tools/custom tools/resource loader/extension lifecycle preserved where available
   - [x] `AgentSession.prompt(...)` for real turns when isolated auth/model config is available
   - [x] first bounded `AgentSession.subscribe(...)` event diagnostics capture in `pi-session` raw results, including event counts, bounded event summaries, tool metadata summaries, and final assistant-text extraction

@@ -29,9 +29,12 @@ type PiRegistry = {
   hasConfiguredAuth?(model: PiModel): boolean;
 };
 
+type PiResourceLoader = { reload(): Promise<void> };
+
 type PiSessionModules = {
   createAgentSession: (options?: Record<string, unknown>) => Promise<{ session: PiAgentSession; modelFallbackMessage?: string }>;
   AuthStorage: { create(path?: string): unknown };
+  DefaultResourceLoader: new (options: Record<string, unknown>) => PiResourceLoader;
   ModelRegistry: { create(authStorage: unknown, modelsPath?: string): PiRegistry };
   SessionManager: { open(path: string, sessionDir?: string, cwdOverride?: string): unknown };
   SettingsManager: { create(cwd?: string, agentDir?: string): unknown };
@@ -87,9 +90,10 @@ async function importFromProject<T>(projectRoot: string, path: string): Promise<
 }
 
 async function loadPiSessionModules(projectRoot: string): Promise<PiSessionModules> {
-  const [sdk, auth, registry, sessionManager, settingsManager] = await Promise.all([
+  const [sdk, auth, resourceLoader, registry, sessionManager, settingsManager] = await Promise.all([
     importFromProject<{ createAgentSession: PiSessionModules["createAgentSession"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/sdk.js"),
     importFromProject<{ AuthStorage: PiSessionModules["AuthStorage"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/auth-storage.js"),
+    importFromProject<{ DefaultResourceLoader: PiSessionModules["DefaultResourceLoader"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/resource-loader.js"),
     importFromProject<{ ModelRegistry: PiSessionModules["ModelRegistry"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/model-registry.js"),
     importFromProject<{ SessionManager: PiSessionModules["SessionManager"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/session-manager.js"),
     importFromProject<{ SettingsManager: PiSessionModules["SettingsManager"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/settings-manager.js"),
@@ -97,6 +101,7 @@ async function loadPiSessionModules(projectRoot: string): Promise<PiSessionModul
   return {
     createAgentSession: sdk.createAgentSession,
     AuthStorage: auth.AuthStorage,
+    DefaultResourceLoader: resourceLoader.DefaultResourceLoader,
     ModelRegistry: registry.ModelRegistry,
     SessionManager: sessionManager.SessionManager,
     SettingsManager: settingsManager.SettingsManager,
@@ -181,6 +186,46 @@ export function createPiSessionEventCapture(limit = 200): { capture: PiSessionEv
   };
 }
 
+export type PiSessionPromptParts = {
+  appendSystemPrompt: string[];
+  promptText: string;
+  diagnostics: {
+    appendSystemPromptCount: number;
+    promptTextChars: number;
+    latestUserMessageFound: boolean;
+    nonUserPromptMessagesSkipped: number;
+  };
+};
+
+function labelSystemPrompt(index: number, text: string): string {
+  return [`<mindstone_context index="${index}">`, text.trim(), "</mindstone_context>"].join("\n");
+}
+
+function fallbackPromptText(message: MindStoneChatRequest["messages"][number] | undefined): string {
+  if (!message) return "";
+  if (message.text?.trim()) return message.text.trim();
+  if (typeof message.content === "string") return message.content.trim();
+  return "";
+}
+
+export function buildPiSessionPromptParts(messages: MindStoneChatRequest["messages"]): PiSessionPromptParts {
+  const systemMessages = messages.filter((message) => message.role === "system" && message.text?.trim());
+  const latestUser = [...messages].reverse().find((message) => message.role === "user" && (message.text?.trim() || typeof message.content === "string"));
+  const latestMessage = [...messages].reverse().find((message) => message.text?.trim() || typeof message.content === "string");
+  const nonUserPromptMessagesSkipped = messages.filter((message) => message.role === "assistant" || message.role === "tool").length;
+  const promptText = fallbackPromptText(latestUser ?? latestMessage);
+  return {
+    appendSystemPrompt: systemMessages.map((message, index) => labelSystemPrompt(index + 1, message.text ?? "")),
+    promptText,
+    diagnostics: {
+      appendSystemPromptCount: systemMessages.length,
+      promptTextChars: promptText.length,
+      latestUserMessageFound: Boolean(latestUser),
+      nonUserPromptMessagesSkipped,
+    },
+  };
+}
+
 export class PiSessionMindStoneProvider implements MindStoneModelProvider {
   readonly id = "pi-session";
   readonly #projectRoot: string;
@@ -258,12 +303,21 @@ export class PiSessionMindStoneProvider implements MindStoneModelProvider {
     mkdirSync(dirname(sessionFile), { recursive: true });
     const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
     const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
+    const promptParts = buildPiSessionPromptParts(request.messages);
+    const resourceLoader = new modules.DefaultResourceLoader({
+      cwd: this.#cwd,
+      agentDir: this.#agentDir,
+      settingsManager,
+      appendSystemPrompt: promptParts.appendSystemPrompt,
+    });
+    await resourceLoader.reload();
     const { session, modelFallbackMessage } = await modules.createAgentSession({
       cwd: this.#cwd,
       agentDir: this.#agentDir,
       model,
       sessionManager,
       settingsManager,
+      resourceLoader,
       sessionStartEvent: { type: "session_start", reason: "startup" },
     });
 
@@ -271,16 +325,7 @@ export class PiSessionMindStoneProvider implements MindStoneModelProvider {
     const unsubscribe = session.subscribe?.((event) => record(event));
 
     try {
-      const prompt = request.messages
-        .map((message) => {
-          if (message.role === "system") return `[system context]\n${message.text ?? ""}`;
-          if (message.role === "assistant") return `[prior assistant]\n${message.text ?? ""}`;
-          if (message.role === "tool") return `[tool]\n${message.text ?? JSON.stringify(message.content ?? "")}`;
-          return message.text ?? "";
-        })
-        .filter((text) => text.trim())
-        .join("\n\n");
-      await session.prompt(prompt || request.transcriptEntries.at(-1)?.text || "", { source: "rpc" });
+      await session.prompt(promptParts.promptText || request.transcriptEntries.at(-1)?.text || "", { source: "rpc" });
       const text = capture.lastAssistantText ?? lastAssistantText(session.messages ?? session.state?.messages);
       return {
         role: "assistant",
@@ -291,6 +336,7 @@ export class PiSessionMindStoneProvider implements MindStoneModelProvider {
           sessionFile,
           modelFallbackMessage,
           piSession: {
+            prompt: promptParts.diagnostics,
             eventCounts: capture.eventCounts,
             events: capture.events,
             assistantTexts: capture.assistantTexts,
