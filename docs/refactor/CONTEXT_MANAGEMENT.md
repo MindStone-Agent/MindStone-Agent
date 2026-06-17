@@ -40,7 +40,7 @@ Current first-pass runtime behavior:
 - When utilization reaches `compactTargetPercent`, Gateway records an `auto_compact_required` transcript event.
 - The event includes token counts, utilization, warning/target thresholds, `keepRecentTokens`, computed `reserveTokens`, and the recommended action.
 - If `emergencyAutoHandoff` is enabled and the required threshold is reached, Gateway writes a local emergency handoff artifact and appends a compact checkpoint entry to runtime `LOG.md`.
-- The latest handoff is written to `transcripts/.handoff.md`; timestamped handoff artifacts are written under `handoffs/`.
+- The current handoff is written to `transcripts/.handoff.md` and may be overwritten by the next compaction boundary; durable continuity belongs in LOG, transcripts, journals, and structured memory, not in archived handoff files.
 - Actual substrate compaction is still not invoked automatically; the event records that compaction was not requested yet.
 
 ## `sliding_window`
@@ -93,7 +93,7 @@ Implemented:
 - Gateway `/chat/send`, RPC `chat.send`, WebSocket RPC `chat.send`, and `/v1/chat/completions` build a prompt-window summary after persisting inbound messages.
 - When pruning occurs, Gateway appends a transcript event with `event: context_window_pruned` and pruned/kept entry IDs.
 - In `auto_compact` mode, Gateway appends `auto_compact_warning` or `auto_compact_required` transcript events when configured thresholds are crossed.
-- When `emergencyAutoHandoff` is enabled, `auto_compact_required` writes a local emergency handoff to `handoffs/` and `transcripts/.handoff.md`, then records the artifact paths in transcript metadata.
+- When `emergencyAutoHandoff` is enabled, `auto_compact_required` writes the current emergency handoff to `transcripts/.handoff.md`, then records that path in transcript metadata.
 - Smoke coverage:
   - `npm run smoke:context-window`
   - `npm run smoke:sliding-window`

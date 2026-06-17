@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { estimatePromptTokens, type PromptWindowAutoCompactEvent } from "../context/index.js";
@@ -23,12 +22,6 @@ export type AutoCompactHandoffResult = {
   entryCount: number;
   recentEntryCount: number;
 };
-
-function safeId(value: string): string {
-  const cleaned = value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  if (cleaned.length > 0 && cleaned.length <= 72) return cleaned;
-  return createHash("sha256").update(value).digest("hex").slice(0, 16);
-}
 
 function entryText(entry: TranscriptEntry): string {
   if (typeof entry.text === "string") return entry.text;
@@ -70,27 +63,22 @@ export function writeAutoCompactHandoff(
   const paths = options.paths ?? runtimePathsFromEnv();
   const timestamp = input.timestamp ?? new Date().toISOString();
   const recentEntries = selectRecentEntries(input.entries, input.event.keepRecentTokens);
-  const sessionId = safeId(input.sessionKey);
-  const stamp = timestamp.replace(/[:.]/g, "-");
-  const path = join(paths.handoffDir, `${stamp}_${sessionId}.handoff.md`);
   const latestPath = join(paths.transcriptDir, ".handoff.md");
   const body = renderHandoff(input, recentEntries, timestamp);
 
-  mkdirSync(paths.handoffDir, { recursive: true });
   mkdirSync(paths.transcriptDir, { recursive: true });
-  writeFileSync(path, body, "utf-8");
   writeFileSync(latestPath, body, "utf-8");
 
   mkdirSync(dirname(paths.logPath), { recursive: true });
   writeFileSync(
     paths.logPath,
-    `\n## ${timestamp} — Auto-compact checkpoint\n\n- Session: ${input.sessionKey}\n- Agent: ${input.agentId}\n- Event: ${input.event.event}\n- Action: ${input.event.action}\n- Utilization: ${input.event.utilizationPercent.toFixed(1)}%\n- Handoff: ${path}\n- Latest handoff: ${latestPath}\n\n`,
+    `\n## ${timestamp} — Auto-compact checkpoint\n\n- Session: ${input.sessionKey}\n- Agent: ${input.agentId}\n- Event: ${input.event.event}\n- Action: ${input.event.action}\n- Utilization: ${input.event.utilizationPercent.toFixed(1)}%\n- Handoff: ${latestPath}\n\n`,
     { flag: "a", encoding: "utf-8" },
   );
 
   return {
     written: true,
-    path,
+    path: latestPath,
     latestPath,
     logPath: paths.logPath,
     entryCount: input.entries.length,

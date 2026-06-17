@@ -83,10 +83,10 @@ if (compactEvent.metadata?.compactTargetPercent !== 30) process.exit(1);
 if (compactEvent.metadata?.keepRecentTokens !== 120) process.exit(1);
 if (compactEvent.metadata?.handoff?.written !== true) process.exit(1);
 if (compactEvent.metadata?.compaction?.requested !== false) process.exit(1);
-if (!fs.existsSync(compactEvent.metadata.handoff.path)) process.exit(1);
-if (!fs.existsSync(compactEvent.metadata.handoff.latestPath)) process.exit(1);
 const latest = path.join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "mindstone", "transcripts", ".handoff.md");
+if (compactEvent.metadata.handoff.path !== latest) process.exit(1);
 if (compactEvent.metadata.handoff.latestPath !== latest) process.exit(1);
+if (!fs.existsSync(latest)) process.exit(1);
 if (!fs.readFileSync(latest, "utf-8").includes("MindStone-Agent Auto-Compact Handoff")) process.exit(1);
 NODE
 
