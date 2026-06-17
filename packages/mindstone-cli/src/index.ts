@@ -10,6 +10,7 @@ import {
   formatMindStoneConfigHeader,
   getCurrentHandoffStatus,
   getMindStoneDoctorReport,
+  getMindStoneSystemStatus,
   getSqliteMemoryIndexStats,
   loadMindStoneConfig,
   probeMemoryEmbeddingProvider,
@@ -343,6 +344,7 @@ function printStatus(): void {
   const configPath = resolveConfigPath();
   const loaded = loadMindStoneConfig(configPath);
   const handoff = getCurrentHandoffStatus(paths);
+  const status = getMindStoneSystemStatus();
   output.write(`${gold("🔶 MindStone-Agent status")}\n\n`);
   output.write(
     [
@@ -355,6 +357,10 @@ function printStatus(): void {
       `Config exists: ${loaded.exists}`,
       loaded.error ? `Config error: ${loaded.error}` : undefined,
       `Current handoff: ${handoff.exists ? `${handoff.path} (${handoff.bytes} bytes)` : `none (${handoff.path})`}`,
+      `WebChat: ${status.webchat.url}`,
+      `WebChat default session: ${status.webchat.defaultSessionKey}`,
+      `WebChat source: ${status.webchat.source.substrate}/${status.webchat.source.channel}/${status.webchat.source.chatType}`,
+      `WebChat API auth applies: ${status.webchat.apiAuthApplies}`,
       loaded.config ? "" : undefined,
       loaded.config ? formatConfigSummary(loaded.config) : undefined,
     ]

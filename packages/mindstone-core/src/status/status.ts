@@ -5,6 +5,7 @@ import type { MindStoneRoutingConfig } from "../config/index.js";
 import { getCurrentHandoffStatus, type CurrentHandoffStatus } from "../lifecycle/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { listTranscriptSessions } from "../transcript/index.js";
+import { getMindStoneWebChatStatus, type MindStoneWebChatStatus } from "./webchat.js";
 
 export type MindStoneAgentStatus = {
   agentId: string;
@@ -33,6 +34,7 @@ export type MindStoneSystemStatus = {
     entryCount: number;
   };
   handoff: CurrentHandoffStatus;
+  webchat: MindStoneWebChatStatus;
   contextManagement: ResolvedContextManagementPolicy;
   routing: {
     mode: Required<MindStoneRoutingConfig>["mode"];
@@ -76,6 +78,7 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
       entryCount: transcriptSessions.reduce((total, session) => total + session.entries, 0),
     },
     handoff: getCurrentHandoffStatus(paths),
+    webchat: getMindStoneWebChatStatus(loadedConfig.config),
     contextManagement: resolveContextManagementPolicy(loadedConfig.config?.contextManagement),
     routing: {
       mode: loadedConfig.config?.routing?.mode ?? "placeholder",

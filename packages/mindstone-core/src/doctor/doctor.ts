@@ -5,6 +5,7 @@ import { getCurrentHandoffStatus } from "../lifecycle/index.js";
 import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { resolveDefaultSessionKey } from "../routing/session.js";
+import { getMindStoneWebChatStatus } from "../status/webchat.js";
 import { loadMindStoneConfig, resolveConfigPath } from "../config/load.js";
 import type { MindStoneConfig } from "../config/types.js";
 import type { MindStoneDoctorCheck, MindStoneDoctorReport, MindStoneDoctorSeverity } from "./types.js";
@@ -126,6 +127,23 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
   if (sessionMode === "single" && !defaultSessionKey.startsWith("agent:")) {
     check(checks, "warn", "session.sharedDefault", "Single-session default is not canonical MindStone shape", defaultSessionKey);
   }
+
+  const webchat = getMindStoneWebChatStatus(config);
+  check(checks, "pass", "webchat.shell", "Built-in WebChat shell is available", webchat.url);
+  check(
+    checks,
+    webchat.defaultSessionKey === defaultSessionKey ? "pass" : "warn",
+    "webchat.session",
+    "WebChat blank session uses configured default session key",
+    webchat.defaultSessionKey,
+  );
+  check(
+    checks,
+    "info",
+    "webchat.auth",
+    "WebChat API calls use configured Gateway auth",
+    `Static shell: ${webchat.path}; chat/status APIs remain protected when auth is enabled`,
+  );
 
   const context = resolveContextManagementPolicy(config?.contextManagement);
   check(checks, "pass", "context.mode", "Context-management mode resolves", context.mode);

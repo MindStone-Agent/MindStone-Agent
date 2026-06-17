@@ -216,7 +216,9 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - blank session key uses `agent:default:main`
   - API calls honor configured Gateway auth
   - mock-routed assistant response appends to canonical transcript
-  - verified with `npm run smoke:webchat-ui`
+  - `mindstone status` reports WebChat URL/session/source
+  - `mindstone doctor` checks WebChat shell/session readiness
+  - verified with `npm run smoke:webchat-ui` and `npm run smoke:doctor`
 - [ ] Add fuller WebChat setup/config UX.
   - Gateway enablement
   - auth mode
