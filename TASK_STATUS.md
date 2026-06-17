@@ -148,7 +148,9 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] Add first-pass SCRI ranking layer with provider score, kind/source priority, critical/evergreen boosts, usage boosts, recency/half-life boosts, and score diagnostics.
   - [x] Add dedup against active prompt/session content.
   - [x] Add candidate dedup to avoid repeated chunks/text consuming recall budget.
-  - [ ] Add actual sqlite-vec extension nearest-neighbor search.
+  - [x] Add sqlite-vec capability probe and explicit fallback diagnostics.
+  - [x] Report current vector backend as `sqlite-vec`, `js-cosine`, or `lexical` in memory status/doctor.
+  - [ ] Add actual sqlite-vec extension nearest-neighbor search when the extension is available/packaged.
   - [ ] Tune full SCRI salience model against real agent traces.
 - [ ] Implement embedding/provider configuration.
   - [x] embedding provider selection via `memory.embeddingProvider`

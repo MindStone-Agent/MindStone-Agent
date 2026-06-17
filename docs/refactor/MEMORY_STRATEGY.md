@@ -286,10 +286,13 @@ Implemented in MindStone-Agent first pass:
 - active prompt/session dedup so recall does not re-inject content already present in the live context
 - candidate dedup so repeated chunks/text do not consume recall budget
 - smoke test proves active-context dedup and SCRI score diagnostics
+- sqlite-vec capability probe with explicit fallback status
+- `mindstone memory status` reports `sqlite-vec`, `js-cosine`, or `lexical` as the active vector backend
+- `mindstone doctor` reports when sqlite-vec native search is unavailable and which fallback is in use
 
 Still pending:
 
-- actual sqlite-vec extension-backed nearest-neighbor search
+- package/install actual sqlite-vec extension-backed nearest-neighbor search
 - config wizard UX for embeddings
 - tuning SCRI weights against real traces
 - richer source-specific salience policies

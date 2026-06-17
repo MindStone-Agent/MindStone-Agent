@@ -286,6 +286,11 @@ function printMemoryStatus(): void {
       `Sources: ${stats.sources}`,
       `Chunks: ${stats.chunks}`,
       `Embedded chunks: ${stats.embeddedChunks}`,
+      `Vector backend: ${stats.vectorBackend}`,
+      `sqlite-vec available: ${stats.sqliteVec.available}`,
+      stats.sqliteVec.version ? `sqlite-vec version: ${stats.sqliteVec.version}` : undefined,
+      stats.sqliteVec.extensionPath ? `sqlite-vec extension: ${stats.sqliteVec.extensionPath}` : undefined,
+      stats.sqliteVec.error ? `sqlite-vec note: ${stats.sqliteVec.error}` : undefined,
       stats.updatedAt ? `Updated: ${stats.updatedAt}` : undefined,
       stats.error ? `Error: ${stats.error}` : undefined,
     ]

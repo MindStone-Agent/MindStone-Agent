@@ -183,6 +183,7 @@ The preferred order is:
   - [x] SQLite-index-backed recall can feed autoRecall when `memory.vectorStore` is `sqlite-vec`.
   - [x] Embedding-backed SQLite recall works over stored embeddings using JS cosine similarity.
   - [x] First-pass SCRI ranking/dedup works with diagnostics.
+  - [x] sqlite-vec capability/fallback diagnostics are implemented.
   - [ ] sqlite-vec native ANN search and SCRI weight tuning remain pending.
 - [ ] Add dream-cycle hook for compaction/session/pruning boundary.
 - [x] Implement sliding-window prompt pruning: trigger at `ceilingPercent`, prune toward `floorPercent`, retain `minRecentMessages`, preserve transcript.
@@ -207,6 +208,7 @@ The preferred order is:
   - `mindstone memory status`
   - `mindstone doctor` reports SQLite DB presence/chunk counts for `sqlite-vec` config.
   - `mindstone doctor` probes configured embedding providers with a sample embedding request.
+  - `mindstone doctor` reports sqlite-vec availability or explicit JS-cosine/lexical fallback.
 - [x] Add tests for recall injection formatting.
 - [x] Add smoke test for SCRI active-context dedup, candidate dedup, and score diagnostics.
 - [x] Document thin standing context, ephemeral auto-recall, on-demand recall, structured memory, journals, LOG, and vectorization strategy in `docs/refactor/MEMORY_STRATEGY.md`.

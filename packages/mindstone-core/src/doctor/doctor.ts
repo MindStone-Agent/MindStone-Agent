@@ -154,6 +154,23 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
         "SQLite memory index has chunks",
         `${sqliteMemoryStats.sources} sources, ${sqliteMemoryStats.chunks} chunks, ${sqliteMemoryStats.embeddedChunks} embedded`,
       );
+      if (sqliteMemoryStats.sqliteVec.available) {
+        check(
+          checks,
+          "pass",
+          "memory.sqliteVec",
+          "sqlite-vec native extension is available",
+          sqliteMemoryStats.sqliteVec.version ?? "available",
+        );
+      } else {
+        check(
+          checks,
+          "info",
+          "memory.sqliteVec",
+          "sqlite-vec native extension is unavailable; using fallback recall backend",
+          `${sqliteMemoryStats.vectorBackend}${sqliteMemoryStats.sqliteVec.error ? `: ${sqliteMemoryStats.sqliteVec.error}` : ""}`,
+        );
+      }
     }
   } else if (sqliteMemoryStats.present) {
     check(

@@ -42,12 +42,21 @@ export type SqliteMemoryBackfillResult = {
   transcriptDocuments: number;
 };
 
+export type SqliteVecStatus = {
+  available: boolean;
+  version?: string;
+  extensionPath?: string;
+  error?: string;
+};
+
 export type SqliteMemoryIndexStats = {
   databasePath: string;
   present: boolean;
   sources: number;
   chunks: number;
   embeddedChunks: number;
+  vectorBackend: "sqlite-vec" | "js-cosine" | "lexical";
+  sqliteVec: SqliteVecStatus;
   updatedAt?: string;
   error?: string;
 };
@@ -74,6 +83,44 @@ export function sqliteMemoryDatabasePath(paths: MindStoneRuntimePaths = runtimeP
 
 function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex");
+}
+
+function sqliteVecExtensionPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return env.MINDSTONE_SQLITE_VEC_EXTENSION?.trim() || env.SQLITE_VEC_EXTENSION?.trim() || undefined;
+}
+
+function tryEnableSqliteVec(db: DatabaseSync, env: NodeJS.ProcessEnv = process.env): SqliteVecStatus {
+  const extensionPath = sqliteVecExtensionPath(env);
+  try {
+    if (extensionPath) {
+      db.enableLoadExtension(true);
+      db.loadExtension(extensionPath);
+    }
+    const row = db.prepare("SELECT vec_version() AS version").get() as { version?: string };
+    return { available: true, version: row.version, extensionPath };
+  } catch (error) {
+    return {
+      available: false,
+      extensionPath,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    try {
+      db.enableLoadExtension(false);
+    } catch {
+      // Some builds may not allow toggling extension loading after a failed probe.
+    }
+  }
+}
+
+export function getSqliteVecStatus(paths: MindStoneRuntimePaths = runtimePathsFromEnv(), env: NodeJS.ProcessEnv = process.env): SqliteVecStatus {
+  const databasePath = sqliteMemoryDatabasePath(paths);
+  const db = openDatabase(databasePath);
+  try {
+    return tryEnableSqliteVec(db, env);
+  } finally {
+    db.close();
+  }
 }
 
 function openDatabase(path: string): DatabaseSync {
@@ -364,7 +411,16 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
 
 export function getSqliteMemoryIndexStats(paths: MindStoneRuntimePaths = runtimePathsFromEnv()): SqliteMemoryIndexStats {
   const databasePath = sqliteMemoryDatabasePath(paths);
-  if (!existsSync(databasePath)) return { databasePath, present: false, sources: 0, chunks: 0, embeddedChunks: 0 };
+  const sqliteVec = existsSync(databasePath) ? getSqliteVecStatus(paths) : { available: false, error: "database not present" };
+  const empty = {
+    databasePath,
+    sources: 0,
+    chunks: 0,
+    embeddedChunks: 0,
+    vectorBackend: "lexical" as const,
+    sqliteVec,
+  };
+  if (!existsSync(databasePath)) return { ...empty, present: false };
   try {
     const db = openDatabase(databasePath);
     initializeSchema(db);
@@ -373,16 +429,19 @@ export function getSqliteMemoryIndexStats(paths: MindStoneRuntimePaths = runtime
     const embeddedChunks = db.prepare("SELECT count(*) AS count FROM memory_chunks WHERE embedding_json IS NOT NULL").get() as { count: number };
     const updated = db.prepare("SELECT max(updated_at) AS updatedAt FROM memory_chunks").get() as { updatedAt?: string };
     db.close();
+    const embedded = Number(embeddedChunks.count ?? 0);
     return {
       databasePath,
       present: true,
       sources: Number(sources.count ?? 0),
       chunks: Number(chunks.count ?? 0),
-      embeddedChunks: Number(embeddedChunks.count ?? 0),
+      embeddedChunks: embedded,
+      vectorBackend: sqliteVec.available ? "sqlite-vec" : embedded > 0 ? "js-cosine" : "lexical",
+      sqliteVec,
       updatedAt: updated.updatedAt,
     };
   } catch (error) {
-    return { databasePath, present: true, sources: 0, chunks: 0, embeddedChunks: 0, error: error instanceof Error ? error.message : String(error) };
+    return { ...empty, present: true, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
