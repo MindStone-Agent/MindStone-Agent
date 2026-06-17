@@ -25,6 +25,7 @@ import {
   runMindStoneRoute,
   runtimePathsFromEnv,
   readCurrentHandoff,
+  requestGatewaySubstrateCompaction,
   writeAutoCompactHandoff,
   type MindStoneConfig,
   type MindStoneModelInfo,
@@ -114,6 +115,7 @@ function appendAutoCompactTranscriptEvent(input: {
   entries: TranscriptEntry[];
   source?: TranscriptEntry["source"];
   runId?: string;
+  config?: MindStoneConfig;
 }): TranscriptEntry {
   const metadata: Record<string, unknown> = { ...input.event };
   let text = input.event.event === "auto_compact_required"
@@ -130,9 +132,17 @@ function appendAutoCompactTranscriptEvent(input: {
         source: input.source,
         runId: input.runId,
       });
+      const compaction = requestGatewaySubstrateCompaction({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        event: input.event,
+        handoff,
+        config: input.config,
+        runId: input.runId,
+      });
       metadata.handoff = handoff;
-      metadata.compaction = { requested: false, reason: "substrate_compaction_request_not_implemented" };
-      text = `${text} Emergency auto-handoff written to ${handoff.latestPath}.`;
+      metadata.compaction = compaction;
+      text = `${text} Emergency auto-handoff written to ${handoff.latestPath}. Substrate compaction not requested: ${compaction.reason}.`;
     } else {
       metadata.handoff = { written: false, reason: "emergency_auto_handoff_disabled" };
       metadata.compaction = { requested: false, reason: "manual_checkpoint_handoff_required" };
@@ -184,6 +194,7 @@ function maybeRecordPromptWindowEvent(input: {
       event: result.autoCompactEvent,
       entries,
       source,
+      config: input.config,
     });
   }
 
@@ -446,6 +457,7 @@ async function runConfiguredRoute(input: {
         entries: route.promptWindow.entries,
         runId: run.id,
         source,
+        config: input.config,
       });
     }
 

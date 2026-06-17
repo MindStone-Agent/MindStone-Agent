@@ -166,7 +166,8 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] Gateway transcript events for `auto_compact_warning` and `auto_compact_required`
   - [x] gated emergency checkpoint/handoff writing trigger when `emergencyAutoHandoff` is enabled
   - [x] current handoff visibility in status/doctor and ephemeral one-shot replay into routed prompt context
-  - [ ] actual substrate compact request/coordination
+  - [x] substrate compaction coordination result reporting (`requested`, `available`, `substrate`, `reason`)
+  - [ ] actual substrate compact invocation for a live in-process Pi `AgentSession`
   - [ ] post-compact archive/embed/dream-cycle hook
 - [x] Implement sliding-window prompt pruning and config.
 - [ ] Polish sliding-window config UX and diagnostics.

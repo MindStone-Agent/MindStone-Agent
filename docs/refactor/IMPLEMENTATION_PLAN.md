@@ -205,7 +205,8 @@ The preferred order is:
   - [x] Compact target to reserve-token mapping.
   - [x] Gated emergency checkpoint/handoff writing when `emergencyAutoHandoff` is enabled.
   - [x] Current handoff status/doctor visibility and ephemeral replay into routed prompt context.
-  - [ ] Actual substrate compact request remains pending.
+  - [x] Explicit substrate compaction coordination-result reporting.
+  - [ ] Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi session handle.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle.
 - [x] Add manual backfill command.
   - `mindstone memory backfill`

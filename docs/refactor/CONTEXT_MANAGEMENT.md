@@ -43,7 +43,8 @@ Current first-pass runtime behavior:
 - The current handoff is written to `transcripts/.handoff.md` and may be overwritten by the next compaction boundary; durable continuity belongs in LOG, transcripts, journals, and structured memory, not in archived handoff files.
 - `/status`, `mindstone status`, and `mindstone doctor` report current handoff presence/path/size/hash where available.
 - On a subsequent routed model call, Gateway replays the current handoff ephemerally into prompt context if that handoff hash has not already been replayed in the session, then records a `handoff_replayed` transcript event with `durable: false`.
-- Actual substrate compaction is still not invoked automatically; the event records that compaction was not requested yet.
+- Gateway records an explicit substrate compaction coordination result with `requested`, `available`, `substrate`, and `reason` fields.
+- Pi exposes `AgentSession.compact(customInstructions?)`, but MindStone-Agent Gateway currently has no live in-process Pi `AgentSession` handle; the stateless Pi provider path therefore reports compaction as unavailable rather than pretending to request it.
 
 ## `sliding_window`
 
@@ -103,7 +104,7 @@ Implemented:
 
 Still pending:
 
-- Auto-compact eventing, gated emergency handoff writing, status/doctor visibility, and ephemeral handoff replay are implemented, but actual substrate compaction is not yet requested/invoked.
+- Auto-compact eventing, gated emergency handoff writing, status/doctor visibility, ephemeral handoff replay, and explicit compaction coordination-result reporting are implemented, but actual in-process Pi `AgentSession.compact()` invocation is not yet wired.
 - Real model routing must consume `promptEntries` as the actual model input.
 - Token estimation is currently conservative character-based estimation, not provider tokenizer-specific.
 - Tool-call/tool-result semantics need richer grouping once real tool transcripts are flowing.

@@ -227,7 +227,7 @@ type ContextManagementPolicy =
     };
 ```
 
-`auto_compact` delegates actual compaction to the substrate where available and preserves continuity through checkpoint/handoff/replay. Current implementation emits threshold events and can write a gated emergency local handoff when `emergencyAutoHandoff` is enabled; actual substrate compaction requests remain pending.
+`auto_compact` delegates actual compaction to the substrate where available and preserves continuity through checkpoint/handoff/replay. Current implementation emits threshold events, can write a gated emergency local handoff when `emergencyAutoHandoff` is enabled, replays the current handoff ephemerally, and records an explicit substrate compaction coordination result. Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi session handle.
 
 `sliding_window` is MindStone proper's normal behavior: when prompt utilization reaches `ceilingPercent` of the current model's configured context window, older messages are removed from the active prompt window down toward `floorPercent`. The transcript store remains append-only and complete.
 
