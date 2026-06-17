@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-rpc-smoke.XXXXXX")"
 GATEWAY_PORT="19795"
-SESSION_KEY="agent:default:rpc:direct:smoke"
+SESSION_KEY="mindstone"
 
 cleanup() {
   if [[ -n "${gateway_pid:-}" ]]; then
@@ -47,19 +47,20 @@ async function rpc(id, method, params, expectedStatus = 200) {
   return body;
 }
 
-const injected = await rpc("1", "chat.inject", { sessionKey, message: "operator note", label: "note" });
-if (!injected.ok || injected.result.entry.role !== "assistant") process.exit(1);
+const injected = await rpc("1", "chat.inject", { message: "operator note", label: "note" });
+if (!injected.ok || injected.result.entry.role !== "assistant" || injected.result.entry.sessionKey !== sessionKey) process.exit(1);
 
-const sent = await rpc("2", "chat.send", { sessionKey, message: "route this later" });
+const sent = await rpc("2", "chat.send", { message: "route this later" });
 if (!sent.ok || sent.result.code !== "not_implemented" || sent.result.persisted !== true) process.exit(1);
 
-const aborted = await rpc("3", "chat.abort", { sessionKey, runId: "rpc-run" });
+const aborted = await rpc("3", "chat.abort", { runId: "rpc-run" });
 if (!aborted.ok || aborted.result.aborted !== false) process.exit(1);
 
 const sessions = await rpc("4", "chat.sessions", {});
 if (!Array.isArray(sessions.result.sessions) || sessions.result.sessions[0].entries !== 4) process.exit(1);
 
-const history = await rpc("5", "chat.history", { sessionKey });
+const history = await rpc("5", "chat.history", {});
+if (history.result.sessionKey !== sessionKey) process.exit(1);
 if (!Array.isArray(history.result.entries) || history.result.entries.length !== 4) process.exit(1);
 if (history.result.entries[0].text !== "[note]\n\noperator note") process.exit(1);
 if (history.result.entries[2].metadata?.event !== "routing_not_implemented") process.exit(1);

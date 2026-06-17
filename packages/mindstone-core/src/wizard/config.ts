@@ -245,6 +245,11 @@ function withDefaultOnboardingConfig(config: MindStoneConfig): MindStoneConfig {
       minRecentMessages: 24,
       preserveTranscript: true,
     },
+    session: {
+      mode: "single",
+      defaultSessionKey: "mindstone",
+      ...config.session,
+    },
     memory: {
       autoRecall: false,
       vectorStore: "sqlite-vec",

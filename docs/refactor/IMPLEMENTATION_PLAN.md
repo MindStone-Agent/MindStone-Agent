@@ -248,8 +248,10 @@ The preferred order is:
 
 ### Tasks
 
-- [ ] Add explicit session policy config for single shared MindStone session/transcript by default.
+- [x] Add explicit session policy config for single shared MindStone session/transcript by default.
 - [ ] Ensure Gateway WebChat, OpenWebUI, Pi adapter, Telegram, and future channels can route to the same default session key.
+  - [x] Gateway REST chat, RPC chat, and OpenAI chat completions default to the configured shared session when `sessionKey` is omitted.
+  - [ ] OpenWebUI, Telegram, WebChat UI, and Pi adapter validation still pending.
 - [ ] Enable Gateway OpenAI-compatible endpoint in local config.
 - [ ] Start Gateway with auth.
 - [ ] Configure OpenWebUI custom OpenAI provider with Gateway base URL.

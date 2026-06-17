@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-chat-smoke.XXXXXX")"
 GATEWAY_PORT="19794"
-SESSION_KEY="agent:default:webchat:direct:smoke"
+SESSION_KEY="mindstone"
 
 cleanup() {
   if [[ -n "${gateway_pid:-}" ]]; then
@@ -48,7 +48,7 @@ await request(
   {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessionKey, agentId: "default", role: "user", text: "hello webchat" }),
+    body: JSON.stringify({ agentId: "default", role: "user", text: "hello webchat" }),
   },
   201,
 );
@@ -57,7 +57,7 @@ await request(
   {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessionKey, agentId: "default", role: "assistant", text: "hello human" }),
+    body: JSON.stringify({ agentId: "default", role: "assistant", text: "hello human" }),
   },
   201,
 );
@@ -67,7 +67,7 @@ const send = await request(
   {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessionKey, agentId: "default", text: "please route me later" }),
+    body: JSON.stringify({ agentId: "default", text: "please route me later" }),
   },
   501,
 );
@@ -78,18 +78,19 @@ const abort = await request(
   {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessionKey, agentId: "default", runId: "smoke-run" }),
+    body: JSON.stringify({ agentId: "default", runId: "smoke-run" }),
   },
   202,
 );
 if (abort.aborted !== false || !abort.entry) process.exit(1);
 
 const sessions = await request("/chat/sessions", undefined, 200);
-if (!Array.isArray(sessions.sessions) || sessions.sessions.length !== 1 || sessions.sessions[0].entries !== 5) {
+if (!Array.isArray(sessions.sessions) || sessions.sessions.length !== 1 || sessions.sessions[0].sessionKey !== sessionKey || sessions.sessions[0].entries !== 5) {
   process.exit(1);
 }
 
-const history = await request(`/chat/history?sessionKey=${encodeURIComponent(sessionKey)}`, undefined, 200);
+const history = await request("/chat/history", undefined, 200);
+if (history.sessionKey !== sessionKey) process.exit(1);
 if (!Array.isArray(history.entries) || history.entries.length !== 5) process.exit(1);
 if (history.entries[0].text !== "hello webchat") process.exit(1);
 if (history.entries[3].metadata?.event !== "routing_not_implemented") process.exit(1);

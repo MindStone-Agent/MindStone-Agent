@@ -149,9 +149,9 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 
 ### Sessions and transcripts
 
-- [ ] Add explicit session policy config.
-  - default should support one shared MindStone session/transcript across channels/surfaces.
-  - candidate config:
+- [x] Add explicit session policy config.
+  - default supports one shared MindStone session/transcript across Gateway surfaces.
+  - implemented config:
     ```json
     {
       "session": {
@@ -161,6 +161,8 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
     }
     ```
 - [ ] Ensure Telegram, WebChat, OpenWebUI, Pi adapter, and future channels can route into the same session/transcript by default.
+  - [x] Gateway REST chat, RPC chat, and OpenAI chat completions use the configured shared default when `sessionKey` is omitted.
+  - [ ] Telegram/WebChat UI/OpenWebUI/Pi adapter final validation still pending.
 - [ ] Preserve channel/source metadata inside the unified transcript without splitting memory continuity.
 
 ### Channels and surfaces

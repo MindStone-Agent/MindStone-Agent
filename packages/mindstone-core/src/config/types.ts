@@ -23,6 +23,13 @@ export type MindStoneMemoryConfig = {
   embeddingProvider?: string;
 };
 
+export type MindStoneSessionConfig = {
+  /** single routes all surfaces into one continuity session by default; per_surface keeps channel-derived keys. */
+  mode?: "single" | "per_surface";
+  /** Default session key used when mode is single, or as fallback when no surface key can be derived. */
+  defaultSessionKey?: string;
+};
+
 export type MindStoneRoutingConfig = {
   /** placeholder keeps send/completions transcript-aware without calling a model. */
   mode?: "placeholder" | "mock" | "pi";
@@ -84,6 +91,7 @@ export type MindStoneConfig = {
   };
   agents?: Record<string, MindStoneAgentConfig>;
   channels?: Record<string, unknown>;
+  session?: MindStoneSessionConfig;
   memory?: MindStoneMemoryConfig;
   contextManagement?: ContextManagementPolicy;
   routing?: MindStoneRoutingConfig;

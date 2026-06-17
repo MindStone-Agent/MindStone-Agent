@@ -17,8 +17,8 @@ import {
   loadMindStoneConfig,
   readTranscriptEntries,
   resolveConfigPath,
+  resolveConfiguredSessionKey,
   resolveGatewayAuthRequirement,
-  resolveSessionKey,
   runMindStoneRoute,
   runtimePathsFromEnv,
   type MindStoneConfig,
@@ -238,6 +238,31 @@ function abortGatewayRuns(sessionKey: string, runId: unknown): { aborted: boolea
   };
 }
 
+function stringParam(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function gatewaySessionKey(input: {
+  config: MindStoneConfig | undefined;
+  explicitSessionKey?: unknown;
+  agentId: string;
+  substrate: string;
+  channel?: string;
+  chatType?: string;
+  senderId?: unknown;
+  threadId?: unknown;
+}): string {
+  return resolveConfiguredSessionKey(input.config, {
+    agentId: input.agentId,
+    substrate: input.substrate,
+    channel: input.channel,
+    chatType: input.chatType,
+    senderId: stringParam(input.senderId),
+    threadId: stringParam(input.threadId),
+    explicitSessionKey: stringParam(input.explicitSessionKey),
+  });
+}
+
 async function runConfiguredRoute(input: {
   sessionKey: string;
   agentId: string;
@@ -350,10 +375,18 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
   }
 
   if (method === "chat.history") {
-    const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
-    if (!sessionKey) {
-      return { status: 400, body: rpcError(id, "invalid_request", "sessionKey is required") };
-    }
+    const loadedConfig = loadGatewayConfig();
+    const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
+    const sessionKey = gatewaySessionKey({
+      config: loadedConfig.config,
+      explicitSessionKey: params.sessionKey,
+      agentId,
+      substrate: "gateway-rpc",
+      channel: "webchat",
+      chatType: "internal",
+      senderId: params.senderId,
+      threadId: params.threadId,
+    });
     const limit = typeof params.limit === "number" ? params.limit : undefined;
     return {
       status: 200,
@@ -362,11 +395,12 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
   }
 
   if (method === "chat.inject") {
-    const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+    const loadedConfig = loadGatewayConfig();
     const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
+    const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: params.sessionKey, agentId, substrate: "gateway-rpc", channel: "webchat", chatType: "internal" });
     const message = typeof params.message === "string" ? params.message : typeof params.text === "string" ? params.text : "";
-    if (!sessionKey || !message.trim()) {
-      return { status: 400, body: rpcError(id, "invalid_request", "sessionKey and message are required") };
+    if (!message.trim()) {
+      return { status: 400, body: rpcError(id, "invalid_request", "message is required") };
     }
     const entry = appendTranscriptEntry({
       sessionKey,
@@ -379,11 +413,12 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
   }
 
   if (method === "chat.send") {
-    const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+    const loadedConfig = loadGatewayConfig();
     const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
+    const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: params.sessionKey, agentId, substrate: "gateway-rpc", channel: "webchat", chatType: "internal", senderId: params.senderId, threadId: params.threadId });
     const message = typeof params.message === "string" ? params.message : typeof params.text === "string" ? params.text : "";
-    if (!sessionKey || !message.trim()) {
-      return { status: 400, body: rpcError(id, "invalid_request", "sessionKey and message are required") };
+    if (!message.trim()) {
+      return { status: 400, body: rpcError(id, "invalid_request", "message is required") };
     }
     const userEntry = appendTranscriptEntry({
       sessionKey,
@@ -392,7 +427,6 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
       text: message,
       metadata: { source: "gateway-rpc", method: "chat.send" },
     });
-    const loadedConfig = loadGatewayConfig();
     const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config });
     if (routed.routed) {
       return { status: routed.status, body: rpcSuccess(id, { persisted: true, userEntry, ...routed.body as Record<string, unknown> }) };
@@ -426,11 +460,9 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
   }
 
   if (method === "chat.abort") {
-    const sessionKey = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+    const loadedConfig = loadGatewayConfig();
     const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
-    if (!sessionKey) {
-      return { status: 400, body: rpcError(id, "invalid_request", "sessionKey is required") };
-    }
+    const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: params.sessionKey, agentId, substrate: "gateway-rpc", channel: "webchat", chatType: "internal", senderId: params.senderId, threadId: params.threadId });
     const abort = abortGatewayRuns(sessionKey, params.runId);
     const entry = appendTranscriptEntry({
       sessionKey,
@@ -672,11 +704,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   if (req.method === "GET" && url.pathname === "/chat/history") {
-    const sessionKey = url.searchParams.get("sessionKey")?.trim();
-    if (!sessionKey) {
-      sendJson(res, 400, { ok: false, error: "sessionKey is required" });
-      return;
-    }
+    const loadedConfig = loadGatewayConfig();
+    const agentId = url.searchParams.get("agentId")?.trim() || "default";
+    const sessionKey = gatewaySessionKey({
+      config: loadedConfig.config,
+      explicitSessionKey: url.searchParams.get("sessionKey"),
+      agentId,
+      substrate: "gateway-rest",
+      channel: "webchat",
+      chatType: "internal",
+      senderId: url.searchParams.get("senderId"),
+      threadId: url.searchParams.get("threadId"),
+    });
     const limitText = url.searchParams.get("limit");
     const limit = limitText ? Number(limitText) : undefined;
     sendJson(res, 200, {
@@ -696,11 +735,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
     const input = body as Record<string, unknown>;
-    const sessionKey = typeof input.sessionKey === "string" ? input.sessionKey.trim() : "";
-    const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
+    const loadedConfig = loadGatewayConfig();
+    const agentId = typeof input.agentId === "string" && input.agentId.trim() ? input.agentId.trim() : "default";
+    const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: input.sessionKey, agentId, substrate: "gateway-rest", channel: "webchat", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
     const text = typeof input.text === "string" ? input.text : "";
-    if (!sessionKey || !agentId || !text.trim()) {
-      sendJson(res, 400, { ok: false, error: "sessionKey, agentId, and text are required" });
+    if (!text.trim()) {
+      sendJson(res, 400, { ok: false, error: "text is required" });
       return;
     }
     const metadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : undefined;
@@ -711,7 +751,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       text,
       metadata,
     });
-    const loadedConfig = loadGatewayConfig();
     const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, metadata });
     if (routed.routed) {
       sendJson(res, routed.status, { persisted: true, userEntry, ...(routed.body as Record<string, unknown>) });
@@ -753,12 +792,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
     const input = body as Record<string, unknown>;
-    const sessionKey = typeof input.sessionKey === "string" ? input.sessionKey.trim() : "";
-    const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
-    if (!sessionKey || !agentId) {
-      sendJson(res, 400, { ok: false, error: "sessionKey and agentId are required" });
-      return;
-    }
+    const loadedConfig = loadGatewayConfig();
+    const agentId = typeof input.agentId === "string" && input.agentId.trim() ? input.agentId.trim() : "default";
+    const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: input.sessionKey, agentId, substrate: "gateway-rest", channel: "webchat", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
     const abort = abortGatewayRuns(sessionKey, input.runId);
     const entry = appendTranscriptEntry({
       sessionKey,
@@ -790,11 +826,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
     const input = body as Record<string, unknown>;
-    const sessionKey = typeof input.sessionKey === "string" ? input.sessionKey.trim() : "";
-    const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
+    const loadedConfig = loadGatewayConfig();
+    const agentId = typeof input.agentId === "string" && input.agentId.trim() ? input.agentId.trim() : "default";
+    const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: input.sessionKey, agentId, substrate: "gateway-rest", channel: "webchat", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
     const role = input.role;
-    if (!sessionKey || !agentId || !isTranscriptRole(role)) {
-      sendJson(res, 400, { ok: false, error: "sessionKey, agentId, and valid role are required" });
+    if (!isTranscriptRole(role)) {
+      sendJson(res, 400, { ok: false, error: "valid role is required" });
       return;
     }
     const entry = appendTranscriptEntry({
@@ -850,12 +887,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     }
 
     const metadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
-    const metadataSessionKey = typeof metadata.sessionKey === "string" ? metadata.sessionKey : undefined;
     const model = typeof input.model === "string" ? input.model : "mindstone/default";
     const agentId = typeof metadata.agentId === "string" ? metadata.agentId : "default";
-    const sessionKey = metadataSessionKey ?? resolveSessionKey({
+    const sessionKey = gatewaySessionKey({
+      config: loadedConfig.config,
+      explicitSessionKey: metadata.sessionKey,
       agentId,
       substrate: "openai",
+      channel: "openai-chat-completions",
+      chatType: "internal",
       senderId: typeof input.user === "string" ? input.user : model,
     });
 
