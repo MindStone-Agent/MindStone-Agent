@@ -1,4 +1,5 @@
 import type { ContextManagementPolicy } from "../context/index.js";
+import type { MindStoneSelectedProfile } from "../profile/index.js";
 
 export type GatewayAuthConfig =
   | { mode: "none" }
@@ -12,6 +13,8 @@ export type MindStoneAgentConfig = {
   defaultModel?: string;
   /** Configured maximum context window for the agent's current/default model. */
   contextWindowTokens?: number;
+  /** Selected onboarding profile that seeded this agent. */
+  profileId?: string;
 };
 
 export type MindStoneMemoryConfig = {
@@ -34,8 +37,13 @@ export type MindStoneRoutingConfig = {
   };
 };
 
+export type MindStoneOnboardingConfig = {
+  profile?: MindStoneSelectedProfile;
+};
+
 export type MindStoneConfig = {
   workspace?: { root?: string };
+  onboarding?: MindStoneOnboardingConfig;
   gateway?: {
     host?: string;
     port?: number;

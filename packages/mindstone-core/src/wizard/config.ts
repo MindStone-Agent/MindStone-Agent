@@ -5,6 +5,13 @@ import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { loadMindStoneConfig, resolveConfigPath, resolvePathRelativeToConfig } from "../config/load.js";
 import type { GatewayAuthConfig, MindStoneConfig, MindStoneRoutingConfig } from "../config/types.js";
 import type { MindStoneModelInfo, MindStoneProviderInfo } from "../provider/index.js";
+import {
+  BUILT_IN_MINDSTONE_PROFILES,
+  getBuiltInMindStoneProfile,
+  isBuiltInMindStoneProfileId,
+  type BuiltInMindStoneProfileId,
+  type MindStoneSelectedProfile,
+} from "../profile/index.js";
 import type { MindStonePrompter, MindStoneSelectOption } from "./prompter.js";
 
 export type MindStoneConfigWizardSection =
@@ -102,6 +109,11 @@ function stableJson(config: MindStoneConfig): string {
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
+function selectedProfileSummary(profile: MindStoneSelectedProfile | undefined): string {
+  if (!profile) return "unset";
+  return profile.id === "custom" ? `${profile.label} (custom)` : profile.label;
+}
+
 export function formatMindStoneConfigHeader(): string {
   return TITLE;
 }
@@ -119,6 +131,7 @@ export function formatConfigSummary(config: MindStoneConfig): string {
     `routing.mode: ${routing}`,
     `routing.defaultAgentId: ${defaultAgent}`,
     `routing.defaultModel: ${config.routing?.defaultModel ?? config.agents?.[defaultAgent]?.defaultModel ?? "unset"}`,
+    `onboarding.profile: ${selectedProfileSummary(config.onboarding?.profile)}`,
     `contextManagement.mode: ${context.mode}`,
     `memory.autoRecall: ${config.memory?.autoRecall ?? false}`,
     `memory.vectorStore: ${config.memory?.vectorStore ?? "sqlite-vec"}`,
@@ -208,6 +221,7 @@ function withDefaultOnboardingConfig(config: MindStoneConfig): MindStoneConfig {
         id: defaultAgentId,
         identityPath: `agents/${defaultAgentId}/IDENTITY.md`,
         userPath: `agents/${defaultAgentId}/USER.md`,
+        profileId: config.onboarding?.profile?.id,
         ...config.agents?.[defaultAgentId],
       },
     },
@@ -913,6 +927,106 @@ function markdownEscape(value: string): string {
   return value.replace(/\r\n/g, "\n").trim();
 }
 
+function selectedProfileToLines(profile: MindStoneSelectedProfile | undefined): string[] {
+  if (!profile) return ["Base profile: unset"];
+  const definition = getBuiltInMindStoneProfile(profile.id);
+  if (!definition) {
+    return [
+      `Base profile: ${profile.label}`,
+      `Description: ${profile.customDescription ?? profile.description}`,
+    ];
+  }
+  return [
+    `Base profile: ${definition.label}`,
+    `Description: ${definition.description}`,
+    `Purpose seed: ${definition.purposeSeed}`,
+    "Interaction bias:",
+    ...definition.interactionBias.map((item) => `- ${item}`),
+    "Memory priorities:",
+    ...definition.memoryPriorities.map((item) => `- ${item}`),
+    "Suggested skills/modules:",
+    ...definition.suggestedSkills.map((item) => `- ${item}`),
+    "Boundaries:",
+    ...definition.boundaries.map((item) => `- ${item}`),
+  ];
+}
+
+function applySelectedProfile(config: MindStoneConfig, profile: MindStoneSelectedProfile): MindStoneConfig {
+  const defaultAgentId = config.routing?.defaultAgentId ?? "default";
+  const currentAgent = config.agents?.[defaultAgentId];
+  return {
+    ...config,
+    onboarding: {
+      ...config.onboarding,
+      profile,
+    },
+    agents: {
+      ...config.agents,
+      [defaultAgentId]: {
+        id: defaultAgentId,
+        ...currentAgent,
+        profileId: profile.id,
+      },
+    },
+  };
+}
+
+async function chooseOnboardingProfile(
+  config: MindStoneConfig,
+  prompter: MindStonePrompter,
+): Promise<MindStoneSelectedProfile> {
+  type ProfileChoice = BuiltInMindStoneProfileId | "custom";
+  const currentProfile = config.onboarding?.profile;
+  const initialValue: ProfileChoice = currentProfile && isBuiltInMindStoneProfileId(currentProfile.id)
+    ? currentProfile.id
+    : "general_companion";
+  const choice = await prompter.select<ProfileChoice>({
+    message: "Base profile",
+    options: [
+      ...BUILT_IN_MINDSTONE_PROFILES.map((profile) => ({
+        value: profile.id,
+        label: profile.label,
+        hint: profile.description,
+      })),
+      { value: "custom", label: "Custom / Write-in", hint: "describe a custom role and collaboration shape" },
+    ],
+    initialValue,
+  });
+
+  if (choice !== "custom") {
+    const profile = getBuiltInMindStoneProfile(choice);
+    if (!profile) throw new Error(`Unknown built-in profile: ${choice}`);
+    return {
+      id: profile.id,
+      label: profile.label,
+      description: profile.description,
+      selectedAt: new Date().toISOString(),
+    };
+  }
+
+  const label = markdownEscape(
+    await prompter.text({
+      message: "Custom profile name",
+      placeholder: currentProfile?.id === "custom" ? currentProfile.label : "Integration Research Partner",
+      initialValue: currentProfile?.id === "custom" ? currentProfile.label : "",
+    }),
+  ) || "Custom Profile";
+  const customDescription = markdownEscape(
+    await prompter.text({
+      message: "Custom profile description",
+      placeholder: "what this agent should be especially good at, how it should work, and important boundaries",
+      initialValue: currentProfile?.id === "custom" ? currentProfile.customDescription ?? currentProfile.description : "",
+    }),
+  );
+  return {
+    id: "custom",
+    label,
+    description: customDescription || "Custom user-defined MindStone profile.",
+    customDescription: customDescription || undefined,
+    selectedAt: new Date().toISOString(),
+  };
+}
+
 function resolveOnboardingAgentPaths(config: MindStoneConfig, configPath: string): {
   agentId: string;
   identityPath: string;
@@ -960,10 +1074,15 @@ async function createOnboardingIdentityFiles(params: {
     "Identity model",
   );
 
+  const profile = params.config.onboarding?.profile;
+  const profileDefinition = getBuiltInMindStoneProfile(profile?.id);
+  const profileLines = selectedProfileToLines(profile);
+  await params.prompter.note(profileLines.join("\n"), "Selected profile seed");
+
   const purpose = markdownEscape(
     await params.prompter.text({
-      message: "What should this MindStone agent help with?",
-      placeholder: "software engineering, research, operations, personal assistant...",
+      message: `What should this ${profile?.label ?? "MindStone agent"} help with first?`,
+      placeholder: profileDefinition?.purposeSeed ?? "software engineering, research, operations, personal assistant...",
     }),
   );
   const userContext = markdownEscape(
@@ -980,9 +1099,13 @@ This identity scaffold was created by \`mindstone onboard\` on ${now}.
 
 The agent has not yet established a durable name, voice, or self-description. On first activation, it should read the user context, understand the requested purpose, and collaboratively form its own identity rather than pretending a complete identity already exists.
 
+## Base profile seed
+
+${profileLines.join("\n")}
+
 ## Purpose seed
 
-${purpose || "No purpose seed provided."}
+${purpose || profileDefinition?.purposeSeed || profile?.description || "No purpose seed provided."}
 
 ## Operating notes
 
@@ -996,9 +1119,13 @@ ${purpose || "No purpose seed provided."}
 
 This user/project context scaffold was created by \`mindstone onboard\` on ${now}.
 
+## Base profile
+
+${profileLines.join("\n")}
+
 ## Initial purpose
 
-${purpose || "No initial purpose provided."}
+${purpose || profileDefinition?.purposeSeed || profile?.description || "No initial purpose provided."}
 
 ## Initial context
 
@@ -1059,6 +1186,10 @@ export async function runMindStoneOnboardingWizard(
     "Runtime isolation",
   );
 
+  const loadedForProfile = loadMindStoneConfig(configPath);
+  if (loadedForProfile.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loadedForProfile.error}`);
+  const selectedProfile = await chooseOnboardingProfile(loadedForProfile.config ?? {}, prompter);
+
   const mode =
     options.onboardingMode ??
     (await prompter.select<MindStoneOnboardingMode>({
@@ -1075,7 +1206,7 @@ export async function runMindStoneOnboardingWizard(
     const loaded = loadMindStoneConfig(configPath);
     if (loaded.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loaded.error}`);
     const before = loaded.config ?? {};
-    const after = withDefaultOnboardingConfig(before);
+    const after = withDefaultOnboardingConfig(applySelectedProfile(before, selectedProfile));
     await prompter.note(formatConfigSummary(after), loaded.exists ? "QuickStart existing/defaulted config" : "QuickStart config");
     const issues = validateMindStoneConfig(after);
     if (issues.length > 0) {
@@ -1105,6 +1236,20 @@ export async function runMindStoneOnboardingWizard(
       showIntro: false,
       sections: ["workspace", "gateway", "routing", "context", "memory", "identity"],
     });
+    const profiledConfig = applySelectedProfile(configResult.config, selectedProfile);
+    const issues = validateMindStoneConfig(profiledConfig);
+    if (issues.length > 0) {
+      await prompter.note(issues.map((issue) => `- ${issue}`).join("\n"), "Config validation failed");
+      throw new Error("MindStone config validation failed");
+    }
+    if (configResult.wrote && !options.dryRun) writeMindStoneConfig(configResult.path, profiledConfig);
+    configResult = {
+      ...configResult,
+      config: profiledConfig,
+      changedSections: configResult.changedSections.includes("profile")
+        ? configResult.changedSections
+        : [...configResult.changedSections, "profile"],
+    };
   }
 
   const identityResult = configResult.wrote

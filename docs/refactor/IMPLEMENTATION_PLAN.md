@@ -79,8 +79,9 @@ The preferred order is:
 - [x] Add native CLI command for section reconfiguration.
 - [ ] Add command for setup/onboarding in Pi adapter.
 - [ ] Add command for section reconfiguration in Pi adapter.
-- [ ] Add default onboarding profiles with write-in option.
-- [ ] Add `Integration Builder` as an initial profile/skill.
+- [x] Add default onboarding profiles with write-in option.
+- [x] Add `Integration Builder` as an initial onboarding profile.
+- [ ] Add reusable `Integration Builder` skill behavior.
 - [ ] Add “getting to know the user” onboarding phase for preferences, boundaries, style, and project/domain context.
 - [ ] Add naming/identity emergence phase without forcing human-assigned names.
 - [ ] Preserve channel onboarding adapters for Telegram, Signal, Discord, Slack.
@@ -99,6 +100,8 @@ The preferred order is:
 - [ ] Wizard runs through at least identity + memory + gateway sections in Pi.
 - [x] Native CLI onboarding/config can run core setup and section reconfiguration.
 - [ ] Onboarding can select a profile/write-in purpose, gather interaction preferences, and create identity/user scaffolds from that seed.
+  - [x] Profile/write-in selection seeds config and identity/user scaffolds.
+  - [ ] Interaction preference gathering is still pending.
 - [ ] Channel setup section lists available plugins.
 - [ ] Reconfiguration can run by section.
 

@@ -17,7 +17,7 @@ const texts = [
   "help build and operate MindStone-Agent",
   "Clint prefers truthful, verified work and no destructive changes without approval.",
 ];
-const selects = ["quickstart"];
+const selects = ["integration_builder", "quickstart"];
 const confirms = [true, true];
 
 const prompter: MindStonePrompter = {
@@ -54,6 +54,8 @@ if (config.routing?.mode !== "placeholder") throw new Error("QuickStart placehol
 if (config.gateway?.auth?.mode !== "none") throw new Error("QuickStart gateway auth mode was not written");
 if (config.contextManagement?.mode !== "sliding_window") throw new Error("Context mode was not written");
 if (config.memory?.autoRecall !== false) throw new Error("QuickStart memory autoRecall default was not written");
+if (config.onboarding?.profile?.id !== "integration_builder") throw new Error("Selected onboarding profile was not written");
+if (config.agents?.default?.profileId !== "integration_builder") throw new Error("Agent profileId was not written");
 
 const identityPath = resolve(dirname(result.path), "agents/default/IDENTITY.md");
 const userPath = resolve(dirname(result.path), "agents/default/USER.md");
@@ -62,6 +64,8 @@ if (!existsSync(userPath)) throw new Error("User file does not exist");
 const identity = readFileSync(identityPath, "utf-8");
 const user = readFileSync(userPath, "utf-8");
 if (!identity.includes("MindStone Agent Identity Pending")) throw new Error("Identity scaffold content missing");
+if (!identity.includes("Base profile: Integration Builder")) throw new Error("Identity profile seed missing");
+if (!user.includes("Base profile: Integration Builder")) throw new Error("User profile seed missing");
 if (!user.includes("Clint prefers truthful")) throw new Error("User scaffold content missing");
 
 console.log(`onboard smoke passed: ${result.path}`);

@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with provider-first isolated Pi model selection, native CLI, context-management policy + sliding-window selector, router/provider abstraction, transcript store, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with profile selection and provider-first isolated Pi model selection, native CLI, context-management policy + sliding-window selector, router/provider abstraction, transcript store, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -37,6 +37,7 @@
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
 - [x] Add provider-first isolated Pi provider/model discovery to native config/onboarding routing setup.
+- [x] Add default onboarding profile selection with Custom / Write-in support.
 
 ### Completed
 
@@ -102,9 +103,9 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 
 ### Onboarding and identity
 
-- [ ] Add default onboarding profiles with a write-in option.
+- [x] Add default onboarding profiles with a write-in option.
   - Profiles provide the base job description and inform the agent’s eventual name/identity choice.
-  - Examples to define: general assistant, software engineer, ops/devops, research analyst, security analyst, creative collaborator, integration builder.
+  - Initial profiles: General Companion, Software Engineering Partner, Integration Builder, Research Analyst, Project Strategist, Cybersecurity Specialist, Business Advisor, Therapist / Reflective Support, Life Coach, Health Advisor, Custom / Write-in.
 - [ ] Add the “getting to know the user” phase.
   - interaction preferences
   - communication style
@@ -115,9 +116,9 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - Do not force the human to name the agent.
   - Use selected profile + user context as identity seed.
   - Preserve the MindStone model where the agent forms/chooses its identity collaboratively.
-- [ ] Build the initial `Integration Builder` skill/profile.
-  - Helps create and configure new integrations/channels/tools.
-  - Should become both an onboarding profile and reusable skill surface.
+- [ ] Build the initial `Integration Builder` skill surface.
+  - [x] Add Integration Builder as an onboarding profile.
+  - [ ] Add reusable Integration Builder skill behavior for creating/configuring integrations/channels/tools.
 
 ### Memory and context
 
