@@ -145,7 +145,7 @@ The preferred order is:
 - [ ] Preserve or refactor WebSocket `chat.send`.
 - [ ] Preserve or refactor WebSocket `chat.abort`.
 - [ ] Preserve or refactor WebSocket `chat.inject`.
-- [ ] Preserve OpenAI-compatible `/v1/chat/completions`.
+- [x] Preserve OpenAI-compatible `/v1/chat/completions` for configured mock/Pi routing modes, with placeholder fallback when no provider is configured.
 - [ ] Preserve OpenResponses `/v1/responses`.
 - [ ] Add health/status endpoint.
 - [ ] Verify auth behavior and endpoint enable flags.
@@ -282,6 +282,7 @@ The preferred order is:
 - [x] Add explicit session policy config for single shared MindStone session/transcript by default.
 - [ ] Ensure Gateway WebChat, OpenWebUI, Pi adapter, Telegram, and future channels can route to the same default session key.
   - [x] Gateway REST chat, RPC chat, and OpenAI chat completions default to the configured shared session when `sessionKey` is omitted.
+  - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, routing events, and assistant responses preserve structured transcript source metadata.
   - [ ] OpenWebUI, Telegram, WebChat UI, and Pi adapter validation still pending.
 - [ ] Enable Gateway OpenAI-compatible endpoint in local config.
 - [ ] Start Gateway with auth.

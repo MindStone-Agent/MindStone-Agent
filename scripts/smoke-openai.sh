@@ -78,8 +78,10 @@ const history = await expect("/chat/history", undefined, 200);
 if (history.sessionKey !== sessionKey) process.exit(1);
 if (!Array.isArray(history.entries) || history.entries.length !== 3) process.exit(1);
 if (history.entries[0].role !== "system") process.exit(1);
+if (history.entries[0].source?.substrate !== "openai" || history.entries[0].source?.channel !== "openai-chat-completions") process.exit(1);
 if (history.entries[1].text !== "hello") process.exit(1);
-if (history.entries[2].metadata?.event !== "routing_not_implemented") process.exit(1);
+if (history.entries[1].source?.substrate !== "openai") process.exit(1);
+if (history.entries[2].metadata?.event !== "routing_not_implemented" || history.entries[2].source?.substrate !== "openai") process.exit(1);
 NODE
 
 echo "OpenAI-compatible Gateway smoke test passed."

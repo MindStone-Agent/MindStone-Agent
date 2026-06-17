@@ -112,8 +112,10 @@ function maybeRecordPromptWindowEvent(input: {
   entries?: TranscriptEntry[];
   model?: MindStoneModelInfo;
 }): ReturnType<typeof buildPromptWindow> {
+  const entries = input.entries ?? readTranscriptEntries(input.sessionKey);
+  const source = [...entries].reverse().find((entry) => entry.source)?.source;
   const result = buildPromptWindow({
-    entries: input.entries ?? readTranscriptEntries(input.sessionKey),
+    entries,
     contextWindowTokens: input.model?.contextWindowTokens ?? resolveContextWindowTokens(input.config, input.agentId, input.metadata),
     reservedTokens: resolveReservedPromptTokens(input.metadata),
     policy: input.config?.contextManagement,
@@ -125,6 +127,7 @@ function maybeRecordPromptWindowEvent(input: {
       agentId: input.agentId,
       role: "event",
       text: `Context window pruned from ${result.tokensBefore} to ${result.tokensAfter} estimated tokens. Transcript preserved.`,
+      source,
       metadata: result.pruneEvent,
     });
   }
@@ -136,6 +139,7 @@ function maybeRecordPromptWindowEvent(input: {
       text: result.autoCompactEvent.event === "auto_compact_required"
         ? `Auto-compact threshold reached at ${result.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Checkpoint/handoff/compact should run.`
         : `Auto-compact warning threshold reached at ${result.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Prepare checkpoint/handoff.`,
+      source,
       metadata: result.autoCompactEvent,
     });
   }
@@ -256,6 +260,21 @@ function stringParam(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function gatewayTranscriptSource(input: {
+  substrate: string;
+  channel?: string;
+  chatType?: "direct" | "group" | "channel" | "thread" | "internal";
+  senderId?: unknown;
+  threadId?: unknown;
+}) {
+  return {
+    substrate: input.substrate,
+    channel: input.channel,
+    chatType: input.chatType,
+    senderId: stringParam(input.senderId),
+  };
+}
+
 function gatewaySessionKey(input: {
   config: MindStoneConfig | undefined;
   explicitSessionKey?: unknown;
@@ -292,6 +311,7 @@ async function runConfiguredRoute(input: {
 
   const model = resolveRouteModel(input.config, input.agentId, input.metadata);
   const entries = readTranscriptEntries(input.sessionKey);
+  const source = [...entries].reverse().find((entry) => entry.source)?.source;
   const run = runManager.start({
     sessionKey: input.sessionKey,
     agentId: input.agentId,
@@ -331,6 +351,7 @@ async function runConfiguredRoute(input: {
         role: "event",
         text: `Context window pruned from ${route.promptWindow.tokensBefore} to ${route.promptWindow.tokensAfter} estimated tokens. Transcript preserved.`,
         runId: run.id,
+        source,
         metadata: route.promptWindow.pruneEvent,
       });
     }
@@ -343,6 +364,7 @@ async function runConfiguredRoute(input: {
           ? `Auto-compact threshold reached at ${route.promptWindow.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Checkpoint/handoff/compact should run.`
           : `Auto-compact warning threshold reached at ${route.promptWindow.autoCompactEvent.utilizationPercent.toFixed(1)}% utilization. Prepare checkpoint/handoff.`,
         runId: run.id,
+        source,
         metadata: route.promptWindow.autoCompactEvent,
       });
     }
@@ -354,6 +376,7 @@ async function runConfiguredRoute(input: {
         role: "event",
         text: `Injected ${route.memoryRecall.hits.length} recalled memory chunk(s) into prompt context.`,
         runId: run.id,
+        source,
         metadata: {
           event: "memory_recall_injected",
           query: route.memoryRecall.query,
@@ -379,6 +402,7 @@ async function runConfiguredRoute(input: {
       role: "assistant",
       text: route.result.text,
       content: route.result.content,
+      source,
       runId: run.id,
       metadata: {
         event: "assistant_response",
@@ -423,6 +447,7 @@ async function runConfiguredRoute(input: {
       agentId: input.agentId,
       role: "event",
       text: error instanceof Error ? error.message : String(error),
+      source,
       runId: run.id,
       metadata: { event: "routing_failed", provider: provider.id, model: model.id },
     });
@@ -470,7 +495,8 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
   if (method === "chat.inject") {
     const loadedConfig = loadGatewayConfig();
     const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
-    const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: params.sessionKey, agentId, substrate: "gateway-rpc", channel: "webchat", chatType: "internal" });
+    const source = gatewayTranscriptSource({ substrate: "gateway-rpc", channel: "webchat", chatType: "internal", senderId: params.senderId, threadId: params.threadId });
+    const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: params.sessionKey, agentId, substrate: "gateway-rpc", channel: "webchat", chatType: "internal", senderId: params.senderId, threadId: params.threadId });
     const message = typeof params.message === "string" ? params.message : typeof params.text === "string" ? params.text : "";
     if (!message.trim()) {
       return { status: 400, body: rpcError(id, "invalid_request", "message is required") };
@@ -480,7 +506,8 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
       agentId,
       role: "assistant",
       text: labelMessage(params.label, message),
-      metadata: { source: "gateway-rpc", method: "chat.inject" },
+      source,
+      metadata: { source: "gateway-rpc", method: "chat.inject", threadId: stringParam(params.threadId) },
     });
     return { status: 200, body: rpcSuccess(id, { ok: true, entry }) };
   }
@@ -488,6 +515,7 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
   if (method === "chat.send") {
     const loadedConfig = loadGatewayConfig();
     const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
+    const source = gatewayTranscriptSource({ substrate: "gateway-rpc", channel: "webchat", chatType: "internal", senderId: params.senderId, threadId: params.threadId });
     const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: params.sessionKey, agentId, substrate: "gateway-rpc", channel: "webchat", chatType: "internal", senderId: params.senderId, threadId: params.threadId });
     const message = typeof params.message === "string" ? params.message : typeof params.text === "string" ? params.text : "";
     if (!message.trim()) {
@@ -498,7 +526,8 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
       agentId,
       role: "user",
       text: message,
-      metadata: { source: "gateway-rpc", method: "chat.send" },
+      source,
+      metadata: { source: "gateway-rpc", method: "chat.send", threadId: stringParam(params.threadId) },
     });
     const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config });
     if (routed.routed) {
@@ -511,7 +540,8 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
       role: "event",
       text: "MindStone routing is not implemented yet; message persisted but no assistant run was started.",
       parentId: userEntry.id,
-      metadata: { event: "routing_not_implemented", source: "gateway-rpc", method: "chat.send" },
+      source,
+      metadata: { event: "routing_not_implemented", source: "gateway-rpc", method: "chat.send", threadId: stringParam(params.threadId) },
     });
     return {
       status: 200,
@@ -536,6 +566,7 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
   if (method === "chat.abort") {
     const loadedConfig = loadGatewayConfig();
     const agentId = typeof params.agentId === "string" ? params.agentId.trim() : "default";
+    const source = gatewayTranscriptSource({ substrate: "gateway-rpc", channel: "webchat", chatType: "internal", senderId: params.senderId, threadId: params.threadId });
     const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: params.sessionKey, agentId, substrate: "gateway-rpc", channel: "webchat", chatType: "internal", senderId: params.senderId, threadId: params.threadId });
     const abort = abortGatewayRuns(sessionKey, params.runId);
     const entry = appendTranscriptEntry({
@@ -543,6 +574,7 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
       agentId,
       role: "event",
       text: abort.aborted ? "Abort requested and active run aborted." : "Abort requested, but no active run was found.",
+      source,
       metadata: {
         event: "abort_requested",
         source: "gateway-rpc",
@@ -811,6 +843,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const input = body as Record<string, unknown>;
     const loadedConfig = loadGatewayConfig();
     const agentId = typeof input.agentId === "string" && input.agentId.trim() ? input.agentId.trim() : "default";
+    const source = gatewayTranscriptSource({ substrate: "gateway-rest", channel: "webchat", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
     const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: input.sessionKey, agentId, substrate: "gateway-rest", channel: "webchat", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
     const text = typeof input.text === "string" ? input.text : "";
     if (!text.trim()) {
@@ -823,7 +856,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       agentId,
       role: "user",
       text,
-      metadata,
+      source,
+      metadata: { ...(metadata ?? {}), threadId: stringParam(input.threadId) },
     });
     const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, metadata });
     if (routed.routed) {
@@ -837,7 +871,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       role: "event",
       text: "MindStone routing is not implemented yet; message persisted but no assistant run was started.",
       parentId: userEntry.id,
-      metadata: { event: "routing_not_implemented" },
+      source,
+      metadata: { event: "routing_not_implemented", source: "gateway-rest", threadId: stringParam(input.threadId) },
     });
     sendJson(res, 501, {
       ok: false,
@@ -869,6 +904,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const input = body as Record<string, unknown>;
     const loadedConfig = loadGatewayConfig();
     const agentId = typeof input.agentId === "string" && input.agentId.trim() ? input.agentId.trim() : "default";
+    const source = gatewayTranscriptSource({ substrate: "gateway-rest", channel: "webchat", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
     const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: input.sessionKey, agentId, substrate: "gateway-rest", channel: "webchat", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
     const abort = abortGatewayRuns(sessionKey, input.runId);
     const entry = appendTranscriptEntry({
@@ -876,8 +912,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       agentId,
       role: "event",
       text: abort.aborted ? "Abort requested and active run aborted." : "Abort requested, but no active run was found.",
+      source,
       metadata: {
         event: "abort_requested",
+        source: "gateway-rest",
+        threadId: stringParam(input.threadId),
         runId: typeof input.runId === "string" ? input.runId : undefined,
         abortReason: abort.reason,
       },
@@ -903,6 +942,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const input = body as Record<string, unknown>;
     const loadedConfig = loadGatewayConfig();
     const agentId = typeof input.agentId === "string" && input.agentId.trim() ? input.agentId.trim() : "default";
+    const source = gatewayTranscriptSource({ substrate: "gateway-rest", channel: "webchat", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
     const sessionKey = gatewaySessionKey({ config: loadedConfig.config, explicitSessionKey: input.sessionKey, agentId, substrate: "gateway-rest", channel: "webchat", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
     const role = input.role;
     if (!isTranscriptRole(role)) {
@@ -915,7 +955,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       role,
       text: typeof input.text === "string" ? input.text : undefined,
       content: input.content,
-      metadata: typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : undefined,
+      source,
+      metadata: { ...(typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {}), threadId: stringParam(input.threadId) },
     });
     sendJson(res, 201, { ok: true, entry });
     return;
@@ -974,6 +1015,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       senderId: typeof input.user === "string" ? input.user : model,
     });
 
+    const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-chat-completions", chatType: "internal", senderId: typeof input.user === "string" ? input.user : model });
     const persistedEntries = messages.map((message, index) => {
       const record = typeof message === "object" && message !== null ? message as Record<string, unknown> : {};
       return appendTranscriptEntry({
@@ -982,6 +1024,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         role: openAiRoleToTranscriptRole(record.role),
         text: transcriptTextFromOpenAiContent(record.content),
         content: record.content,
+        source,
         metadata: {
           source: "openai-chat-completions",
           model,
@@ -1025,6 +1068,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       agentId,
       role: "event",
       text: "OpenAI-compatible chat completions are not connected to MindStone routing yet.",
+      source,
       metadata: { event: "routing_not_implemented", source: "openai-chat-completions", model },
     });
 

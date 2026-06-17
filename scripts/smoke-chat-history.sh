@@ -93,8 +93,10 @@ const history = await request("/chat/history", undefined, 200);
 if (history.sessionKey !== sessionKey) process.exit(1);
 if (!Array.isArray(history.entries) || history.entries.length !== 5) process.exit(1);
 if (history.entries[0].text !== "hello webchat") process.exit(1);
-if (history.entries[3].metadata?.event !== "routing_not_implemented") process.exit(1);
-if (history.entries[4].metadata?.event !== "abort_requested") process.exit(1);
+if (history.entries[0].source?.substrate !== "gateway-rest" || history.entries[0].source?.channel !== "webchat") process.exit(1);
+if (history.entries[2].source?.substrate !== "gateway-rest" || history.entries[2].source?.chatType !== "internal") process.exit(1);
+if (history.entries[3].metadata?.event !== "routing_not_implemented" || history.entries[3].source?.substrate !== "gateway-rest") process.exit(1);
+if (history.entries[4].metadata?.event !== "abort_requested" || history.entries[4].source?.substrate !== "gateway-rest") process.exit(1);
 NODE
 
 echo "Chat history Gateway smoke test passed."

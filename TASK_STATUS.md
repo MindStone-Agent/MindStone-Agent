@@ -89,7 +89,7 @@
 ### Upcoming
 
 - [x] Replace placeholder initializer with interactive onboarding flow.
-- [ ] Connect transcript-aware `/v1/chat/completions` to real MindStone routing.
+- [x] Connect transcript-aware `/v1/chat/completions` to real MindStone routing for configured mock/Pi provider modes.
 - [x] Add WebSocket transport over the method-name RPC bridge.
 - [x] Add run manager abstraction for active/abortable Gateway runs.
 - [x] Connect router flow to consume selected sliding-window `promptEntries` for mock and Pi provider modes.
@@ -187,6 +187,8 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] Gateway REST chat, RPC chat, and OpenAI chat completions use the configured shared default when `sessionKey` is omitted.
   - [ ] Telegram/WebChat UI/OpenWebUI/Pi adapter final validation still pending.
 - [ ] Preserve channel/source metadata inside the unified transcript without splitting memory continuity.
+  - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, routing events, and assistant responses now write structured `TranscriptEntry.source` metadata.
+  - [ ] Telegram/WebChat UI/Pi adapter source metadata still pending final validation.
 
 ### Channels and surfaces
 
