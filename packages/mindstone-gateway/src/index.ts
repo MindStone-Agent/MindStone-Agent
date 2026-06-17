@@ -9,7 +9,7 @@ import { WEBCHAT_UI_HTML } from "./webchat-ui.js";
 
 export { MockMindStoneProvider } from "./mock-provider.js";
 export { PiMindStoneProvider } from "./pi-provider.js";
-export { PiSessionMindStoneProvider, piSessionFileForKey } from "./pi-session-provider.js";
+export { PiSessionMindStoneProvider, createPiSessionEventCapture, piSessionFileForKey, summarizePiSessionEvent } from "./pi-session-provider.js";
 export { GatewayRunManager } from "./run-manager.js";
 import {
   appendTranscriptEntry,

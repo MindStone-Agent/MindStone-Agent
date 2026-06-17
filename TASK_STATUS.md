@@ -35,7 +35,8 @@
 - [x] Implement Core sliding-window prompt selector and Gateway pruning event path.
 - [x] Add router/provider abstraction with placeholder, mock, and lightweight Pi provider scaffold.
 - [x] Add `pi-session` routing mode scaffold that maps canonical MindStone session keys to deterministic Pi session files and uses Pi `SessionManager` / `createAgentSession` for real turns when isolated auth is available.
-- [ ] Complete event/stream capture and richer prompt/context injection for the session-backed Pi runner.
+- [x] Add first bounded Pi `AgentSession.subscribe(...)` event diagnostics capture for the `pi-session` runner; smoke validates event counts, bounded event summaries, tool metadata summaries, and final assistant-text extraction without live auth.
+- [ ] Complete full event/stream capture into MindStone transcript/source metadata and richer prompt/context injection for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
 - [x] Add provider-first isolated Pi provider/model discovery to native config/onboarding routing setup.
@@ -186,7 +187,8 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] substrate compaction coordination result reporting (`requested`, `available`, `substrate`, `reason`)
   - [ ] actual substrate compact invocation for a live in-process Pi `AgentSession` or Pi-extension `ctx.compact()` bridge, without splitting or mutating the authoritative JSONL transcript
   - [x] first `pi-session` runner scaffold added; current MindStone proves Pi `SessionManager` can coexist with canonical single-session/SCRI when MindStone owns the session-key → session-file mapping
-  - [ ] complete live-auth validation and event/stream transcript capture
+  - [x] first bounded `AgentSession.subscribe(...)` event diagnostics capture in `pi-session` provider raw result
+  - [ ] complete live-auth validation and full event/stream transcript capture
   - [x] post-compact maintenance scaffold event after handoff replay
   - [ ] actual post-compact archive/backfill/embed/dream-cycle execution policy
 - [x] Implement sliding-window prompt pruning and config.

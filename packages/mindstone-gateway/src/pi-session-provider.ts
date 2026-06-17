@@ -42,8 +42,35 @@ type PiAgentMessage = {
   content?: unknown;
 };
 
+type PiAgentEvent = {
+  type?: string;
+  message?: PiAgentMessage;
+  messages?: PiAgentMessage[];
+  assistantMessageEvent?: unknown;
+  toolName?: string;
+  toolCallId?: string;
+  willRetry?: boolean;
+};
+
+type PiSessionEventSummary = {
+  type: string;
+  messageRole?: string;
+  assistantTextChars?: number;
+  toolName?: string;
+  toolCallId?: string;
+  willRetry?: boolean;
+};
+
+type PiSessionEventCapture = {
+  events: PiSessionEventSummary[];
+  eventCounts: Record<string, number>;
+  assistantTexts: string[];
+  lastAssistantText?: string;
+};
+
 type PiAgentSession = {
   prompt(text: string, options?: Record<string, unknown>): Promise<void>;
+  subscribe?(listener: (event: PiAgentEvent) => void): () => void;
   dispose(): void;
   messages?: PiAgentMessage[];
   state?: { messages?: PiAgentMessage[]; model?: PiModel };
@@ -115,6 +142,43 @@ function textFromContent(content: unknown): string {
 function lastAssistantText(messages: PiAgentMessage[] | undefined): string {
   const assistant = [...(messages ?? [])].reverse().find((message) => message.role === "assistant");
   return textFromContent(assistant?.content).trim();
+}
+
+export function summarizePiSessionEvent(event: PiAgentEvent): PiSessionEventSummary {
+  const type = typeof event.type === "string" ? event.type : "unknown";
+  const assistantText = event.message?.role === "assistant" ? textFromContent(event.message.content).trim() : undefined;
+  return {
+    type,
+    messageRole: event.message?.role,
+    assistantTextChars: assistantText ? assistantText.length : undefined,
+    toolName: typeof event.toolName === "string" ? event.toolName : undefined,
+    toolCallId: typeof event.toolCallId === "string" ? event.toolCallId : undefined,
+    willRetry: typeof event.willRetry === "boolean" ? event.willRetry : undefined,
+  };
+}
+
+export function createPiSessionEventCapture(limit = 200): { capture: PiSessionEventCapture; record: (event: PiAgentEvent) => void } {
+  const capture: PiSessionEventCapture = { events: [], eventCounts: {}, assistantTexts: [] };
+  const rememberAssistantText = (message: PiAgentMessage | undefined): void => {
+    if (message?.role !== "assistant") return;
+    const text = textFromContent(message.content).trim();
+    if (!text) return;
+    if (capture.assistantTexts.at(-1) !== text) capture.assistantTexts.push(text);
+    capture.lastAssistantText = text;
+  };
+  return {
+    capture,
+    record(event) {
+      const type = typeof event.type === "string" ? event.type : "unknown";
+      capture.eventCounts[type] = (capture.eventCounts[type] ?? 0) + 1;
+      capture.events.push(summarizePiSessionEvent(event));
+      if (capture.events.length > limit) capture.events.splice(0, capture.events.length - limit);
+      rememberAssistantText(event.message);
+      if (event.type === "agent_end") {
+        rememberAssistantText([...(event.messages ?? [])].reverse().find((message) => message.role === "assistant"));
+      }
+    },
+  };
 }
 
 export class PiSessionMindStoneProvider implements MindStoneModelProvider {
@@ -203,6 +267,9 @@ export class PiSessionMindStoneProvider implements MindStoneModelProvider {
       sessionStartEvent: { type: "session_start", reason: "startup" },
     });
 
+    const { capture, record } = createPiSessionEventCapture();
+    const unsubscribe = session.subscribe?.((event) => record(event));
+
     try {
       const prompt = request.messages
         .map((message) => {
@@ -213,8 +280,8 @@ export class PiSessionMindStoneProvider implements MindStoneModelProvider {
         })
         .filter((text) => text.trim())
         .join("\n\n");
-      await session.prompt(prompt || request.transcriptEntries.at(-1)?.text || "");
-      const text = lastAssistantText(session.messages ?? session.state?.messages);
+      await session.prompt(prompt || request.transcriptEntries.at(-1)?.text || "", { source: "rpc" });
+      const text = capture.lastAssistantText ?? lastAssistantText(session.messages ?? session.state?.messages);
       return {
         role: "assistant",
         text,
@@ -223,9 +290,15 @@ export class PiSessionMindStoneProvider implements MindStoneModelProvider {
           sessionId: session.sessionId,
           sessionFile,
           modelFallbackMessage,
+          piSession: {
+            eventCounts: capture.eventCounts,
+            events: capture.events,
+            assistantTexts: capture.assistantTexts,
+          },
         },
       };
     } finally {
+      unsubscribe?.();
       session.dispose();
     }
   }
