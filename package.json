@@ -30,7 +30,8 @@
     "smoke:pi-provider-config": "./scripts/smoke-pi-provider-config.sh",
     "smoke:config-wizard": "./scripts/smoke-config-wizard.sh",
     "smoke:onboard": "./scripts/smoke-onboard.sh",
-    "smoke:config-pi-models": "./scripts/smoke-config-pi-models.sh"
+    "smoke:config-pi-models": "./scripts/smoke-config-pi-models.sh",
+    "smoke:doctor": "./scripts/smoke-doctor.sh"
   },
   "engines": {
     "node": ">=22.19.0"

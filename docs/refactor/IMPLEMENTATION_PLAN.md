@@ -274,6 +274,8 @@ The preferred order is:
 - [ ] Update install flow.
 - [ ] Update daemon install/status/restart flow.
 - [ ] Add config migration/doctor checks.
+  - [x] First-pass `mindstone doctor` checks runtime isolation, config parse, identity files, session policy, context policy, memory config, routing mode/model, and provider/model discovery.
+  - [ ] Config migrations and live provider/model-call validation are still pending.
 - [ ] Add `.gitignore` entries for private state if missing.
 - [ ] Update README quick start after implementation is real.
 - [ ] Add architecture docs and API docs as needed.

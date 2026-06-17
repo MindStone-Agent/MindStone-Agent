@@ -184,5 +184,6 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 ### Provider/routing validation
 
 - [ ] Live-test Pi-backed model calls with isolated credentials/config.
-- [ ] Add `mindstone doctor` checks for provider auth/model availability.
+- [x] Add first-pass `mindstone doctor` checks for runtime/config/session/identity/memory/routing/provider discovery.
+- [ ] Extend `mindstone doctor` with live provider auth/model-call validation.
 - [ ] Ensure provider setup follows provider → auth method → model, never a flat global model list.

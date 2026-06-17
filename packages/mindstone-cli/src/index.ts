@@ -6,11 +6,13 @@ import { stdin as input, stdout as output } from "node:process";
 import {
   formatConfigSummary,
   formatMindStoneConfigHeader,
+  getMindStoneDoctorReport,
   loadMindStoneConfig,
   resolveConfigPath,
   runMindStoneConfigWizard,
   runMindStoneOnboardingWizard,
   runtimePathsFromEnv,
+  type MindStoneDoctorReport,
   type MindStoneModelInfo,
   type MindStoneProviderAuthSetupRequest,
   type MindStoneProviderInfo,
@@ -19,7 +21,7 @@ import {
 } from "@mindstone-agent/core";
 import { PiMindStoneProvider } from "@mindstone-agent/gateway";
 
-type Command = "config" | "onboard" | "status" | "help";
+type Command = "config" | "onboard" | "status" | "doctor" | "help";
 
 const gold = (text: string) => `\x1b[38;5;214m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -33,6 +35,7 @@ function usage(): string {
     "  mindstone config       Configure MindStone-Agent runtime settings",
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone status       Show isolated runtime/config status",
+    "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
     "  mindstone help         Show this help",
     "",
     "Environment:",
@@ -45,7 +48,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "config" || raw === "onboard" || raw === "status" || raw === "help") return raw;
+  if (raw === "config" || raw === "onboard" || raw === "status" || raw === "doctor" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -291,6 +294,32 @@ function printStatus(): void {
   output.write("\n");
 }
 
+function severityIcon(severity: MindStoneDoctorReport["checks"][number]["severity"]): string {
+  if (severity === "pass") return "✓";
+  if (severity === "warn") return "!";
+  if (severity === "fail") return "✗";
+  return "i";
+}
+
+function printDoctor(report: MindStoneDoctorReport): void {
+  output.write(`${gold("🔶 MindStone-Agent doctor")}\n\n`);
+  for (const check of report.checks) {
+    const icon = severityIcon(check.severity);
+    const title = check.severity === "fail" ? bold(check.title) : check.title;
+    output.write(`${icon} [${check.severity}] ${check.id}: ${title}`);
+    if (check.detail) output.write(`\n    ${dim(check.detail)}`);
+    output.write("\n");
+  }
+  output.write("\n");
+  output.write(
+    [
+      `Summary: ${report.summary.pass} pass, ${report.summary.warn} warn, ${report.summary.fail} fail, ${report.summary.info} info`,
+      `Result: ${report.ok ? "ok" : "failed"}`,
+    ].join("\n"),
+  );
+  output.write("\n");
+}
+
 async function main(): Promise<void> {
   const command = parseCommand(process.argv);
   if (command === "help") {
@@ -299,6 +328,19 @@ async function main(): Promise<void> {
   }
   if (command === "status") {
     printStatus();
+    return;
+  }
+  if (command === "doctor") {
+    const discovery = await discoverPiModels();
+    const report = getMindStoneDoctorReport({
+      providerDiscovery: {
+        providerCount: discovery.providers.length,
+        modelCount: discovery.models.length,
+        error: discovery.error,
+      },
+    });
+    printDoctor(report);
+    if (!report.ok) process.exitCode = 1;
     return;
   }
 
