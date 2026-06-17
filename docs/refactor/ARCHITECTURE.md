@@ -340,7 +340,7 @@ Current default:
 ProviderRouteAgentRunner
 ```
 
-It wraps the existing routed provider path so CLI and Gateway behavior remain stable while preparing for future runners that own live Pi `AgentSession` handles, streaming event emission, abort semantics, and substrate compaction control. Run context and runner diagnostics are preserved in API responses and assistant transcript metadata. Pi-backed execution is expected to move behind this boundary rather than leaking provider calls into channel surfaces.
+It wraps the existing routed provider path so CLI and Gateway behavior remain stable while preparing for future runners that own live Pi `AgentSession` handles, streaming event emission, abort semantics, and substrate compaction control. Run context and runner diagnostics are preserved in API responses and assistant transcript metadata. `routing.mode = "pi-session"` now selects a Gateway-side `PiSessionAgentRunner` from native CLI and Gateway paths, while `PiSessionMindStoneProvider` remains as a compatibility wrapper. Pi-backed execution should continue moving behind this boundary rather than leaking provider calls into channel surfaces.
 
 ## 5. Current-Pi Adapter Architecture
 

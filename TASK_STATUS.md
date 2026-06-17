@@ -36,6 +36,7 @@
 - [x] Add router/provider abstraction with placeholder, mock, and lightweight Pi provider scaffold.
 - [x] Add Core `AgentRunner` boundary and default `ProviderRouteAgentRunner`; native chat and Gateway routes now call the runner boundary rather than `runMindStoneRoute(...)` directly.
 - [x] Pass run context through `AgentRunner` and preserve runner diagnostics in API responses plus assistant transcript metadata.
+- [x] Add Gateway-side `PiSessionAgentRunner`; CLI/Gateway select it for `routing.mode = "pi-session"`, while the legacy `PiSessionMindStoneProvider` remains a compatibility wrapper.
 - [x] Add `pi-session` routing mode scaffold that maps canonical MindStone session keys to deterministic Pi session files and uses Pi `SessionManager` / `createAgentSession` for real turns when isolated auth is available.
 - [x] Add first bounded Pi `AgentSession.subscribe(...)` event diagnostics capture for the `pi-session` runner; smoke validates event counts, bounded event summaries, tool metadata summaries, and final assistant-text extraction without live auth.
 - [x] Move `pi-session` MindStone system messages (identity/SCRI/handoff) into Pi `DefaultResourceLoader.appendSystemPrompt` and send only the latest user turn through `AgentSession.prompt(...)`.
@@ -105,8 +106,9 @@
 - [x] Add run manager abstraction for active/abortable Gateway runs.
 - [x] Connect router flow to consume selected sliding-window `promptEntries` for mock and Pi provider modes.
 - [x] Add native `mindstone chat` MVP interaction surface with mock-routed validation.
-- [x] Add Core `AgentRunner` boundary and wire native chat/Gateway route execution through the default provider-route runner, including run context and runner diagnostics.
+- [x] Add Core `AgentRunner` boundary and wire native chat/Gateway route execution through runners, including run context and runner diagnostics.
 - [x] Add first session-backed Pi runner scaffold using Pi `AgentSession` / `SessionManager`; provider-level `completeSimple` remains scaffold/fallback, not the real Pi-backed MVP path.
+- [x] Move `pi-session` route selection behind `PiSessionAgentRunner` for native CLI and Gateway paths, with the provider wrapper retained for compatibility.
 - [ ] Live-test Pi-backed model calls through the session-backed runner with isolated credentials/config.
 - [ ] Finish auto-compact runtime policy for compatible substrates as a secondary/fallback path behind sliding-window/SCRI.
   - Primary continuity premise: one shared append-only JSONL session/transcript across channels; pruning/compaction affect only live prompt/session context.

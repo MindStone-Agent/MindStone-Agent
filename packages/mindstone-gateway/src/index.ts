@@ -4,12 +4,14 @@ import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
 import { PiMindStoneProvider } from "./pi-provider.js";
 import { PiSessionMindStoneProvider } from "./pi-session-provider.js";
+import { PiSessionAgentRunner } from "./pi-session-runner.js";
 import { GatewayRunManager } from "./run-manager.js";
 import { WEBCHAT_UI_HTML } from "./webchat-ui.js";
 
 export { MockMindStoneProvider } from "./mock-provider.js";
 export { PiMindStoneProvider } from "./pi-provider.js";
 export { PiSessionMindStoneProvider, buildPiSessionPromptParts, createPiSessionEventCapture, piSessionFileForKey, summarizePiSessionEvent } from "./pi-session-provider.js";
+export { PiSessionAgentRunner } from "./pi-session-runner.js";
 export { GatewayRunManager } from "./run-manager.js";
 import {
   appendTranscriptEntry,
@@ -34,6 +36,7 @@ import {
   requestGatewaySubstrateCompaction,
   writeAutoCompactHandoff,
   type MindStoneConfig,
+  type AgentRunner,
   type MindStoneModelInfo,
   type MindStoneModelProvider,
   type TranscriptEntry,
@@ -130,6 +133,14 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
     });
   }
   return undefined;
+}
+
+function resolveRunner(config: MindStoneConfig | undefined, provider: MindStoneModelProvider): AgentRunner {
+  const mode = resolveRoutingMode(config);
+  if (mode === "pi-session") {
+    return new PiSessionAgentRunner({ provider });
+  }
+  return createProviderRouteAgentRunner();
 }
 
 function appendAutoCompactTranscriptEvent(input: {
@@ -434,7 +445,7 @@ async function runConfiguredRoute(input: {
   });
 
   try {
-    const runner = createProviderRouteAgentRunner();
+    const runner = resolveRunner(input.config, provider);
     const route = await runner.run({
       agentId: input.agentId,
       sessionKey: input.sessionKey,

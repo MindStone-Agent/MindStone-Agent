@@ -44,7 +44,7 @@ NODE
 
 node --input-type=module <<'NODE'
 import { providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
-import { buildPiSessionPromptParts, createPiSessionEventCapture, piSessionFileForKey } from './packages/mindstone-gateway/dist/index.js';
+import { buildPiSessionPromptParts, createPiSessionEventCapture, PiSessionAgentRunner, piSessionFileForKey } from './packages/mindstone-gateway/dist/index.js';
 import { resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
 const actual = piSessionFileForKey(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions`, process.env.CHAT_SESSION_KEY);
@@ -91,6 +91,37 @@ if (providerDiagnostics?.piSession?.prompt?.appendSystemPromptCount !== 1) throw
 if (providerDiagnostics?.piSession?.eventCounts?.agent_end !== 1) throw new Error('provider diagnostics did not preserve event counts');
 if (!providerDiagnostics?.piSession?.events?.some((event) => event.toolName === 'read')) throw new Error('provider diagnostics did not preserve event summaries');
 if (providerDiagnostics?.piSession?.assistantTextCount !== 2) throw new Error('provider diagnostics did not preserve assistant text count');
+
+const fakeProvider = {
+  id: 'fake-pi-session-provider',
+  listModels() { return []; },
+  async completeChat(request) {
+    return {
+      role: 'assistant',
+      text: `fake pi-session runner: ${request.messages.at(-1)?.text ?? ''}`,
+      model: request.model,
+    };
+  },
+};
+const runner = new PiSessionAgentRunner({ provider: fakeProvider });
+const runnerResult = await runner.run({
+  agentId: 'default',
+  sessionKey: process.env.CHAT_SESSION_KEY,
+  entries: [{
+    id: 'entry-1',
+    timestamp: new Date().toISOString(),
+    sessionKey: process.env.CHAT_SESSION_KEY,
+    agentId: 'default',
+    role: 'user',
+    text: 'runner boundary sentinel',
+  }],
+  model: { id: 'fake/model', provider: 'pi-session' },
+  provider: fakeProvider,
+  runContext: { runId: 'run-smoke', surface: 'smoke' },
+});
+if (runnerResult.runner.id !== 'pi-session' || runnerResult.runner.mode !== 'pi-session') throw new Error('pi-session runner diagnostics missing');
+if (runnerResult.runner.runId !== 'run-smoke' || runnerResult.runner.surface !== 'smoke') throw new Error('pi-session runner context missing');
+if (!runnerResult.result.text.includes('runner boundary sentinel')) throw new Error('pi-session runner did not execute routed provider path');
 NODE
 
 set +e

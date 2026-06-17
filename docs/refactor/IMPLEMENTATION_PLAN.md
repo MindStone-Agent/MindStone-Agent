@@ -125,7 +125,9 @@ The preferred order is:
   - Current default: `ProviderRouteAgentRunner`, a behavior-preserving wrapper around the existing routed provider path.
   - Native chat and Gateway route execution now call the runner boundary, preparing for future live Pi session handles, streaming, abort, and compaction control.
   - Run context and runner diagnostics are preserved in API responses and assistant transcript metadata.
+  - `routing.mode = "pi-session"` now selects a Gateway-side `PiSessionAgentRunner` in native CLI and Gateway paths; `PiSessionMindStoneProvider` remains available as a compatibility wrapper.
 - [x] Add first `pi-session` routing scaffold with deterministic canonical session-key → Pi session-file mapping and Pi `SessionManager` / `createAgentSession` use.
+- [x] Add Gateway-side `PiSessionAgentRunner` and select it from CLI/Gateway for `routing.mode = "pi-session"`.
 - [ ] Complete a session-backed Pi runner modeled on current MindStone's embedded Pi runner:
   - [x] isolated Pi `agentDir` and session directory
   - [x] canonical MindStone session key → Pi session file mapping

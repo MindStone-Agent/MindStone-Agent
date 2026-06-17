@@ -21,6 +21,7 @@ import {
   runMindStoneConfigWizard,
   runMindStoneOnboardingWizard,
   runtimePathsFromEnv,
+  type AgentRunner,
   type MindStoneDoctorReport,
   type MindStoneModelInfo,
   type MindStoneProviderAuthSetupRequest,
@@ -28,7 +29,7 @@ import {
   type MindStonePrompter,
   type MindStoneSelectOption,
 } from "@mindstone-agent/core";
-import { MockMindStoneProvider, PiMindStoneProvider, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
+import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 
 type Command = "chat" | "config" | "onboard" | "status" | "doctor" | "memory" | "help";
 
@@ -377,6 +378,10 @@ function resolveChatProvider(config: ReturnType<typeof loadMindStoneConfig>["con
   throw new Error("MindStone chat requires routing.mode to be mock, pi-session, or pi. Current mode is placeholder; run `mindstone config` or edit config.json first.");
 }
 
+function resolveChatRunner(config: ReturnType<typeof loadMindStoneConfig>["config"], provider: MockMindStoneProvider | PiMindStoneProvider | PiSessionMindStoneProvider): AgentRunner | undefined {
+  return config?.routing?.mode === "pi-session" ? new PiSessionAgentRunner({ provider }) : undefined;
+}
+
 async function runOneChatTurn(params: {
   argv: string[];
   message: string;
@@ -404,6 +409,7 @@ async function runOneChatTurn(params: {
   const modelOverride = optionValue(params.argv, "--model");
   if (modelOverride) metadata.model = modelOverride;
   const provider = resolveChatProvider(config);
+  const runner = resolveChatRunner(config, provider);
   const model = resolveMindStoneChatModel({ config, agentId, routingMode: mode, metadata });
   return runMindStoneChatTurn({
     agentId,
@@ -413,6 +419,7 @@ async function runOneChatTurn(params: {
     configPath: params.loaded.path,
     provider,
     model,
+    runner,
     source: {
       substrate: "mindstone-cli",
       channel: "terminal",
