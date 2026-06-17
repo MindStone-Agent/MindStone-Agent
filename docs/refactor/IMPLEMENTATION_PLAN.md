@@ -125,11 +125,13 @@ The preferred order is:
   - Current default: `ProviderRouteAgentRunner`, a behavior-preserving wrapper around the existing routed provider path.
   - Native chat and Gateway route execution now call the runner boundary, preparing for future live Pi session handles, streaming, abort, and compaction control.
   - Run context and runner diagnostics are preserved in API responses and assistant transcript metadata.
+  - `AgentRunner.stream(...)` now exists as a lifecycle-only contract scaffold with `run_started`, `run_completed`, and `run_failed` validation; live token/substrate streaming remains pending.
   - `routing.mode = "pi-session"` now selects a Gateway-side `PiSessionAgentRunner` in native CLI and Gateway paths; `PiSessionMindStoneProvider` remains available as a compatibility wrapper.
   - Shared `PiSessionExecutor` owns the actual Pi `AgentSession` implementation so runner/provider compatibility paths no longer duplicate execution logic.
 - [x] Add first `pi-session` routing scaffold with deterministic canonical session-key → Pi session-file mapping and Pi `SessionManager` / `createAgentSession` use.
 - [x] Add Gateway-side `PiSessionAgentRunner` and select it from CLI/Gateway for `routing.mode = "pi-session"`.
 - [x] Extract `PiSessionExecutor` as the shared Pi AgentSession execution layer used by the runner and compatibility provider.
+- [x] Add lifecycle-only `AgentRunner.stream(...)` contract scaffold and smoke validation for provider-route and pi-session runners.
 - [ ] Complete a session-backed Pi runner modeled on current MindStone's embedded Pi runner:
   - [x] isolated Pi `agentDir` and session directory
   - [x] canonical MindStone session key → Pi session file mapping
@@ -140,6 +142,7 @@ The preferred order is:
   - [x] `AgentSession.prompt(...)` for real turns when isolated auth/model config is available
   - [x] first bounded `AgentSession.subscribe(...)` event diagnostics capture in `pi-session` raw results, including event counts, bounded event summaries, tool metadata summaries, and final assistant-text extraction
   - [x] sanitized `pi-session` provider diagnostics are copied into assistant transcript metadata for native chat and Gateway routes when available
+  - [x] lifecycle-only `AgentRunner.stream(...)` scaffold exists
   - [ ] full streaming/event capture into MindStone transcript/source metadata
   - [ ] eventual `AgentSession.compact(...)` coordination for secondary auto-compact mode
 - [x] Demote the current provider-level `completeSimple` Pi path to scaffold/fallback status until or unless it can be proven to preserve Pi harness semantics.
@@ -394,21 +397,18 @@ The preferred order is:
 
 ## 14. Immediate Next Steps
 
-- [ ] Complete the checkpoint memory follow-up for the current auto-compact work:
-  - `reference_pi_public_docs.md`
-  - updates to live-memory/context-management memories
-  - recall backfill/archive verification after approval
 - [x] Re-center the next engineering slice on MindStone continuity fundamentals:
   - one shared session/transcript across Gateway, WebChat, OpenAI-compatible, Pi adapter, and future channels
   - JSONL transcript remains append-only and authoritative
   - sliding-window pruning affects only the active prompt window
   - SCRI/recall rehydrates relevant older context from transcript/memory layers
   - verified Gateway REST/RPC/WS/OpenAI default-session convergence with `npm run smoke:unified-session`
-- [ ] Perform a focused Pi SDK/docs spike for compaction only as the secondary fallback path:
-  - verify SDK `AgentSession.compact(customInstructions?)` behavior in an isolated runtime
-  - verify extension `ctx.compact()` behavior and event ordering from inside Pi
-  - confirm neither approach would split session authority or treat compaction summary as durable memory
-  - decide whether MindStone-Agent should add a session-backed Pi runner/provider or a Pi-extension control bridge
-- [ ] If the compaction integration path is clean and respects unified transcript continuity, implement actual substrate compact invocation behind the existing coordination interface.
-- [ ] If the compaction path requires larger runtime restructuring or threatens transcript/session authority, defer it explicitly and implement native sqlite-vec packaging/loading or channel/session validation next.
-- [ ] Add compact config UX for checkpoint/handoff trigger, compact target, and post-compact archive/backfill/embed/dream-cycle execution policy, framed as fallback policy behind sliding-window/SCRI.
+- [x] Add the session-backed Pi runner path behind `AgentRunner`:
+  - `PiSessionAgentRunner` selected for `routing.mode = "pi-session"`
+  - `PiSessionExecutor` owns shared Pi `AgentSession` execution logic
+  - provider wrapper retained for compatibility only
+  - no live auth/model success claimed yet
+- [x] Add lifecycle-only `AgentRunner.stream(...)` contract scaffold.
+- [ ] Implement full Pi session event/stream capture into MindStone transcript/source metadata.
+- [ ] Live-test Pi-backed model calls through `AgentSession.prompt(...)` only after isolated auth/model config is intentionally provided.
+- [ ] Add actual substrate compact invocation behind the existing coordination interface only after the session-backed runner can preserve unified transcript authority.

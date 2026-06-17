@@ -1,5 +1,6 @@
 import { runMindStoneRoute } from "../routing/run.js";
-import type { AgentRunInput, AgentRunResult, AgentRunner } from "./types.js";
+import { agentRunStreamErrorFromUnknown } from "./stream.js";
+import type { AgentRunInput, AgentRunResult, AgentRunner, AgentRunStreamEvent } from "./types.js";
 
 /**
  * Default MindStone-Agent runner for current routed provider execution.
@@ -29,6 +30,51 @@ export class ProviderRouteAgentRunner implements AgentRunner {
         surface: input.runContext?.surface,
       },
     };
+  }
+
+  async *stream(input: AgentRunInput): AsyncIterable<AgentRunStreamEvent> {
+    const startedAt = input.runContext?.startedAt ?? new Date().toISOString();
+    const runContext = { ...input.runContext, startedAt };
+    let sequence = 0;
+    yield {
+      type: "run_started",
+      sequence: sequence++,
+      timestamp: startedAt,
+      runnerId: this.id,
+      runId: runContext.runId,
+      surface: runContext.surface,
+      metadata: runContext.metadata,
+      input: {
+        agentId: input.agentId,
+        sessionKey: input.sessionKey,
+        model: input.model,
+      },
+    };
+    try {
+      const result = await this.run({ ...input, runContext });
+      yield {
+        type: "run_completed",
+        sequence: sequence++,
+        timestamp: result.runner.completedAt,
+        runnerId: this.id,
+        runId: runContext.runId,
+        surface: runContext.surface,
+        metadata: runContext.metadata,
+        result,
+      };
+    } catch (error) {
+      yield {
+        type: "run_failed",
+        sequence: sequence++,
+        timestamp: new Date().toISOString(),
+        runnerId: this.id,
+        runId: runContext.runId,
+        surface: runContext.surface,
+        metadata: runContext.metadata,
+        error: agentRunStreamErrorFromUnknown(error),
+      };
+      throw error;
+    }
   }
 }
 
