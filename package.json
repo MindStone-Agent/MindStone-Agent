@@ -31,7 +31,8 @@
     "smoke:config-wizard": "./scripts/smoke-config-wizard.sh",
     "smoke:onboard": "./scripts/smoke-onboard.sh",
     "smoke:config-pi-models": "./scripts/smoke-config-pi-models.sh",
-    "smoke:doctor": "./scripts/smoke-doctor.sh"
+    "smoke:doctor": "./scripts/smoke-doctor.sh",
+    "smoke:auto-recall": "./scripts/smoke-auto-recall.sh"
   },
   "engines": {
     "node": ">=22.19.0"

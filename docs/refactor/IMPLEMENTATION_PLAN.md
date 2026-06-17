@@ -173,17 +173,20 @@ The preferred order is:
 - [ ] Define/port vector backend abstraction.
 - [ ] Decide LanceDB vs sqlite-vec support order.
 - [ ] Port SCRI recall query/scoring/dedup/context-budget behavior.
+  - [x] First-pass local autoRecall query/scoring/context-budget insertion is implemented for deterministic smoke tests.
+  - [ ] Full SCRI/vector scoring and dedup remain pending.
 - [ ] Add dream-cycle hook for compaction/session/pruning boundary.
 - [x] Implement sliding-window prompt pruning: trigger at `ceilingPercent`, prune toward `floorPercent`, retain `minRecentMessages`, preserve transcript.
 - [x] Connect sliding-window prompt selection to router prompt messages for mock and Pi provider modes.
-- [ ] Implement real auto-recall prompt insertion behind `memory.autoRecall`.
+- [x] Implement first-pass auto-recall prompt insertion behind `memory.autoRecall` for local deterministic memory docs.
+- [ ] Implement real vector-backed auto-recall prompt insertion behind `memory.autoRecall`.
 - [ ] Implement embedding/provider configuration beyond the placeholder `embeddingProvider` field.
 - [ ] Live-test selected prompt messages against Pi-backed provider with isolated credentials/config.
 - [ ] Implement auto-compact runtime policy for compatible substrates.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle.
 - [ ] Add manual backfill command.
 - [ ] Add memory status and diagnostics.
-- [ ] Add tests for recall injection formatting.
+- [x] Add tests for recall injection formatting.
 
 ### Candidate files
 

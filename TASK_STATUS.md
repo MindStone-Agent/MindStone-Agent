@@ -128,11 +128,13 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 ### Memory and context
 
 - [ ] Implement real auto-recall config, not only the `memory.autoRecall` toggle.
-  - recall query construction
-  - vector search
-  - relevance scoring
-  - dedup
-  - prompt-budget insertion
+  - [x] Add first-pass recall query construction from latest user turn.
+  - [x] Add deterministic local recall provider for development/smoke tests.
+  - [x] Add lexical relevance scoring and min-score filtering.
+  - [x] Add prompt-budget insertion into route assembly.
+  - [x] Add `memory_recall_injected` transcript event.
+  - [ ] Add real vector search provider and embedding-backed recall.
+  - [ ] Add dedup against active prompt/session content.
 - [ ] Implement embedding/provider configuration.
   - embedding provider selection
   - API key/env/reference handling

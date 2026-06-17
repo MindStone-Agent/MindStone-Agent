@@ -5,7 +5,7 @@ export * from "./transcript/index.js";
 export * from "./context/index.js";
 export * from "./provider/index.js";
 export * from "./profile/index.js";
-export * from "./memory/types.js";
+export * from "./memory/index.js";
 export * from "./scri/types.js";
 export * from "./channels/types.js";
 export * from "./wizard/prompter.js";

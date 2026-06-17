@@ -125,10 +125,12 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
 
   const memory = config?.memory;
   check(checks, memory?.vectorStore ? "pass" : "warn", "memory.vectorStore", "Memory vector store is configured", memory?.vectorStore ?? "unset");
-  if (memory?.autoRecall && !memory.embeddingProvider) {
+  if (memory?.autoRecall && !memory.embeddingProvider && !memory.localDocuments?.length) {
     check(checks, "warn", "memory.embedding", "Auto-recall has an embedding provider", "memory.autoRecall is true but memory.embeddingProvider is unset");
   } else if (memory?.embeddingProvider) {
     check(checks, "pass", "memory.embedding", "Embedding provider is configured", memory.embeddingProvider);
+  } else if (memory?.autoRecall && memory.localDocuments?.length) {
+    check(checks, "pass", "memory.embedding", "Auto-recall has a deterministic local memory source", `${memory.localDocuments.length} local documents`);
   } else {
     check(checks, "info", "memory.embedding", "Embedding provider is unset", "fine until autoRecall is enabled");
   }

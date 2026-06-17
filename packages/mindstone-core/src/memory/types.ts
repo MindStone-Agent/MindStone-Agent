@@ -27,3 +27,21 @@ export type MemoryQuery = {
   agentId?: string;
   filters?: Record<string, unknown>;
 };
+
+export type MemoryRecallConfig = {
+  maxResults?: number;
+  maxPromptTokens?: number;
+  minScore?: number;
+};
+
+export type MemoryRecallResult = {
+  query: string;
+  hits: MemoryHit[];
+  promptText?: string;
+  promptTokens: number;
+};
+
+export interface MemoryRecallProvider {
+  id: string;
+  search(query: MemoryQuery): Promise<MemoryHit[]> | MemoryHit[];
+}

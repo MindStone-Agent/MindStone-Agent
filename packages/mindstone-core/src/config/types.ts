@@ -1,4 +1,5 @@
 import type { ContextManagementPolicy } from "../context/index.js";
+import type { MemoryDocument, MemoryRecallConfig } from "../memory/index.js";
 import type { MindStoneSelectedProfile } from "../profile/index.js";
 
 export type GatewayAuthConfig =
@@ -21,6 +22,9 @@ export type MindStoneMemoryConfig = {
   autoRecall?: boolean;
   vectorStore?: "lancedb" | "sqlite-vec" | "memory";
   embeddingProvider?: string;
+  recall?: MemoryRecallConfig;
+  /** Deterministic local memory docs for development/smoke tests before live vector providers are wired. */
+  localDocuments?: MemoryDocument[];
 };
 
 export type MindStoneSessionConfig = {

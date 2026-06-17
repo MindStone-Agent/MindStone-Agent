@@ -11,6 +11,7 @@ export { GatewayRunManager } from "./run-manager.js";
 import {
   appendTranscriptEntry,
   buildPromptWindow,
+  createLocalMemoryRecallProvider,
   decideGatewayAuth,
   getMindStoneSystemStatus,
   listTranscriptSessions,
@@ -293,6 +294,11 @@ async function runConfiguredRoute(input: {
       provider,
       contextManagement: input.config?.contextManagement,
       reservedTokens: resolveReservedPromptTokens(input.metadata),
+      memoryRecall: {
+        enabled: input.config?.memory?.autoRecall === true,
+        provider: createLocalMemoryRecallProvider(input.config?.memory?.localDocuments),
+        config: input.config?.memory?.recall,
+      },
       signal: run.abortController.signal,
       metadata: input.metadata,
     });
@@ -305,6 +311,23 @@ async function runConfiguredRoute(input: {
         text: `Context window pruned from ${route.promptWindow.tokensBefore} to ${route.promptWindow.tokensAfter} estimated tokens. Transcript preserved.`,
         runId: run.id,
         metadata: route.promptWindow.pruneEvent,
+      });
+    }
+
+    if (route.memoryRecall?.hits.length) {
+      appendTranscriptEntry({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        role: "event",
+        text: `Injected ${route.memoryRecall.hits.length} recalled memory chunk(s) into prompt context.`,
+        runId: run.id,
+        metadata: {
+          event: "memory_recall_injected",
+          query: route.memoryRecall.query,
+          hitCount: route.memoryRecall.hits.length,
+          promptTokens: route.memoryRecall.promptTokens,
+          hits: route.memoryRecall.hits.map((hit) => ({ id: hit.id, chunkId: hit.chunkId, title: hit.title, score: hit.score })),
+        },
       });
     }
 
@@ -340,6 +363,13 @@ async function runConfiguredRoute(input: {
           promptEntries: route.promptWindow.promptEntries.length,
           prunedEntries: route.promptWindow.prunedEntries.length,
         },
+        memoryRecall: route.memoryRecall
+          ? {
+              query: route.memoryRecall.query,
+              hitCount: route.memoryRecall.hits.length,
+              promptTokens: route.memoryRecall.promptTokens,
+            }
+          : undefined,
         entry: assistantEntry,
       },
     };
