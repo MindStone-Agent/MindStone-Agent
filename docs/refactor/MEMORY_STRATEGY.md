@@ -6,6 +6,10 @@
 
 ## Thesis
 
+Memory is not a feature. It is a layered continuity system.
+
+No single layer has to pretend to be memory by itself. LOG is not memory. Vectors are not truth. Handoff is not identity. Memory docs are not the full experience. But together they make continuity much harder to break.
+
 MindStone-Agent should combine the strongest parts of MS4* file memory with MindStone proper's journal/dream-cycle model.
 
 The important distinction:
