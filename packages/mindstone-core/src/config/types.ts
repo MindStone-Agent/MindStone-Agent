@@ -63,6 +63,19 @@ export type MindStoneRoutingConfig = {
   };
 };
 
+export type MindStoneRunnerStreamConfig = {
+  /** Persist selected AgentRunner.stream(...) events as transcript event entries. Defaults to false. */
+  persistTranscriptEvents?: boolean;
+  /** Stream event types to persist. Defaults to substrate_event only. */
+  eventTypes?: string[];
+  /** Maximum stream events to persist per turn. Defaults to 50. */
+  maxEvents?: number;
+};
+
+export type MindStoneObservabilityConfig = {
+  runnerStream?: MindStoneRunnerStreamConfig;
+};
+
 export type MindStoneInteractionDetail = "concise" | "balanced" | "detailed";
 export type MindStoneRecommendationStyle = "direct" | "options_tradeoffs" | "ask_first";
 export type MindStoneWorkStyle = "act_directly" | "plan_first" | "ask_first";
@@ -114,4 +127,5 @@ export type MindStoneConfig = {
   memory?: MindStoneMemoryConfig;
   contextManagement?: ContextManagementPolicy;
   routing?: MindStoneRoutingConfig;
+  observability?: MindStoneObservabilityConfig;
 };

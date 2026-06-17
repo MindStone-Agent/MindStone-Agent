@@ -44,7 +44,8 @@
 - [x] Preserve sanitized provider diagnostics from `pi-session` raw results into assistant transcript metadata for native chat and Gateway routes when available.
 - [x] Add `AgentRunner.stream(...)` contract scaffold and lifecycle event smoke validation for provider-route and pi-session runners.
 - [x] Replay bounded `pi-session` diagnostics as `substrate_event` stream events after runner execution; this is not live token streaming yet.
-- [ ] Complete full event/stream capture into MindStone transcript/source metadata and richer prompt/context injection for the session-backed Pi runner.
+- [x] Add gated transcript persistence for selected `AgentRunner.stream(...)` events in native chat and Gateway route paths.
+- [ ] Complete full live event/stream capture into MindStone transcript/source metadata and richer prompt/context injection for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
 - [x] Add provider-first isolated Pi provider/model discovery to native config/onboarding routing setup.
@@ -113,7 +114,8 @@
 - [x] Add first session-backed Pi runner scaffold using Pi `AgentSession` / `SessionManager`; provider-level `completeSimple` remains scaffold/fallback, not the real Pi-backed MVP path.
 - [x] Move `pi-session` route selection behind `PiSessionAgentRunner` for native CLI and Gateway paths, with the provider wrapper retained for compatibility.
 - [x] Extract `PiSessionExecutor` as the shared AgentSession execution layer under the runner/provider wrapper.
-- [x] Add lifecycle-only `AgentRunner.stream(...)` scaffold and post-run bounded `pi-session` diagnostic replay as stream `substrate_event`s; live token/substrate streaming remains pending.
+- [x] Add lifecycle-only `AgentRunner.stream(...)` scaffold and post-run bounded `pi-session` diagnostic replay as stream `substrate_event`s.
+- [x] Add `observability.runnerStream.persistTranscriptEvents` gate for selected stream event transcript persistence.
 - [ ] Live-test Pi-backed model calls through the session-backed runner with isolated credentials/config.
 - [ ] Finish auto-compact runtime policy for compatible substrates as a secondary/fallback path behind sliding-window/SCRI.
   - Primary continuity premise: one shared append-only JSONL session/transcript across channels; pruning/compaction affect only live prompt/session context.

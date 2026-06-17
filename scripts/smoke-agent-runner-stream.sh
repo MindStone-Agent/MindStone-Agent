@@ -11,7 +11,10 @@ echo "== AgentRunner stream contract smoke test =="
 npm run build:mindstone
 
 node --input-type=module <<'NODE'
-import { createProviderRouteAgentRunner } from './packages/mindstone-core/dist/index.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createProviderRouteAgentRunner, readTranscriptEntries, runMindStoneChatTurn } from './packages/mindstone-core/dist/index.js';
 import { PiSessionAgentRunner } from './packages/mindstone-gateway/dist/index.js';
 
 const transcriptEntry = {
@@ -81,6 +84,48 @@ if (piSessionEvents[3].type !== 'run_completed') throw new Error('pi-session: fi
 if (piSessionEvents.some((event, index) => event.sequence !== index)) throw new Error('pi-session: stream sequence was not monotonic from zero');
 if (piSessionEvents[3].result.runner.id !== 'pi-session') throw new Error('pi-session: completed result runner diagnostics missing');
 
+const runtimeDir = mkdtempSync(join(tmpdir(), 'mindstone-agent-runner-stream-transcript.'));
+process.env.MINDSTONE_AGENT_RUNTIME_DIR = runtimeDir;
+try {
+  const turn = await runMindStoneChatTurn({
+    agentId: 'default',
+    sessionKey: 'agent:default:main',
+    message: 'persist stream diagnostics sentinel',
+    config: {
+      observability: {
+        runnerStream: {
+          persistTranscriptEvents: true,
+          eventTypes: ['substrate_event'],
+          maxEvents: 10,
+        },
+      },
+    },
+    provider: fakeProvider,
+    model,
+    runner: new PiSessionAgentRunner({ provider: fakeProvider }),
+    source: { substrate: 'smoke', channel: 'runner-stream', chatType: 'internal' },
+  });
+  if (turn.runnerStream?.eventCount !== 4 || turn.runnerStream?.persistedEventCount !== 2) {
+    throw new Error(`unexpected runnerStream summary: ${JSON.stringify(turn.runnerStream)}`);
+  }
+  if (turn.events.filter((entry) => entry.metadata?.event === 'runner_stream_event').length !== 2) {
+    throw new Error('runner stream events were not returned from chat turn');
+  }
+  const transcript = readTranscriptEntries('agent:default:main');
+  const streamEntries = transcript.filter((entry) => entry.metadata?.event === 'runner_stream_event');
+  if (streamEntries.length !== 2) throw new Error(`expected 2 persisted runner stream events, got ${streamEntries.length}`);
+  if (!streamEntries.every((entry) => entry.metadata?.streamType === 'substrate_event' && entry.metadata?.substrate === 'pi')) {
+    throw new Error('persisted runner stream events were not Pi substrate events');
+  }
+  const assistantIndex = transcript.findIndex((entry) => entry.role === 'assistant');
+  const lastStreamIndex = transcript.findLastIndex((entry) => entry.metadata?.event === 'runner_stream_event');
+  if (assistantIndex < 0 || lastStreamIndex < 0 || lastStreamIndex > assistantIndex) {
+    throw new Error('runner stream transcript events were not persisted before assistant response');
+  }
+} finally {
+  rmSync(runtimeDir, { recursive: true, force: true });
+}
+
 const failingProvider = {
   id: 'failing-stream-provider',
   listModels() { return [model]; },
@@ -99,7 +144,7 @@ if (failureEvents.length !== 2) throw new Error(`expected started+failed events,
 if (failureEvents[0].type !== 'run_started' || failureEvents[1].type !== 'run_failed') throw new Error('failure stream did not emit started then failed');
 if (failureEvents[1].error.message !== 'stream failure sentinel') throw new Error('failure stream did not serialize error message');
 
-console.log(JSON.stringify({ ok: true, providerRouteEvents: 2, piSessionEvents: piSessionEvents.length, failureEvents: 2 }, null, 2));
+console.log(JSON.stringify({ ok: true, providerRouteEvents: 2, piSessionEvents: piSessionEvents.length, persistedStreamEvents: 2, failureEvents: 2 }, null, 2));
 NODE
 
 echo "AgentRunner stream contract smoke test passed."

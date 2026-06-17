@@ -37,6 +37,8 @@ import {
   requestGatewaySubstrateCompaction,
   writeAutoCompactHandoff,
   type MindStoneConfig,
+  type AgentRunResult,
+  type AgentRunStreamEvent,
   type AgentRunner,
   type MindStoneModelInfo,
   type MindStoneModelProvider,
@@ -98,6 +100,118 @@ function resolveContextWindowTokens(config: MindStoneConfig | undefined, agentId
 
 function resolveReservedPromptTokens(metadata?: Record<string, unknown>): number {
   return numberFromMetadata(metadata, "reservedTokens") ?? 0;
+}
+
+const RUNNER_STREAM_EVENT_TYPES: AgentRunStreamEvent["type"][] = [
+  "run_started",
+  "route_planned",
+  "text_delta",
+  "substrate_event",
+  "run_completed",
+  "run_failed",
+];
+
+type RunnerStreamOptions = {
+  persistTranscriptEvents: boolean;
+  eventTypes: AgentRunStreamEvent["type"][];
+  maxEvents: number;
+};
+
+function normalizeRunnerStreamEventTypes(values: readonly string[] | undefined): AgentRunStreamEvent["type"][] {
+  if (!values?.length) return ["substrate_event"];
+  const known = new Set<string>(RUNNER_STREAM_EVENT_TYPES);
+  const normalized = values.filter((value): value is AgentRunStreamEvent["type"] => known.has(value));
+  return normalized.length ? normalized : ["substrate_event"];
+}
+
+function resolveRunnerStreamOptions(config: MindStoneConfig | undefined): RunnerStreamOptions {
+  const configured = config?.observability?.runnerStream;
+  return {
+    persistTranscriptEvents: configured?.persistTranscriptEvents === true,
+    eventTypes: normalizeRunnerStreamEventTypes(configured?.eventTypes),
+    maxEvents: Math.max(0, Math.floor(configured?.maxEvents ?? 50)),
+  };
+}
+
+async function runGatewayRunner(input: {
+  runner: AgentRunner;
+  runInput: Parameters<AgentRunner["run"]>[0];
+  streamOptions: RunnerStreamOptions;
+}): Promise<{ route: AgentRunResult; streamEvents: AgentRunStreamEvent[] }> {
+  if (!input.streamOptions.persistTranscriptEvents) {
+    return { route: await input.runner.run(input.runInput), streamEvents: [] };
+  }
+  const streamEvents: AgentRunStreamEvent[] = [];
+  let route: AgentRunResult | undefined;
+  for await (const event of input.runner.stream(input.runInput)) {
+    streamEvents.push(event);
+    if (event.type === "run_completed") route = event.result;
+  }
+  if (!route) throw new Error("AgentRunner stream completed without run_completed event");
+  return { route, streamEvents };
+}
+
+function runnerStreamEventText(event: AgentRunStreamEvent): string {
+  if (event.type === "substrate_event") return `Runner ${event.runnerId} emitted ${event.substrate} substrate event.`;
+  if (event.type === "text_delta") return `Runner ${event.runnerId} emitted streamed text delta (${event.text.length} chars).`;
+  if (event.type === "run_started") return `Runner ${event.runnerId} started.`;
+  if (event.type === "run_completed") return `Runner ${event.runnerId} completed.`;
+  if (event.type === "run_failed") return `Runner ${event.runnerId} failed: ${event.error.message}`;
+  return `Runner ${event.runnerId} planned route.`;
+}
+
+function runnerStreamEventMetadata(event: AgentRunStreamEvent): Record<string, unknown> {
+  const base = {
+    event: "runner_stream_event",
+    streamType: event.type,
+    sequence: event.sequence,
+    runnerId: event.runnerId,
+    sourceTimestamp: event.timestamp,
+    surface: event.surface,
+    streamMetadata: event.metadata,
+  };
+  if (event.type === "substrate_event") return { ...base, substrate: event.substrate, payload: event.event };
+  if (event.type === "text_delta") return { ...base, textChars: event.text.length };
+  if (event.type === "run_failed") return { ...base, error: event.error };
+  if (event.type === "run_started") return { ...base, input: event.input };
+  if (event.type === "route_planned") {
+    return {
+      ...base,
+      plan: {
+        agentId: event.plan.agentId,
+        sessionKey: event.plan.sessionKey,
+        model: event.plan.model,
+        promptEntries: event.plan.promptWindow.promptEntries.length,
+        prunedEntries: event.plan.promptWindow.prunedEntries.length,
+      },
+    };
+  }
+  return base;
+}
+
+function appendRunnerStreamTranscriptEvents(input: {
+  sessionKey: string;
+  agentId: string;
+  runId: string;
+  source?: TranscriptEntry["source"];
+  streamEvents: AgentRunStreamEvent[];
+  streamOptions: RunnerStreamOptions;
+}): TranscriptEntry[] {
+  if (!input.streamOptions.persistTranscriptEvents || input.streamOptions.maxEvents <= 0) return [];
+  const selectedTypes = new Set(input.streamOptions.eventTypes);
+  return input.streamEvents
+    .filter((event) => selectedTypes.has(event.type))
+    .slice(0, input.streamOptions.maxEvents)
+    .map((event) => appendTranscriptEntry({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      role: "event",
+      text: runnerStreamEventText(event),
+      content: event.type === "substrate_event" ? event.event : undefined,
+      runId: input.runId,
+      source: input.source,
+      metadata: runnerStreamEventMetadata(event),
+    }));
 }
 
 function resolveRoutingMode(config: MindStoneConfig | undefined): "placeholder" | "mock" | "pi" | "pi-session" {
@@ -447,35 +561,40 @@ async function runConfiguredRoute(input: {
 
   try {
     const runner = resolveRunner(input.config, provider);
-    const route = await runner.run({
-      agentId: input.agentId,
-      sessionKey: input.sessionKey,
-      entries,
-      model,
-      provider,
-      identityContext: loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
-      contextManagement: input.config?.contextManagement,
-      reservedTokens: resolveReservedPromptTokens(input.metadata),
-      handoffReplay,
-      memoryRecall: {
-        enabled: input.config?.memory?.autoRecall === true,
-        provider: input.config?.memory?.vectorStore === "sqlite-vec"
-          ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
-              ...(input.config?.memory?.localDocuments ?? []),
-              ...discoverFileMemoryDocuments({ config: input.config }),
-            ])
-          : createLocalMemoryRecallProvider([
-              ...(input.config?.memory?.localDocuments ?? []),
-              ...discoverFileMemoryDocuments({ config: input.config }),
-            ]),
-        config: input.config?.memory?.recall,
-      },
-      signal: run.abortController.signal,
-      metadata: input.metadata,
-      runContext: {
-        runId: run.id,
-        surface: source?.substrate ?? "gateway",
+    const streamOptions = resolveRunnerStreamOptions(input.config);
+    const { route, streamEvents } = await runGatewayRunner({
+      runner,
+      streamOptions,
+      runInput: {
+        agentId: input.agentId,
+        sessionKey: input.sessionKey,
+        entries,
+        model,
+        provider,
+        identityContext: loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
+        contextManagement: input.config?.contextManagement,
+        reservedTokens: resolveReservedPromptTokens(input.metadata),
+        handoffReplay,
+        memoryRecall: {
+          enabled: input.config?.memory?.autoRecall === true,
+          provider: input.config?.memory?.vectorStore === "sqlite-vec"
+            ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
+                ...(input.config?.memory?.localDocuments ?? []),
+                ...discoverFileMemoryDocuments({ config: input.config }),
+              ])
+            : createLocalMemoryRecallProvider([
+                ...(input.config?.memory?.localDocuments ?? []),
+                ...discoverFileMemoryDocuments({ config: input.config }),
+              ]),
+          config: input.config?.memory?.recall,
+        },
+        signal: run.abortController.signal,
         metadata: input.metadata,
+        runContext: {
+          runId: run.id,
+          surface: source?.substrate ?? "gateway",
+          metadata: input.metadata,
+        },
       },
     });
 
@@ -566,6 +685,15 @@ async function runConfiguredRoute(input: {
       });
     }
 
+    const runnerStreamTranscriptEvents = appendRunnerStreamTranscriptEvents({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      runId: run.id,
+      source,
+      streamEvents,
+      streamOptions,
+    });
+
     const assistantEntry = appendTranscriptEntry({
       sessionKey: input.sessionKey,
       agentId: input.agentId,
@@ -617,6 +745,12 @@ async function runConfiguredRoute(input: {
               query: route.memoryRecall.query,
               hitCount: route.memoryRecall.hits.length,
               promptTokens: route.memoryRecall.promptTokens,
+            }
+          : undefined,
+        runnerStream: streamOptions.persistTranscriptEvents
+          ? {
+              eventCount: streamEvents.length,
+              persistedEventCount: runnerStreamTranscriptEvents.length,
             }
           : undefined,
         entry: assistantEntry,
