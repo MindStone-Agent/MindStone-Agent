@@ -207,7 +207,8 @@ The preferred order is:
   - [x] Current handoff status/doctor visibility and ephemeral replay into routed prompt context.
   - [x] Explicit substrate compaction coordination-result reporting.
   - [x] Post-compact maintenance scaffold event after handoff replay.
-  - [ ] Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi session handle.
+  - [ ] Actual in-process Pi `AgentSession.compact()` invocation remains pending until Gateway owns a live Pi session handle or a Pi-extension control path can call `ctx.compact()`.
+  - [ ] Next spike: choose between a session-backed Pi runner/provider using the SDK `AgentSession` API and a Pi-extension bridge that coordinates compaction from inside Pi via `ctx.compact()`.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle execution policy.
 - [x] Add manual backfill command.
   - `mindstone memory backfill`
@@ -354,6 +355,9 @@ The preferred order is:
 ## 13. Dependencies
 
 - Current Pi SDK docs and extension APIs.
+  - Public docs: `https://pi.dev/docs/latest`
+  - Package registry: `https://pi.dev/packages`
+  - Compaction reference: `https://pi.dev/docs/latest/compaction`
 - Existing MindStone Gateway and channel code.
 - Embedding/vector backend decision.
 - Channel test credentials or mocked provider fixtures.
@@ -362,8 +366,14 @@ The preferred order is:
 
 ## 14. Immediate Next Steps
 
-- [ ] Clint reviews draft PRD/design for scope.
-- [ ] Ask Cairn for architecture review when urgent task clears.
-- [ ] Decide first PR scope.
-- [ ] Create an ADR or update `ARCHITECTURE.md` after decision.
-- [ ] Start Core contract extraction spike.
+- [ ] Complete the checkpoint memory follow-up for the current auto-compact work:
+  - `reference_pi_public_docs.md`
+  - updates to live-memory/context-management memories
+  - recall backfill/archive verification after approval
+- [ ] Perform a focused Pi SDK/docs spike for actual compaction integration:
+  - verify SDK `AgentSession.compact(customInstructions?)` behavior in an isolated runtime
+  - verify extension `ctx.compact()` behavior and event ordering from inside Pi
+  - decide whether MindStone-Agent should add a session-backed Pi runner/provider or a Pi-extension control bridge
+- [ ] If the compaction integration path is clean, implement actual substrate compact invocation behind the existing coordination interface.
+- [ ] If the compaction path requires larger runtime restructuring, defer it explicitly and implement native sqlite-vec packaging/loading next.
+- [ ] Add compact config UX for checkpoint/handoff trigger, compact target, and post-compact archive/backfill/embed/dream-cycle execution policy.
