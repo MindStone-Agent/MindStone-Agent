@@ -29,8 +29,9 @@ npm run build:mindstone
 ./scripts/init-runtime.sh
 
 node <<'NODE'
-const { readFileSync, writeFileSync } = require("node:fs");
-const path = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone/config.json`;
+const { mkdirSync, readFileSync, writeFileSync } = require("node:fs");
+const runtime = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone`;
+const path = `${runtime}/config.json`;
 const config = JSON.parse(readFileSync(path, "utf8"));
 config.routing = {
   mode: "mock",
@@ -38,6 +39,9 @@ config.routing = {
   mock: { responsePrefix: "router-smoke" },
 };
 config.gateway.http.chatCompletions.enabled = true;
+mkdirSync(`${runtime}/agents/default`, { recursive: true });
+writeFileSync(`${runtime}/agents/default/IDENTITY.md`, '# Router Mock Identity\n\nIdentity sentinel: ROUTER-MOCK-IDENTITY.');
+writeFileSync(`${runtime}/agents/default/USER.md`, '# Router Mock User\n\nUser sentinel: ROUTER-MOCK-USER.');
 writeFileSync(path, JSON.stringify(config, null, 2));
 console.log(path);
 NODE
@@ -69,6 +73,8 @@ const chat = await post("/chat/send", {
 });
 if (!chat.ok || !chat.entry?.text?.includes("hello chat router")) process.exit(1);
 if (!chat.runId || chat.provider !== "mock") process.exit(1);
+if (!chat.identityContext?.injected || chat.identityContext.name !== "Router Mock Identity") process.exit(1);
+if (!chat.identityContext.identityPath?.endsWith("IDENTITY.md") || !chat.identityContext.userPath?.endsWith("USER.md")) process.exit(1);
 
 const rpc = await post("/rpc", {
   id: "1",
@@ -77,6 +83,7 @@ const rpc = await post("/rpc", {
 });
 if (!rpc.ok || !rpc.result?.entry?.text?.includes("hello rpc router")) process.exit(1);
 if (rpc.result.provider !== "mock") process.exit(1);
+if (!rpc.result.identityContext?.injected || rpc.result.identityContext.name !== "Router Mock Identity") process.exit(1);
 
 const openai = await post("/v1/chat/completions", {
   model: "mindstone/mock",
@@ -85,6 +92,7 @@ const openai = await post("/v1/chat/completions", {
 });
 if (openai.object !== "chat.completion") process.exit(1);
 if (!openai.choices?.[0]?.message?.content?.includes("hello openai router")) process.exit(1);
+if (!openai.mindstone?.identityContext?.injected || openai.mindstone.identityContext.name !== "Router Mock Identity") process.exit(1);
 
 const history = await fetch(`${base}/chat/history?sessionKey=${encodeURIComponent(process.env.CHAT_SESSION_KEY)}`);
 const body = await history.json();

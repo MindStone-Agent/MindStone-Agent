@@ -125,6 +125,11 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - Use selected profile + user context as identity seed.
   - Preserve the MindStone model where the agent forms/chooses its identity collaboratively.
   - Supports defer, candidate seed, and custom identity direction modes.
+- [x] Inject configured `IDENTITY.md` and `USER.md` into routed provider prompts as standing system context.
+  - Core route assembly reserves token budget for identity/user context.
+  - Gateway loads the routed agent identity/user files from config.
+  - REST/RPC/OpenAI-compatible/WebChat routed calls report `identityContext` diagnostics.
+  - Verified with `npm run smoke:identity-context`, `npm run smoke:router-mock`, and `npm run smoke:webchat-ui`.
 - [ ] Expand identity emergence into a real first-activation synthesis step.
 - [ ] Build the initial `Integration Builder` skill surface.
   - [x] Add Integration Builder as an onboarding profile.

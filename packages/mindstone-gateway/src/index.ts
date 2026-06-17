@@ -19,6 +19,7 @@ import {
   getMindStoneSystemStatus,
   listTranscriptSessions,
   loadMindStoneConfig,
+  loadMindStoneIdentity,
   readTranscriptEntries,
   resolveConfigPath,
   resolveConfiguredSessionKey,
@@ -368,10 +369,29 @@ function hasReplayedHandoff(entries: TranscriptEntry[], sha256: string): boolean
   });
 }
 
+function loadRouteIdentityContext(input: {
+  agentId: string;
+  config: MindStoneConfig | undefined;
+  configPath?: string;
+}) {
+  const agentConfig = input.config?.agents?.[input.agentId];
+  if (!agentConfig || !input.configPath) return undefined;
+  const loadedIdentity = loadMindStoneIdentity(input.agentId, agentConfig, input.configPath);
+  if (!loadedIdentity.identity) return undefined;
+  return {
+    name: loadedIdentity.identity.name,
+    identityMarkdown: loadedIdentity.identity.identityMarkdown,
+    userMarkdown: loadedIdentity.identity.userMarkdown,
+    identityPath: loadedIdentity.identityPath,
+    userPath: loadedIdentity.userPath,
+  };
+}
+
 async function runConfiguredRoute(input: {
   sessionKey: string;
   agentId: string;
   config: MindStoneConfig | undefined;
+  configPath?: string;
   metadata?: Record<string, unknown>;
 }): Promise<{
   routed: boolean;
@@ -407,6 +427,7 @@ async function runConfiguredRoute(input: {
       entries,
       model,
       provider,
+      identityContext: loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
       contextManagement: input.config?.contextManagement,
       reservedTokens: resolveReservedPromptTokens(input.metadata),
       handoffReplay,
@@ -539,6 +560,7 @@ async function runConfiguredRoute(input: {
         runId: run.id,
         provider: provider.id,
         model: model.id,
+        identityContext: route.identityContext,
         promptWindow: {
           mode: route.promptWindow.policy.mode,
           pruned: route.promptWindow.pruned,
@@ -655,7 +677,7 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
       source,
       metadata: { source: "gateway-rpc", method: "chat.send", threadId: stringParam(params.threadId) },
     });
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path });
     if (routed.routed) {
       return { status: routed.status, body: rpcSuccess(id, { persisted: true, userEntry, ...routed.body as Record<string, unknown> }) };
     }
@@ -990,7 +1012,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       source,
       metadata: { ...(metadata ?? {}), threadId: stringParam(input.threadId) },
     });
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, metadata });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata });
     if (routed.routed) {
       sendJson(res, routed.status, { persisted: true, userEntry, ...(routed.body as Record<string, unknown>) });
       return;
@@ -1164,9 +1186,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         },
       });
     });
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, metadata: { ...metadata, model } });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
     if (routed.routed && routed.status === 200) {
-      const routedBody = routed.body as { entry?: TranscriptEntry; promptWindow?: unknown; runId?: string };
+      const routedBody = routed.body as { entry?: TranscriptEntry; identityContext?: unknown; promptWindow?: unknown; runId?: string };
       sendJson(res, 200, {
         id: `chatcmpl-${routedBody.runId ?? Date.now().toString(36)}`,
         object: "chat.completion",
@@ -1182,6 +1204,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         mindstone: {
           persisted: true,
           sessionKey,
+          identityContext: routedBody.identityContext,
           promptWindow: routedBody.promptWindow,
           entries: [...persistedEntries, routedBody.entry].filter(Boolean),
         },

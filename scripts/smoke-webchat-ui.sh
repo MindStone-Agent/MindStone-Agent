@@ -82,6 +82,7 @@ const send = await json(
 );
 if (send.ok !== true || send.provider !== 'mock' || send.model !== 'mindstone/mock') process.exit(1);
 if (send.persisted !== true || !send.userEntry || !send.entry) process.exit(1);
+if (!send.identityContext?.injected || send.identityContext.name !== 'Default MindStone Agent') process.exit(1);
 if (!send.entry.text.includes('webchat-ui-smoke: hello from native webchat ui smoke')) process.exit(1);
 if (send.entry.metadata?.event !== 'assistant_response') process.exit(1);
 

@@ -139,7 +139,7 @@ The page is a native MindStone surface over the Gateway WebChat REST endpoints, 
 agent:default:main
 ```
 
-When routing is configured, WebChat sends through the same provider path as other Gateway surfaces and appends assistant responses to the canonical transcript. `npm run smoke:webchat-ui` validates the built-in shell plus a mock-routed assistant response with `gateway-rest` / `webchat` / `internal` source metadata.
+When routing is configured, WebChat sends through the same provider path as other Gateway surfaces and appends assistant responses to the canonical transcript. Routed calls now inject the configured agent `IDENTITY.md` and `USER.md` as standing system context before transcript/SCRI context. `npm run smoke:webchat-ui` validates the built-in shell plus a mock-routed assistant response with identity context and `gateway-rest` / `webchat` / `internal` source metadata.
 
 The static UI shell is served without auth so a browser can load it directly; configured Gateway auth still applies to transcript/status/chat API calls from the page. `mindstone status` reports the WebChat URL, default session key, and source metadata, and `mindstone doctor` checks WebChat shell/session readiness.
 
