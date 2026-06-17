@@ -460,6 +460,11 @@ async function runConfiguredRoute(input: {
       },
       signal: run.abortController.signal,
       metadata: input.metadata,
+      runContext: {
+        runId: run.id,
+        surface: source?.substrate ?? "gateway",
+        metadata: input.metadata,
+      },
     });
 
     if (route.handoffReplay) {
@@ -562,6 +567,7 @@ async function runConfiguredRoute(input: {
         provider: provider.id,
         model: model.id,
         usage: route.result.usage,
+        runner: route.runner,
         providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
       },
     });
@@ -575,6 +581,7 @@ async function runConfiguredRoute(input: {
         runId: run.id,
         provider: provider.id,
         model: model.id,
+        runner: route.runner,
         identityContext: route.identityContext,
         promptWindow: {
           mode: route.promptWindow.policy.mode,

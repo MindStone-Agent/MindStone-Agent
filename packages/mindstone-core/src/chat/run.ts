@@ -63,6 +63,7 @@ export type MindStoneChatTurnResult = {
     hitCount: number;
     promptTokens: number;
   };
+  runner: Awaited<ReturnType<AgentRunner["run"]>>["runner"];
 };
 
 function numberFromMetadata(metadata: Record<string, unknown> | undefined, key: string): number | undefined {
@@ -204,6 +205,11 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     },
     signal: input.signal,
     metadata: input.metadata,
+    runContext: {
+      runId,
+      surface: input.source?.substrate ?? "mindstone-chat",
+      metadata: input.metadata,
+    },
   });
 
   const events: TranscriptEntry[] = [];
@@ -276,6 +282,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       provider: input.provider.id,
       model: input.model.id,
       usage: route.result.usage,
+      runner: route.runner,
       providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
     },
   });
@@ -315,6 +322,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
           promptTokens: route.memoryRecall.promptTokens,
         }
       : undefined,
+    runner: route.runner,
   };
 }
 

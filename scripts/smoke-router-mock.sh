@@ -73,6 +73,7 @@ const chat = await post("/chat/send", {
 });
 if (!chat.ok || !chat.entry?.text?.includes("hello chat router")) process.exit(1);
 if (!chat.runId || chat.provider !== "mock") process.exit(1);
+if (chat.runner?.id !== "provider-route" || chat.runner?.runId !== chat.runId) process.exit(1);
 if (!chat.identityContext?.injected || chat.identityContext.name !== "Router Mock Identity") process.exit(1);
 if (!chat.identityContext.identityPath?.endsWith("IDENTITY.md") || !chat.identityContext.userPath?.endsWith("USER.md")) process.exit(1);
 
@@ -83,6 +84,7 @@ const rpc = await post("/rpc", {
 });
 if (!rpc.ok || !rpc.result?.entry?.text?.includes("hello rpc router")) process.exit(1);
 if (rpc.result.provider !== "mock") process.exit(1);
+if (rpc.result.runner?.id !== "provider-route" || rpc.result.runner?.runId !== rpc.result.runId) process.exit(1);
 if (!rpc.result.identityContext?.injected || rpc.result.identityContext.name !== "Router Mock Identity") process.exit(1);
 
 const openai = await post("/v1/chat/completions", {
@@ -93,10 +95,11 @@ const openai = await post("/v1/chat/completions", {
 if (openai.object !== "chat.completion") process.exit(1);
 if (!openai.choices?.[0]?.message?.content?.includes("hello openai router")) process.exit(1);
 if (!openai.mindstone?.identityContext?.injected || openai.mindstone.identityContext.name !== "Router Mock Identity") process.exit(1);
+if (openai.mindstone.entries?.[1]?.metadata?.runner?.id !== "provider-route") process.exit(1);
 
 const history = await fetch(`${base}/chat/history?sessionKey=${encodeURIComponent(process.env.CHAT_SESSION_KEY)}`);
 const body = await history.json();
-if (!body.entries.some((entry) => entry.role === "assistant" && entry.metadata?.event === "assistant_response")) process.exit(1);
+if (!body.entries.some((entry) => entry.role === "assistant" && entry.metadata?.event === "assistant_response" && entry.metadata?.runner?.id === "provider-route")) process.exit(1);
 NODE
 
 echo "Gateway mock router smoke test passed."

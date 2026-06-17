@@ -55,6 +55,8 @@ if (!result.assistantEntry?.text?.includes("hello native cli chat")) process.exi
 if (!result.identityContext?.injected || result.identityContext.name !== "CLI Chat Identity") process.exit(1);
 if (result.assistantEntry?.source?.substrate !== "mindstone-cli") process.exit(1);
 if (result.userEntry?.source?.channel !== "terminal") process.exit(1);
+if (result.runner?.id !== "provider-route" || result.runner?.mode !== "provider-route") process.exit(1);
+if (result.runner?.runId !== result.runId || result.runner?.surface !== "mindstone-cli") process.exit(1);
 const transcriptPath = join(
   process.env.MINDSTONE_AGENT_RUNTIME_DIR,
   "mindstone",
@@ -64,7 +66,7 @@ const transcriptPath = join(
 if (!existsSync(transcriptPath)) process.exit(1);
 const entries = readFileSync(transcriptPath, "utf8").trim().split(/\r?\n/).map((line) => JSON.parse(line));
 if (!entries.some((entry) => entry.role === "user" && entry.text === "hello native cli chat" && entry.source?.substrate === "mindstone-cli")) process.exit(1);
-if (!entries.some((entry) => entry.role === "assistant" && entry.metadata?.event === "assistant_response" && entry.metadata?.provider === "mock")) process.exit(1);
+if (!entries.some((entry) => entry.role === "assistant" && entry.metadata?.event === "assistant_response" && entry.metadata?.provider === "mock" && entry.metadata?.runner?.id === "provider-route")) process.exit(1);
 NODE
 
 echo "CLI chat smoke test passed."

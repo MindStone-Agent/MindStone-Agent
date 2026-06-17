@@ -12,8 +12,23 @@ import type { AgentRunInput, AgentRunResult, AgentRunner } from "./types.js";
 export class ProviderRouteAgentRunner implements AgentRunner {
   readonly id = "provider-route";
 
-  run(input: AgentRunInput): Promise<AgentRunResult> {
-    return runMindStoneRoute(input);
+  async run(input: AgentRunInput): Promise<AgentRunResult> {
+    const startedAt = input.runContext?.startedAt ?? new Date().toISOString();
+    const startedMs = Date.now();
+    const route = await runMindStoneRoute(input);
+    const completedAt = new Date().toISOString();
+    return {
+      ...route,
+      runner: {
+        id: this.id,
+        mode: "provider-route",
+        startedAt,
+        completedAt,
+        durationMs: Math.max(0, Date.now() - startedMs),
+        runId: input.runContext?.runId,
+        surface: input.runContext?.surface,
+      },
+    };
   }
 }
 
