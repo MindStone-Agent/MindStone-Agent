@@ -325,16 +325,22 @@ OpenAI compatibility should remain opt-in and authenticated. The Gateway should 
 
 ### 4.4 Agent execution boundary
 
-Open question: Gateway may either run an embedded agent runtime or delegate to substrates. For first implementation, choose the path with least disruption to existing Gateway behavior, but keep an interface boundary:
+Gateway/native surfaces route through a Core `AgentRunner` boundary. The first implementation is behavior-preserving:
 
 ```ts
 export interface AgentRunner {
+  id: string;
   run(input: AgentRunInput): Promise<AgentRunResult>;
-  stream?(input: AgentRunInput): AsyncIterable<AgentRunEvent>;
 }
 ```
 
-Pi can become one implementation or a control substrate. This decision should be validated before large channel porting.
+Current default:
+
+```text
+ProviderRouteAgentRunner
+```
+
+It wraps the existing routed provider path so CLI and Gateway behavior remain stable while preparing for future runners that own live Pi `AgentSession` handles, streaming event emission, abort semantics, and substrate compaction control. Pi-backed execution is expected to move behind this boundary rather than leaking provider calls into channel surfaces.
 
 ## 5. Current-Pi Adapter Architecture
 

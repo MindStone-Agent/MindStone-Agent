@@ -34,6 +34,7 @@
 - [x] Add selectable context-management policy config for `auto_compact` vs `sliding_window`.
 - [x] Implement Core sliding-window prompt selector and Gateway pruning event path.
 - [x] Add router/provider abstraction with placeholder, mock, and lightweight Pi provider scaffold.
+- [x] Add Core `AgentRunner` boundary and default `ProviderRouteAgentRunner`; native chat and Gateway routes now call the runner boundary rather than `runMindStoneRoute(...)` directly.
 - [x] Add `pi-session` routing mode scaffold that maps canonical MindStone session keys to deterministic Pi session files and uses Pi `SessionManager` / `createAgentSession` for real turns when isolated auth is available.
 - [x] Add first bounded Pi `AgentSession.subscribe(...)` event diagnostics capture for the `pi-session` runner; smoke validates event counts, bounded event summaries, tool metadata summaries, and final assistant-text extraction without live auth.
 - [x] Move `pi-session` MindStone system messages (identity/SCRI/handoff) into Pi `DefaultResourceLoader.appendSystemPrompt` and send only the latest user turn through `AgentSession.prompt(...)`.
@@ -103,6 +104,7 @@
 - [x] Add run manager abstraction for active/abortable Gateway runs.
 - [x] Connect router flow to consume selected sliding-window `promptEntries` for mock and Pi provider modes.
 - [x] Add native `mindstone chat` MVP interaction surface with mock-routed validation.
+- [x] Add Core `AgentRunner` boundary and wire native chat/Gateway route execution through the default provider-route runner.
 - [x] Add first session-backed Pi runner scaffold using Pi `AgentSession` / `SessionManager`; provider-level `completeSimple` remains scaffold/fallback, not the real Pi-backed MVP path.
 - [ ] Live-test Pi-backed model calls through the session-backed runner with isolated credentials/config.
 - [ ] Finish auto-compact runtime policy for compatible substrates as a secondary/fallback path behind sliding-window/SCRI.

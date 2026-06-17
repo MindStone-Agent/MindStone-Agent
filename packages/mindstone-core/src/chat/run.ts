@@ -10,6 +10,7 @@ import {
 import { providerDiagnosticsFromChatResult, type MindStoneModelInfo, type MindStoneModelProvider } from "../provider/index.js";
 import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
+import { createProviderRouteAgentRunner, type AgentRunner } from "../runner/index.js";
 import {
   appendTranscriptEntry,
   readTranscriptEntries,
@@ -25,6 +26,7 @@ export type MindStoneChatTurnInput = {
   configPath?: string;
   provider: MindStoneModelProvider;
   model: MindStoneModelInfo;
+  runner?: AgentRunner;
   source?: TranscriptSource;
   metadata?: Record<string, unknown>;
   signal?: AbortSignal;
@@ -176,7 +178,8 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       }
     : undefined;
 
-  const route = await runMindStoneRoute({
+  const runner = input.runner ?? createProviderRouteAgentRunner();
+  const route = await runner.run({
     agentId: input.agentId,
     sessionKey: input.sessionKey,
     entries,

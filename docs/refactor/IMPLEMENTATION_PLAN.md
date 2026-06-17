@@ -121,7 +121,9 @@ The preferred order is:
 - [ ] Add compaction/session lifecycle handling where Pi supports it.
 - [ ] Add Gateway status/check commands.
 - [ ] Add smoke validation instructions.
-- [ ] Add a Core/Gateway `AgentRunner` boundary so CLI, Gateway, WebChat, OpenAI-compatible, and future channel surfaces do not call provider completions directly.
+- [x] Add a Core/Gateway `AgentRunner` boundary so CLI, Gateway, WebChat, OpenAI-compatible, and future channel surfaces do not call route/provider execution directly.
+  - Current default: `ProviderRouteAgentRunner`, a behavior-preserving wrapper around the existing routed provider path.
+  - Native chat and Gateway route execution now call the runner boundary, preparing for future live Pi session handles, streaming, abort, and compaction control.
 - [x] Add first `pi-session` routing scaffold with deterministic canonical session-key → Pi session-file mapping and Pi `SessionManager` / `createAgentSession` use.
 - [ ] Complete a session-backed Pi runner modeled on current MindStone's embedded Pi runner:
   - [x] isolated Pi `agentDir` and session directory

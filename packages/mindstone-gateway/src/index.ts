@@ -26,9 +26,9 @@ import {
   resolveConfigPath,
   resolveConfiguredSessionKey,
   resolveGatewayAuthRequirement,
-  runMindStoneRoute,
   runtimePathsFromEnv,
   planPostCompactMaintenance,
+  createProviderRouteAgentRunner,
   providerDiagnosticsFromChatResult,
   readCurrentHandoff,
   requestGatewaySubstrateCompaction,
@@ -434,7 +434,8 @@ async function runConfiguredRoute(input: {
   });
 
   try {
-    const route = await runMindStoneRoute({
+    const runner = createProviderRouteAgentRunner();
+    const route = await runner.run({
       agentId: input.agentId,
       sessionKey: input.sessionKey,
       entries,
