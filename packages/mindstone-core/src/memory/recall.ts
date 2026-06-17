@@ -8,6 +8,7 @@ import type {
   MemoryRecallProvider,
   MemoryRecallResult,
 } from "./types.js";
+import { rankMemoryHitsWithScri } from "./scri-ranking.js";
 
 export type MemoryRecallInput = {
   agentId: string;
@@ -79,7 +80,11 @@ export function createLocalMemoryRecallProvider(documents: MemoryDocument[] | un
 
 function formatHit(hit: MemoryHit, index: number): string {
   const title = hit.title ?? hit.path ?? hit.id;
-  return [`${index + 1}. ${title} (score ${hit.score.toFixed(2)})`, hit.text.trim()].join("\n");
+  const metadata = hit.metadata ?? {};
+  const providerScore = typeof metadata.providerScore === "number" ? `, provider ${metadata.providerScore.toFixed(2)}` : "";
+  const scri = metadata.scri as { reasons?: unknown } | undefined;
+  const reasons = Array.isArray(scri?.reasons) ? ` — ${(scri.reasons as string[]).join(", ")}` : "";
+  return [`${index + 1}. ${title} (SCRI ${hit.score.toFixed(2)}${providerScore})${reasons}`, hit.text.trim()].join("\n");
 }
 
 export function buildMemoryRecallPrompt(hits: MemoryHit[], maxPromptTokens = DEFAULT_MAX_PROMPT_TOKENS): { text?: string; tokens: number; hits: MemoryHit[] } {
@@ -117,9 +122,27 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
   const limit = input.config?.maxResults ?? DEFAULT_MAX_RESULTS;
   const minScore = input.config?.minScore ?? DEFAULT_MIN_SCORE;
   const maxPromptTokens = input.config?.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS;
-  const rawHits = await provider.search({ text: query, limit, agentId: input.agentId });
-  const hits = rawHits.filter((hit) => hit.score >= minScore).slice(0, limit);
-  if (hits.length === 0) return { query, hits: [], promptTokens: 0 };
+  const rawHits = await provider.search({ text: query, limit: Math.max(limit * 3, limit), agentId: input.agentId });
+  const thresholdHits = rawHits.filter((hit) => hit.score >= minScore);
+  const ranked = rankMemoryHitsWithScri(thresholdHits, {
+    activeEntries: input.entries,
+    dedupAgainstActiveContext: input.config?.dedupAgainstActiveContext,
+    maxActiveEntriesForDedup: input.config?.maxActiveEntriesForDedup,
+  });
+  const hits = ranked.hits.slice(0, limit);
+  if (hits.length === 0) {
+    return {
+      query,
+      hits: [],
+      promptTokens: 0,
+      diagnostics: {
+        rawHitCount: rawHits.length,
+        rankedHitCount: ranked.hits.length,
+        selectedHitCount: 0,
+        rejected: ranked.rejected,
+      },
+    };
+  }
 
   const prompt = buildMemoryRecallPrompt(hits, maxPromptTokens);
   return {
@@ -127,5 +150,11 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
     hits: prompt.hits,
     promptText: prompt.text,
     promptTokens: prompt.tokens,
+    diagnostics: {
+      rawHitCount: rawHits.length,
+      rankedHitCount: ranked.hits.length,
+      selectedHitCount: prompt.hits.length,
+      rejected: ranked.rejected,
+    },
   };
 }

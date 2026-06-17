@@ -32,6 +32,14 @@ export type MemoryRecallConfig = {
   maxResults?: number;
   maxPromptTokens?: number;
   minScore?: number;
+  dedupAgainstActiveContext?: boolean;
+  maxActiveEntriesForDedup?: number;
+};
+
+export type MemoryRecallRejectedHit = {
+  id: string;
+  chunkId: string;
+  reason: string;
 };
 
 export type MemoryRecallResult = {
@@ -39,6 +47,12 @@ export type MemoryRecallResult = {
   hits: MemoryHit[];
   promptText?: string;
   promptTokens: number;
+  diagnostics?: {
+    rawHitCount: number;
+    rankedHitCount: number;
+    selectedHitCount: number;
+    rejected: MemoryRecallRejectedHit[];
+  };
 };
 
 export interface MemoryRecallProvider {

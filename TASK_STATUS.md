@@ -145,8 +145,11 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] Add Ollama-style local default: `ollama:nomic-embed-text` using `/v1/embeddings`.
   - [x] Add embedding backfill into SQLite chunks with `mindstone memory backfill --embed`.
   - [x] Add embedding-backed recall over embedded SQLite chunks, currently using JS cosine similarity over stored vectors.
+  - [x] Add first-pass SCRI ranking layer with provider score, kind/source priority, critical/evergreen boosts, usage boosts, recency/half-life boosts, and score diagnostics.
+  - [x] Add dedup against active prompt/session content.
+  - [x] Add candidate dedup to avoid repeated chunks/text consuming recall budget.
   - [ ] Add actual sqlite-vec extension nearest-neighbor search.
-  - [ ] Add dedup against active prompt/session content.
+  - [ ] Tune full SCRI salience model against real agent traces.
 - [ ] Implement embedding/provider configuration.
   - [x] embedding provider selection via `memory.embeddingProvider`
   - [x] API key/env/reference handling for OpenAI-compatible embedding endpoints

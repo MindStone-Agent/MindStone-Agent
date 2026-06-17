@@ -62,16 +62,24 @@ On each routed turn:
 1. Build a recall query from the current user prompt and routing/session context.
 2. Search vectorized structured memory files, journals, and transcripts.
 3. Select a small number of relevant hits within a strict token budget.
-4. Inject them into the current model call only.
-5. Record a compact transcript event such as:
+4. Deduplicate against active prompt/session content so the agent does not recall what is already in the live context.
+5. Rank hits through SCRI salience: provider similarity, memory kind/source, critical/evergreen flags, hits/prevented counters, recency, and half-life.
+6. Inject the selected hits into the current model call only.
+7. Record a compact transcript event such as:
 
 ```json
 {
   "event": "memory_recall_injected",
   "query": "...",
   "hitCount": 3,
+  "diagnostics": {
+    "rawHitCount": 12,
+    "rankedHitCount": 5,
+    "selectedHitCount": 3,
+    "rejected": [{ "id": "...", "reason": "duplicate-active-context" }]
+  },
   "hits": [
-    { "id": "...", "title": "...", "score": 0.82 }
+    { "id": "...", "title": "...", "score": 0.82, "providerScore": 0.73, "scri": { "reasons": ["critical", "evergreen"] } }
   ]
 }
 ```
@@ -274,11 +282,15 @@ Implemented in MindStone-Agent first pass:
 - embedding-backed recall over embedded SQLite chunks using cosine similarity in JS
 - `mindstone doctor` runs a sample embedding probe when an embedding provider is configured
 - smoke test proves embedding recall can retrieve a chunk with no lexical overlap
+- first-pass SCRI ranking layer with provider score, memory kind/source priority, critical/evergreen boosts, usage boosts, recency/half-life boosts, and score diagnostics
+- active prompt/session dedup so recall does not re-inject content already present in the live context
+- candidate dedup so repeated chunks/text do not consume recall budget
+- smoke test proves active-context dedup and SCRI score diagnostics
 
 Still pending:
 
 - actual sqlite-vec extension-backed nearest-neighbor search
 - config wizard UX for embeddings
-- dedup against active prompt/session content
-- full SCRI salience scoring
+- tuning SCRI weights against real traces
+- richer source-specific salience policies
 - checkpoint/dream-cycle automation for journal writing and memory index updates

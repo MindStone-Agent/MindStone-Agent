@@ -336,7 +336,16 @@ async function runConfiguredRoute(input: {
           query: route.memoryRecall.query,
           hitCount: route.memoryRecall.hits.length,
           promptTokens: route.memoryRecall.promptTokens,
-          hits: route.memoryRecall.hits.map((hit) => ({ id: hit.id, chunkId: hit.chunkId, title: hit.title, score: hit.score })),
+          diagnostics: route.memoryRecall.diagnostics,
+          hits: route.memoryRecall.hits.map((hit) => ({
+            id: hit.id,
+            chunkId: hit.chunkId,
+            title: hit.title,
+            score: hit.score,
+            providerScore: typeof hit.metadata?.providerScore === "number" ? hit.metadata.providerScore : undefined,
+            recallMode: typeof hit.metadata?.recallMode === "string" ? hit.metadata.recallMode : undefined,
+            scri: hit.metadata?.scri,
+          })),
         },
       });
     }
