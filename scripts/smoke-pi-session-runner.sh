@@ -43,6 +43,7 @@ writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
 NODE
 
 node --input-type=module <<'NODE'
+import { providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
 import { buildPiSessionPromptParts, createPiSessionEventCapture, piSessionFileForKey } from './packages/mindstone-gateway/dist/index.js';
 import { resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
@@ -70,6 +71,26 @@ if (promptParts.appendSystemPrompt.length !== 1) throw new Error('system context
 if (!promptParts.appendSystemPrompt[0].includes('<mindstone_context index="1">')) throw new Error('system context wrapper missing');
 if (promptParts.promptText !== 'latest user turn') throw new Error('latest user turn was not selected as prompt text');
 if (promptParts.diagnostics.nonUserPromptMessagesSkipped !== 2) throw new Error('non-user prompt skip diagnostics wrong');
+
+const providerDiagnostics = providerDiagnosticsFromChatResult({
+  role: 'assistant',
+  text: 'assistant text',
+  raw: {
+    sessionId: 'session-1',
+    sessionFile: actual,
+    piSession: {
+      prompt: promptParts.diagnostics,
+      eventCounts: capture.eventCounts,
+      events: capture.events,
+      assistantTexts: capture.assistantTexts,
+    },
+  },
+});
+if (providerDiagnostics?.piSession?.sessionId !== 'session-1') throw new Error('provider diagnostics did not preserve pi session id');
+if (providerDiagnostics?.piSession?.prompt?.appendSystemPromptCount !== 1) throw new Error('provider diagnostics did not preserve prompt diagnostics');
+if (providerDiagnostics?.piSession?.eventCounts?.agent_end !== 1) throw new Error('provider diagnostics did not preserve event counts');
+if (!providerDiagnostics?.piSession?.events?.some((event) => event.toolName === 'read')) throw new Error('provider diagnostics did not preserve event summaries');
+if (providerDiagnostics?.piSession?.assistantTextCount !== 2) throw new Error('provider diagnostics did not preserve assistant text count');
 NODE
 
 set +e

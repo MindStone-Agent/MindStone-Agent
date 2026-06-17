@@ -132,6 +132,7 @@ The preferred order is:
   - [ ] Pi tools/custom tools/resource loader/extension lifecycle preserved where available
   - [x] `AgentSession.prompt(...)` for real turns when isolated auth/model config is available
   - [x] first bounded `AgentSession.subscribe(...)` event diagnostics capture in `pi-session` raw results, including event counts, bounded event summaries, tool metadata summaries, and final assistant-text extraction
+  - [x] sanitized `pi-session` provider diagnostics are copied into assistant transcript metadata for native chat and Gateway routes when available
   - [ ] full streaming/event capture into MindStone transcript/source metadata
   - [ ] eventual `AgentSession.compact(...)` coordination for secondary auto-compact mode
 - [x] Demote the current provider-level `completeSimple` Pi path to scaffold/fallback status until or unless it can be proven to preserve Pi harness semantics.

@@ -37,6 +37,7 @@
 - [x] Add `pi-session` routing mode scaffold that maps canonical MindStone session keys to deterministic Pi session files and uses Pi `SessionManager` / `createAgentSession` for real turns when isolated auth is available.
 - [x] Add first bounded Pi `AgentSession.subscribe(...)` event diagnostics capture for the `pi-session` runner; smoke validates event counts, bounded event summaries, tool metadata summaries, and final assistant-text extraction without live auth.
 - [x] Move `pi-session` MindStone system messages (identity/SCRI/handoff) into Pi `DefaultResourceLoader.appendSystemPrompt` and send only the latest user turn through `AgentSession.prompt(...)`.
+- [x] Preserve sanitized provider diagnostics from `pi-session` raw results into assistant transcript metadata for native chat and Gateway routes when available.
 - [ ] Complete full event/stream capture into MindStone transcript/source metadata and richer prompt/context injection for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
@@ -190,6 +191,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] first `pi-session` runner scaffold added; current MindStone proves Pi `SessionManager` can coexist with canonical single-session/SCRI when MindStone owns the session-key → session-file mapping
   - [x] first bounded `AgentSession.subscribe(...)` event diagnostics capture in `pi-session` provider raw result
   - [x] first resource-loader-based MindStone context injection via `appendSystemPrompt`; crude all-message prompt concatenation removed
+  - [x] sanitized `pi-session` diagnostics are preserved into assistant transcript metadata when provider raw diagnostics are available
   - [ ] complete live-auth validation and full event/stream transcript capture
   - [x] post-compact maintenance scaffold event after handoff replay
   - [ ] actual post-compact archive/backfill/embed/dream-cycle execution policy

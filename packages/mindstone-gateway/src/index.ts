@@ -29,6 +29,7 @@ import {
   runMindStoneRoute,
   runtimePathsFromEnv,
   planPostCompactMaintenance,
+  providerDiagnosticsFromChatResult,
   readCurrentHandoff,
   requestGatewaySubstrateCompaction,
   writeAutoCompactHandoff,
@@ -560,6 +561,7 @@ async function runConfiguredRoute(input: {
         provider: provider.id,
         model: model.id,
         usage: route.result.usage,
+        providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
       },
     });
     runManager.complete(run.id);

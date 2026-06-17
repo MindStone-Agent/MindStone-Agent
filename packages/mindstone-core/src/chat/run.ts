@@ -7,7 +7,7 @@ import {
   createSqliteMemoryRecallProvider,
   discoverFileMemoryDocuments,
 } from "../memory/index.js";
-import type { MindStoneModelInfo, MindStoneModelProvider } from "../provider/index.js";
+import { providerDiagnosticsFromChatResult, type MindStoneModelInfo, type MindStoneModelProvider } from "../provider/index.js";
 import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
 import {
@@ -273,6 +273,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       provider: input.provider.id,
       model: input.model.id,
       usage: route.result.usage,
+      providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
     },
   });
 
