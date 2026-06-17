@@ -140,15 +140,20 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] Add prompt-budget insertion into route assembly.
   - [x] Add `memory_recall_injected` transcript event.
   - [x] Add dependency-free SQLite memory index/backfill/status command.
-  - [x] Add SQLite-index-backed recall provider for configured `sqlite-vec` mode, currently using lexical scoring over indexed chunks.
-  - [ ] Add actual sqlite-vec nearest-neighbor search and embedding-backed recall.
+  - [x] Add SQLite-index-backed recall provider for configured `sqlite-vec` mode.
+  - [x] Add OpenAI-compatible embedding provider interface.
+  - [x] Add Ollama-style local default: `ollama:nomic-embed-text` using `/v1/embeddings`.
+  - [x] Add embedding backfill into SQLite chunks with `mindstone memory backfill --embed`.
+  - [x] Add embedding-backed recall over embedded SQLite chunks, currently using JS cosine similarity over stored vectors.
+  - [ ] Add actual sqlite-vec extension nearest-neighbor search.
   - [ ] Add dedup against active prompt/session content.
 - [ ] Implement embedding/provider configuration.
-  - embedding provider selection
-  - API key/env/reference handling
-  - local/Ollama defaults
-  - model choice
-  - vector backend compatibility
+  - [x] embedding provider selection via `memory.embeddingProvider`
+  - [x] API key/env/reference handling for OpenAI-compatible embedding endpoints
+  - [x] local/Ollama defaults
+  - [x] model choice via provider spec, e.g. `ollama:nomic-embed-text`
+  - [ ] config wizard UX for embeddings
+  - [ ] sqlite-vec native vector backend compatibility
 - [x] Support choosing `sliding_window` vs `auto_compact` context mode.
 - [ ] Finish auto-compact runtime policy.
   - checkpoint/handoff trigger

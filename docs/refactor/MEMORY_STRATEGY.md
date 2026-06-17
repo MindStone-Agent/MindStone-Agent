@@ -263,13 +263,18 @@ Implemented in MindStone-Agent first pass:
 - `mindstone memory status` reports SQLite memory index status
 - Gateway autoRecall prefers the SQLite memory index when `memory.vectorStore` is `sqlite-vec`, with file/local fallback
 - `mindstone doctor` reports SQLite memory index presence/chunk counts when `sqlite-vec` is configured
+- OpenAI-compatible embedding provider interface
+- Ollama-style local embedding config, e.g. `memory.embeddingProvider = "ollama:nomic-embed-text"`
+- `EMBEDDER_BASE_URL`, `EMBEDDER_API_KEY`, `EMBEDDER_MODEL`, and related env hooks
+- `mindstone memory backfill --embed` stores embeddings in SQLite chunk rows
+- embedding-backed recall over embedded SQLite chunks using cosine similarity in JS
+- `mindstone doctor` runs a sample embedding probe when an embedding provider is configured
+- smoke test proves embedding recall can retrieve a chunk with no lexical overlap
 
 Still pending:
 
 - actual sqlite-vec extension-backed nearest-neighbor search
-- embedding provider implementation
-- embedding backfill into SQLite chunks
-- embedding-backed vector recall instead of lexical scoring over SQLite chunks
+- config wizard UX for embeddings
 - dedup against active prompt/session content
 - full SCRI salience scoring
 - checkpoint/dream-cycle automation for journal writing and memory index updates

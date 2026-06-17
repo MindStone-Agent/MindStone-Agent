@@ -299,7 +299,7 @@ async function runConfiguredRoute(input: {
       memoryRecall: {
         enabled: input.config?.memory?.autoRecall === true,
         provider: input.config?.memory?.vectorStore === "sqlite-vec"
-          ? createSqliteMemoryRecallProvider() ?? createLocalMemoryRecallProvider([
+          ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
               ...(input.config?.memory?.localDocuments ?? []),
               ...discoverFileMemoryDocuments({ config: input.config }),
             ])

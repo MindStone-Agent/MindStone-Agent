@@ -32,6 +32,7 @@ export type MindStoneFileMemoryConfig = {
 export type MindStoneMemoryConfig = {
   autoRecall?: boolean;
   vectorStore?: "lancedb" | "sqlite-vec" | "memory";
+  /** Embedding provider spec, e.g. ollama:nomic-embed-text or openai:text-embedding-3-small. */
   embeddingProvider?: string;
   recall?: MemoryRecallConfig;
   files?: MindStoneFileMemoryConfig;

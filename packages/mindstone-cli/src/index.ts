@@ -4,12 +4,14 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
+  backfillSqliteMemoryEmbeddings,
   backfillSqliteMemoryIndex,
   formatConfigSummary,
   formatMindStoneConfigHeader,
   getMindStoneDoctorReport,
   getSqliteMemoryIndexStats,
   loadMindStoneConfig,
+  probeMemoryEmbeddingProvider,
   resolveConfigPath,
   runMindStoneConfigWizard,
   runMindStoneOnboardingWizard,
@@ -38,7 +40,7 @@ function usage(): string {
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
-    "  mindstone memory backfill  Index file memory and transcripts into SQLite memory DB",
+    "  mindstone memory backfill [--embed] [--force]  Index file memory/transcripts and optionally embed chunks",
     "  mindstone memory status    Show SQLite memory DB status",
     "  mindstone help         Show this help",
     "",
@@ -293,7 +295,7 @@ function printMemoryStatus(): void {
   output.write("\n");
 }
 
-function runMemoryCommand(argv: string[]): void {
+async function runMemoryCommand(argv: string[]): Promise<void> {
   const subcommand = argv[3] ?? "status";
   if (subcommand === "status") {
     printMemoryStatus();
@@ -303,17 +305,27 @@ function runMemoryCommand(argv: string[]): void {
     const paths = runtimePathsFromEnv();
     const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
     if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+    const embed = argv.includes("--embed");
+    const force = argv.includes("--force");
     const result = backfillSqliteMemoryIndex({ config: loaded.config, paths });
+    const lines = [
+      `Database: ${result.databasePath}`,
+      `Sources indexed: ${result.sourcesIndexed}`,
+      `Chunks indexed: ${result.chunksIndexed}`,
+      `File documents: ${result.fileDocuments}`,
+      `Transcript documents: ${result.transcriptDocuments}`,
+    ];
+    if (embed) {
+      const embeddingResult = await backfillSqliteMemoryEmbeddings({ config: loaded.config, paths, force });
+      lines.push(
+        `Embedding provider: ${embeddingResult.providerId}:${embeddingResult.model}`,
+        `Chunks considered for embedding: ${embeddingResult.chunksConsidered}`,
+        `Chunks embedded: ${embeddingResult.chunksEmbedded}`,
+        embeddingResult.dimensions ? `Embedding dimensions: ${embeddingResult.dimensions}` : "Embedding dimensions: n/a",
+      );
+    }
     output.write(`${gold("🔶 MindStone memory backfill")}\n\n`);
-    output.write(
-      [
-        `Database: ${result.databasePath}`,
-        `Sources indexed: ${result.sourcesIndexed}`,
-        `Chunks indexed: ${result.chunksIndexed}`,
-        `File documents: ${result.fileDocuments}`,
-        `Transcript documents: ${result.transcriptDocuments}`,
-      ].join("\n"),
-    );
+    output.write(lines.join("\n"));
     output.write("\n");
     return;
   }
@@ -381,17 +393,23 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "memory") {
-    runMemoryCommand(process.argv);
+    await runMemoryCommand(process.argv);
     return;
   }
   if (command === "doctor") {
     const discovery = await discoverPiModels();
+    const paths = runtimePathsFromEnv();
+    const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+    const embeddingProbe = loaded.config?.memory?.embeddingProvider
+      ? await probeMemoryEmbeddingProvider(loaded.config)
+      : undefined;
     const report = getMindStoneDoctorReport({
       providerDiscovery: {
         providerCount: discovery.providers.length,
         modelCount: discovery.models.length,
         error: discovery.error,
       },
+      embeddingProbe,
     });
     printDoctor(report);
     if (!report.ok) process.exitCode = 1;

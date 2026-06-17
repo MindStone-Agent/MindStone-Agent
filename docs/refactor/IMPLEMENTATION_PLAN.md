@@ -180,15 +180,23 @@ The preferred order is:
 - [ ] Port SCRI recall query/scoring/dedup/context-budget behavior.
   - [x] First-pass local autoRecall query/scoring/context-budget insertion is implemented for deterministic smoke tests.
   - [x] File-backed structured memory, journals, `memory/MEMORY.md`, and `LOG.md` can feed local autoRecall.
-  - [x] SQLite-index-backed recall can feed autoRecall when `memory.vectorStore` is `sqlite-vec`, currently with lexical scoring over chunks.
-  - [ ] Full SCRI/vector scoring and dedup remain pending.
+  - [x] SQLite-index-backed recall can feed autoRecall when `memory.vectorStore` is `sqlite-vec`.
+  - [x] Embedding-backed SQLite recall works over stored embeddings using JS cosine similarity.
+  - [ ] Full SCRI/vector scoring, sqlite-vec native ANN search, and dedup remain pending.
 - [ ] Add dream-cycle hook for compaction/session/pruning boundary.
 - [x] Implement sliding-window prompt pruning: trigger at `ceilingPercent`, prune toward `floorPercent`, retain `minRecentMessages`, preserve transcript.
 - [x] Connect sliding-window prompt selection to router prompt messages for mock and Pi provider modes.
 - [x] Implement first-pass auto-recall prompt insertion behind `memory.autoRecall` for local deterministic memory docs.
 - [ ] Implement real vector-backed auto-recall prompt insertion behind `memory.autoRecall`.
-  - [x] First-pass SQLite-index-backed recall insertion is implemented; embedding/sqlite-vec nearest-neighbor search remains pending.
+  - [x] First-pass SQLite-index-backed recall insertion is implemented.
+  - [x] Embedding-backed recall over SQLite-stored vectors is implemented.
+  - [ ] sqlite-vec extension nearest-neighbor search remains pending.
 - [ ] Implement embedding/provider configuration beyond the placeholder `embeddingProvider` field.
+  - [x] OpenAI-compatible embedding provider interface.
+  - [x] Ollama-style local default via `ollama:nomic-embed-text` and `EMBEDDER_BASE_URL`.
+  - [x] `mindstone memory backfill --embed`.
+  - [x] `mindstone doctor` sample embedding probe.
+  - [ ] Config wizard UX remains pending.
 - [ ] Live-test selected prompt messages against Pi-backed provider with isolated credentials/config.
 - [ ] Implement auto-compact runtime policy for compatible substrates.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle.
@@ -197,6 +205,7 @@ The preferred order is:
 - [x] Add first-pass memory status and diagnostics.
   - `mindstone memory status`
   - `mindstone doctor` reports SQLite DB presence/chunk counts for `sqlite-vec` config.
+  - `mindstone doctor` probes configured embedding providers with a sample embedding request.
 - [x] Add tests for recall injection formatting.
 - [x] Document thin standing context, ephemeral auto-recall, on-demand recall, structured memory, journals, LOG, and vectorization strategy in `docs/refactor/MEMORY_STRATEGY.md`.
 

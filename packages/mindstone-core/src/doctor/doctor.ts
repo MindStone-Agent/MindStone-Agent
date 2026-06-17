@@ -13,9 +13,18 @@ export type MindStoneDoctorProviderDiscovery = {
   error?: string;
 };
 
+export type MindStoneDoctorEmbeddingProbe = {
+  providerId: string;
+  model: string;
+  baseUrl: string;
+  dimensions?: number;
+  error?: string;
+};
+
 export type MindStoneDoctorOptions = {
   env?: NodeJS.ProcessEnv;
   providerDiscovery?: MindStoneDoctorProviderDiscovery;
+  embeddingProbe?: MindStoneDoctorEmbeddingProbe;
 };
 
 function check(
@@ -165,6 +174,17 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
     check(checks, "warn", "memory.embedding", "Auto-recall has an embedding provider", "memory.autoRecall is true but memory.embeddingProvider is unset");
   } else if (memory?.embeddingProvider) {
     check(checks, "pass", "memory.embedding", "Embedding provider is configured", memory.embeddingProvider);
+    if (options.embeddingProbe?.error) {
+      check(checks, "warn", "memory.embedding.live", "Embedding provider responds to sample request", options.embeddingProbe.error);
+    } else if (options.embeddingProbe) {
+      check(
+        checks,
+        options.embeddingProbe.dimensions ? "pass" : "warn",
+        "memory.embedding.live",
+        "Embedding provider responds to sample request",
+        `${options.embeddingProbe.providerId}:${options.embeddingProbe.model} ${options.embeddingProbe.dimensions ?? 0} dimensions @ ${options.embeddingProbe.baseUrl}`,
+      );
+    }
   } else if (memory?.autoRecall && deterministicMemorySources > 0) {
     check(checks, "pass", "memory.embedding", "Auto-recall has deterministic file/local memory sources", `${deterministicMemorySources} documents`);
   } else {
