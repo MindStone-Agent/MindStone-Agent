@@ -69,6 +69,8 @@ MindStone-Agent defaults to `sliding_window` because it is rebuilding MindStone 
 
 MS4PI should keep the `auto_compact` checkpoint/handoff/compact behavior because it runs inside Pi and inherits Pi's episodic session constraints.
 
+MindStone-Agent should also keep standing context thin. Large memory bodies, journals, and transcripts should usually enter the prompt through ephemeral per-turn auto-recall or deliberate on-demand reads, not permanent standing context. See `MEMORY_STRATEGY.md`.
+
 ## Current implementation status
 
 Implemented:

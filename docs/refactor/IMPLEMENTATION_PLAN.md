@@ -168,12 +168,14 @@ The preferred order is:
 
 ### Tasks
 
-- [ ] Define/port memory source discovery.
+- [x] Define first-pass file-backed memory source discovery.
+- [ ] Port full memory source discovery beyond runtime memory files/journals/LOG.
 - [ ] Define/port transcript archive/index pipeline.
 - [ ] Define/port vector backend abstraction.
 - [ ] Decide LanceDB vs sqlite-vec support order.
 - [ ] Port SCRI recall query/scoring/dedup/context-budget behavior.
   - [x] First-pass local autoRecall query/scoring/context-budget insertion is implemented for deterministic smoke tests.
+  - [x] File-backed structured memory, journals, `memory/MEMORY.md`, and `LOG.md` can feed local autoRecall.
   - [ ] Full SCRI/vector scoring and dedup remain pending.
 - [ ] Add dream-cycle hook for compaction/session/pruning boundary.
 - [x] Implement sliding-window prompt pruning: trigger at `ceilingPercent`, prune toward `floorPercent`, retain `minRecentMessages`, preserve transcript.
@@ -187,6 +189,7 @@ The preferred order is:
 - [ ] Add manual backfill command.
 - [ ] Add memory status and diagnostics.
 - [x] Add tests for recall injection formatting.
+- [x] Document thin standing context, ephemeral auto-recall, on-demand recall, structured memory, journals, LOG, and vectorization strategy in `docs/refactor/MEMORY_STRATEGY.md`.
 
 ### Candidate files
 

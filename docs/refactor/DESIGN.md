@@ -131,11 +131,15 @@ Memory design must preserve MindStone's distinction from ordinary RAG.
 Memory sources:
 
 - identity and user files
+- structured MS4-style memory files with `memory/MEMORY.md` index
 - narrative journals
+- `LOG.md` checkpoint/session ledger
 - docs/wiki/project memory
 - raw and compacted transcripts
 - explicit checkpoints
 - channel transcripts where configured
+
+See `MEMORY_STRATEGY.md` for the detailed strategy: standing context stays thin, auto-recall is ephemeral per turn, and on-demand recall reads full sources when needed.
 
 Memory services:
 

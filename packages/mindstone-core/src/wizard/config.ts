@@ -254,6 +254,17 @@ function withDefaultOnboardingConfig(config: MindStoneConfig): MindStoneConfig {
       autoRecall: false,
       vectorStore: "sqlite-vec",
       ...config.memory,
+      files: {
+        enabled: true,
+        memoryDir: "memory",
+        journalsDir: "journals",
+        logPath: "LOG.md",
+        indexPath: "memory/MEMORY.md",
+        includeMemoryFiles: true,
+        includeJournals: true,
+        includeLog: true,
+        ...config.memory?.files,
+      },
     },
     agents: {
       ...config.agents,

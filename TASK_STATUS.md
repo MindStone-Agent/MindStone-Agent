@@ -127,9 +127,15 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 
 ### Memory and context
 
+- [x] Add MS4-style file-backed memory substrate alongside journals.
+  - Runtime now initializes `LOG.md`, `memory/MEMORY.md`, `memory/`, and `journals/`.
+  - Structured memory files and journals are distinct and discoverable.
+  - File-backed memory can feed ephemeral autoRecall.
+- [x] Document thin-context / ephemeral-recall / on-demand-recall strategy for SCRI and MindStone-Agent.
 - [ ] Implement real auto-recall config, not only the `memory.autoRecall` toggle.
   - [x] Add first-pass recall query construction from latest user turn.
   - [x] Add deterministic local recall provider for development/smoke tests.
+  - [x] Discover file-backed memory docs, journals, index, and LOG as local recall sources.
   - [x] Add lexical relevance scoring and min-score filtering.
   - [x] Add prompt-budget insertion into route assembly.
   - [x] Add `memory_recall_injected` transcript event.

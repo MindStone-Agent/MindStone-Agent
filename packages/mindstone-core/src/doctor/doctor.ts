@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolveContextManagementPolicy } from "../context/index.js";
 import { loadConfiguredIdentities } from "../identity/index.js";
+import { discoverFileMemoryDocuments } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { loadMindStoneConfig, resolveConfigPath } from "../config/load.js";
 import type { MindStoneConfig } from "../config/types.js";
@@ -125,12 +126,18 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
 
   const memory = config?.memory;
   check(checks, memory?.vectorStore ? "pass" : "warn", "memory.vectorStore", "Memory vector store is configured", memory?.vectorStore ?? "unset");
-  if (memory?.autoRecall && !memory.embeddingProvider && !memory.localDocuments?.length) {
+  check(checks, existsSync(paths.logPath) ? "pass" : "warn", "memory.log", "LOG.md exists", paths.logPath);
+  check(checks, existsSync(paths.memoryIndexPath) ? "pass" : "warn", "memory.index", "Structured memory index exists", paths.memoryIndexPath);
+  check(checks, existsSync(paths.journalDir) ? "pass" : "warn", "memory.journals", "Journal directory exists", paths.journalDir);
+  const fileMemoryDocs = discoverFileMemoryDocuments({ config, paths });
+  check(checks, fileMemoryDocs.length > 0 ? "pass" : "warn", "memory.files", "File-backed memory documents are discoverable", `${fileMemoryDocs.length} documents`);
+  const deterministicMemorySources = (memory?.localDocuments?.length ?? 0) + fileMemoryDocs.length;
+  if (memory?.autoRecall && !memory.embeddingProvider && deterministicMemorySources === 0) {
     check(checks, "warn", "memory.embedding", "Auto-recall has an embedding provider", "memory.autoRecall is true but memory.embeddingProvider is unset");
   } else if (memory?.embeddingProvider) {
     check(checks, "pass", "memory.embedding", "Embedding provider is configured", memory.embeddingProvider);
-  } else if (memory?.autoRecall && memory.localDocuments?.length) {
-    check(checks, "pass", "memory.embedding", "Auto-recall has a deterministic local memory source", `${memory.localDocuments.length} local documents`);
+  } else if (memory?.autoRecall && deterministicMemorySources > 0) {
+    check(checks, "pass", "memory.embedding", "Auto-recall has deterministic file/local memory sources", `${deterministicMemorySources} documents`);
   } else {
     check(checks, "info", "memory.embedding", "Embedding provider is unset", "fine until autoRecall is enabled");
   }

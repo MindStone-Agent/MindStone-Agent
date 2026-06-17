@@ -18,11 +18,23 @@ export type MindStoneAgentConfig = {
   profileId?: string;
 };
 
+export type MindStoneFileMemoryConfig = {
+  enabled?: boolean;
+  memoryDir?: string;
+  journalsDir?: string;
+  logPath?: string;
+  indexPath?: string;
+  includeMemoryFiles?: boolean;
+  includeJournals?: boolean;
+  includeLog?: boolean;
+};
+
 export type MindStoneMemoryConfig = {
   autoRecall?: boolean;
   vectorStore?: "lancedb" | "sqlite-vec" | "memory";
   embeddingProvider?: string;
   recall?: MemoryRecallConfig;
+  files?: MindStoneFileMemoryConfig;
   /** Deterministic local memory docs for development/smoke tests before live vector providers are wired. */
   localDocuments?: MemoryDocument[];
 };

@@ -13,6 +13,7 @@ import {
   buildPromptWindow,
   createLocalMemoryRecallProvider,
   decideGatewayAuth,
+  discoverFileMemoryDocuments,
   getMindStoneSystemStatus,
   listTranscriptSessions,
   loadMindStoneConfig,
@@ -296,7 +297,10 @@ async function runConfiguredRoute(input: {
       reservedTokens: resolveReservedPromptTokens(input.metadata),
       memoryRecall: {
         enabled: input.config?.memory?.autoRecall === true,
-        provider: createLocalMemoryRecallProvider(input.config?.memory?.localDocuments),
+        provider: createLocalMemoryRecallProvider([
+          ...(input.config?.memory?.localDocuments ?? []),
+          ...discoverFileMemoryDocuments({ config: input.config }),
+        ]),
         config: input.config?.memory?.recall,
       },
       signal: run.abortController.signal,

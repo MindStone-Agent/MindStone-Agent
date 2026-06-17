@@ -32,7 +32,8 @@
     "smoke:onboard": "./scripts/smoke-onboard.sh",
     "smoke:config-pi-models": "./scripts/smoke-config-pi-models.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",
-    "smoke:auto-recall": "./scripts/smoke-auto-recall.sh"
+    "smoke:auto-recall": "./scripts/smoke-auto-recall.sh",
+    "smoke:file-memory": "./scripts/smoke-file-memory.sh"
   },
   "engines": {
     "node": ">=22.19.0"

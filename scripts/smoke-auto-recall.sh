@@ -84,14 +84,14 @@ const send = await request(
   200,
 );
 if (!send.ok || send.provider !== "mock") process.exit(1);
-if (send.memoryRecall?.hitCount !== 1) process.exit(1);
+if (!send.memoryRecall || send.memoryRecall.hitCount < 1) process.exit(1);
 if (send.memoryRecall?.query !== "How should Integration Builder handle APIs and webhooks?") process.exit(1);
 
 const history = await request("/chat/history", undefined, 200);
 const recallEvent = history.entries.find((entry) => entry.metadata?.event === "memory_recall_injected");
 if (!recallEvent) process.exit(1);
-if (recallEvent.metadata?.hitCount !== 1) process.exit(1);
-if (recallEvent.metadata?.hits?.[0]?.id !== "memory-integration-builder") process.exit(1);
+if (recallEvent.metadata?.hitCount < 1) process.exit(1);
+if (!recallEvent.metadata?.hits?.some((hit) => hit.id === "memory-integration-builder")) process.exit(1);
 if (!history.entries.some((entry) => entry.role === "assistant" && entry.metadata?.event === "assistant_response")) process.exit(1);
 NODE
 
