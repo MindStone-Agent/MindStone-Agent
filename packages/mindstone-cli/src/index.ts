@@ -4,9 +4,11 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
+  backfillSqliteMemoryIndex,
   formatConfigSummary,
   formatMindStoneConfigHeader,
   getMindStoneDoctorReport,
+  getSqliteMemoryIndexStats,
   loadMindStoneConfig,
   resolveConfigPath,
   runMindStoneConfigWizard,
@@ -21,7 +23,7 @@ import {
 } from "@mindstone-agent/core";
 import { PiMindStoneProvider } from "@mindstone-agent/gateway";
 
-type Command = "config" | "onboard" | "status" | "doctor" | "help";
+type Command = "config" | "onboard" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;214m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -36,6 +38,8 @@ function usage(): string {
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
+    "  mindstone memory backfill  Index file memory and transcripts into SQLite memory DB",
+    "  mindstone memory status    Show SQLite memory DB status",
     "  mindstone help         Show this help",
     "",
     "Environment:",
@@ -48,7 +52,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "config" || raw === "onboard" || raw === "status" || raw === "doctor" || raw === "help") return raw;
+  if (raw === "config" || raw === "onboard" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -270,6 +274,52 @@ function setupProviderAuth(request: MindStoneProviderAuthSetupRequest): string |
     : `Stored ${request.providerId} API key in isolated auth.json.`;
 }
 
+function printMemoryStatus(): void {
+  const stats = getSqliteMemoryIndexStats(runtimePathsFromEnv());
+  output.write(`${gold("🔶 MindStone memory status")}\n\n`);
+  output.write(
+    [
+      `Database: ${stats.databasePath}`,
+      `Present: ${stats.present}`,
+      `Sources: ${stats.sources}`,
+      `Chunks: ${stats.chunks}`,
+      `Embedded chunks: ${stats.embeddedChunks}`,
+      stats.updatedAt ? `Updated: ${stats.updatedAt}` : undefined,
+      stats.error ? `Error: ${stats.error}` : undefined,
+    ]
+      .filter((line) => line !== undefined)
+      .join("\n"),
+  );
+  output.write("\n");
+}
+
+function runMemoryCommand(argv: string[]): void {
+  const subcommand = argv[3] ?? "status";
+  if (subcommand === "status") {
+    printMemoryStatus();
+    return;
+  }
+  if (subcommand === "backfill") {
+    const paths = runtimePathsFromEnv();
+    const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+    if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+    const result = backfillSqliteMemoryIndex({ config: loaded.config, paths });
+    output.write(`${gold("🔶 MindStone memory backfill")}\n\n`);
+    output.write(
+      [
+        `Database: ${result.databasePath}`,
+        `Sources indexed: ${result.sourcesIndexed}`,
+        `Chunks indexed: ${result.chunksIndexed}`,
+        `File documents: ${result.fileDocuments}`,
+        `Transcript documents: ${result.transcriptDocuments}`,
+      ].join("\n"),
+    );
+    output.write("\n");
+    return;
+  }
+  throw new Error(`Unknown memory command: ${subcommand}\n\n${usage()}`);
+}
+
 function printStatus(): void {
   const paths = runtimePathsFromEnv();
   const configPath = resolveConfigPath();
@@ -328,6 +378,10 @@ async function main(): Promise<void> {
   }
   if (command === "status") {
     printStatus();
+    return;
+  }
+  if (command === "memory") {
+    runMemoryCommand(process.argv);
     return;
   }
   if (command === "doctor") {

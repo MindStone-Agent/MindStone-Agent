@@ -12,6 +12,7 @@ import {
   appendTranscriptEntry,
   buildPromptWindow,
   createLocalMemoryRecallProvider,
+  createSqliteMemoryRecallProvider,
   decideGatewayAuth,
   discoverFileMemoryDocuments,
   getMindStoneSystemStatus,
@@ -297,10 +298,15 @@ async function runConfiguredRoute(input: {
       reservedTokens: resolveReservedPromptTokens(input.metadata),
       memoryRecall: {
         enabled: input.config?.memory?.autoRecall === true,
-        provider: createLocalMemoryRecallProvider([
-          ...(input.config?.memory?.localDocuments ?? []),
-          ...discoverFileMemoryDocuments({ config: input.config }),
-        ]),
+        provider: input.config?.memory?.vectorStore === "sqlite-vec"
+          ? createSqliteMemoryRecallProvider() ?? createLocalMemoryRecallProvider([
+              ...(input.config?.memory?.localDocuments ?? []),
+              ...discoverFileMemoryDocuments({ config: input.config }),
+            ])
+          : createLocalMemoryRecallProvider([
+              ...(input.config?.memory?.localDocuments ?? []),
+              ...discoverFileMemoryDocuments({ config: input.config }),
+            ]),
         config: input.config?.memory?.recall,
       },
       signal: run.abortController.signal,

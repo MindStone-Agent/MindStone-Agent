@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolveContextManagementPolicy } from "../context/index.js";
 import { loadConfiguredIdentities } from "../identity/index.js";
-import { discoverFileMemoryDocuments } from "../memory/index.js";
+import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { loadMindStoneConfig, resolveConfigPath } from "../config/load.js";
 import type { MindStoneConfig } from "../config/types.js";
@@ -126,6 +126,35 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
 
   const memory = config?.memory;
   check(checks, memory?.vectorStore ? "pass" : "warn", "memory.vectorStore", "Memory vector store is configured", memory?.vectorStore ?? "unset");
+  const sqliteMemoryStats = getSqliteMemoryIndexStats(paths);
+  if (memory?.vectorStore === "sqlite-vec") {
+    check(
+      checks,
+      sqliteMemoryStats.present ? "pass" : "warn",
+      "memory.sqlite",
+      "SQLite memory index exists",
+      sqliteMemoryStats.databasePath,
+    );
+    if (sqliteMemoryStats.error) {
+      check(checks, "warn", "memory.sqlite.stats", "SQLite memory index can be inspected", sqliteMemoryStats.error);
+    } else if (sqliteMemoryStats.present) {
+      check(
+        checks,
+        sqliteMemoryStats.chunks > 0 ? "pass" : "warn",
+        "memory.sqlite.chunks",
+        "SQLite memory index has chunks",
+        `${sqliteMemoryStats.sources} sources, ${sqliteMemoryStats.chunks} chunks, ${sqliteMemoryStats.embeddedChunks} embedded`,
+      );
+    }
+  } else if (sqliteMemoryStats.present) {
+    check(
+      checks,
+      "info",
+      "memory.sqlite",
+      "SQLite memory index exists but is not the configured vector store",
+      `${sqliteMemoryStats.databasePath} (${sqliteMemoryStats.chunks} chunks)`,
+    );
+  }
   check(checks, existsSync(paths.logPath) ? "pass" : "warn", "memory.log", "LOG.md exists", paths.logPath);
   check(checks, existsSync(paths.memoryIndexPath) ? "pass" : "warn", "memory.index", "Structured memory index exists", paths.memoryIndexPath);
   check(checks, existsSync(paths.journalDir) ? "pass" : "warn", "memory.journals", "Journal directory exists", paths.journalDir);

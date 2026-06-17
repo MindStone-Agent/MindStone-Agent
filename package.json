@@ -33,7 +33,8 @@
     "smoke:config-pi-models": "./scripts/smoke-config-pi-models.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",
     "smoke:auto-recall": "./scripts/smoke-auto-recall.sh",
-    "smoke:file-memory": "./scripts/smoke-file-memory.sh"
+    "smoke:file-memory": "./scripts/smoke-file-memory.sh",
+    "smoke:memory-backfill": "./scripts/smoke-memory-backfill.sh"
   },
   "engines": {
     "node": ">=22.19.0"

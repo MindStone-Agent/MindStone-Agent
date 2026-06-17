@@ -1,6 +1,6 @@
 # MindStone-Agent memory strategy: thin context, ephemeral recall, durable files
 
-**Status:** Draft implementation strategy  
+**Status:** Draft implementation strategy with first-pass file and SQLite index implementation  
 **Date:** 2026-06-17  
 **Purpose:** Capture the memory strategy for MindStone-Agent and SCRI documentation, especially where it intentionally differs from older MindStone proper behavior.
 
@@ -258,13 +258,18 @@ Implemented in MindStone-Agent first pass:
 - recall is injected ephemerally into current routed provider call
 - transcript event records `memory_recall_injected`
 - smoke test proves structured memory file recall reaches chat context
+- dependency-free SQLite memory index at `.runtime/mindstone/vectors/memory.sqlite` using Node's built-in `node:sqlite`
+- `mindstone memory backfill` indexes structured memory, journals, LOG, and existing JSONL transcript entries into SQLite chunks
+- `mindstone memory status` reports SQLite memory index status
+- Gateway autoRecall prefers the SQLite memory index when `memory.vectorStore` is `sqlite-vec`, with file/local fallback
+- `mindstone doctor` reports SQLite memory index presence/chunk counts when `sqlite-vec` is configured
 
 Still pending:
 
-- SQLite/sqlite-vec backing store
+- actual sqlite-vec extension-backed nearest-neighbor search
 - embedding provider implementation
-- file backfill/index command
-- transcript/journal chunking into vectors
+- embedding backfill into SQLite chunks
+- embedding-backed vector recall instead of lexical scoring over SQLite chunks
 - dedup against active prompt/session content
 - full SCRI salience scoring
 - checkpoint/dream-cycle automation for journal writing and memory index updates

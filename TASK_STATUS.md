@@ -1,6 +1,6 @@
 # MindStone-Agent Task Status
 
-**Last Updated:** 2026-06-16  
+**Last Updated:** 2026-06-17  
 **Status:** Rebuilding foundation around upstream Pi base
 
 ## Quick Status
@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with profile selection and provider-first isolated Pi model selection, native CLI, context-management policy + sliding-window selector, router/provider abstraction, transcript store, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with profile selection and provider-first isolated Pi model selection, native CLI, context-management policy + sliding-window selector, router/provider abstraction, transcript store, file + SQLite memory index/backfill/status, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -139,7 +139,9 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] Add lexical relevance scoring and min-score filtering.
   - [x] Add prompt-budget insertion into route assembly.
   - [x] Add `memory_recall_injected` transcript event.
-  - [ ] Add real vector search provider and embedding-backed recall.
+  - [x] Add dependency-free SQLite memory index/backfill/status command.
+  - [x] Add SQLite-index-backed recall provider for configured `sqlite-vec` mode, currently using lexical scoring over indexed chunks.
+  - [ ] Add actual sqlite-vec nearest-neighbor search and embedding-backed recall.
   - [ ] Add dedup against active prompt/session content.
 - [ ] Implement embedding/provider configuration.
   - embedding provider selection

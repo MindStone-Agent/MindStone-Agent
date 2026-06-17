@@ -47,6 +47,7 @@ The preferred order is:
 - [ ] Define `MindStonePrompter` interface.
 - [ ] Define transcript/session interfaces.
 - [ ] Define memory source/vector/SCRI interfaces.
+  - [x] First-pass memory document/chunk/recall provider interfaces exist.
 - [x] Define context-management policy config for selectable `auto_compact` vs `sliding_window` modes.
 - [x] Define runtime context-window pruning contracts and tests.
 - [ ] Define config service interface and migration boundary.
@@ -171,23 +172,31 @@ The preferred order is:
 - [x] Define first-pass file-backed memory source discovery.
 - [ ] Port full memory source discovery beyond runtime memory files/journals/LOG.
 - [ ] Define/port transcript archive/index pipeline.
+  - [x] First-pass `mindstone memory backfill` indexes existing JSONL transcript entries into SQLite chunks.
 - [ ] Define/port vector backend abstraction.
-- [ ] Decide LanceDB vs sqlite-vec support order.
+  - [x] First-pass dependency-free SQLite memory index schema/provider exists at `.runtime/mindstone/vectors/memory.sqlite`.
+- [x] Decide LanceDB vs sqlite-vec support order.
+  - Default local direction is SQLite/sqlite-vec; LanceDB remains optional/compatibility-oriented.
 - [ ] Port SCRI recall query/scoring/dedup/context-budget behavior.
   - [x] First-pass local autoRecall query/scoring/context-budget insertion is implemented for deterministic smoke tests.
   - [x] File-backed structured memory, journals, `memory/MEMORY.md`, and `LOG.md` can feed local autoRecall.
+  - [x] SQLite-index-backed recall can feed autoRecall when `memory.vectorStore` is `sqlite-vec`, currently with lexical scoring over chunks.
   - [ ] Full SCRI/vector scoring and dedup remain pending.
 - [ ] Add dream-cycle hook for compaction/session/pruning boundary.
 - [x] Implement sliding-window prompt pruning: trigger at `ceilingPercent`, prune toward `floorPercent`, retain `minRecentMessages`, preserve transcript.
 - [x] Connect sliding-window prompt selection to router prompt messages for mock and Pi provider modes.
 - [x] Implement first-pass auto-recall prompt insertion behind `memory.autoRecall` for local deterministic memory docs.
 - [ ] Implement real vector-backed auto-recall prompt insertion behind `memory.autoRecall`.
+  - [x] First-pass SQLite-index-backed recall insertion is implemented; embedding/sqlite-vec nearest-neighbor search remains pending.
 - [ ] Implement embedding/provider configuration beyond the placeholder `embeddingProvider` field.
 - [ ] Live-test selected prompt messages against Pi-backed provider with isolated credentials/config.
 - [ ] Implement auto-compact runtime policy for compatible substrates.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle.
-- [ ] Add manual backfill command.
-- [ ] Add memory status and diagnostics.
+- [x] Add manual backfill command.
+  - `mindstone memory backfill`
+- [x] Add first-pass memory status and diagnostics.
+  - `mindstone memory status`
+  - `mindstone doctor` reports SQLite DB presence/chunk counts for `sqlite-vec` config.
 - [x] Add tests for recall injection formatting.
 - [x] Document thin standing context, ephemeral auto-recall, on-demand recall, structured memory, journals, LOG, and vectorization strategy in `docs/refactor/MEMORY_STRATEGY.md`.
 
