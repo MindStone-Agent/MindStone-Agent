@@ -82,7 +82,8 @@ The preferred order is:
 - [x] Add default onboarding profiles with write-in option.
 - [x] Add `Integration Builder` as an initial onboarding profile.
 - [ ] Add reusable `Integration Builder` skill behavior.
-- [ ] Add “getting to know the user” onboarding phase for preferences, boundaries, style, and project/domain context.
+- [x] Add initial “getting to know the user” onboarding phase for preferences, boundaries, style, memory/checkpoint style, and project/domain context.
+- [ ] Expand preference onboarding with richer collaboration-pattern and clarifying-question tuning.
 - [ ] Add naming/identity emergence phase without forcing human-assigned names.
 - [ ] Preserve channel onboarding adapters for Telegram, Signal, Discord, Slack.
 - [x] Add fake prompter smoke tests for wizard sections.
@@ -99,9 +100,9 @@ The preferred order is:
 
 - [ ] Wizard runs through at least identity + memory + gateway sections in Pi.
 - [x] Native CLI onboarding/config can run core setup and section reconfiguration.
-- [ ] Onboarding can select a profile/write-in purpose, gather interaction preferences, and create identity/user scaffolds from that seed.
+- [x] Onboarding can select a profile/write-in purpose, gather interaction preferences, and create identity/user scaffolds from that seed.
   - [x] Profile/write-in selection seeds config and identity/user scaffolds.
-  - [ ] Interaction preference gathering is still pending.
+  - [x] Interaction preference gathering seeds config and identity/user scaffolds.
 - [ ] Channel setup section lists available plugins.
 - [ ] Reconfiguration can run by section.
 

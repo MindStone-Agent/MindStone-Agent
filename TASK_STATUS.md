@@ -106,12 +106,15 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [x] Add default onboarding profiles with a write-in option.
   - Profiles provide the base job description and inform the agent’s eventual name/identity choice.
   - Initial profiles: General Companion, Software Engineering Partner, Integration Builder, Research Analyst, Project Strategist, Cybersecurity Specialist, Business Advisor, Therapist / Reflective Support, Life Coach, Health Advisor, Custom / Write-in.
-- [ ] Add the “getting to know the user” phase.
+- [x] Add the initial “getting to know the user” phase.
   - interaction preferences
-  - communication style
+  - communication/recommendation style
+  - work style
   - boundaries and approval rules
+  - memory/checkpoint style
   - project/domain context
-  - how the agent should ask clarifying questions
+  - sensitive context/cautions
+- [ ] Expand user-preference onboarding later with richer clarifying-question and collaboration-pattern tuning.
 - [ ] Add the naming/identity emergence phase.
   - Do not force the human to name the agent.
   - Use selected profile + user context as identity seed.

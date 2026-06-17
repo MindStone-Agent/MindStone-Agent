@@ -37,8 +37,27 @@ export type MindStoneRoutingConfig = {
   };
 };
 
+export type MindStoneInteractionDetail = "concise" | "balanced" | "detailed";
+export type MindStoneRecommendationStyle = "direct" | "options_tradeoffs" | "ask_first";
+export type MindStoneWorkStyle = "act_directly" | "plan_first" | "ask_first";
+export type MindStoneApprovalMode = "standard" | "strict" | "custom";
+export type MindStoneMemoryStyle = "propose_checkpoint_memories" | "minimal" | "ask_each_time";
+
+export type MindStoneOnboardingPreferences = {
+  interactionDetail?: MindStoneInteractionDetail;
+  recommendationStyle?: MindStoneRecommendationStyle;
+  workStyle?: MindStoneWorkStyle;
+  approvalMode?: MindStoneApprovalMode;
+  approvalNotes?: string;
+  memoryStyle?: MindStoneMemoryStyle;
+  projectContext?: string;
+  sensitiveContext?: string;
+  selectedAt?: string;
+};
+
 export type MindStoneOnboardingConfig = {
   profile?: MindStoneSelectedProfile;
+  preferences?: MindStoneOnboardingPreferences;
 };
 
 export type MindStoneConfig = {

@@ -3,7 +3,17 @@ import { dirname, resolve } from "node:path";
 import { resolveContextManagementPolicy, type ContextManagementMode } from "../context/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { loadMindStoneConfig, resolveConfigPath, resolvePathRelativeToConfig } from "../config/load.js";
-import type { GatewayAuthConfig, MindStoneConfig, MindStoneRoutingConfig } from "../config/types.js";
+import type {
+  GatewayAuthConfig,
+  MindStoneApprovalMode,
+  MindStoneConfig,
+  MindStoneInteractionDetail,
+  MindStoneMemoryStyle,
+  MindStoneOnboardingPreferences,
+  MindStoneRecommendationStyle,
+  MindStoneRoutingConfig,
+  MindStoneWorkStyle,
+} from "../config/types.js";
 import type { MindStoneModelInfo, MindStoneProviderInfo } from "../provider/index.js";
 import {
   BUILT_IN_MINDSTONE_PROFILES,
@@ -114,6 +124,21 @@ function selectedProfileSummary(profile: MindStoneSelectedProfile | undefined): 
   return profile.id === "custom" ? `${profile.label} (custom)` : profile.label;
 }
 
+function preferenceLabel(value: string | undefined): string {
+  return value?.replace(/_/g, " ") ?? "unset";
+}
+
+function selectedPreferencesSummary(preferences: MindStoneOnboardingPreferences | undefined): string {
+  if (!preferences) return "unset";
+  return [
+    `detail=${preferenceLabel(preferences.interactionDetail)}`,
+    `recommend=${preferenceLabel(preferences.recommendationStyle)}`,
+    `work=${preferenceLabel(preferences.workStyle)}`,
+    `approval=${preferenceLabel(preferences.approvalMode)}`,
+    `memory=${preferenceLabel(preferences.memoryStyle)}`,
+  ].join(" ");
+}
+
 export function formatMindStoneConfigHeader(): string {
   return TITLE;
 }
@@ -132,6 +157,7 @@ export function formatConfigSummary(config: MindStoneConfig): string {
     `routing.defaultAgentId: ${defaultAgent}`,
     `routing.defaultModel: ${config.routing?.defaultModel ?? config.agents?.[defaultAgent]?.defaultModel ?? "unset"}`,
     `onboarding.profile: ${selectedProfileSummary(config.onboarding?.profile)}`,
+    `onboarding.preferences: ${selectedPreferencesSummary(config.onboarding?.preferences)}`,
     `contextManagement.mode: ${context.mode}`,
     `memory.autoRecall: ${config.memory?.autoRecall ?? false}`,
     `memory.vectorStore: ${config.memory?.vectorStore ?? "sqlite-vec"}`,
@@ -1027,6 +1053,130 @@ async function chooseOnboardingProfile(
   };
 }
 
+function applyOnboardingPreferences(
+  config: MindStoneConfig,
+  preferences: MindStoneOnboardingPreferences,
+): MindStoneConfig {
+  return {
+    ...config,
+    onboarding: {
+      ...config.onboarding,
+      preferences,
+    },
+  };
+}
+
+function selectedPreferencesToLines(preferences: MindStoneOnboardingPreferences | undefined): string[] {
+  if (!preferences) return ["Preferences: unset"];
+  return [
+    `Interaction detail: ${preferenceLabel(preferences.interactionDetail)}`,
+    `Recommendation style: ${preferenceLabel(preferences.recommendationStyle)}`,
+    `Work style: ${preferenceLabel(preferences.workStyle)}`,
+    `Approval mode: ${preferenceLabel(preferences.approvalMode)}`,
+    preferences.approvalNotes ? `Approval notes: ${preferences.approvalNotes}` : undefined,
+    `Memory style: ${preferenceLabel(preferences.memoryStyle)}`,
+    preferences.projectContext ? `Project/domain context: ${preferences.projectContext}` : undefined,
+    preferences.sensitiveContext ? `Sensitive context / cautions: ${preferences.sensitiveContext}` : undefined,
+  ].filter((line): line is string => Boolean(line));
+}
+
+async function chooseOnboardingPreferences(
+  config: MindStoneConfig,
+  prompter: MindStonePrompter,
+): Promise<MindStoneOnboardingPreferences> {
+  const current = config.onboarding?.preferences;
+  const interactionDetail = await prompter.select<MindStoneInteractionDetail>({
+    message: "Interaction detail",
+    options: [
+      { value: "concise", label: "Concise", hint: "short answers unless more detail is requested" },
+      { value: "balanced", label: "Balanced", hint: "default; enough context without overbuilding" },
+      { value: "detailed", label: "Detailed", hint: "more explanation, rationale, and examples" },
+    ],
+    initialValue: current?.interactionDetail ?? "balanced",
+  });
+
+  const recommendationStyle = await prompter.select<MindStoneRecommendationStyle>({
+    message: "Recommendation style",
+    options: [
+      { value: "direct", label: "Direct recommendations", hint: "say what you think when there is enough evidence" },
+      { value: "options_tradeoffs", label: "Options + tradeoffs", hint: "present choices before recommending" },
+      { value: "ask_first", label: "Ask before recommending", hint: "clarify more often before choosing a path" },
+    ],
+    initialValue: current?.recommendationStyle ?? "direct",
+  });
+
+  const workStyle = await prompter.select<MindStoneWorkStyle>({
+    message: "Work style",
+    options: [
+      { value: "act_directly", label: "Act directly", hint: "when safe, inspect/edit/test without extra ceremony" },
+      { value: "plan_first", label: "Plan first", hint: "outline approach before changing things" },
+      { value: "ask_first", label: "Ask first", hint: "pause more often before taking action" },
+    ],
+    initialValue: current?.workStyle ?? "act_directly",
+  });
+
+  const approvalMode = await prompter.select<MindStoneApprovalMode>({
+    message: "Approval boundaries",
+    options: [
+      { value: "standard", label: "Standard safety", hint: "confirm destructive/auth/git push/credential/memory changes" },
+      { value: "strict", label: "Strict", hint: "ask before most file, network, or configuration changes" },
+      { value: "custom", label: "Custom", hint: "write specific approval rules" },
+    ],
+    initialValue: current?.approvalMode ?? "standard",
+  });
+  const approvalNotes = approvalMode === "custom"
+    ? markdownEscape(await prompter.text({
+        message: "Custom approval rules",
+        placeholder: current?.approvalNotes ?? "ask before changing files outside the project; never push without approval...",
+        initialValue: current?.approvalNotes ?? "",
+      }))
+    : undefined;
+
+  const memoryStyle = await prompter.select<MindStoneMemoryStyle>({
+    message: "Memory/checkpoint style",
+    options: [
+      { value: "propose_checkpoint_memories", label: "Propose checkpoint memories", hint: "suggest durable memories during checkpoints" },
+      { value: "minimal", label: "Minimal", hint: "remember only clearly durable project/user facts" },
+      { value: "ask_each_time", label: "Ask each time", hint: "confirm before treating anything as memory-worthy" },
+    ],
+    initialValue: current?.memoryStyle ?? "propose_checkpoint_memories",
+  });
+
+  const projectContext = markdownEscape(await prompter.text({
+    message: "Project/domain context",
+    placeholder: current?.projectContext ?? "active projects, domain, collaboration context, important constraints...",
+    initialValue: current?.projectContext ?? "",
+  }));
+
+  const sensitiveChoice = await prompter.select<"none" | "custom">({
+    message: "Sensitive context or cautions",
+    options: [
+      { value: "none", label: "None for now", hint: "you can add this later" },
+      { value: "custom", label: "Add sensitive cautions", hint: "private areas, disclosure limits, political/safety concerns" },
+    ],
+    initialValue: current?.sensitiveContext ? "custom" : "none",
+  });
+  const sensitiveContext = sensitiveChoice === "custom"
+    ? markdownEscape(await prompter.text({
+        message: "Sensitive context / cautions",
+        placeholder: current?.sensitiveContext ?? "things the agent should be especially careful with...",
+        initialValue: current?.sensitiveContext ?? "",
+      }))
+    : undefined;
+
+  return {
+    interactionDetail,
+    recommendationStyle,
+    workStyle,
+    approvalMode,
+    approvalNotes: approvalNotes || undefined,
+    memoryStyle,
+    projectContext: projectContext || undefined,
+    sensitiveContext: sensitiveContext || undefined,
+    selectedAt: new Date().toISOString(),
+  };
+}
+
 function resolveOnboardingAgentPaths(config: MindStoneConfig, configPath: string): {
   agentId: string;
   identityPath: string;
@@ -1077,7 +1227,9 @@ async function createOnboardingIdentityFiles(params: {
   const profile = params.config.onboarding?.profile;
   const profileDefinition = getBuiltInMindStoneProfile(profile?.id);
   const profileLines = selectedProfileToLines(profile);
+  const preferenceLines = selectedPreferencesToLines(params.config.onboarding?.preferences);
   await params.prompter.note(profileLines.join("\n"), "Selected profile seed");
+  await params.prompter.note(preferenceLines.join("\n"), "User preference seed");
 
   const purpose = markdownEscape(
     await params.prompter.text({
@@ -1103,6 +1255,10 @@ The agent has not yet established a durable name, voice, or self-description. On
 
 ${profileLines.join("\n")}
 
+## Preference seed
+
+${preferenceLines.join("\n")}
+
 ## Purpose seed
 
 ${purpose || profileDefinition?.purposeSeed || profile?.description || "No purpose seed provided."}
@@ -1122,6 +1278,10 @@ This user/project context scaffold was created by \`mindstone onboard\` on ${now
 ## Base profile
 
 ${profileLines.join("\n")}
+
+## Interaction and operating preferences
+
+${preferenceLines.join("\n")}
 
 ## Initial purpose
 
@@ -1189,6 +1349,7 @@ export async function runMindStoneOnboardingWizard(
   const loadedForProfile = loadMindStoneConfig(configPath);
   if (loadedForProfile.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loadedForProfile.error}`);
   const selectedProfile = await chooseOnboardingProfile(loadedForProfile.config ?? {}, prompter);
+  const selectedPreferences = await chooseOnboardingPreferences(loadedForProfile.config ?? {}, prompter);
 
   const mode =
     options.onboardingMode ??
@@ -1206,7 +1367,7 @@ export async function runMindStoneOnboardingWizard(
     const loaded = loadMindStoneConfig(configPath);
     if (loaded.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loaded.error}`);
     const before = loaded.config ?? {};
-    const after = withDefaultOnboardingConfig(applySelectedProfile(before, selectedProfile));
+    const after = withDefaultOnboardingConfig(applyOnboardingPreferences(applySelectedProfile(before, selectedProfile), selectedPreferences));
     await prompter.note(formatConfigSummary(after), loaded.exists ? "QuickStart existing/defaulted config" : "QuickStart config");
     const issues = validateMindStoneConfig(after);
     if (issues.length > 0) {
@@ -1236,7 +1397,7 @@ export async function runMindStoneOnboardingWizard(
       showIntro: false,
       sections: ["workspace", "gateway", "routing", "context", "memory", "identity"],
     });
-    const profiledConfig = applySelectedProfile(configResult.config, selectedProfile);
+    const profiledConfig = applyOnboardingPreferences(applySelectedProfile(configResult.config, selectedProfile), selectedPreferences);
     const issues = validateMindStoneConfig(profiledConfig);
     if (issues.length > 0) {
       await prompter.note(issues.map((issue) => `- ${issue}`).join("\n"), "Config validation failed");
