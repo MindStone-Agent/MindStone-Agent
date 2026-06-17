@@ -139,6 +139,8 @@ The page is a native MindStone surface over the Gateway WebChat REST endpoints, 
 agent:default:main
 ```
 
+When routing is configured, WebChat sends through the same provider path as other Gateway surfaces and appends assistant responses to the canonical transcript. `npm run smoke:webchat-ui` validates the built-in shell plus a mock-routed assistant response with `gateway-rest` / `webchat` / `internal` source metadata.
+
 The static UI shell is served without auth so a browser can load it directly; configured Gateway auth still applies to transcript/status/chat API calls from the page.
 
 The default MindStone-Agent Gateway port is `19789` to avoid colliding with existing MindStone/Pi services that may use `18789`.

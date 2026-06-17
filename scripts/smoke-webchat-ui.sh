@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-webchat-ui-smoke.XXXXXX")"
-GATEWAY_PORT="19798"
+GATEWAY_PORT="19802"
 SESSION_KEY="agent:default:main"
 
 cleanup() {
@@ -25,6 +25,20 @@ echo "== WebChat UI Gateway smoke test =="
 
 npm run build:mindstone
 ./scripts/init-runtime.sh
+
+node <<'NODE'
+const { readFileSync, writeFileSync } = require("node:fs");
+const path = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone/config.json`;
+const config = JSON.parse(readFileSync(path, "utf8"));
+config.routing = {
+  mode: "mock",
+  defaultAgentId: "default",
+  defaultModel: "mindstone/mock",
+  mock: { responsePrefix: "webchat-ui-smoke" },
+};
+writeFileSync(path, JSON.stringify(config, null, 2));
+console.log(path);
+NODE
 
 ./scripts/start-gateway.sh >/tmp/mindstone-agent-webchat-ui-gateway.log 2>&1 &
 gateway_pid=$!
@@ -64,9 +78,12 @@ const send = await json(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ agentId: 'default', senderId: 'webchat-ui-smoke', text: 'hello from native webchat ui smoke' }),
   },
-  501,
+  200,
 );
-if (send.persisted !== true || !Array.isArray(send.entries) || send.entries.length !== 2) process.exit(1);
+if (send.ok !== true || send.provider !== 'mock' || send.model !== 'mindstone/mock') process.exit(1);
+if (send.persisted !== true || !send.userEntry || !send.entry) process.exit(1);
+if (!send.entry.text.includes('webchat-ui-smoke: hello from native webchat ui smoke')) process.exit(1);
+if (send.entry.metadata?.event !== 'assistant_response') process.exit(1);
 
 const history = await json('/chat/history?agentId=default&senderId=webchat-ui-smoke', undefined, 200);
 if (history.sessionKey !== expectedSessionKey) process.exit(1);
@@ -75,7 +92,12 @@ if (history.entries[0].text !== 'hello from native webchat ui smoke') process.ex
 if (history.entries[0].source?.substrate !== 'gateway-rest') process.exit(1);
 if (history.entries[0].source?.channel !== 'webchat') process.exit(1);
 if (history.entries[0].source?.chatType !== 'internal') process.exit(1);
-if (history.entries[1].metadata?.event !== 'routing_not_implemented') process.exit(1);
+if (history.entries[1].role !== 'assistant') process.exit(1);
+if (!history.entries[1].text.includes('webchat-ui-smoke: hello from native webchat ui smoke')) process.exit(1);
+if (history.entries[1].metadata?.event !== 'assistant_response') process.exit(1);
+if (history.entries[1].source?.substrate !== 'gateway-rest') process.exit(1);
+if (history.entries[1].source?.channel !== 'webchat') process.exit(1);
+if (history.entries[1].source?.chatType !== 'internal') process.exit(1);
 NODE
 
 echo "WebChat UI Gateway smoke test passed."
