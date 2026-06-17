@@ -204,6 +204,7 @@ The preferred order is:
   - [x] First-pass threshold eventing for `auto_compact_warning` and `auto_compact_required`.
   - [x] Compact target to reserve-token mapping.
   - [x] Gated emergency checkpoint/handoff writing when `emergencyAutoHandoff` is enabled.
+  - [x] Current handoff status/doctor visibility and ephemeral replay into routed prompt context.
   - [ ] Actual substrate compact request remains pending.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle.
 - [x] Add manual backfill command.

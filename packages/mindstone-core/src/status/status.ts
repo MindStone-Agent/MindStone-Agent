@@ -2,6 +2,7 @@ import { loadConfiguredIdentities } from "../identity/index.js";
 import { loadMindStoneConfig, resolveConfigPath, type LoadedMindStoneConfig } from "../config/index.js";
 import { resolveContextManagementPolicy, type ResolvedContextManagementPolicy } from "../context/index.js";
 import type { MindStoneRoutingConfig } from "../config/index.js";
+import { getCurrentHandoffStatus, type CurrentHandoffStatus } from "../lifecycle/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { listTranscriptSessions } from "../transcript/index.js";
 
@@ -31,6 +32,7 @@ export type MindStoneSystemStatus = {
     sessionCount: number;
     entryCount: number;
   };
+  handoff: CurrentHandoffStatus;
   contextManagement: ResolvedContextManagementPolicy;
   routing: {
     mode: Required<MindStoneRoutingConfig>["mode"];
@@ -73,6 +75,7 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
       sessionCount: transcriptSessions.length,
       entryCount: transcriptSessions.reduce((total, session) => total + session.entries, 0),
     },
+    handoff: getCurrentHandoffStatus(paths),
     contextManagement: resolveContextManagementPolicy(loadedConfig.config?.contextManagement),
     routing: {
       mode: loadedConfig.config?.routing?.mode ?? "placeholder",

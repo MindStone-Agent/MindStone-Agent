@@ -71,12 +71,13 @@ const send = await request(
   200,
 );
 if (!send.ok || send.provider !== "mock") process.exit(1);
+if (send.handoffReplay) process.exit(1);
 if (send.promptWindow.mode !== "auto_compact") process.exit(1);
 if (!send.promptWindow.autoCompact || send.promptWindow.autoCompact.event !== "auto_compact_required") process.exit(1);
 if (send.promptWindow.autoCompact.action !== "request_compaction") process.exit(1);
 if (send.promptWindow.autoCompact.reserveTokens <= 0) process.exit(1);
 
-const history = await request("/chat/history", undefined, 200);
+let history = await request("/chat/history", undefined, 200);
 const compactEvent = history.entries.find((entry) => entry.metadata?.event === "auto_compact_required");
 if (!compactEvent) process.exit(1);
 if (compactEvent.metadata?.compactTargetPercent !== 30) process.exit(1);
@@ -88,6 +89,31 @@ if (compactEvent.metadata.handoff.path !== latest) process.exit(1);
 if (compactEvent.metadata.handoff.latestPath !== latest) process.exit(1);
 if (!fs.existsSync(latest)) process.exit(1);
 if (!fs.readFileSync(latest, "utf-8").includes("MindStone-Agent Auto-Compact Handoff")) process.exit(1);
+
+const status = await request("/status", undefined, 200);
+if (!status.handoff?.exists) process.exit(1);
+if (status.handoff.path !== latest) process.exit(1);
+if (!status.handoff.sha256 || status.handoff.bytes <= 0) process.exit(1);
+
+const replay = await request(
+  "/chat/send",
+  {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "resume after handoff" }),
+  },
+  200,
+);
+if (!replay.ok || replay.provider !== "mock") process.exit(1);
+if (!replay.handoffReplay) process.exit(1);
+if (replay.handoffReplay.path !== latest) process.exit(1);
+if (replay.handoffReplay.sha256 !== status.handoff.sha256) process.exit(1);
+
+history = await request("/chat/history", undefined, 200);
+const replayEvent = history.entries.find((entry) => entry.metadata?.event === "handoff_replayed");
+if (!replayEvent) process.exit(1);
+if (replayEvent.metadata?.durable !== false) process.exit(1);
+if (replayEvent.metadata?.handoff?.sha256 !== status.handoff.sha256) process.exit(1);
 NODE
 
 echo "Auto-compact runtime policy smoke test passed."

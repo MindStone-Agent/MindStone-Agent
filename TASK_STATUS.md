@@ -165,6 +165,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] compact target/reserve-token mapping
   - [x] Gateway transcript events for `auto_compact_warning` and `auto_compact_required`
   - [x] gated emergency checkpoint/handoff writing trigger when `emergencyAutoHandoff` is enabled
+  - [x] current handoff visibility in status/doctor and ephemeral one-shot replay into routed prompt context
   - [ ] actual substrate compact request/coordination
   - [ ] post-compact archive/embed/dream-cycle hook
 - [x] Implement sliding-window prompt pruning and config.

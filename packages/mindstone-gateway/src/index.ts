@@ -24,6 +24,7 @@ import {
   resolveGatewayAuthRequirement,
   runMindStoneRoute,
   runtimePathsFromEnv,
+  readCurrentHandoff,
   writeAutoCompactHandoff,
   type MindStoneConfig,
   type MindStoneModelInfo,
@@ -338,6 +339,14 @@ function gatewaySessionKey(input: {
   });
 }
 
+function hasReplayedHandoff(entries: TranscriptEntry[], sha256: string): boolean {
+  return entries.some((entry) => {
+    if (entry.metadata?.event !== "handoff_replayed") return false;
+    const handoff = entry.metadata.handoff;
+    return typeof handoff === "object" && handoff !== null && (handoff as Record<string, unknown>).sha256 === sha256;
+  });
+}
+
 async function runConfiguredRoute(input: {
   sessionKey: string;
   agentId: string;
@@ -353,6 +362,16 @@ async function runConfiguredRoute(input: {
 
   const model = resolveRouteModel(input.config, input.agentId, input.metadata);
   const entries = readTranscriptEntries(input.sessionKey);
+  const currentHandoff = readCurrentHandoff();
+  const handoffReplay = currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
+    ? {
+        path: currentHandoff.path,
+        sha256: currentHandoff.sha256,
+        updatedAt: currentHandoff.updatedAt,
+        text: currentHandoff.text,
+        tokenEstimate: currentHandoff.tokenEstimate,
+      }
+    : undefined;
   const source = [...entries].reverse().find((entry) => entry.source)?.source;
   const run = runManager.start({
     sessionKey: input.sessionKey,
@@ -369,6 +388,7 @@ async function runConfiguredRoute(input: {
       provider,
       contextManagement: input.config?.contextManagement,
       reservedTokens: resolveReservedPromptTokens(input.metadata),
+      handoffReplay,
       memoryRecall: {
         enabled: input.config?.memory?.autoRecall === true,
         provider: input.config?.memory?.vectorStore === "sqlite-vec"
@@ -385,6 +405,27 @@ async function runConfiguredRoute(input: {
       signal: run.abortController.signal,
       metadata: input.metadata,
     });
+
+    if (route.handoffReplay) {
+      appendTranscriptEntry({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        role: "event",
+        text: `Replayed current handoff into prompt context from ${route.handoffReplay.path}.`,
+        runId: run.id,
+        source,
+        metadata: {
+          event: "handoff_replayed",
+          handoff: {
+            path: route.handoffReplay.path,
+            sha256: route.handoffReplay.sha256,
+            updatedAt: route.handoffReplay.updatedAt,
+            tokenEstimate: route.handoffReplay.tokenEstimate,
+          },
+          durable: false,
+        },
+      });
+    }
 
     if (route.promptWindow.pruneEvent) {
       appendTranscriptEntry({
@@ -469,6 +510,14 @@ async function runConfiguredRoute(input: {
           prunedEntries: route.promptWindow.prunedEntries.length,
           autoCompact: route.promptWindow.autoCompactEvent,
         },
+        handoffReplay: route.handoffReplay
+          ? {
+              path: route.handoffReplay.path,
+              sha256: route.handoffReplay.sha256,
+              updatedAt: route.handoffReplay.updatedAt,
+              tokenEstimate: route.handoffReplay.tokenEstimate,
+            }
+          : undefined,
         memoryRecall: route.memoryRecall
           ? {
               query: route.memoryRecall.query,

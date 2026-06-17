@@ -8,6 +8,7 @@ import {
   backfillSqliteMemoryIndex,
   formatConfigSummary,
   formatMindStoneConfigHeader,
+  getCurrentHandoffStatus,
   getMindStoneDoctorReport,
   getSqliteMemoryIndexStats,
   loadMindStoneConfig,
@@ -341,6 +342,7 @@ function printStatus(): void {
   const paths = runtimePathsFromEnv();
   const configPath = resolveConfigPath();
   const loaded = loadMindStoneConfig(configPath);
+  const handoff = getCurrentHandoffStatus(paths);
   output.write(`${gold("🔶 MindStone-Agent status")}\n\n`);
   output.write(
     [
@@ -352,6 +354,7 @@ function printStatus(): void {
       `Config: ${configPath}`,
       `Config exists: ${loaded.exists}`,
       loaded.error ? `Config error: ${loaded.error}` : undefined,
+      `Current handoff: ${handoff.exists ? `${handoff.path} (${handoff.bytes} bytes)` : `none (${handoff.path})`}`,
       loaded.config ? "" : undefined,
       loaded.config ? formatConfigSummary(loaded.config) : undefined,
     ]

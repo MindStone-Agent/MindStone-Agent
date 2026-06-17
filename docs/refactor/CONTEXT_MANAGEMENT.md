@@ -41,6 +41,8 @@ Current first-pass runtime behavior:
 - The event includes token counts, utilization, warning/target thresholds, `keepRecentTokens`, computed `reserveTokens`, and the recommended action.
 - If `emergencyAutoHandoff` is enabled and the required threshold is reached, Gateway writes a local emergency handoff artifact and appends a compact checkpoint entry to runtime `LOG.md`.
 - The current handoff is written to `transcripts/.handoff.md` and may be overwritten by the next compaction boundary; durable continuity belongs in LOG, transcripts, journals, and structured memory, not in archived handoff files.
+- `/status`, `mindstone status`, and `mindstone doctor` report current handoff presence/path/size/hash where available.
+- On a subsequent routed model call, Gateway replays the current handoff ephemerally into prompt context if that handoff hash has not already been replayed in the session, then records a `handoff_replayed` transcript event with `durable: false`.
 - Actual substrate compaction is still not invoked automatically; the event records that compaction was not requested yet.
 
 ## `sliding_window`
@@ -94,13 +96,14 @@ Implemented:
 - When pruning occurs, Gateway appends a transcript event with `event: context_window_pruned` and pruned/kept entry IDs.
 - In `auto_compact` mode, Gateway appends `auto_compact_warning` or `auto_compact_required` transcript events when configured thresholds are crossed.
 - When `emergencyAutoHandoff` is enabled, `auto_compact_required` writes the current emergency handoff to `transcripts/.handoff.md`, then records that path in transcript metadata.
+- Gateway replays the current handoff once per handoff hash/session as ephemeral prompt context and records `handoff_replayed`; it is not indexed or promoted to durable memory.
 - Smoke coverage:
   - `npm run smoke:context-window`
   - `npm run smoke:sliding-window`
 
 Still pending:
 
-- Auto-compact eventing and gated emergency handoff writing are implemented, but actual substrate compaction is not yet requested/invoked.
+- Auto-compact eventing, gated emergency handoff writing, status/doctor visibility, and ephemeral handoff replay are implemented, but actual substrate compaction is not yet requested/invoked.
 - Real model routing must consume `promptEntries` as the actual model input.
 - Token estimation is currently conservative character-based estimation, not provider tokenizer-specific.
 - Tool-call/tool-result semantics need richer grouping once real tool transcripts are flowing.

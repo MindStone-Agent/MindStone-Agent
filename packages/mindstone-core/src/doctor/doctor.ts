@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolveContextManagementPolicy } from "../context/index.js";
 import { loadConfiguredIdentities } from "../identity/index.js";
+import { getCurrentHandoffStatus } from "../lifecycle/index.js";
 import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { loadMindStoneConfig, resolveConfigPath } from "../config/load.js";
@@ -182,6 +183,14 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
     );
   }
   check(checks, existsSync(paths.logPath) ? "pass" : "warn", "memory.log", "LOG.md exists", paths.logPath);
+  const handoff = getCurrentHandoffStatus(paths);
+  check(
+    checks,
+    handoff.exists ? "pass" : "info",
+    "handoff.current",
+    "Current handoff file status for ephemeral replay",
+    handoff.exists ? `${handoff.path} (${handoff.bytes} bytes, ${handoff.tokenEstimate ?? 0} est. tokens)` : handoff.path,
+  );
   check(checks, existsSync(paths.memoryIndexPath) ? "pass" : "warn", "memory.index", "Structured memory index exists", paths.memoryIndexPath);
   check(checks, existsSync(paths.journalDir) ? "pass" : "warn", "memory.journals", "Journal directory exists", paths.journalDir);
   const fileMemoryDocs = discoverFileMemoryDocuments({ config, paths });

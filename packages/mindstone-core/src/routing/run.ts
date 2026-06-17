@@ -4,6 +4,14 @@ import { recallMindStoneMemory, type MemoryRecallConfig, type MemoryRecallProvid
 import type { MindStoneChatMessage, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider } from "../provider/index.js";
 import type { TranscriptEntry } from "../transcript/index.js";
 
+export type MindStoneHandoffReplay = {
+  path: string;
+  sha256: string;
+  updatedAt?: string;
+  text: string;
+  tokenEstimate: number;
+};
+
 export type MindStoneRouteInput = {
   agentId: string;
   sessionKey: string;
@@ -13,6 +21,7 @@ export type MindStoneRouteInput = {
   contextManagement?: ContextManagementPolicy;
   reservedTokens?: number;
   protectedEntryIds?: string[];
+  handoffReplay?: MindStoneHandoffReplay;
   memoryRecall?: {
     enabled?: boolean;
     provider?: MemoryRecallProvider;
@@ -29,6 +38,7 @@ export type MindStoneRoutePlan = {
   promptWindow: PromptWindowBuildResult;
   messages: MindStoneChatMessage[];
   memoryRecall?: MemoryRecallResult;
+  handoffReplay?: MindStoneHandoffReplay;
 };
 
 export type MindStoneRouteResult = MindStoneRoutePlan & {
@@ -50,12 +60,21 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     entries: input.entries,
     contextWindowTokens: input.model.contextWindowTokens ?? 128_000,
     policy: input.contextManagement,
-    reservedTokens: (input.reservedTokens ?? 0) + (input.memoryRecall?.promptTokens ?? 0),
+    reservedTokens: (input.reservedTokens ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0),
     protectedEntryIds: input.protectedEntryIds,
   });
   const messages = promptWindow.promptEntries.map(transcriptEntryToChatMessage).filter((message): message is MindStoneChatMessage => Boolean(message));
   if (input.memoryRecall?.promptText) {
     messages.unshift({ role: "system", text: input.memoryRecall.promptText });
+  }
+  if (input.handoffReplay?.text) {
+    messages.unshift({
+      role: "system",
+      text: [
+        "Current MindStone handoff replay (ephemeral; do not promote to durable memory unless explicitly checkpointed):",
+        input.handoffReplay.text,
+      ].join("\n\n"),
+    });
   }
   return {
     agentId: input.agentId,
@@ -64,6 +83,7 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     promptWindow,
     messages,
     memoryRecall: input.memoryRecall,
+    handoffReplay: input.handoffReplay,
   };
 }
 
