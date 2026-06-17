@@ -4,6 +4,8 @@ MindStone-Agent supports two context-management modes. They are related but not 
 
 MindStone’s continuity premise is a single shared, append-only JSONL session/transcript across channels. `sliding_window` is the primary live-context policy. `auto_compact` is secondary/fallback behavior for substrates that require summarization under context pressure. In both modes, pruning and compaction affect only the live prompt/session context; they must never delete transcript entries, split continuity by channel, or promote a compaction summary/handoff into durable memory by itself.
 
+MindStone-Agent uses the canonical single-session key shape `agent:<agentId>:<mainKey>`. The default is `agent:default:main`. The legacy early-rebuild alias `mindstone` canonicalizes to `agent:default:main` for compatibility.
+
 ## `auto_compact`
 
 `auto_compact` matches the Pi/Claude-style flow used by MS4PI:
@@ -96,6 +98,7 @@ Implemented:
 - Sliding-window pruning by old prompt units/turn-ish groups.
 - System entries and explicit protected entries stay pinned.
 - At least `minRecentMessages` recent prompt entries are retained.
+- Gateway `/chat/send`, HTTP RPC `chat.send`, WebSocket RPC `chat.send`, and `/v1/chat/completions` default to the canonical shared session `agent:default:main` when no explicit session key is supplied.
 - Gateway `/chat/send`, RPC `chat.send`, WebSocket RPC `chat.send`, and `/v1/chat/completions` build a prompt-window summary after persisting inbound messages.
 - When pruning occurs, Gateway appends a transcript event with `event: context_window_pruned` and pruned/kept entry IDs.
 - In `auto_compact` mode, Gateway appends `auto_compact_warning` or `auto_compact_required` transcript events when configured thresholds are crossed.
@@ -105,6 +108,7 @@ Implemented:
 - Smoke coverage:
   - `npm run smoke:context-window`
   - `npm run smoke:sliding-window`
+  - `npm run smoke:unified-session`
 
 Still pending:
 

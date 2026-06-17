@@ -37,7 +37,8 @@
     "smoke:memory-backfill": "./scripts/smoke-memory-backfill.sh",
     "smoke:embedding-memory": "./scripts/smoke-embedding-memory.sh",
     "smoke:scri-recall": "./scripts/smoke-scri-recall.sh",
-    "smoke:auto-compact": "./scripts/smoke-auto-compact.sh"
+    "smoke:auto-compact": "./scripts/smoke-auto-compact.sh",
+    "smoke:unified-session": "./scripts/smoke-unified-session.sh"
   },
   "engines": {
     "node": ">=22.19.0"

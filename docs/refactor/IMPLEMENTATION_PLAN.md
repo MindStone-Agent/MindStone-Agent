@@ -287,8 +287,11 @@ The preferred order is:
 
 - [x] Add explicit session policy config for single shared MindStone session/transcript by default.
 - [ ] Ensure Gateway WebChat, OpenWebUI, Pi adapter, Telegram, and future channels can route to the same default session key.
-  - [x] Gateway REST chat, RPC chat, and OpenAI chat completions default to the configured shared session when `sessionKey` is omitted.
+  - [x] Canonical single-session default is `agent:default:main`, matching MindStone's `agent:<agentId>:<mainKey>` shape.
+  - [x] Legacy `mindstone` session key alias canonicalizes to `agent:default:main`.
+  - [x] Gateway REST chat, HTTP RPC chat, WebSocket RPC chat, and OpenAI chat completions default to the configured shared session when `sessionKey` is omitted.
   - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, routing events, and assistant responses preserve structured transcript source metadata.
+  - [x] Verified by `npm run smoke:unified-session`.
   - [ ] OpenWebUI, Telegram, WebChat UI, and Pi adapter validation still pending.
 - [ ] Enable Gateway OpenAI-compatible endpoint in local config.
 - [ ] Start Gateway with auth.
@@ -371,11 +374,12 @@ The preferred order is:
   - `reference_pi_public_docs.md`
   - updates to live-memory/context-management memories
   - recall backfill/archive verification after approval
-- [ ] Re-center the next engineering slice on MindStone continuity fundamentals:
+- [x] Re-center the next engineering slice on MindStone continuity fundamentals:
   - one shared session/transcript across Gateway, WebChat, OpenAI-compatible, Pi adapter, and future channels
   - JSONL transcript remains append-only and authoritative
   - sliding-window pruning affects only the active prompt window
   - SCRI/recall rehydrates relevant older context from transcript/memory layers
+  - verified Gateway REST/RPC/WS/OpenAI default-session convergence with `npm run smoke:unified-session`
 - [ ] Perform a focused Pi SDK/docs spike for compaction only as the secondary fallback path:
   - verify SDK `AgentSession.compact(customInstructions?)` behavior in an isolated runtime
   - verify extension `ctx.compact()` behavior and event ordering from inside Pi

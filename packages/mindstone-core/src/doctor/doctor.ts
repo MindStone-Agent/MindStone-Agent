@@ -4,6 +4,7 @@ import { loadConfiguredIdentities } from "../identity/index.js";
 import { getCurrentHandoffStatus } from "../lifecycle/index.js";
 import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
+import { resolveDefaultSessionKey } from "../routing/session.js";
 import { loadMindStoneConfig, resolveConfigPath } from "../config/load.js";
 import type { MindStoneConfig } from "../config/types.js";
 import type { MindStoneDoctorCheck, MindStoneDoctorReport, MindStoneDoctorSeverity } from "./types.js";
@@ -109,7 +110,7 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
   }
 
   const sessionMode = config?.session?.mode ?? "single";
-  const defaultSessionKey = config?.session?.defaultSessionKey?.trim() || "mindstone";
+  const defaultSessionKey = resolveDefaultSessionKey(config);
   if (sessionMode !== "single" && sessionMode !== "per_surface") {
     check(checks, "fail", "session.mode", "Session mode is valid", String(sessionMode));
   } else {
@@ -122,8 +123,8 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
     "Default session key is configured",
     defaultSessionKey,
   );
-  if (sessionMode === "single" && defaultSessionKey !== "mindstone") {
-    check(checks, "warn", "session.sharedDefault", "Single-session default differs from MindStone default", defaultSessionKey);
+  if (sessionMode === "single" && !defaultSessionKey.startsWith("agent:")) {
+    check(checks, "warn", "session.sharedDefault", "Single-session default is not canonical MindStone shape", defaultSessionKey);
   }
 
   const context = resolveContextManagementPolicy(config?.contextManagement);

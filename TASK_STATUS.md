@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with profile selection and provider-first isolated Pi model selection, native CLI, context-management policy + sliding-window selector, router/provider abstraction, transcript store, file + SQLite memory index/backfill/status, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with profile selection and provider-first isolated Pi model selection, native CLI, context-management policy + sliding-window selector, router/provider abstraction, transcript store, file + SQLite memory index/backfill/status, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, canonical unified session key, and OpenAI skeleton build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -38,6 +38,8 @@
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
 - [x] Add provider-first isolated Pi provider/model discovery to native config/onboarding routing setup.
 - [x] Add default onboarding profile selection with Custom / Write-in support.
+- [x] Align single-session default with MindStone canonical session key shape: `agent:default:main`, while preserving `mindstone` as a compatibility alias.
+- [x] Add unified session/transcript invariant smoke proving REST, HTTP RPC, WebSocket RPC, and OpenAI-compatible default traffic append to one canonical transcript with distinct source metadata.
 
 ### Completed
 
@@ -186,12 +188,14 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
     {
       "session": {
         "mode": "single",
-        "defaultSessionKey": "mindstone"
+        "defaultSessionKey": "agent:default:main"
       }
     }
     ```
 - [ ] Ensure Telegram, WebChat, OpenWebUI, Pi adapter, and future channels can route into the same session/transcript by default.
-  - [x] Gateway REST chat, RPC chat, and OpenAI chat completions use the configured shared default when `sessionKey` is omitted.
+  - [x] Gateway REST chat, HTTP RPC chat, WebSocket RPC chat, and OpenAI chat completions use the configured shared default when `sessionKey` is omitted.
+  - [x] `mindstone` legacy alias canonicalizes to `agent:default:main` for compatibility.
+  - [x] Verified with `npm run smoke:unified-session`.
   - [ ] Telegram/WebChat UI/OpenWebUI/Pi adapter final validation still pending.
 - [ ] Preserve channel/source metadata inside the unified transcript without splitting memory continuity.
   - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, routing events, and assistant responses now write structured `TranscriptEntry.source` metadata.

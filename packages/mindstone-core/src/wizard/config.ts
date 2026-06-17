@@ -247,7 +247,7 @@ function withDefaultOnboardingConfig(config: MindStoneConfig): MindStoneConfig {
     },
     session: {
       mode: "single",
-      defaultSessionKey: "mindstone",
+      defaultSessionKey: "agent:default:main",
       ...config.session,
     },
     memory: {

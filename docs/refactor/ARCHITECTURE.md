@@ -231,6 +231,8 @@ type ContextManagementPolicy =
 
 `sliding_window` is MindStone proper's normal behavior: when prompt utilization reaches `ceilingPercent` of the current model's configured context window, older messages are removed from the active prompt window down toward `floorPercent`. The transcript store remains append-only and complete, and SCRI/recall can rehydrate relevant older context without keeping the full transcript in the prompt.
 
+The canonical shared session key follows MindStone's current shape: `agent:<agentId>:<mainKey>`. MindStone-Agent defaults to `agent:default:main` and treats the early-rebuild `mindstone` key as a compatibility alias.
+
 ### 3.5 Transcript interfaces
 
 ```ts

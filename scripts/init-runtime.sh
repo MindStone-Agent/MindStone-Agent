@@ -117,7 +117,7 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
   },
   "session": {
     "mode": "single",
-    "defaultSessionKey": "mindstone"
+    "defaultSessionKey": "agent:default:main"
   },
   "routing": {
     "mode": "placeholder",
