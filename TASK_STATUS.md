@@ -157,7 +157,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] API key/env/reference handling for OpenAI-compatible embedding endpoints
   - [x] local/Ollama defaults
   - [x] model choice via provider spec, e.g. `ollama:nomic-embed-text`
-  - [ ] config wizard UX for embeddings
+  - [x] provider-first config wizard UX for embeddings
   - [ ] sqlite-vec native vector backend compatibility
 - [x] Support choosing `sliding_window` vs `auto_compact` context mode.
 - [ ] Finish auto-compact runtime policy.

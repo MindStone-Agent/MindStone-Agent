@@ -293,7 +293,7 @@ Implemented in MindStone-Agent first pass:
 Still pending:
 
 - package/install actual sqlite-vec extension-backed nearest-neighbor search
-- config wizard UX for embeddings
+- deeper embedding setup UX for provider-specific endpoint/env validation
 - tuning SCRI weights against real traces
 - richer source-specific salience policies
 - checkpoint/dream-cycle automation for journal writing and memory index updates

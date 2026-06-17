@@ -839,6 +839,74 @@ async function configureContext(config: MindStoneConfig, prompter: MindStoneProm
   };
 }
 
+async function chooseEmbeddingProvider(prompter: MindStonePrompter, current?: string): Promise<string | undefined> {
+  type Choice = "unset" | "current" | "ollama" | "openai" | "openai-compatible" | "custom";
+  const options: Array<MindStoneSelectOption<Choice>> = [
+    { value: "unset", label: "None", hint: "memory can still use lexical/file recall" },
+  ];
+  if (current) options.push({ value: "current", label: `Keep current: ${current}` });
+  options.push(
+    { value: "ollama", label: "Ollama local", hint: "default local embeddings via /v1/embeddings" },
+    { value: "openai-compatible", label: "OpenAI-compatible endpoint", hint: "uses EMBEDDER_BASE_URL / EMBEDDER_API_KEY" },
+    { value: "openai", label: "OpenAI", hint: "uses OPENAI_API_KEY or EMBEDDER_API_KEY" },
+    { value: "custom", label: "Custom provider spec", hint: "advanced, e.g. provider:model" },
+  );
+
+  const choice = await prompter.select<Choice>({
+    message: "Embedding provider",
+    options,
+    initialValue: current ? "current" : "ollama",
+  });
+
+  if (choice === "unset") return undefined;
+  if (choice === "current") return current;
+  if (choice === "custom") {
+    const value = await prompter.text({
+      message: "Custom embedding provider spec",
+      placeholder: current ?? "ollama:nomic-embed-text",
+      initialValue: current ?? "ollama:nomic-embed-text",
+    });
+    return trimOrUndefined(value);
+  }
+
+  if (choice === "ollama") {
+    const model = await prompter.select<"nomic-embed-text" | "mxbai-embed-large" | "custom">({
+      message: "Ollama embedding model",
+      options: [
+        { value: "nomic-embed-text", label: "nomic-embed-text", hint: "recommended local default" },
+        { value: "mxbai-embed-large", label: "mxbai-embed-large", hint: "common higher-capacity local option" },
+        { value: "custom", label: "Custom Ollama model", hint: "manual" },
+      ],
+      initialValue: current?.startsWith("ollama:mxbai-embed-large") ? "mxbai-embed-large" : "nomic-embed-text",
+    });
+    if (model !== "custom") return `ollama:${model}`;
+    const customModel = await prompter.text({ message: "Custom Ollama embedding model", placeholder: "nomic-embed-text", initialValue: "nomic-embed-text" });
+    return `ollama:${trimOrUndefined(customModel) ?? "nomic-embed-text"}`;
+  }
+
+  if (choice === "openai") {
+    const model = await prompter.select<"text-embedding-3-small" | "text-embedding-3-large" | "custom">({
+      message: "OpenAI embedding model",
+      options: [
+        { value: "text-embedding-3-small", label: "text-embedding-3-small", hint: "smaller/faster" },
+        { value: "text-embedding-3-large", label: "text-embedding-3-large", hint: "larger/higher quality" },
+        { value: "custom", label: "Custom OpenAI model", hint: "manual" },
+      ],
+      initialValue: current?.startsWith("openai:text-embedding-3-large") ? "text-embedding-3-large" : "text-embedding-3-small",
+    });
+    if (model !== "custom") return `openai:${model}`;
+    const customModel = await prompter.text({ message: "Custom OpenAI embedding model", placeholder: "text-embedding-3-small", initialValue: "text-embedding-3-small" });
+    return `openai:${trimOrUndefined(customModel) ?? "text-embedding-3-small"}`;
+  }
+
+  const model = await prompter.text({
+    message: "OpenAI-compatible embedding model",
+    placeholder: "nomic-embed-text",
+    initialValue: current?.includes(":") ? current.split(":").slice(1).join(":") : "nomic-embed-text",
+  });
+  return `openai-compatible:${trimOrUndefined(model) ?? "nomic-embed-text"}`;
+}
+
 async function configureMemory(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
   const memory = config.memory ?? {};
   const autoRecall = await prompter.confirm({
@@ -854,13 +922,7 @@ async function configureMemory(config: MindStoneConfig, prompter: MindStonePromp
     ],
     initialValue: memory.vectorStore ?? "sqlite-vec",
   });
-  const embeddingProvider = await chooseOptionalString({
-    prompter,
-    message: "Embedding provider",
-    current: memory.embeddingProvider,
-    suggested: "ollama:nomic-embed-text",
-    suggestedLabel: "Use Ollama / nomic-embed-text",
-  });
+  const embeddingProvider = await chooseEmbeddingProvider(prompter, memory.embeddingProvider);
   return { ...config, memory: { ...memory, autoRecall, vectorStore, embeddingProvider } };
 }
 

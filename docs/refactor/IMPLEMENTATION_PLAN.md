@@ -198,7 +198,7 @@ The preferred order is:
   - [x] Ollama-style local default via `ollama:nomic-embed-text` and `EMBEDDER_BASE_URL`.
   - [x] `mindstone memory backfill --embed`.
   - [x] `mindstone doctor` sample embedding probe.
-  - [ ] Config wizard UX remains pending.
+  - [x] Provider-first config wizard UX for embeddings.
 - [ ] Live-test selected prompt messages against Pi-backed provider with isolated credentials/config.
 - [ ] Implement auto-compact runtime policy for compatible substrates.
 - [ ] Add compact config UX and runtime mapping for checkpoint/handoff trigger, compact target, and post-compact archive/embed/dream-cycle.
