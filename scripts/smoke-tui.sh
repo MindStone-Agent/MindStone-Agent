@@ -161,7 +161,7 @@ fi
 
 SELECTOR_OUTPUT="$(./scripts/mindstone tui --smoke-selectors --width 72)"
 echo "${SELECTOR_OUTPUT}"
-if ! grep -q "select agent" <<<"${SELECTOR_OUTPUT}" || ! grep -q "select model" <<<"${SELECTOR_OUTPUT}" || ! grep -q "select session" <<<"${SELECTOR_OUTPUT}"; then
+if ! grep -q "command palette" <<<"${SELECTOR_OUTPUT}" || ! grep -q "select agent" <<<"${SELECTOR_OUTPUT}" || ! grep -q "select model" <<<"${SELECTOR_OUTPUT}" || ! grep -q "select session" <<<"${SELECTOR_OUTPUT}"; then
   echo "TUI selector smoke output missing selector headings" >&2
   exit 1
 fi
@@ -179,6 +179,10 @@ if ! grep -q "research" <<<"${SELECTOR_OUTPUT}" || ! grep -q "mindstone/research
 fi
 if ! grep -q "filtered model" <<<"${SELECTOR_OUTPUT}" || ! grep -q "Filter text: research" <<<"${SELECTOR_OUTPUT}"; then
   echo "TUI selector smoke output missing filtered selector snapshot" >&2
+  exit 1
+fi
+if ! grep -q "filtered command" <<<"${SELECTOR_OUTPUT}" || ! grep -q "Filter text: gateway" <<<"${SELECTOR_OUTPUT}" || ! grep -q "/gateway" <<<"${SELECTOR_OUTPUT}"; then
+  echo "TUI selector smoke output missing filtered command palette snapshot" >&2
   exit 1
 fi
 if grep -q "Config was changed" <<<"${SELECTOR_OUTPUT}"; then

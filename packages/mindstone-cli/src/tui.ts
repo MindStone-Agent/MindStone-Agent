@@ -101,6 +101,7 @@ type TuiCommandDefinition = {
 
 const TUI_COMMANDS: TuiCommandDefinition[] = [
   { name: "help", description: "Show TUI commands" },
+  { name: "commands", description: "Open filterable command palette" },
   { name: "clear", description: "Clear the visible chat log" },
   { name: "status", description: "Show current TUI/session status" },
   { name: "config", description: "Show sanitized active runtime config" },
@@ -459,6 +460,14 @@ function switchTuiModel(ctx: TuiCommandContext, config: ReturnType<typeof loadMi
 
 function uniqueTuiValues(values: Array<string | undefined>): string[] {
   return Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
+}
+
+function tuiCommandSelectItems(): SelectItem[] {
+  return TUI_COMMANDS.map((command) => ({
+    value: `/${command.name}`,
+    label: `/${command.name}${command.usage ? ` ${command.usage}` : ""}`,
+    description: command.description,
+  }));
 }
 
 function tuiAgentSelectItems(config: ReturnType<typeof loadMindStoneConfig>["config"], ctx: TuiCommandContext): SelectItem[] {
@@ -841,12 +850,17 @@ function createMindStoneTuiSelectorSnapshot(width = 80): string {
   const config = smokeSelectorConfig();
   const ctx = smokeSelectorContext();
   const paths = runtimePathsFromEnv();
+  const commands = new MindStoneSelectOverlay("command palette", tuiCommandSelectItems(), "Type to filter • Enter inserts command • Esc clears/cancels");
   const agents = new MindStoneSelectOverlay("select agent", tuiAgentSelectItems(config, ctx), "Type to filter • Enter selects • Esc clears/cancels • config is not changed");
   const models = new MindStoneSelectOverlay("select model", tuiModelSelectItems(config, ctx), "Type to filter • Enter selects • Esc clears/cancels • config is not changed");
   const sessions = new MindStoneSelectOverlay("select session", tuiSessionSelectItems({ config, ctx, paths }), "Type to filter • Enter selects • Esc clears/cancels • config is not changed");
   const filteredModels = new MindStoneSelectOverlay("filtered model", tuiModelSelectItems(config, ctx), "Filter text: research");
   for (const char of "research") filteredModels.handleInput(char);
+  const filteredCommands = new MindStoneSelectOverlay("filtered command", tuiCommandSelectItems(), "Filter text: gateway");
+  for (const char of "gateway") filteredCommands.handleInput(char);
   return [
+    ...commands.render(width),
+    "",
     ...agents.render(width),
     "",
     ...models.render(width),
@@ -854,6 +868,8 @@ function createMindStoneTuiSelectorSnapshot(width = 80): string {
     ...sessions.render(width),
     "",
     ...filteredModels.render(width),
+    "",
+    ...filteredCommands.render(width),
   ].join("\n");
 }
 
@@ -951,6 +967,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       title: string;
       items: SelectItem[];
       emptyText: string;
+      hint?: string;
       onSelect: (item: SelectItem) => void;
     }) => {
       if (params.items.length === 0) {
@@ -958,7 +975,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         tui.requestRender();
         return;
       }
-      const overlay = new MindStoneSelectOverlay(params.title, params.items, "Type to filter • Enter selects • Esc clears/cancels • config is not changed");
+      const overlay = new MindStoneSelectOverlay(params.title, params.items, params.hint ?? "Type to filter • Enter selects • Esc clears/cancels • config is not changed");
       overlay.onSelect = (item) => {
         closeOverlay();
         params.onSelect(item);
@@ -985,6 +1002,19 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       if (message === "/help") {
         chat.addSystem(TUI_HELP_TEXT);
         tui.requestRender();
+        return;
+      }
+      if (message === "/commands") {
+        openTuiSelector({
+          title: "command palette",
+          items: tuiCommandSelectItems(),
+          emptyText: "No TUI commands found.",
+          hint: "Type to filter • Enter inserts command • Esc clears/cancels",
+          onSelect: (item) => {
+            editor.setText(item.value);
+            footer.setStatus(`selected ${item.value} • press Enter to run`);
+          },
+        });
         return;
       }
       if (message === "/status") {
