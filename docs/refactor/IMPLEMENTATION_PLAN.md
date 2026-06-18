@@ -136,6 +136,7 @@ The preferred order is:
 - [x] Add gated transcript persistence for selected stream events in shared native chat and Gateway route paths.
 - [x] Add first OpenClaw-style `mindstone tui` shell using vendored Pi TUI primitives, styled chat log/editor/footer, and the existing routed chat path.
 - [x] Load recent transcript history into `mindstone tui` startup, with `--history-limit` and smoke validation.
+- [x] Add first TUI in-place assistant update path and event-line rendering for returned turn events; live token/event streaming remains pending.
 - [ ] Complete a session-backed Pi runner modeled on current MindStone's embedded Pi runner:
   - [x] isolated Pi `agentDir` and session directory
   - [x] canonical MindStone session key → Pi session file mapping
@@ -418,7 +419,8 @@ The preferred order is:
 - [x] Add gated transcript persistence for selected stream events.
 - [x] Add first styled `mindstone tui` shell over the routed chat path.
 - [x] Load transcript history into the TUI on startup.
-- [ ] Stream/update assistant/tool events in-place.
+- [x] Add first in-place assistant update path and render returned event entries.
+- [ ] Stream/update assistant/tool events live from runner/Gateway events.
 - [ ] Implement full live Pi session event/stream capture into MindStone transcript/source metadata.
 - [ ] Live-test Pi-backed model calls through `AgentSession.prompt(...)` only after isolated auth/model config is intentionally provided.
 - [ ] Add actual substrate compact invocation behind the existing coordination interface only after the session-backed runner can preserve unified transcript authority.

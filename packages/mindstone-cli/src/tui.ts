@@ -111,6 +111,18 @@ class MindStoneFooter implements Component {
   invalidate(): void {}
 }
 
+type AssistantMessageHandle = {
+  setText(text: string): void;
+};
+
+class MarkdownMessageHandle implements AssistantMessageHandle {
+  constructor(private readonly markdown: Markdown) {}
+
+  setText(text: string): void {
+    this.markdown.setText(text || muted("(empty response)"));
+  }
+}
+
 class MindStoneChatLog extends Container {
   private readonly maxComponents: number;
 
@@ -148,10 +160,24 @@ class MindStoneChatLog extends Container {
     this.append(new Markdown(text, 2, 0, markdownTheme));
   }
 
-  addAssistant(text: string): void {
+  startAssistant(text: string): AssistantMessageHandle {
     this.append(new Spacer(1));
     this.append(new Text(`${gold("◆")} ${bold(gold("mindstone"))}`, 1, 0));
-    this.append(new Markdown(text || muted("(empty response)"), 2, 0, markdownTheme));
+    const markdown = new Markdown(text || muted("(empty response)"), 2, 0, markdownTheme);
+    this.append(markdown);
+    return new MarkdownMessageHandle(markdown);
+  }
+
+  addAssistant(text: string): void {
+    this.startAssistant(text);
+  }
+
+  addTurnEvents(entries: TranscriptEntry[]): void {
+    for (const entry of entries) {
+      if (entry.role !== "event") continue;
+      const label = eventEntryLabel(entry);
+      if (label) this.addEvent(label);
+    }
   }
 
   addError(text: string): void {
@@ -349,7 +375,9 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   const footer = new MindStoneFooter();
   chat.addSystem("Welcome back. This is the styled MindStone-Agent TUI shell.");
   chat.addUser("hello tui");
-  chat.addAssistant("TUI smoke response with **markdown** and `code`.");
+  const assistant = chat.startAssistant(dim("MindStone is thinking…"));
+  assistant.setText("TUI smoke response with **markdown** and `code`.");
+  chat.addEvent("runner stream event smoke");
   footer.setStatus(`session ${ctx.sessionKey}`);
   return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
 }
@@ -475,18 +503,21 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       editor.disableSubmit = true;
       footer.setStatus("thinking…");
       chat.addUser(message);
-      const loader = new Loader(tui, gold, muted, "MindStone is thinking…");
+      const assistant = chat.startAssistant(dim("MindStone is thinking…"));
+      const loader = new Loader(tui, gold, muted, "working");
       chat.addChild(loader);
       tui.requestRender();
 
       void sendTuiTurn({ argv, loaded, ctx, message })
         .then((result) => {
           chat.removeChild(loader);
-          chat.addAssistant(result.assistantEntry.text ?? "");
+          chat.addTurnEvents(result.events);
+          assistant.setText(result.assistantEntry.text ?? "");
           footer.setStatus(`idle • ${ctx.sessionKey}`);
         })
         .catch((error) => {
           chat.removeChild(loader);
+          assistant.setText(red("Turn failed."));
           chat.addError(error instanceof Error ? error.message : String(error));
           footer.setStatus("error");
         })
