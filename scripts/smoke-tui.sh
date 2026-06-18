@@ -95,6 +95,10 @@ if ! grep -q "deterministic Pi session file" <<<"${OUTPUT}" || ! grep -q "diagno
   echo "TUI smoke output missing pi panel" >&2
   exit 1
 fi
+if ! grep -q "uses global Pi agent dir" <<<"${OUTPUT}" || ! grep -q "resume cap" <<<"${OUTPUT}" || ! grep -q "compaction reserve floor" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing pi-session safety posture" >&2
+  exit 1
+fi
 if ! grep -q "Transcript history is append-only" <<<"${OUTPUT}" || ! grep -q "entries on disk" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing transcript panel" >&2
   exit 1

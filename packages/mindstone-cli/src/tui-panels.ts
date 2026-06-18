@@ -2,6 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import {
   getCurrentHandoffStatus,
   getMindStoneDoctorReport,
+  getPiSessionSafetyStatus,
   getSqliteMemoryIndexStats,
   listTranscriptSessions,
   loadMindStoneConfig,
@@ -115,6 +116,11 @@ export function buildTuiPiPanel(params: {
   paths: ReturnType<typeof runtimePathsFromEnv>;
 }): string {
   const agentDir = params.config?.routing?.pi?.agentDir ?? params.paths.piAgentDir;
+  const safety = getPiSessionSafetyStatus({
+    config: params.config,
+    piAgentDir: params.paths.piAgentDir,
+    piSessionDir: params.paths.piSessionDir,
+  });
   const sessionFile = piSessionFileForKey(params.paths.piSessionDir, params.ctx.sessionKey);
   const status = fileStatus(sessionFile);
   return [
@@ -123,6 +129,10 @@ export function buildTuiPiPanel(params: {
     `- project root: \`${params.paths.root}\``,
     `- isolated Pi agent dir: \`${agentDir}\``,
     `- isolated Pi session dir: \`${params.paths.piSessionDir}\``,
+    `- uses global Pi agent dir: \`${safety.usesGlobalPiAgentDir}\``,
+    `- resume cap: \`${safety.resumeCap.enabled}\` (${safety.resumeCap.maxEntries} entries, dropErrorTurns=${safety.resumeCap.dropErrorTurns})`,
+    `- compaction reserve floor: \`${safety.compaction.reserveTokensFloor}\``,
+    `- compaction safeguard fallback: \`${safety.compaction.safeguardFallback}\``,
     `- cwd: \`${params.config?.workspace?.root ?? process.cwd()}\``,
     `- default model: \`${params.config?.routing?.defaultModel ?? params.ctx.model.id}\``,
     `- active MindStone session: \`${params.ctx.sessionKey}\``,
