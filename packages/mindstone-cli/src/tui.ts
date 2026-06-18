@@ -714,6 +714,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       footer.setStatus("thinking…");
       chat.addUser(message);
       const assistant = chat.startAssistant(dim("MindStone is thinking…"));
+      let streamedAssistantText = "";
       const loader = new Loader(tui, gold, muted, "working");
       chat.addChild(loader);
       tui.requestRender();
@@ -724,8 +725,14 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         ctx,
         message,
         onRunnerStreamEvent: (event) => {
-          chat.addEvent(runnerStreamEventLabel(event));
-          footer.setStatus(event.type === "run_completed" ? "finalizing…" : runnerStreamEventLabel(event));
+          if (event.type === "text_delta") {
+            streamedAssistantText += event.text;
+            assistant.setText(streamedAssistantText);
+            footer.setStatus("receiving response…");
+          } else {
+            chat.addEvent(runnerStreamEventLabel(event));
+            footer.setStatus(event.type === "run_completed" ? "finalizing…" : runnerStreamEventLabel(event));
+          }
           tui.requestRender();
         },
       })

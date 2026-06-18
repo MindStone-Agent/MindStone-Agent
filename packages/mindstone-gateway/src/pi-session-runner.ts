@@ -101,6 +101,21 @@ export class PiSessionAgentRunner implements AgentRunner {
           event,
         };
       }
+      if (result.result.text) {
+        yield {
+          type: "text_delta",
+          sequence: sequence++,
+          timestamp: new Date().toISOString(),
+          runnerId: this.id,
+          runId: runContext.runId,
+          surface: runContext.surface,
+          metadata: {
+            ...runContext.metadata,
+            completedTextReplay: true,
+          },
+          text: result.result.text,
+        };
+      }
       yield {
         type: "run_completed",
         sequence: sequence++,

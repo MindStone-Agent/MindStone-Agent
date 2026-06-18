@@ -75,7 +75,7 @@ const chat = await post('/chat/send', {
   text: 'hello gateway runner stream',
 });
 if (!chat.ok || chat.runner?.id !== 'provider-route') process.exit(1);
-if (chat.runnerStream?.eventCount !== 2 || chat.runnerStream?.persistedEventCount !== 1) process.exit(1);
+if (chat.runnerStream?.eventCount !== 3 || chat.runnerStream?.persistedEventCount !== 1) process.exit(1);
 
 const historyResponse = await fetch(`${base}/chat/history?sessionKey=${encodeURIComponent(process.env.SESSION_KEY)}`);
 const history = await historyResponse.json();

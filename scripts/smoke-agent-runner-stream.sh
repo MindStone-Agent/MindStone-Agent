@@ -55,13 +55,16 @@ async function collect(stream) {
 }
 
 function assertLifecycle(events, runnerId) {
-  if (events.length !== 2) throw new Error(`${runnerId}: expected 2 lifecycle events, got ${events.length}`);
+  if (events.length !== 3) throw new Error(`${runnerId}: expected started+text_delta+completed events, got ${events.length}`);
   if (events[0].type !== 'run_started') throw new Error(`${runnerId}: first event was not run_started`);
-  if (events[1].type !== 'run_completed') throw new Error(`${runnerId}: second event was not run_completed`);
-  if (events[0].sequence !== 0 || events[1].sequence !== 1) throw new Error(`${runnerId}: stream sequence was not monotonic from zero`);
-  if (events[0].runnerId !== runnerId || events[1].runnerId !== runnerId) throw new Error(`${runnerId}: runnerId missing from stream events`);
-  if (events[1].result.runner.id !== runnerId) throw new Error(`${runnerId}: completed result runner diagnostics missing`);
-  if (!events[1].result.result.text.includes('stream contract sentinel')) throw new Error(`${runnerId}: completed result text missing sentinel`);
+  if (events[1].type !== 'text_delta') throw new Error(`${runnerId}: second event was not text_delta`);
+  if (events[2].type !== 'run_completed') throw new Error(`${runnerId}: third event was not run_completed`);
+  if (events.some((event, index) => event.sequence !== index)) throw new Error(`${runnerId}: stream sequence was not monotonic from zero`);
+  if (!events.every((event) => event.runnerId === runnerId)) throw new Error(`${runnerId}: runnerId missing from stream events`);
+  if (events[1].metadata?.completedTextReplay !== true) throw new Error(`${runnerId}: text_delta was not marked as completed text replay`);
+  if (!events[1].text.includes('stream contract sentinel')) throw new Error(`${runnerId}: text_delta missing sentinel`);
+  if (events[2].result.runner.id !== runnerId) throw new Error(`${runnerId}: completed result runner diagnostics missing`);
+  if (!events[2].result.result.text.includes('stream contract sentinel')) throw new Error(`${runnerId}: completed result text missing sentinel`);
 }
 
 const baseInput = {
@@ -76,13 +79,14 @@ const baseInput = {
 assertLifecycle(await collect(createProviderRouteAgentRunner().stream(baseInput)), 'provider-route');
 
 const piSessionEvents = await collect(new PiSessionAgentRunner({ provider: fakeProvider }).stream(baseInput));
-if (piSessionEvents.length !== 4) throw new Error(`pi-session: expected started+2 substrate+completed events, got ${piSessionEvents.length}`);
+if (piSessionEvents.length !== 5) throw new Error(`pi-session: expected started+2 substrate+text_delta+completed events, got ${piSessionEvents.length}`);
 if (piSessionEvents[0].type !== 'run_started') throw new Error('pi-session: first event was not run_started');
 if (piSessionEvents[1].type !== 'substrate_event' || piSessionEvents[1].substrate !== 'pi') throw new Error('pi-session: first diagnostic was not a Pi substrate_event');
 if (piSessionEvents[2].type !== 'substrate_event' || piSessionEvents[2].event.toolName !== 'read') throw new Error('pi-session: tool diagnostic substrate_event missing');
-if (piSessionEvents[3].type !== 'run_completed') throw new Error('pi-session: final event was not run_completed');
+if (piSessionEvents[3].type !== 'text_delta' || piSessionEvents[3].metadata?.completedTextReplay !== true) throw new Error('pi-session: completed text replay delta missing');
+if (piSessionEvents[4].type !== 'run_completed') throw new Error('pi-session: final event was not run_completed');
 if (piSessionEvents.some((event, index) => event.sequence !== index)) throw new Error('pi-session: stream sequence was not monotonic from zero');
-if (piSessionEvents[3].result.runner.id !== 'pi-session') throw new Error('pi-session: completed result runner diagnostics missing');
+if (piSessionEvents[4].result.runner.id !== 'pi-session') throw new Error('pi-session: completed result runner diagnostics missing');
 
 const runtimeDir = mkdtempSync(join(tmpdir(), 'mindstone-agent-runner-stream-transcript.'));
 process.env.MINDSTONE_AGENT_RUNTIME_DIR = runtimeDir;
@@ -105,7 +109,7 @@ try {
     runner: new PiSessionAgentRunner({ provider: fakeProvider }),
     source: { substrate: 'smoke', channel: 'runner-stream', chatType: 'internal' },
   });
-  if (turn.runnerStream?.eventCount !== 4 || turn.runnerStream?.persistedEventCount !== 2) {
+  if (turn.runnerStream?.eventCount !== 5 || turn.runnerStream?.persistedEventCount !== 2) {
     throw new Error(`unexpected runnerStream summary: ${JSON.stringify(turn.runnerStream)}`);
   }
   if (turn.events.filter((entry) => entry.metadata?.event === 'runner_stream_event').length !== 2) {
@@ -144,7 +148,7 @@ if (failureEvents.length !== 2) throw new Error(`expected started+failed events,
 if (failureEvents[0].type !== 'run_started' || failureEvents[1].type !== 'run_failed') throw new Error('failure stream did not emit started then failed');
 if (failureEvents[1].error.message !== 'stream failure sentinel') throw new Error('failure stream did not serialize error message');
 
-console.log(JSON.stringify({ ok: true, providerRouteEvents: 2, piSessionEvents: piSessionEvents.length, persistedStreamEvents: 2, failureEvents: 2 }, null, 2));
+console.log(JSON.stringify({ ok: true, providerRouteEvents: 3, piSessionEvents: piSessionEvents.length, persistedStreamEvents: 2, failureEvents: 2 }, null, 2));
 NODE
 
 echo "AgentRunner stream contract smoke test passed."
