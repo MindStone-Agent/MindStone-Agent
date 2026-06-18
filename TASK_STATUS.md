@@ -64,6 +64,7 @@
 - [x] Add runtime-only TUI switching commands: `/session <key>`, `/agent <id>`, and `/model <id>`.
 - [x] Render richer TUI runner substrate/tool event labels from stream payload metadata.
 - [x] Add non-mutating TUI `/memory` and `/context` panels for recall index and prompt-window status.
+- [x] Add non-mutating TUI `/doctor` panel backed by Core doctor report summary.
 
 ### Completed
 
@@ -161,6 +162,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [x] Add completed-response `text_delta` replay path for mutable assistant updates.
 - [x] Render richer runner substrate/tool event labels from stream payload metadata.
 - [x] Add non-mutating `/memory` and `/context` panels for recall index and prompt-window status.
+- [x] Add non-mutating `/doctor` panel backed by Core doctor report summary.
 - [ ] Add richer interactive selector overlays and status/settings overlays.
 - [ ] Adapt richer current MindStone TUI components and event handlers from `/Users/clint/Projects/MindStone/src/tui/`.
 

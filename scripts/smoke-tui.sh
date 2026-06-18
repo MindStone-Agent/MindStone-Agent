@@ -87,6 +87,10 @@ if ! grep -q "context window" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing context panel" >&2
   exit 1
 fi
+if ! grep -q "pass/warn/fail/info" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing doctor panel" >&2
+  exit 1
+fi
 if ! grep -q "sessions" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing sessions panel" >&2
   exit 1

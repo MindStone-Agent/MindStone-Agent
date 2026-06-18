@@ -2,6 +2,7 @@ import {
   loadMindStoneConfig,
   resolveConfigPath,
   resolveConfiguredSessionKey,
+  getMindStoneDoctorReport,
   getSqliteMemoryIndexStats,
   listTranscriptSessions,
   planMindStonePromptWindow,
@@ -354,6 +355,24 @@ function buildTuiContextPanel(params: {
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
+function buildTuiDoctorPanel(): string {
+  const report = getMindStoneDoctorReport();
+  const notable = report.checks.filter((check) => check.severity !== "pass").slice(0, 12);
+  const lines = [
+    `- result: \`${report.ok ? "ok" : "needs attention"}\``,
+    `- pass/warn/fail/info: \`${report.summary.pass} / ${report.summary.warn} / ${report.summary.fail} / ${report.summary.info}\``,
+  ];
+  if (notable.length === 0) {
+    lines.push("", "No warnings, failures, or info checks to show.");
+  } else {
+    lines.push("", ...notable.map((check) => {
+      const detail = check.detail ? ` — ${check.detail}` : "";
+      return `- ${check.severity}: \`${check.id}\` — ${check.title}${detail}`;
+    }));
+  }
+  return lines.join("\n");
+}
+
 type TuiPanelItem = {
   id: string;
   detail?: string;
@@ -678,6 +697,7 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   }));
   chat.addPanel("memory", buildTuiMemoryPanel(smokeConfig, runtimePathsFromEnv()));
   chat.addPanel("context", buildTuiContextPanel({ config: smokeConfig, ctx, entries: [] }));
+  chat.addPanel("doctor", buildTuiDoctorPanel());
   chat.addPanel("sessions", buildTuiSessionsPanel({
     ctx,
     config: smokeConfig,
@@ -773,6 +793,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "status", description: "Show current TUI/session status" },
     { name: "memory", description: "Show memory/recall index status" },
     { name: "context", description: "Show context window policy and current session estimate" },
+    { name: "doctor", description: "Show compact runtime doctor summary" },
     { name: "sessions", description: "Show known/configured sessions" },
     { name: "session", description: "Switch this TUI session: /session <key>" },
     { name: "agents", description: "Show configured agents" },
@@ -844,7 +865,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -871,6 +892,11 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
           ctx,
           entries: readTranscriptEntries(ctx.sessionKey),
         }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/doctor") {
+        chat.addPanel("doctor", buildTuiDoctorPanel());
         tui.requestRender();
         return;
       }
