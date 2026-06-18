@@ -130,7 +130,7 @@ The preferred order is:
   - Native chat and Gateway route execution now call the runner boundary, preparing for future live Pi session handles, streaming, abort, and compaction control.
   - Run context and runner diagnostics are preserved in API responses and assistant transcript metadata.
   - `AgentRunner.stream(...)` now exists with lifecycle events (`run_started`, `run_completed`, `run_failed`) and can replay bounded `pi-session` post-run diagnostics as `substrate_event`s.
-  - Selected stream events can be persisted as transcript `event` entries behind `observability.runnerStream.persistTranscriptEvents`; live token/substrate streaming remains pending.
+  - Selected stream events can be persisted as transcript `event` entries behind `observability.runnerStream.persistTranscriptEvents`; runner stream callbacks can now drive live TUI text/substrate updates, while durable persistence remains gated and sanitized.
   - `routing.mode = "pi-session"` now selects a Gateway-side `PiSessionAgentRunner` in native CLI and Gateway paths; `PiSessionMindStoneProvider` remains available as a compatibility wrapper.
   - Shared `PiSessionExecutor` owns the actual Pi `AgentSession` implementation so runner/provider compatibility paths no longer duplicate execution logic.
 - [x] Add first `pi-session` routing scaffold with deterministic canonical session-key → Pi session-file mapping and Pi `SessionManager` / `createAgentSession` use.
@@ -140,7 +140,8 @@ The preferred order is:
 - [x] Add gated transcript persistence for selected stream events in shared native chat and Gateway route paths.
 - [x] Add first OpenClaw-style `mindstone tui` shell using vendored Pi TUI primitives, styled chat log/editor/footer, and the existing routed chat path.
 - [x] Load recent transcript history into `mindstone tui` startup, with `--history-limit` and smoke validation.
-- [x] Add first TUI in-place assistant update path and event-line rendering for returned turn events; live token/event streaming remains pending.
+- [x] Add first TUI in-place assistant update path and event-line rendering for returned turn events.
+- [x] Wire native TUI turns to `onRunnerStreamEvent` for live runner text-delta and substrate/route event updates, with `mindstone tui --smoke-stream` coverage.
 - [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
 - [x] Add non-mutating `/config` panel for sanitized active runtime config.
 - [x] Add non-mutating `/gateway` panel for configured Gateway surfaces/auth without live probing.

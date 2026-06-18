@@ -43,7 +43,7 @@
 - [x] Move `pi-session` MindStone system messages (identity/SCRI/handoff) into Pi `DefaultResourceLoader.appendSystemPrompt` and send only the latest user turn through `AgentSession.prompt(...)`.
 - [x] Preserve sanitized provider diagnostics from `pi-session` raw results into assistant transcript metadata for native chat and Gateway routes when available.
 - [x] Add `AgentRunner.stream(...)` contract scaffold and lifecycle event smoke validation for provider-route and pi-session runners.
-- [x] Replay bounded `pi-session` diagnostics as `substrate_event` stream events after runner execution; this is not live token streaming yet.
+- [x] Replay bounded `pi-session` diagnostics as `substrate_event` stream events after runner execution; later runner stream callback plumbing added live TUI text/substrate updates, while authenticated provider behavior remains unverified.
 - [x] Add explicit `route_planned` events plus live `pi-session` diagnostic and assistant text-delta callback plumbing through `AgentRunner.stream(...)`; authenticated provider behavior remains unverified.
 - [x] Add gated transcript persistence for selected `AgentRunner.stream(...)` events in native chat and Gateway route paths, with an explicit durable Pi-session metadata policy and sanitizer smoke coverage for raw Pi message/tool args/results.
 - [x] Add gated `smoke:pi-session-live` probe for isolated-auth live `AgentSession.prompt(...)`, runner-stream validation, and optional `AgentSession.compact(...)` validation via `MINDSTONE_PI_SESSION_LIVE_COMPACT=1`.
