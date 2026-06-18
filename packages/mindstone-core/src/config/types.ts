@@ -60,6 +60,15 @@ export type MindStonePiCompactionConfig = {
   reserveTokensFloor?: number;
 };
 
+export type MindStonePiResumeCapConfig = {
+  /** Cap Pi SessionManager's in-memory branch after open. Defaults to true for pi-session routes. */
+  enabled?: boolean;
+  /** Max message-emitting entries to keep in Pi's in-memory branch. Defaults to 800. */
+  maxEntries?: number;
+  /** Drop assistant turns with stopReason === "error" from the in-memory branch. Defaults to true. */
+  dropErrorTurns?: boolean;
+};
+
 export type MindStoneRoutingConfig = {
   /** placeholder keeps send/completions transcript-aware without calling a model. */
   mode?: MindStoneRoutingMode;
@@ -81,6 +90,8 @@ export type MindStoneRoutingConfig = {
     additionalThemePaths?: string[];
     /** Session-local Pi native compaction overrides for the isolated route. */
     compaction?: MindStonePiCompactionConfig;
+    /** In-memory Pi SessionManager resume cap for long-running isolated sessions. */
+    resumeCap?: MindStonePiResumeCapConfig;
     /** Disable Pi extension loading for this route. */
     noExtensions?: boolean;
     /** Disable Pi skill loading for this route. */

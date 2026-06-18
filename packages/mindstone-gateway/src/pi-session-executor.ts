@@ -2,8 +2,9 @@ import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, wri
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { AgentCompactionInput, AgentCompactionResult, ContextManagementPolicy, MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo, MindStonePiCompactionConfig } from "@mindstone-agent/core";
+import type { AgentCompactionInput, AgentCompactionResult, ContextManagementPolicy, MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo, MindStonePiCompactionConfig, MindStonePiResumeCapConfig } from "@mindstone-agent/core";
 import { buildMindStonePiExtensionFactories, type MindStonePiExtensionFactory } from "./pi-context-pruning-extension.js";
+import { capPiSessionManagerOnLoad, resolvePiSessionResumeCapOptions } from "./pi-session-resume-cap.js";
 
 export type PiSessionResourceLoaderOptions = {
   additionalExtensionPaths?: string[];
@@ -24,6 +25,8 @@ export type PiSessionExecutorOptions = PiSessionResourceLoaderOptions & {
   contextManagement?: ContextManagementPolicy;
   /** Session-local Pi native compaction settings for the isolated route. */
   compaction?: MindStonePiCompactionConfig;
+  /** Cap Pi SessionManager's in-memory branch after open without rewriting the session file. */
+  resumeCap?: MindStonePiResumeCapConfig;
   projectRoot?: string;
   agentDir?: string;
   sessionDir?: string;
@@ -691,6 +694,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
   readonly #defaultProvider?: string;
   readonly #defaultModel?: string;
   readonly #compactionOptions?: MindStonePiCompactionConfig;
+  readonly #resumeCapOptions?: MindStonePiResumeCapConfig;
   readonly #resourceOptions: PiSessionResourceLoaderOptions;
   #modules?: PiSessionModules;
   #registry?: PiRegistry;
@@ -703,6 +707,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     this.#defaultProvider = options.defaultProvider;
     this.#defaultModel = options.defaultModel;
     this.#compactionOptions = options.compaction;
+    this.#resumeCapOptions = options.resumeCap;
     this.#resourceOptions = {
       additionalExtensionPaths: options.additionalExtensionPaths,
       additionalSkillPaths: options.additionalSkillPaths,
@@ -807,6 +812,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       mkdirSync(dirname(sessionFile), { recursive: true });
       repairPiSessionFileTailIfNeeded(sessionFile);
       const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
+      const resumeCap = capPiSessionManagerOnLoad(sessionManager, resolvePiSessionResumeCapOptions(this.#resumeCapOptions));
       const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
       applyPiSessionCompactionSettings({ settingsManager: settingsManager as PiSettingsManagerLike, compaction: this.#compactionOptions });
       const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
@@ -853,6 +859,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
           surface: input.runContext?.surface,
           details: {
             sessionFile,
+            resumeCap,
             result,
           },
         };
@@ -877,6 +884,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       mkdirSync(dirname(sessionFile), { recursive: true });
       repairPiSessionFileTailIfNeeded(sessionFile);
       const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
+      const resumeCap = capPiSessionManagerOnLoad(sessionManager, resolvePiSessionResumeCapOptions(this.#resumeCapOptions));
       const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
       applyPiSessionCompactionSettings({ settingsManager: settingsManager as PiSettingsManagerLike, compaction: this.#compactionOptions });
       const promptParts = buildPiSessionPromptParts(request.messages);
@@ -924,6 +932,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
             modelFallbackMessage,
             piSession: {
               prompt: promptParts.diagnostics,
+              resumeCap,
               eventCounts: capture.eventCounts,
               events: capture.events,
               assistantTexts: capture.assistantTexts,

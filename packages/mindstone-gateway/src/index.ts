@@ -38,6 +38,12 @@ export {
   type PiSessionFileRepairResult,
   type PiSessionResourceLoaderOptions,
 } from "./pi-session-executor.js";
+export {
+  capPiSessionManagerOnLoad,
+  resolvePiSessionResumeCapOptions,
+  type PiSessionResumeCapOptions,
+  type PiSessionResumeCapStats,
+} from "./pi-session-resume-cap.js";
 export { PiSessionMindStoneProvider, buildPiSessionPromptParts, createPiSessionEventCapture, piSessionFileForKey, summarizePiSessionEvent } from "./pi-session-provider.js";
 export { PiSessionAgentRunner } from "./pi-session-runner.js";
 export { GatewayRunManager } from "./run-manager.js";
@@ -269,6 +275,7 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
       defaultModel: config?.routing?.defaultModel,
       contextManagement: config?.contextManagement,
       compaction: config?.routing?.pi?.compaction,
+      resumeCap: config?.routing?.pi?.resumeCap,
       additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
       additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
       additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
@@ -301,6 +308,7 @@ function resolveRunner(config: MindStoneConfig | undefined, provider: MindStoneM
       defaultModel: config?.routing?.defaultModel,
       contextManagement: config?.contextManagement,
       compaction: config?.routing?.pi?.compaction,
+      resumeCap: config?.routing?.pi?.resumeCap,
       additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
       additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
       additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,

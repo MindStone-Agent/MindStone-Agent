@@ -44,7 +44,7 @@ NODE
 
 node --input-type=module <<'NODE'
 import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
-import { applyPiSessionCompactionSettings, buildMindStonePiExtensionFactories, buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR, PiSessionAgentRunner, piSessionFileForKey, repairPiSessionFileTailIfNeeded, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
+import { applyPiSessionCompactionSettings, buildMindStonePiExtensionFactories, buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, capPiSessionManagerOnLoad, createPiSessionEventCapture, DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR, PiSessionAgentRunner, piSessionFileForKey, repairPiSessionFileTailIfNeeded, resolvePiSessionResumeCapOptions, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
@@ -94,6 +94,67 @@ if (repairedContent.includes('partial')) throw new Error('session tail repair di
 if (repairedContent.trim().split('\n').length !== 2) throw new Error('session tail repair did not preserve valid entries');
 const cleanRepairResult = repairPiSessionFileTailIfNeeded(repairSessionFile);
 if (cleanRepairResult.repaired || cleanRepairResult.reason !== 'clean') throw new Error(`clean session file should not repair: ${JSON.stringify(cleanRepairResult)}`);
+
+function createFakeSessionManager(entries, sessionFile = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/resume-cap-smoke.jsonl`) {
+  const header = { type: 'session', id: 'resume-cap-smoke', version: 3, timestamp: new Date().toISOString(), cwd: process.cwd() };
+  const manager = {
+    fileEntries: [header, ...entries],
+    byId: new Map(entries.map((entry) => [entry.id, entry])),
+    labelsById: new Map(),
+    labelTimestampsById: new Map(),
+    leafId: entries.at(-1)?.id ?? null,
+    flushed: true,
+    getSessionFile() { return sessionFile; },
+    getBranch() {
+      const out = [];
+      let current = this.leafId ? this.byId.get(this.leafId) : undefined;
+      while (current) {
+        out.unshift(current);
+        current = current.parentId ? this.byId.get(current.parentId) : undefined;
+      }
+      return out;
+    },
+  };
+  return manager;
+}
+function msg(id, parentId, role = 'user', extra = {}) {
+  return { type: 'message', id, parentId, timestamp: new Date().toISOString(), message: { role, content: `${role}:${id}`, ...extra } };
+}
+const resumeCapOptions = resolvePiSessionResumeCapOptions({ maxEntries: 3 });
+if (!resumeCapOptions || resumeCapOptions.maxEntries !== 3 || resumeCapOptions.dropErrorTurns !== true) throw new Error('resume cap options did not resolve');
+if (resolvePiSessionResumeCapOptions({ enabled: false }) !== undefined) throw new Error('disabled resume cap should resolve undefined');
+const resumeFile = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/resume-cap-disk-preserve.jsonl`;
+mkdirSync(dirname(resumeFile), { recursive: true });
+writeFileSync(resumeFile, 'disk must remain untouched');
+const cappedManager = createFakeSessionManager([
+  msg('m1', null), msg('m2', 'm1'), msg('m3', 'm2'), msg('m4', 'm3'), msg('m5', 'm4'),
+], resumeFile);
+const capStats = capPiSessionManagerOnLoad(cappedManager, resumeCapOptions);
+if (capStats.action !== 'capped' || capStats.dropped !== 2 || capStats.kept !== 3 || capStats.messageEmittersKept !== 3) throw new Error(`resume cap stats wrong: ${JSON.stringify(capStats)}`);
+if (cappedManager.fileEntries.length !== 4 || cappedManager.leafId !== 'm5' || cappedManager.fileEntries[1].id !== 'm3' || cappedManager.fileEntries[1].parentId !== null) throw new Error('resume cap did not rebuild in-memory branch correctly');
+if (readFileSync(resumeFile, 'utf-8') !== 'disk must remain untouched') throw new Error('resume cap rewrote the session file');
+const errorManager = createFakeSessionManager([
+  msg('u1', null),
+  msg('e1', 'u1', 'assistant', { stopReason: 'error' }),
+  msg('u2', 'e1'),
+]);
+const errorStats = capPiSessionManagerOnLoad(errorManager, resolvePiSessionResumeCapOptions({ maxEntries: 10 }));
+if (errorStats.action !== 'capped' || errorStats.errorTurnsDropped !== 1 || errorManager.fileEntries.some((entry) => entry.id === 'e1')) throw new Error(`error-turn resume cap failed: ${JSON.stringify(errorStats)}`);
+if (errorManager.byId.get('u2')?.parentId !== 'u1') throw new Error('resume cap did not reparent through dropped error turn');
+const compactionManager = createFakeSessionManager([
+  msg('c1', null),
+  msg('c2', 'c1'),
+  { type: 'compaction', id: 'compact-1', parentId: 'c2', timestamp: new Date().toISOString(), summary: 'summary', firstKeptEntryId: 'c1', tokensBefore: 1000 },
+  msg('c3', 'compact-1'),
+]);
+const compactionStats = capPiSessionManagerOnLoad(compactionManager, resolvePiSessionResumeCapOptions({ maxEntries: 2 }));
+if (compactionStats.action !== 'noop' || !compactionStats.compactionExpanded || compactionManager.fileEntries[1].id !== 'c1') throw new Error(`compaction resume cap expansion failed: ${JSON.stringify(compactionStats)}`);
+const toolManager = createFakeSessionManager([
+  { ...msg('tool-call', null, 'assistant'), message: { role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'README.md' } }] } },
+  { ...msg('tool-result', 'tool-call', 'toolResult'), message: { role: 'toolResult', toolCallId: 'call-1', content: 'ok' } },
+]);
+const toolStats = capPiSessionManagerOnLoad(toolManager, resolvePiSessionResumeCapOptions({ maxEntries: 1 }));
+if (toolStats.action !== 'noop' || !toolStats.toolPairExpanded || toolManager.fileEntries[1].id !== 'tool-call') throw new Error(`tool-pair resume cap expansion failed: ${JSON.stringify(toolStats)}`);
 
 const { capture, record } = createPiSessionEventCapture(5);
 record({ type: 'agent_start' });
@@ -204,6 +265,7 @@ const providerDiagnostics = providerDiagnosticsFromChatResult({
     sessionFile: actual,
     piSession: {
       prompt: promptParts.diagnostics,
+      resumeCap: capStats,
       eventCounts: capture.eventCounts,
       events: capture.events,
       assistantTexts: capture.assistantTexts,
@@ -212,6 +274,7 @@ const providerDiagnostics = providerDiagnosticsFromChatResult({
 });
 if (providerDiagnostics?.piSession?.sessionId !== 'session-1') throw new Error('provider diagnostics did not preserve pi session id');
 if (providerDiagnostics?.piSession?.prompt?.appendSystemPromptCount !== 1) throw new Error('provider diagnostics did not preserve prompt diagnostics');
+if (providerDiagnostics?.piSession?.resumeCap?.action !== 'capped' || providerDiagnostics?.piSession?.resumeCap?.dropped !== 2) throw new Error('provider diagnostics did not preserve resume-cap diagnostics');
 if (providerDiagnostics?.piSession?.eventCounts?.agent_end !== 1) throw new Error('provider diagnostics did not preserve event counts');
 if (!providerDiagnostics?.piSession?.events?.some((event) => event.toolName === 'read' && event.toolArgsKeys?.includes('path'))) throw new Error('provider diagnostics did not preserve event summaries');
 if (!providerDiagnostics?.piSession?.events?.some((event) => event.assistantStreamEventType === 'text_delta')) throw new Error('provider diagnostics did not preserve assistant stream event summaries');

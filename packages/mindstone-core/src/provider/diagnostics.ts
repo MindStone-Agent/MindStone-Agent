@@ -42,6 +42,16 @@ export type ProviderDiagnostics = {
       latestUserMessageFound?: boolean;
       nonUserPromptMessagesSkipped?: number;
     };
+    resumeCap?: {
+      action?: string;
+      branchLengthBefore?: number;
+      dropped?: number;
+      kept?: number;
+      messageEmittersKept?: number;
+      compactionExpanded?: boolean;
+      toolPairExpanded?: boolean;
+      errorTurnsDropped?: number;
+    };
     eventCounts?: Record<string, number>;
     events?: PiSessionEventDiagnostic[];
     assistantTextCount?: number;
@@ -136,6 +146,22 @@ function sanitizePromptDiagnostics(value: unknown): NonNullable<ProviderDiagnost
   return Object.values(output).some((item) => item !== undefined) ? output : undefined;
 }
 
+function sanitizeResumeCapDiagnostics(value: unknown): NonNullable<ProviderDiagnostics["piSession"]>["resumeCap"] {
+  const input = record(value);
+  if (!input) return undefined;
+  const output = {
+    action: stringValue(input.action),
+    branchLengthBefore: numberValue(input.branchLengthBefore),
+    dropped: numberValue(input.dropped),
+    kept: numberValue(input.kept),
+    messageEmittersKept: numberValue(input.messageEmittersKept),
+    compactionExpanded: booleanValue(input.compactionExpanded),
+    toolPairExpanded: booleanValue(input.toolPairExpanded),
+    errorTurnsDropped: numberValue(input.errorTurnsDropped),
+  };
+  return Object.values(output).some((item) => item !== undefined) ? output : undefined;
+}
+
 export function providerDiagnosticsFromChatResult(result: MindStoneChatResult): ProviderDiagnostics | undefined {
   const raw = record(result.raw);
   const piSession = record(raw?.piSession);
@@ -149,6 +175,7 @@ export function providerDiagnosticsFromChatResult(result: MindStoneChatResult): 
       sessionFile: stringValue(raw.sessionFile),
       modelFallbackMessage: stringValue(raw.modelFallbackMessage),
       prompt: sanitizePromptDiagnostics(piSession.prompt),
+      resumeCap: sanitizeResumeCapDiagnostics(piSession.resumeCap),
       eventCounts: sanitizeEventCounts(piSession.eventCounts),
       events: sanitizePiSessionEvents(piSession.events),
       assistantTextCount: assistantTexts.length > 0 ? assistantTexts.length : undefined,
