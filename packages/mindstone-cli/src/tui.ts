@@ -320,6 +320,50 @@ function buildTuiMemoryPanel(config: ReturnType<typeof loadMindStoneConfig>["con
   ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
+function buildTuiConfigPanel(params: {
+  config: ReturnType<typeof loadMindStoneConfig>["config"];
+  configPath: string;
+  paths: ReturnType<typeof runtimePathsFromEnv>;
+}): string {
+  const config = params.config;
+  const authMode = config?.gateway?.auth?.mode ?? "none";
+  const authConfigured = authMode === "none"
+    ? "not required"
+    : authMode === "token"
+      ? "token source configured; value hidden"
+      : "password source configured; value hidden";
+  const contextMode = config?.contextManagement?.mode ?? "sliding_window";
+  return [
+    `- config path: \`${params.configPath}\``,
+    `- workspace root: \`${config?.workspace?.root ?? "not configured"}\``,
+    `- runtime root: \`${params.paths.root}\``,
+    `- agents configured: \`${Object.keys(config?.agents ?? {}).length}\``,
+    `- routing mode: \`${config?.routing?.mode ?? "placeholder"}\``,
+    `- default agent: \`${config?.routing?.defaultAgentId ?? "default"}\``,
+    `- default model: \`${config?.routing?.defaultModel ?? "not configured"}\``,
+    `- session mode: \`${config?.session?.mode ?? "single"}\``,
+    `- default session: \`${config?.session?.defaultSessionKey ?? "agent:default:main"}\``,
+    `- context mode: \`${contextMode}\``,
+    `- memory autoRecall: \`${config?.memory?.autoRecall === true}\``,
+    `- memory vector store: \`${config?.memory?.vectorStore ?? "memory"}\``,
+    `- embedding provider: \`${config?.memory?.embeddingProvider ?? "not configured"}\``,
+    `- gateway: \`${config?.gateway?.host ?? "127.0.0.1"}:${config?.gateway?.port ?? 19789}\``,
+    `- gateway auth mode: \`${authMode}\``,
+    `- gateway auth status: \`${authConfigured}\``,
+    `- OpenAI chat completions: \`${config?.gateway?.http?.chatCompletions?.enabled !== false}\``,
+    `- OpenResponses: \`${config?.gateway?.http?.responses?.enabled === true}\``,
+    `- runner stream persistence: \`${config?.observability?.runnerStream?.persistTranscriptEvents === true}\``,
+    config?.observability?.runnerStream?.eventTypes?.length
+      ? `- runner stream event types: \`${config.observability.runnerStream.eventTypes.join(", ")}\``
+      : undefined,
+    config?.observability?.runnerStream?.maxEvents !== undefined
+      ? `- runner stream max events: \`${config.observability.runnerStream.maxEvents}\``
+      : undefined,
+    "",
+    "Secret values are intentionally not displayed.",
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
 function buildTuiContextPanel(params: {
   config: ReturnType<typeof loadMindStoneConfig>["config"];
   ctx: TuiCommandContext;
@@ -836,8 +880,18 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
     event: { type: "tool_execution_start", toolName: "read", toolCallId: "tool-1" },
   }));
   const smokeConfig = {
+    workspace: { root: "/tmp/mindstone-workspace" },
+    gateway: {
+      host: "127.0.0.1",
+      port: 19789,
+      auth: { mode: "token" as const, tokenEnv: "MINDSTONE_GATEWAY_TOKEN" },
+      http: { chatCompletions: { enabled: true }, responses: { enabled: false } },
+    },
     routing: { mode: "mock" as const, defaultAgentId: "default", defaultModel: "mindstone/mock" },
     session: { mode: "single" as const, defaultSessionKey: "agent:default:main" },
+    memory: { autoRecall: false, vectorStore: "memory" as const },
+    contextManagement: { mode: "sliding_window" as const, ceilingPercent: 92, floorPercent: 70, minRecentMessages: 24, preserveTranscript: true },
+    observability: { runnerStream: { persistTranscriptEvents: true, eventTypes: ["substrate_event"], maxEvents: 50 } },
     agents: {
       default: { id: "default", defaultModel: "mindstone/mock", profileId: "software-engineering-partner" },
       research: { id: "research", defaultModel: "mindstone/research", profileId: "research-analyst" },
@@ -852,6 +906,7 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
     piSessionDir: "/tmp/pi-sessions",
   }));
   const smokePaths = runtimePathsFromEnv();
+  chat.addPanel("config", buildTuiConfigPanel({ config: smokeConfig, configPath: "/tmp/mindstone/config.json", paths: smokePaths }));
   chat.addPanel("memory", buildTuiMemoryPanel(smokeConfig, smokePaths));
   chat.addPanel("context", buildTuiContextPanel({ config: smokeConfig, ctx, entries: [] }));
   chat.addPanel("handoff", buildTuiHandoffPanel(smokePaths));
@@ -990,6 +1045,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "help", description: "Show TUI commands" },
     { name: "clear", description: "Clear the visible chat log" },
     { name: "status", description: "Show current TUI/session status" },
+    { name: "config", description: "Show sanitized active runtime config" },
     { name: "memory", description: "Show memory/recall index status" },
     { name: "context", description: "Show context window policy and current session estimate" },
     { name: "handoff", description: "Show current compaction handoff status" },
@@ -1068,7 +1124,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /handoff, /identity, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /config, /memory, /context, /handoff, /identity, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -1081,6 +1137,11 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
           transcriptDir: paths.transcriptDir,
           piSessionDir: paths.piSessionDir,
         }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/config") {
+        chat.addPanel("config", buildTuiConfigPanel({ config: loaded.config, configPath: loaded.path, paths }));
         tui.requestRender();
         return;
       }

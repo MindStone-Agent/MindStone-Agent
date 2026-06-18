@@ -138,6 +138,7 @@ The preferred order is:
 - [x] Load recent transcript history into `mindstone tui` startup, with `--history-limit` and smoke validation.
 - [x] Add first TUI in-place assistant update path and event-line rendering for returned turn events; live token/event streaming remains pending.
 - [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
+- [x] Add non-mutating `/config` panel for sanitized active runtime config.
 - [x] Add first non-mutating `/sessions`, `/agents`, and `/models` panels.
 - [x] Surface `AgentRunner.stream(...)` lifecycle/diagnostic events into the TUI turn path as compact event lines.
 - [x] Emit completed-response `text_delta` replay events from runners and apply them to mutable TUI assistant messages.

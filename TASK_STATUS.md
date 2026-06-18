@@ -58,6 +58,7 @@
 - [x] Load recent transcript history into `mindstone tui` startup; smoke validates rendering prior user/assistant transcript entries.
 - [x] Add first TUI in-place assistant response update path and event-line rendering for returned turn events.
 - [x] Add first TUI status panel via `/status`, showing agent/session/route/model/provider/config/transcript/runtime details.
+- [x] Add non-mutating TUI `/config` panel for sanitized active runtime config.
 - [x] Add first non-mutating TUI selector panels via `/sessions`, `/agents`, and `/models`.
 - [x] Surface `AgentRunner.stream(...)` lifecycle/diagnostic events into the TUI turn path as compact event lines.
 - [x] Emit completed-response `text_delta` replay events from runners and apply them to the mutable TUI assistant message.
@@ -160,6 +161,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [x] Apply completed-response `text_delta` replay events to the mutable assistant message.
 - [ ] Stream/update assistant text and tool/substrate events live from Gateway/runner events.
 - [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
+- [x] Add non-mutating `/config` panel for sanitized active runtime config.
 - [x] Add first non-mutating `/sessions`, `/agents`, and `/models` panels.
 - [x] Add runtime-only `/session <key>`, `/agent <id>`, and `/model <id>` switching commands without config mutation.
 - [x] Add first TUI rendering path for `AgentRunner.stream(...)` lifecycle/diagnostic events.

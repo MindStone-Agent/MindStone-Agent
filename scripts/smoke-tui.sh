@@ -79,6 +79,10 @@ if ! grep -q "provider:" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing status provider details" >&2
   exit 1
 fi
+if ! grep -q "gateway auth mode" <<<"${OUTPUT}" || ! grep -q "Secret values are intentionally not displayed" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing sanitized config panel" >&2
+  exit 1
+fi
 if ! grep -q "autoRecall" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing memory panel" >&2
   exit 1
