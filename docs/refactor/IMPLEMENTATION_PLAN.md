@@ -141,6 +141,7 @@ The preferred order is:
 - [x] Add first non-mutating `/sessions`, `/agents`, and `/models` panels.
 - [x] Surface `AgentRunner.stream(...)` lifecycle/diagnostic events into the TUI turn path as compact event lines.
 - [x] Emit completed-response `text_delta` replay events from runners and apply them to mutable TUI assistant messages.
+- [x] Add runtime-only `/session <key>`, `/agent <id>`, and `/model <id>` TUI switching commands without config mutation.
 - [ ] Complete a session-backed Pi runner modeled on current MindStone's embedded Pi runner:
   - [x] isolated Pi `agentDir` and session directory
   - [x] canonical MindStone session key → Pi session file mapping
@@ -428,6 +429,7 @@ The preferred order is:
 - [x] Add non-mutating TUI `/sessions`, `/agents`, and `/models` selector panels.
 - [x] Render runner lifecycle/diagnostic stream events in TUI turns.
 - [x] Apply completed-response `text_delta` replay events to mutable TUI assistant messages.
+- [x] Add runtime-only TUI switching commands for session/agent/model selection.
 - [ ] Stream/update assistant/tool events live from runner/Gateway events.
 - [ ] Implement full live Pi session event/stream capture into MindStone transcript/source metadata.
 - [ ] Live-test Pi-backed model calls through `AgentSession.prompt(...)` only after isolated auth/model config is intentionally provided.

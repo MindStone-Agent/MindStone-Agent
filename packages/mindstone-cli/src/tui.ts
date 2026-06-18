@@ -328,7 +328,7 @@ function buildTuiAgentsPanel(config: ReturnType<typeof loadMindStoneConfig>["con
         detail: detailParts.join("; ") || undefined,
       };
     }),
-    next: "Selector mutation is not enabled yet. Start with `--agent <id>` or update config intentionally.",
+    next: "Use `/agent <id>` to switch this TUI session. Config mutation is not enabled here.",
   });
 }
 
@@ -350,7 +350,7 @@ function buildTuiModelsPanel(config: ReturnType<typeof loadMindStoneConfig>["con
         id === agent?.defaultModel ? "agent default" : undefined,
       ].filter(Boolean).join("; ") || undefined,
     })),
-    next: "Model switching is not enabled yet. Start with `--model <id>` or update config intentionally.",
+    next: "Use `/model <id>` to switch this TUI session. Config mutation is not enabled here.",
   });
 }
 
@@ -382,8 +382,49 @@ function buildTuiSessionsPanel(params: {
   return buildTuiListPanel({
     emptyText: "No sessions found.",
     items: Array.from(byKey.values()).sort((a, b) => Number(Boolean(b.current)) - Number(Boolean(a.current)) || a.id.localeCompare(b.id)),
-    next: "Session switching is not enabled yet. Start with `--session <key>` or update config intentionally.",
+    next: "Use `/session <key>` to switch this TUI session. Config mutation is not enabled here.",
   });
+}
+
+function commandArgument(message: string, command: string): string | undefined {
+  if (!message.startsWith(`${command} `)) return undefined;
+  const value = message.slice(command.length + 1).trim();
+  return value || undefined;
+}
+
+function switchTuiSession(ctx: TuiCommandContext, config: ReturnType<typeof loadMindStoneConfig>["config"], rawSessionKey: string): string {
+  ctx.sessionKey = resolveConfiguredSessionKey(config, {
+    agentId: ctx.agentId,
+    substrate: "mindstone-tui",
+    channel: "terminal",
+    chatType: "direct",
+    senderId: "local",
+    explicitSessionKey: rawSessionKey,
+  });
+  return `Switched this TUI session to \`${ctx.sessionKey}\`. Config was not changed.`;
+}
+
+function switchTuiAgent(ctx: TuiCommandContext, config: ReturnType<typeof loadMindStoneConfig>["config"], agentId: string): string {
+  ctx.agentId = agentId;
+  ctx.sessionKey = resolveConfiguredSessionKey(config, {
+    agentId,
+    substrate: "mindstone-tui",
+    channel: "terminal",
+    chatType: "direct",
+    senderId: "local",
+  });
+  ctx.model = resolveMindStoneChatModel({ config, agentId, routingMode: ctx.routingMode });
+  return `Switched this TUI session to agent \`${ctx.agentId}\`, session \`${ctx.sessionKey}\`, model \`${ctx.model.id}\`. Config was not changed.`;
+}
+
+function switchTuiModel(ctx: TuiCommandContext, config: ReturnType<typeof loadMindStoneConfig>["config"], modelId: string): string {
+  ctx.model = resolveMindStoneChatModel({
+    config,
+    agentId: ctx.agentId,
+    routingMode: ctx.routingMode,
+    metadata: { model: modelId },
+  });
+  return `Switched this TUI session to model \`${ctx.model.id}\`. Config was not changed.`;
 }
 
 function appendTranscriptEntryToChatLog(chat: MindStoneChatLog, entry: TranscriptEntry): boolean {
@@ -467,9 +508,8 @@ async function sendTuiTurn(params: {
   const metadata: Record<string, unknown> = {
     source: "mindstone-tui",
     method: "tui",
+    model: params.ctx.model.id,
   };
-  const modelOverride = optionValue(params.argv, "--model");
-  if (modelOverride) metadata.model = modelOverride;
   return runMindStoneChatTurn({
     agentId: params.ctx.agentId,
     sessionKey: params.ctx.sessionKey,
@@ -542,7 +582,10 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   const smokeConfig = {
     routing: { mode: "mock" as const, defaultAgentId: "default", defaultModel: "mindstone/mock" },
     session: { mode: "single" as const, defaultSessionKey: "agent:default:main" },
-    agents: { default: { id: "default", defaultModel: "mindstone/mock", profileId: "software-engineering-partner" } },
+    agents: {
+      default: { id: "default", defaultModel: "mindstone/mock", profileId: "software-engineering-partner" },
+      research: { id: "research", defaultModel: "mindstone/research", profileId: "research-analyst" },
+    },
   };
   chat.addStatusPanel(buildTuiStatusPanel({
     ctx,
@@ -584,7 +627,39 @@ function createMindStoneTuiHistorySnapshot(argv: string[], width: number): strin
   return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
 }
 
+function createMindStoneTuiSwitchSnapshot(width = 80): string {
+  const config = {
+    routing: { mode: "mock" as const, defaultAgentId: "default", defaultModel: "mindstone/mock" },
+    session: { mode: "single" as const, defaultSessionKey: "agent:default:main" },
+    agents: {
+      default: { id: "default", defaultModel: "mindstone/mock", profileId: "software-engineering-partner" },
+      research: { id: "research", defaultModel: "mindstone/research", profileId: "research-analyst" },
+    },
+  };
+  const ctx: TuiCommandContext = {
+    agentId: "default",
+    sessionKey: "agent:default:main",
+    routingMode: "mock",
+    model: { id: "mindstone/mock", provider: "mock" },
+  };
+  const header = new MindStoneHeader(ctx);
+  const chat = new MindStoneChatLog();
+  const footer = new MindStoneFooter();
+  chat.addSystem(switchTuiAgent(ctx, config, "research"));
+  chat.addSystem(switchTuiModel(ctx, config, "mindstone/custom-smoke"));
+  chat.addSystem(switchTuiSession(ctx, config, "agent:research:smoke"));
+  chat.addPanel("agents", buildTuiAgentsPanel(config, ctx));
+  chat.addPanel("models", buildTuiModelsPanel(config, ctx));
+  chat.addPanel("sessions", buildTuiSessionsPanel({ ctx, config, sessions: [] }));
+  footer.setStatus(`session ${ctx.sessionKey}`);
+  return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
+}
+
 export async function runTuiCommand(argv: string[]): Promise<void> {
+  if (hasOption(argv, "--smoke-switches")) {
+    process.stdout.write(`${createMindStoneTuiSwitchSnapshot(numberOption(argv, "--width", 80))}\n`);
+    return;
+  }
   if (hasOption(argv, "--smoke-history")) {
     process.stdout.write(`${createMindStoneTuiHistorySnapshot(argv, numberOption(argv, "--width", 80))}\n`);
     return;
@@ -614,19 +689,22 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "clear", description: "Clear the visible chat log" },
     { name: "status", description: "Show current TUI/session status" },
     { name: "sessions", description: "Show known/configured sessions" },
+    { name: "session", description: "Switch this TUI session: /session <key>" },
     { name: "agents", description: "Show configured agents" },
+    { name: "agent", description: "Switch this TUI session to an agent: /agent <id>" },
     { name: "models", description: "Show configured model choices" },
+    { name: "model", description: "Switch this TUI session model: /model <id>" },
     { name: "exit", description: "Exit the TUI" },
     { name: "quit", description: "Exit the TUI" },
   ], process.cwd()));
 
   const historyLimit = numberOption(argv, "--history-limit", 40);
   const entries = recentTranscriptEntries(ctx.sessionKey, historyLimit);
-  const renderableCount = entries.filter(isRenderableTranscriptEntry).length;
-  if (renderableCount === 0) {
+  let renderedHistoryCount = entries.filter(isRenderableTranscriptEntry).length;
+  if (renderedHistoryCount === 0) {
     chat.addSystem("Welcome back. Type a message, /help, /clear, or /exit.");
   } else {
-    chat.addSystem(`Loaded ${renderableCount} recent transcript entr${renderableCount === 1 ? "y" : "ies"}. Type /help for commands.`);
+    chat.addSystem(`Loaded ${renderedHistoryCount} recent transcript entr${renderedHistoryCount === 1 ? "y" : "ies"}. Type /help for commands.`);
     appendRecentTranscriptToChatLog(chat, entries);
   }
   footer.setStatus(`session ${ctx.sessionKey}`);
@@ -656,6 +734,20 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       return undefined;
     });
 
+    const reloadVisibleHistory = (notice: string) => {
+      const nextEntries = recentTranscriptEntries(ctx.sessionKey, historyLimit);
+      renderedHistoryCount = nextEntries.filter(isRenderableTranscriptEntry).length;
+      chat.clear();
+      chat.addSystem(notice);
+      if (renderedHistoryCount === 0) {
+        chat.addSystem("No transcript history for this session yet.");
+      } else {
+        chat.addSystem(`Loaded ${renderedHistoryCount} recent transcript entr${renderedHistoryCount === 1 ? "y" : "ies"}.`);
+        appendRecentTranscriptToChatLog(chat, nextEntries);
+      }
+      footer.setStatus(`session ${ctx.sessionKey}`);
+    };
+
     editor.onSubmit = (raw: string) => {
       const message = raw.trim();
       editor.setText("");
@@ -667,7 +759,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /sessions, /agents, /models, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -676,7 +768,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
           ctx,
           configPath: loaded.path,
           historyLimit,
-          renderedHistoryCount: renderableCount,
+          renderedHistoryCount,
           transcriptDir: paths.transcriptDir,
           piSessionDir: paths.piSessionDir,
         }));
@@ -692,13 +784,32 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         tui.requestRender();
         return;
       }
+      const sessionSwitch = commandArgument(message, "/session");
+      if (sessionSwitch) {
+        reloadVisibleHistory(switchTuiSession(ctx, loaded.config, sessionSwitch));
+        tui.requestRender(true);
+        return;
+      }
       if (message === "/agents") {
         chat.addPanel("agents", buildTuiAgentsPanel(loaded.config, ctx));
         tui.requestRender();
         return;
       }
+      const agentSwitch = commandArgument(message, "/agent");
+      if (agentSwitch) {
+        reloadVisibleHistory(switchTuiAgent(ctx, loaded.config, agentSwitch));
+        tui.requestRender(true);
+        return;
+      }
       if (message === "/models") {
         chat.addPanel("models", buildTuiModelsPanel(loaded.config, ctx));
+        tui.requestRender();
+        return;
+      }
+      const modelSwitch = commandArgument(message, "/model");
+      if (modelSwitch) {
+        chat.addSystem(switchTuiModel(ctx, loaded.config, modelSwitch));
+        footer.setStatus(`model ${ctx.model.id} • session ${ctx.sessionKey}`);
         tui.requestRender();
         return;
       }

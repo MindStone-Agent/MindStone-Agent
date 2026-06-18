@@ -87,8 +87,27 @@ if ! grep -q "models" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing models panel" >&2
   exit 1
 fi
-if ! grep -q "Selector mutation is not enabled yet" <<<"${OUTPUT}"; then
-  echo "TUI smoke output missing selector mutation boundary" >&2
+if ! grep -q "mutation is" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing runtime-only selector boundary" >&2
+  exit 1
+fi
+
+SWITCH_OUTPUT="$(./scripts/mindstone tui --smoke-switches --width 72)"
+echo "${SWITCH_OUTPUT}"
+if ! grep -q "Switched this TUI session to agent" <<<"${SWITCH_OUTPUT}"; then
+  echo "TUI switch smoke output missing agent switch" >&2
+  exit 1
+fi
+if ! grep -q "mindstone/custom-smoke" <<<"${SWITCH_OUTPUT}"; then
+  echo "TUI switch smoke output missing model switch" >&2
+  exit 1
+fi
+if ! grep -q "agent:research:smoke" <<<"${SWITCH_OUTPUT}"; then
+  echo "TUI switch smoke output missing session switch" >&2
+  exit 1
+fi
+if grep -q "Config was changed" <<<"${SWITCH_OUTPUT}"; then
+  echo "TUI switch smoke output incorrectly claims config mutation" >&2
   exit 1
 fi
 

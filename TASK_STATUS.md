@@ -61,6 +61,7 @@
 - [x] Add first non-mutating TUI selector panels via `/sessions`, `/agents`, and `/models`.
 - [x] Surface `AgentRunner.stream(...)` lifecycle/diagnostic events into the TUI turn path as compact event lines.
 - [x] Emit completed-response `text_delta` replay events from runners and apply them to the mutable TUI assistant message.
+- [x] Add runtime-only TUI switching commands: `/session <key>`, `/agent <id>`, and `/model <id>`.
 
 ### Completed
 
@@ -153,8 +154,10 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [ ] Stream/update assistant text and tool/substrate events live from Gateway/runner events.
 - [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
 - [x] Add first non-mutating `/sessions`, `/agents`, and `/models` panels.
+- [x] Add runtime-only `/session <key>`, `/agent <id>`, and `/model <id>` switching commands without config mutation.
 - [x] Add first TUI rendering path for `AgentRunner.stream(...)` lifecycle/diagnostic events.
-- [x] Add completed-response `text_delta` replay path for mutable assistant updates.- [ ] Add interactive session/agent/model selectors and richer status/settings overlays.
+- [x] Add completed-response `text_delta` replay path for mutable assistant updates.
+- [ ] Add richer interactive selector overlays and status/settings overlays.
 - [ ] Adapt richer current MindStone TUI components and event handlers from `/Users/clint/Projects/MindStone/src/tui/`.
 
 ### Onboarding and identity
