@@ -159,6 +159,25 @@ if grep -q "Config was changed" <<<"${SWITCH_OUTPUT}"; then
   exit 1
 fi
 
+SELECTOR_OUTPUT="$(./scripts/mindstone tui --smoke-selectors --width 72)"
+echo "${SELECTOR_OUTPUT}"
+if ! grep -q "select agent" <<<"${SELECTOR_OUTPUT}" || ! grep -q "select model" <<<"${SELECTOR_OUTPUT}" || ! grep -q "select session" <<<"${SELECTOR_OUTPUT}"; then
+  echo "TUI selector smoke output missing selector headings" >&2
+  exit 1
+fi
+if ! grep -q "Enter selects" <<<"${SELECTOR_OUTPUT}" || ! grep -q "Esc cancels" <<<"${SELECTOR_OUTPUT}"; then
+  echo "TUI selector smoke output missing interaction hint" >&2
+  exit 1
+fi
+if ! grep -q "research" <<<"${SELECTOR_OUTPUT}" || ! grep -q "mindstone/research" <<<"${SELECTOR_OUTPUT}"; then
+  echo "TUI selector smoke output missing agent/model choices" >&2
+  exit 1
+fi
+if grep -q "Config was changed" <<<"${SELECTOR_OUTPUT}"; then
+  echo "TUI selector smoke output incorrectly claims config mutation" >&2
+  exit 1
+fi
+
 ./scripts/mindstone chat --once "history sentinel for tui" --json >/tmp/mindstone-agent-tui-chat.json
 HISTORY_OUTPUT="$(./scripts/mindstone tui --smoke-history --history-limit 10 --width 72)"
 echo "${HISTORY_OUTPUT}"

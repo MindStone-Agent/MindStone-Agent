@@ -39,6 +39,7 @@ import {
   Markdown,
   matchesKey,
   ProcessTerminal,
+  SelectList,
   Spacer,
   Text,
   TUI,
@@ -46,6 +47,7 @@ import {
   type Component,
   type EditorTheme,
   type MarkdownTheme,
+  type SelectItem,
   type SelectListTheme,
 } from "../../../vendor/pi/packages/tui/dist/index.js";
 
@@ -112,11 +114,11 @@ const TUI_COMMANDS: TuiCommandDefinition[] = [
   { name: "runs", description: "Show recent transcript runs" },
   { name: "doctor", description: "Show compact runtime doctor summary" },
   { name: "sessions", description: "Show known/configured sessions" },
-  { name: "session", description: "Switch this TUI session", usage: "<key>" },
+  { name: "session", description: "Open session selector or switch this TUI session", usage: "[key]" },
   { name: "agents", description: "Show configured agents" },
-  { name: "agent", description: "Switch this TUI session to an agent", usage: "<id>" },
+  { name: "agent", description: "Open agent selector or switch this TUI session to an agent", usage: "[id]" },
   { name: "models", description: "Show configured model choices" },
-  { name: "model", description: "Switch this TUI session model", usage: "<id>" },
+  { name: "model", description: "Open model selector or switch this TUI session model", usage: "[id]" },
   { name: "exit", description: "Exit the TUI" },
   { name: "quit", description: "Exit the TUI" },
 ];
@@ -250,6 +252,39 @@ class MindStoneChatLog extends Container {
   }
 }
 
+class MindStoneSelectOverlay implements Component {
+  readonly selectList: SelectList;
+
+  constructor(private readonly title: string, items: SelectItem[], private readonly hint: string) {
+    this.selectList = new SelectList(items, 9, selectListTheme, { maxPrimaryColumnWidth: 34 });
+  }
+
+  set onSelect(handler: ((item: SelectItem) => void) | undefined) {
+    this.selectList.onSelect = handler;
+  }
+
+  set onCancel(handler: (() => void) | undefined) {
+    this.selectList.onCancel = handler;
+  }
+
+  render(width: number): string[] {
+    return [
+      truncateToWidth(`${gold("◆")} ${bold(gold(this.title))}`, width),
+      truncateToWidth(muted(this.hint), width),
+      truncateToWidth(muted("─".repeat(Math.max(0, width))), width),
+      ...this.selectList.render(width),
+    ];
+  }
+
+  handleInput(data: string): void {
+    this.selectList.handleInput(data);
+  }
+
+  invalidate(): void {
+    this.selectList.invalidate();
+  }
+}
+
 function optionValue(argv: string[], name: string): string | undefined {
   const index = argv.indexOf(name);
   if (index < 0) return undefined;
@@ -363,6 +398,74 @@ function switchTuiModel(ctx: TuiCommandContext, config: ReturnType<typeof loadMi
     metadata: { model: modelId },
   });
   return `Switched this TUI session to model \`${ctx.model.id}\`. Config was not changed.`;
+}
+
+function uniqueTuiValues(values: Array<string | undefined>): string[] {
+  return Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
+}
+
+function tuiAgentSelectItems(config: ReturnType<typeof loadMindStoneConfig>["config"], ctx: TuiCommandContext): SelectItem[] {
+  return uniqueTuiValues([
+    ctx.agentId,
+    config?.routing?.defaultAgentId,
+    ...Object.keys(config?.agents ?? {}),
+  ]).sort((a, b) => a.localeCompare(b)).map((id) => {
+    const agent = config?.agents?.[id];
+    const detail = [
+      id === ctx.agentId ? "current" : undefined,
+      id === config?.routing?.defaultAgentId ? "default" : undefined,
+      agent?.profileId ? `profile ${agent.profileId}` : undefined,
+      agent?.defaultModel ? `model ${agent.defaultModel}` : undefined,
+    ].filter(Boolean).join("; ");
+    return { value: id, label: id, description: detail };
+  });
+}
+
+function tuiModelSelectItems(config: ReturnType<typeof loadMindStoneConfig>["config"], ctx: TuiCommandContext): SelectItem[] {
+  const agent = config?.agents?.[ctx.agentId];
+  const agentDefaults = Object.values(config?.agents ?? {}).map((configuredAgent) => configuredAgent.defaultModel);
+  return uniqueTuiValues([
+    ctx.model.id,
+    agent?.defaultModel,
+    config?.routing?.defaultModel,
+    ...agentDefaults,
+    ctx.routingMode === "mock" ? "mindstone/mock" : undefined,
+  ]).sort((a, b) => a.localeCompare(b)).map((id) => ({
+    value: id,
+    label: id,
+    description: [
+      id === ctx.model.id ? "current" : undefined,
+      id === config?.routing?.defaultModel ? "routing default" : undefined,
+      id === agent?.defaultModel ? "agent default" : undefined,
+    ].filter(Boolean).join("; "),
+  }));
+}
+
+function tuiSessionSelectItems(params: {
+  config: ReturnType<typeof loadMindStoneConfig>["config"];
+  ctx: TuiCommandContext;
+  paths: ReturnType<typeof runtimePathsFromEnv>;
+}): SelectItem[] {
+  const defaultSession = params.config?.session?.defaultSessionKey;
+  const mode = params.config?.session?.mode ?? "single";
+  const byKey = new Map<string, SelectItem>();
+  for (const key of uniqueTuiValues([params.ctx.sessionKey, defaultSession])) {
+    byKey.set(key, {
+      value: key,
+      label: key,
+      description: [key === params.ctx.sessionKey ? "current" : undefined, key === defaultSession ? "default" : undefined, `mode ${mode}`].filter(Boolean).join("; "),
+    });
+  }
+  for (const session of listTranscriptSessions({ paths: params.paths }).slice(0, 30)) {
+    const existing = byKey.get(session.sessionKey);
+    const detail = `${session.entries} entr${session.entries === 1 ? "y" : "ies"}${session.updatedAt ? `; updated ${session.updatedAt}` : ""}`;
+    byKey.set(session.sessionKey, {
+      value: session.sessionKey,
+      label: session.sessionKey,
+      description: existing?.description ? `${existing.description}; ${detail}` : detail,
+    });
+  }
+  return Array.from(byKey.values()).sort((a, b) => Number(a.value !== params.ctx.sessionKey) - Number(b.value !== params.ctx.sessionKey) || a.value.localeCompare(b.value));
 }
 
 function appendTranscriptEntryToChatLog(chat: MindStoneChatLog, entry: TranscriptEntry): boolean {
@@ -641,8 +744,8 @@ function createMindStoneTuiHistorySnapshot(argv: string[], width: number): strin
   return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
 }
 
-function createMindStoneTuiSwitchSnapshot(width = 80): string {
-  const config = {
+function smokeSelectorConfig() {
+  return {
     routing: { mode: "mock" as const, defaultAgentId: "default", defaultModel: "mindstone/mock" },
     session: { mode: "single" as const, defaultSessionKey: "agent:default:main" },
     agents: {
@@ -650,12 +753,20 @@ function createMindStoneTuiSwitchSnapshot(width = 80): string {
       research: { id: "research", defaultModel: "mindstone/research", profileId: "research-analyst" },
     },
   };
-  const ctx: TuiCommandContext = {
+}
+
+function smokeSelectorContext(): TuiCommandContext {
+  return {
     agentId: "default",
     sessionKey: "agent:default:main",
     routingMode: "mock",
     model: { id: "mindstone/mock", provider: "mock" },
   };
+}
+
+function createMindStoneTuiSwitchSnapshot(width = 80): string {
+  const config = smokeSelectorConfig();
+  const ctx = smokeSelectorContext();
   const header = new MindStoneHeader(ctx);
   const chat = new MindStoneChatLog();
   const footer = new MindStoneFooter();
@@ -669,7 +780,27 @@ function createMindStoneTuiSwitchSnapshot(width = 80): string {
   return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
 }
 
+function createMindStoneTuiSelectorSnapshot(width = 80): string {
+  const config = smokeSelectorConfig();
+  const ctx = smokeSelectorContext();
+  const paths = runtimePathsFromEnv();
+  const agents = new MindStoneSelectOverlay("select agent", tuiAgentSelectItems(config, ctx), "Enter selects • Esc cancels • config is not changed");
+  const models = new MindStoneSelectOverlay("select model", tuiModelSelectItems(config, ctx), "Enter selects • Esc cancels • config is not changed");
+  const sessions = new MindStoneSelectOverlay("select session", tuiSessionSelectItems({ config, ctx, paths }), "Enter selects • Esc cancels • config is not changed");
+  return [
+    ...agents.render(width),
+    "",
+    ...models.render(width),
+    "",
+    ...sessions.render(width),
+  ].join("\n");
+}
+
 export async function runTuiCommand(argv: string[]): Promise<void> {
+  if (hasOption(argv, "--smoke-selectors")) {
+    process.stdout.write(`${createMindStoneTuiSelectorSnapshot(numberOption(argv, "--width", 80))}\n`);
+    return;
+  }
   if (hasOption(argv, "--smoke-switches")) {
     process.stdout.write(`${createMindStoneTuiSwitchSnapshot(numberOption(argv, "--width", 80))}\n`);
     return;
@@ -748,6 +879,36 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         appendRecentTranscriptToChatLog(chat, nextEntries);
       }
       footer.setStatus(`session ${ctx.sessionKey}`);
+    };
+
+    const closeOverlay = () => {
+      if (tui.hasOverlay()) tui.hideOverlay();
+      tui.setFocus(editor);
+    };
+
+    const openTuiSelector = (params: {
+      title: string;
+      items: SelectItem[];
+      emptyText: string;
+      onSelect: (item: SelectItem) => void;
+    }) => {
+      if (params.items.length === 0) {
+        chat.addSystem(params.emptyText);
+        tui.requestRender();
+        return;
+      }
+      const overlay = new MindStoneSelectOverlay(params.title, params.items, "Enter selects • Esc cancels • config is not changed");
+      overlay.onSelect = (item) => {
+        closeOverlay();
+        params.onSelect(item);
+        tui.requestRender(true);
+      };
+      overlay.onCancel = () => {
+        closeOverlay();
+        tui.requestRender();
+      };
+      tui.showOverlay(overlay, { width: "80%", maxHeight: "60%", anchor: "center" });
+      tui.requestRender();
     };
 
     editor.onSubmit = (raw: string) => {
@@ -855,6 +1016,17 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         tui.requestRender();
         return;
       }
+      if (message === "/session") {
+        openTuiSelector({
+          title: "select session",
+          items: tuiSessionSelectItems({ config: loaded.config, ctx, paths }),
+          emptyText: "No sessions found.",
+          onSelect: (item) => {
+            reloadVisibleHistory(switchTuiSession(ctx, loaded.config, item.value));
+          },
+        });
+        return;
+      }
       const sessionSwitch = commandArgument(message, "/session");
       if (sessionSwitch) {
         reloadVisibleHistory(switchTuiSession(ctx, loaded.config, sessionSwitch));
@@ -866,6 +1038,17 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         tui.requestRender();
         return;
       }
+      if (message === "/agent") {
+        openTuiSelector({
+          title: "select agent",
+          items: tuiAgentSelectItems(loaded.config, ctx),
+          emptyText: "No configured agents found.",
+          onSelect: (item) => {
+            reloadVisibleHistory(switchTuiAgent(ctx, loaded.config, item.value));
+          },
+        });
+        return;
+      }
       const agentSwitch = commandArgument(message, "/agent");
       if (agentSwitch) {
         reloadVisibleHistory(switchTuiAgent(ctx, loaded.config, agentSwitch));
@@ -875,6 +1058,18 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       if (message === "/models") {
         chat.addPanel("models", buildTuiModelsPanel(loaded.config, ctx));
         tui.requestRender();
+        return;
+      }
+      if (message === "/model") {
+        openTuiSelector({
+          title: "select model",
+          items: tuiModelSelectItems(loaded.config, ctx),
+          emptyText: "No configured models found.",
+          onSelect: (item) => {
+            chat.addSystem(switchTuiModel(ctx, loaded.config, item.value));
+            footer.setStatus(`model ${ctx.model.id} • session ${ctx.sessionKey}`);
+          },
+        });
         return;
       }
       const modelSwitch = commandArgument(message, "/model");
