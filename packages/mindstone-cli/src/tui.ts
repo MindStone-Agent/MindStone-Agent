@@ -2,6 +2,7 @@ import {
   loadMindStoneConfig,
   resolveConfigPath,
   resolveConfiguredSessionKey,
+  getCurrentHandoffStatus,
   getMindStoneDoctorReport,
   getSqliteMemoryIndexStats,
   listTranscriptSessions,
@@ -373,6 +374,22 @@ function buildTuiDoctorPanel(): string {
   return lines.join("\n");
 }
 
+function buildTuiHandoffPanel(paths: ReturnType<typeof runtimePathsFromEnv>): string {
+  const handoff = getCurrentHandoffStatus(paths);
+  return [
+    `- exists: \`${handoff.exists}\``,
+    `- path: \`${handoff.path}\``,
+    `- bytes: \`${handoff.bytes}\``,
+    handoff.updatedAt ? `- updated: \`${handoff.updatedAt}\`` : undefined,
+    handoff.tokenEstimate !== undefined ? `- token estimate: \`${handoff.tokenEstimate}\`` : undefined,
+    handoff.sha256 ? `- sha256: \`${handoff.sha256.slice(0, 16)}…\`` : undefined,
+    "",
+    handoff.exists
+      ? "This handoff can be replayed into prompt context once per transcript continuity span."
+      : "No current handoff exists for this runtime.",
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
 type TuiPanelItem = {
   id: string;
   detail?: string;
@@ -695,8 +712,10 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
     transcriptDir: "/tmp/mindstone/transcripts",
     piSessionDir: "/tmp/pi-sessions",
   }));
-  chat.addPanel("memory", buildTuiMemoryPanel(smokeConfig, runtimePathsFromEnv()));
+  const smokePaths = runtimePathsFromEnv();
+  chat.addPanel("memory", buildTuiMemoryPanel(smokeConfig, smokePaths));
   chat.addPanel("context", buildTuiContextPanel({ config: smokeConfig, ctx, entries: [] }));
+  chat.addPanel("handoff", buildTuiHandoffPanel(smokePaths));
   chat.addPanel("doctor", buildTuiDoctorPanel());
   chat.addPanel("sessions", buildTuiSessionsPanel({
     ctx,
@@ -793,6 +812,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "status", description: "Show current TUI/session status" },
     { name: "memory", description: "Show memory/recall index status" },
     { name: "context", description: "Show context window policy and current session estimate" },
+    { name: "handoff", description: "Show current compaction handoff status" },
     { name: "doctor", description: "Show compact runtime doctor summary" },
     { name: "sessions", description: "Show known/configured sessions" },
     { name: "session", description: "Switch this TUI session: /session <key>" },
@@ -865,7 +885,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /handoff, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -892,6 +912,11 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
           ctx,
           entries: readTranscriptEntries(ctx.sessionKey),
         }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/handoff") {
+        chat.addPanel("handoff", buildTuiHandoffPanel(paths));
         tui.requestRender();
         return;
       }

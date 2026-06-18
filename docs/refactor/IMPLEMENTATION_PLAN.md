@@ -145,6 +145,7 @@ The preferred order is:
 - [x] Render richer TUI runner substrate/tool event labels from stream payload metadata.
 - [x] Add non-mutating `/memory` and `/context` TUI panels for recall index and prompt-window status.
 - [x] Add non-mutating `/doctor` TUI panel backed by Core doctor report summary.
+- [x] Add non-mutating `/handoff` TUI panel for current compaction handoff status.
 - [ ] Complete a session-backed Pi runner modeled on current MindStone's embedded Pi runner:
   - [x] isolated Pi `agentDir` and session directory
   - [x] canonical MindStone session key → Pi session file mapping
@@ -436,6 +437,7 @@ The preferred order is:
 - [x] Add richer TUI labels for runner substrate/tool event payloads.
 - [x] Add non-mutating TUI `/memory` and `/context` panels.
 - [x] Add non-mutating TUI `/doctor` panel.
+- [x] Add non-mutating TUI `/handoff` panel.
 - [ ] Stream/update assistant/tool events live from runner/Gateway events.
 - [ ] Implement full live Pi session event/stream capture into MindStone transcript/source metadata.
 - [ ] Live-test Pi-backed model calls through `AgentSession.prompt(...)` only after isolated auth/model config is intentionally provided.
