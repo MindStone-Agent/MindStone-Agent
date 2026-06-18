@@ -46,7 +46,8 @@
     "smoke:gateway-runner-stream": "./scripts/smoke-gateway-runner-stream.sh",
     "smoke:cli-chat": "./scripts/smoke-cli-chat.sh",
     "smoke:cli-chat-recall": "./scripts/smoke-cli-chat-recall.sh",
-    "smoke:pi-session-runner": "./scripts/smoke-pi-session-runner.sh"
+    "smoke:pi-session-runner": "./scripts/smoke-pi-session-runner.sh",
+    "smoke:pi-session-live": "./scripts/smoke-pi-session-live.sh"
   },
   "engines": {
     "node": ">=22.19.0"
