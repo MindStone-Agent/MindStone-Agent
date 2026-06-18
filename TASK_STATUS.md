@@ -49,10 +49,11 @@
 - [x] Add gated `smoke:pi-session-live` probe for isolated-auth live `AgentSession.prompt(...)`, runner-stream validation, and optional `AgentSession.compact(...)` validation via `MINDSTONE_PI_SESSION_LIVE_COMPACT=1`.
 - [x] Add config-backed Pi `DefaultResourceLoader` option pass-through for additional extension/skill/prompt/theme paths and resource disable flags.
 - [x] Add smallest MindStone-owned Pi inline extension-factory parity: context-pruning derived from `contextManagement.mode = "sliding_window"`, affecting live Pi LLM context only and preserving append-only transcript authority.
+- [x] Add session-local Pi native compaction setting parity with `routing.pi.compaction` and a 20k reserve-token floor, applied before pi-session prompt/compact.
 - [x] Use real `PiSessionAgentRunner` construction for CLI/TUI pi-session routes instead of injected-provider runners.
 - [x] Add process-local pi-session file serialization around `AgentSession.prompt(...)` and `AgentSession.compact(...)`.
 - [x] Add `docs/refactor/PI_SESSION_PARITY.md` tracking MindStone embedded-runner parity tiers and next gaps.
-- [ ] Complete full live authenticated event/stream validation, durable transcript/source metadata policy, and any necessary compaction-safeguard extension parity for the session-backed Pi runner.
+- [ ] Complete full live authenticated event/stream validation, durable transcript/source metadata policy, and any necessary full staged compaction-safeguard summary parity for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
 - [x] Add provider-first isolated Pi provider/model discovery to native config/onboarding routing setup.
@@ -143,7 +144,7 @@
 - [x] Add lifecycle-only `AgentRunner.stream(...)` scaffold and post-run bounded `pi-session` diagnostic replay as stream `substrate_event`s.
 - [x] Add `observability.runnerStream.persistTranscriptEvents` gate for selected stream event transcript persistence.
 - [ ] Live-test Pi-backed model calls through the session-backed runner with isolated credentials/config using `MINDSTONE_PI_SESSION_LIVE=1 npm run smoke:pi-session-live`; after that succeeds, live-test compaction with `MINDSTONE_PI_SESSION_LIVE_COMPACT=1`.
-- [ ] Decide whether compaction-safeguard inline factory parity is required before MVP; context-pruning inline factory parity is now implemented.
+- [ ] Decide whether full staged compaction-safeguard summary parity is required before MVP; context-pruning inline factory parity and native compaction setting parity are now implemented.
 - [ ] Finish auto-compact runtime policy for compatible substrates as a secondary/fallback path behind sliding-window/SCRI.
   - Primary continuity premise: one shared append-only JSONL session/transcript across channels; pruning/compaction affect only live prompt/session context.
   - Next decision: use a session-backed Pi runner/provider with SDK `AgentSession.compact()` or a Pi-extension control bridge with `ctx.compact()`, only if it preserves unified transcript authority.

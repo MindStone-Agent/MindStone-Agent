@@ -23,7 +23,9 @@ export {
   type MindStonePiExtensionFactoryOptions,
 } from "./pi-context-pruning-extension.js";
 export {
+  DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR,
   PI_SESSION_EVENT_CALLBACK_METADATA_KEY,
+  applyPiSessionCompactionSettings,
   buildPiSessionResourceLoaderOptions,
   PiSessionExecutor,
   withPiSessionFileLock,
@@ -263,6 +265,7 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
       cwd: config?.workspace?.root,
       defaultModel: config?.routing?.defaultModel,
       contextManagement: config?.contextManagement,
+      compaction: config?.routing?.pi?.compaction,
       additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
       additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
       additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
@@ -294,6 +297,7 @@ function resolveRunner(config: MindStoneConfig | undefined, provider: MindStoneM
       cwd: config?.workspace?.root,
       defaultModel: config?.routing?.defaultModel,
       contextManagement: config?.contextManagement,
+      compaction: config?.routing?.pi?.compaction,
       additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
       additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
       additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,

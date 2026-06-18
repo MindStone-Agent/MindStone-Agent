@@ -49,6 +49,17 @@ export type MindStoneSessionConfig = {
 
 export type MindStoneRoutingMode = "placeholder" | "mock" | "pi" | "pi-session";
 
+export type MindStonePiCompactionConfig = {
+  /** Override Pi native compaction enabled state for this isolated route. */
+  enabled?: boolean;
+  /** Pi native compaction reserve tokens. Raised to reserveTokensFloor when lower. */
+  reserveTokens?: number;
+  /** Pi native recent-context preservation target. */
+  keepRecentTokens?: number;
+  /** Minimum reserve tokens to enforce for Pi native compaction. Defaults to 20000. */
+  reserveTokensFloor?: number;
+};
+
 export type MindStoneRoutingConfig = {
   /** placeholder keeps send/completions transcript-aware without calling a model. */
   mode?: MindStoneRoutingMode;
@@ -68,6 +79,8 @@ export type MindStoneRoutingConfig = {
     additionalPromptTemplatePaths?: string[];
     /** Additional Pi theme paths passed to DefaultResourceLoader. */
     additionalThemePaths?: string[];
+    /** Session-local Pi native compaction overrides for the isolated route. */
+    compaction?: MindStonePiCompactionConfig;
     /** Disable Pi extension loading for this route. */
     noExtensions?: boolean;
     /** Disable Pi skill loading for this route. */

@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { AgentCompactionInput, AgentCompactionResult, ContextManagementPolicy, MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo } from "@mindstone-agent/core";
+import type { AgentCompactionInput, AgentCompactionResult, ContextManagementPolicy, MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo, MindStonePiCompactionConfig } from "@mindstone-agent/core";
 import { buildMindStonePiExtensionFactories, type MindStonePiExtensionFactory } from "./pi-context-pruning-extension.js";
 
 export type PiSessionResourceLoaderOptions = {
@@ -21,6 +21,8 @@ export type PiSessionResourceLoaderOptions = {
 export type PiSessionExecutorOptions = PiSessionResourceLoaderOptions & {
   /** MindStone context policy used to derive safe Pi-side inline extension parity. */
   contextManagement?: ContextManagementPolicy;
+  /** Session-local Pi native compaction settings for the isolated route. */
+  compaction?: MindStonePiCompactionConfig;
   projectRoot?: string;
   agentDir?: string;
   sessionDir?: string;
@@ -47,6 +49,59 @@ type PiRegistry = {
 };
 
 type PiResourceLoader = { reload(): Promise<void> };
+
+type PiSettingsManagerLike = {
+  getCompactionEnabled?(): boolean;
+  getCompactionReserveTokens?(): number;
+  getCompactionKeepRecentTokens?(): number;
+  applyOverrides?(overrides: { compaction: { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number } }): void;
+};
+
+export const DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR = 20_000;
+
+function nonNegativeInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+}
+
+function positiveInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+export function applyPiSessionCompactionSettings(input: {
+  settingsManager: PiSettingsManagerLike;
+  compaction?: MindStonePiCompactionConfig;
+}): {
+  didOverride: boolean;
+  compaction: { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number };
+} {
+  const currentEnabled = input.settingsManager.getCompactionEnabled?.();
+  const currentReserveTokens = input.settingsManager.getCompactionReserveTokens?.();
+  const currentKeepRecentTokens = input.settingsManager.getCompactionKeepRecentTokens?.();
+  const reserveTokensFloor = nonNegativeInt(input.compaction?.reserveTokensFloor) ?? DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR;
+  const configuredReserveTokens = nonNegativeInt(input.compaction?.reserveTokens);
+  const configuredKeepRecentTokens = positiveInt(input.compaction?.keepRecentTokens);
+  const targetEnabled = typeof input.compaction?.enabled === "boolean" ? input.compaction.enabled : currentEnabled;
+  const targetReserveTokens = Math.max(configuredReserveTokens ?? currentReserveTokens ?? 0, reserveTokensFloor);
+  const targetKeepRecentTokens = configuredKeepRecentTokens ?? currentKeepRecentTokens;
+  const overrides: { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number } = {};
+
+  if (targetEnabled !== undefined && targetEnabled !== currentEnabled) overrides.enabled = targetEnabled;
+  if (targetReserveTokens > 0 && targetReserveTokens !== currentReserveTokens) overrides.reserveTokens = targetReserveTokens;
+  if (targetKeepRecentTokens !== undefined && targetKeepRecentTokens !== currentKeepRecentTokens) overrides.keepRecentTokens = targetKeepRecentTokens;
+
+  if (Object.keys(overrides).length > 0) {
+    input.settingsManager.applyOverrides?.({ compaction: overrides });
+  }
+
+  return {
+    didOverride: Object.keys(overrides).length > 0,
+    compaction: {
+      enabled: targetEnabled,
+      reserveTokens: targetReserveTokens > 0 ? targetReserveTokens : undefined,
+      keepRecentTokens: targetKeepRecentTokens,
+    },
+  };
+}
 
 type PiSessionModules = {
   createAgentSession: (options?: Record<string, unknown>) => Promise<{ session: PiAgentSession; modelFallbackMessage?: string }>;
@@ -452,6 +507,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
   readonly #cwd: string;
   readonly #defaultProvider?: string;
   readonly #defaultModel?: string;
+  readonly #compactionOptions?: MindStonePiCompactionConfig;
   readonly #resourceOptions: PiSessionResourceLoaderOptions;
   #modules?: PiSessionModules;
   #registry?: PiRegistry;
@@ -463,6 +519,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     this.#cwd = resolve(options.cwd ?? this.#projectRoot);
     this.#defaultProvider = options.defaultProvider;
     this.#defaultModel = options.defaultModel;
+    this.#compactionOptions = options.compaction;
     this.#resourceOptions = {
       additionalExtensionPaths: options.additionalExtensionPaths,
       additionalSkillPaths: options.additionalSkillPaths,
@@ -567,6 +624,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       mkdirSync(dirname(sessionFile), { recursive: true });
       const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
       const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
+      applyPiSessionCompactionSettings({ settingsManager: settingsManager as PiSettingsManagerLike, compaction: this.#compactionOptions });
       const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
         cwd: this.#cwd,
         agentDir: this.#agentDir,
@@ -635,6 +693,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       mkdirSync(dirname(sessionFile), { recursive: true });
       const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
       const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
+      applyPiSessionCompactionSettings({ settingsManager: settingsManager as PiSettingsManagerLike, compaction: this.#compactionOptions });
       const promptParts = buildPiSessionPromptParts(request.messages);
       const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
         cwd: this.#cwd,

@@ -44,7 +44,7 @@ NODE
 
 node --input-type=module <<'NODE'
 import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
-import { buildMindStonePiExtensionFactories, buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, PiSessionAgentRunner, piSessionFileForKey, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
+import { applyPiSessionCompactionSettings, buildMindStonePiExtensionFactories, buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR, PiSessionAgentRunner, piSessionFileForKey, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
 import { resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
 const actual = piSessionFileForKey(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions`, process.env.CHAT_SESSION_KEY);
@@ -142,6 +142,32 @@ const prunedContext = await contextHandlers[0]({
 if (!prunedContext || prunedContext.messages.length >= 4) throw new Error('context pruning extension did not prune live context');
 if (prunedContext.messages[0].role !== 'system') throw new Error('context pruning extension pruned system context');
 if (prunedContext.messages.at(-1)?.content !== 'preserve latest user') throw new Error('context pruning extension pruned latest user message');
+
+const compactionOverrides = [];
+const compactionSettingsResult = applyPiSessionCompactionSettings({
+  settingsManager: {
+    getCompactionEnabled: () => true,
+    getCompactionReserveTokens: () => 16384,
+    getCompactionKeepRecentTokens: () => 20000,
+    applyOverrides: (overrides) => compactionOverrides.push(overrides),
+  },
+  compaction: { enabled: false, reserveTokens: 12000, keepRecentTokens: 30000 },
+});
+if (!compactionSettingsResult.didOverride) throw new Error('Pi compaction settings override was not reported');
+if (compactionSettingsResult.compaction.enabled !== false) throw new Error('Pi compaction enabled override missing');
+if (compactionSettingsResult.compaction.reserveTokens !== DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR) throw new Error('Pi compaction reserve floor was not enforced');
+if (compactionSettingsResult.compaction.keepRecentTokens !== 30000) throw new Error('Pi compaction keepRecent override missing');
+if (compactionOverrides.length !== 1) throw new Error('Pi compaction settings did not apply exactly one override');
+if (compactionOverrides[0].compaction.enabled !== false || compactionOverrides[0].compaction.reserveTokens !== DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR || compactionOverrides[0].compaction.keepRecentTokens !== 30000) throw new Error('Pi compaction overrides payload was wrong');
+const compactionNoopResult = applyPiSessionCompactionSettings({
+  settingsManager: {
+    getCompactionEnabled: () => true,
+    getCompactionReserveTokens: () => DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR,
+    getCompactionKeepRecentTokens: () => 20000,
+    applyOverrides: () => { throw new Error('unexpected compaction override'); },
+  },
+});
+if (compactionNoopResult.didOverride) throw new Error('Pi compaction settings should not override when already at defaults/floor');
 
 const providerDiagnostics = providerDiagnosticsFromChatResult({
   role: 'assistant',
