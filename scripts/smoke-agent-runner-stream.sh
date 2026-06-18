@@ -14,7 +14,7 @@ node --input-type=module <<'NODE'
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createProviderRouteAgentRunner, readTranscriptEntries, runMindStoneChatTurn } from './packages/mindstone-core/dist/index.js';
+import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult, readTranscriptEntries, runMindStoneChatTurn, sanitizeRunnerStreamSubstrateEventPayload } from './packages/mindstone-core/dist/index.js';
 import { PI_SESSION_EVENT_CALLBACK_METADATA_KEY, PiSessionAgentRunner } from './packages/mindstone-gateway/dist/index.js';
 
 const transcriptEntry = {
@@ -92,6 +92,36 @@ if (piSessionEvents[5].type !== 'text_delta' || piSessionEvents[5].metadata?.com
 if (piSessionEvents[6].type !== 'run_completed') throw new Error('pi-session: final event was not run_completed');
 if (piSessionEvents.some((event, index) => event.sequence !== index)) throw new Error('pi-session: stream sequence was not monotonic from zero');
 if (piSessionEvents[6].result.runner.id !== 'pi-session') throw new Error('pi-session: completed result runner diagnostics missing');
+
+const directlySanitized = sanitizeRunnerStreamSubstrateEventPayload({
+  type: 'tool_execution_start',
+  toolName: 'read',
+  toolCallId: 'tool-1',
+  toolArgsKeys: ['path', { nested: 'not safe' }],
+  message: { content: 'SECRET_MESSAGE_SHOULD_NOT_PERSIST' },
+  args: { path: 'SECRET_PATH_SHOULD_NOT_PERSIST' },
+  result: { content: 'SECRET_RESULT_SHOULD_NOT_PERSIST' },
+});
+const directlySanitizedText = JSON.stringify(directlySanitized);
+if (directlySanitizedText.includes('SECRET_MESSAGE_SHOULD_NOT_PERSIST') || directlySanitizedText.includes('SECRET_PATH_SHOULD_NOT_PERSIST') || directlySanitizedText.includes('SECRET_RESULT_SHOULD_NOT_PERSIST')) {
+  throw new Error('direct substrate sanitizer leaked raw message/args/result content');
+}
+if (!directlySanitized.unknownKeys?.includes('message') || !directlySanitized.unknownKeys?.includes('args') || !directlySanitized.unknownKeys?.includes('result')) {
+  throw new Error(`direct substrate sanitizer did not preserve unsafe key names: ${directlySanitizedText}`);
+}
+if (Array.isArray(directlySanitized.toolArgsKeys)) throw new Error('direct substrate sanitizer preserved mixed non-primitive toolArgsKeys array');
+
+const providerDiagnostics = providerDiagnosticsFromChatResult(await fakeProvider.completeChat({
+  messages: [transcriptEntry],
+  model,
+}));
+const providerDiagnosticsText = JSON.stringify(providerDiagnostics);
+if (providerDiagnosticsText.includes('SECRET_PATH_SHOULD_NOT_PERSIST') || providerDiagnosticsText.includes('SECRET_TOKEN_SHOULD_NOT_PERSIST') || providerDiagnosticsText.includes('SECRET_RESULT_SHOULD_NOT_PERSIST')) {
+  throw new Error('provider diagnostics leaked raw Pi event args/result values');
+}
+if (!providerDiagnostics?.piSession?.events?.some((event) => event.toolName === 'read' && event.toolArgsKeys?.includes('path'))) {
+  throw new Error('provider diagnostics did not preserve sanitized tool event summary');
+}
 
 const liveProvider = {
   id: 'fake-live-pi-session-provider',

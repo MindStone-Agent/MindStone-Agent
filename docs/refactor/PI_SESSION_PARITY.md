@@ -33,6 +33,7 @@ Implemented now:
 - per-session-file serialization around pi-session prompt and compaction operations, combining in-process ordering with a conservative cross-process `.lock` file and stale-lock recovery
 - `AgentSession.prompt(...)` path when isolated auth/model config is available
 - bounded sanitized Pi session diagnostics
+- durable transcript boundary sanitizer coverage for runner substrate events and provider diagnostics, proving raw Pi message/args/result payloads do not persist while safe summary key names/counts survive
 - explicit runner `route_planned` stream events before provider/substrate execution
 - live Pi diagnostic callback streaming as runner `substrate_event`
 - live Pi assistant `text_delta` forwarding
@@ -94,9 +95,9 @@ Current MindStone embedded runner includes production-grade behavior that should
    - Confirm no global Pi auth is used.
 
 2. **Durable transcript/source metadata parity**
-   - Current stream event persistence can store runner events, but durable metadata policy needs review.
-   - Decide which Pi events are durable transcript facts versus ephemeral UI diagnostics.
-   - Keep raw tool args/secrets out; preserve names/ids/arg keys/counts only.
+   - Current stream event persistence stores selected runner events behind an observability gate.
+   - Sanitizer smoke coverage now proves raw Pi message/tool args/results are not persisted in runner stream events or provider diagnostics, while names/ids/arg keys/counts survive.
+   - Remaining work: after live authenticated Pi behavior is observed, decide which additional Pi events are durable transcript facts versus ephemeral UI diagnostics.
 
 3. **Resource loader / extension parity**
    - Config-backed Pi resource loader path/disable options now pass through CLI, TUI, Gateway, `PiSessionMindStoneProvider`, and real `PiSessionAgentRunner` construction.
