@@ -22,6 +22,7 @@ import {
   runMindStoneConfigWizard,
   runMindStoneOnboardingWizard,
   runtimePathsFromEnv,
+  synthesizeMindStoneIdentityActivation,
   type AgentRunner,
   type MindStoneDoctorReport,
   type MindStoneModelInfo,
@@ -33,7 +34,7 @@ import {
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "identity" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;214m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -49,6 +50,8 @@ function usage(): string {
     "  mindstone tui          Start styled MindStone-Agent TUI over the canonical MindStone session",
     "  mindstone config       Configure MindStone-Agent runtime settings",
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
+    "  mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]",
+    "                         Synthesize first-activation identity from onboarding seed",
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
     "  mindstone memory backfill [--embed] [--force] [--maintain] [--dedupe-text] [--json]  Index memory/transcripts and optionally maintain/embed chunks",
@@ -66,7 +69,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "identity" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -670,6 +673,92 @@ function printDoctor(report: MindStoneDoctorReport): void {
   output.write("\n");
 }
 
+async function runIdentityCommand(argv: string[]): Promise<void> {
+  const subcommand = argv[3] ?? "help";
+  if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    output.write(
+      [
+        gold("🔶 MindStone identity"),
+        "",
+        "Usage:",
+        "  mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]",
+        "",
+        "Notes:",
+        "  activate synthesizes a first-activation identity from onboarding seeds.",
+        "  It refuses to overwrite a non-pending identity unless --force is used.",
+        "  Existing pending identity files are backed up before replacement.",
+      ].join("\n"),
+    );
+    output.write("\n");
+    return;
+  }
+  if (subcommand !== "activate") throw new Error(`Unknown identity subcommand: ${subcommand}`);
+
+  const json = hasOption(argv, "--json");
+  const dryRun = hasOption(argv, "--dry-run");
+  const force = hasOption(argv, "--force");
+  const yes = hasOption(argv, "--yes") || hasOption(argv, "-y");
+  const agentId = optionValue(argv, "--agent");
+  const configPath = optionValue(argv, "--config") ?? resolveConfigPath();
+
+  const preview = synthesizeMindStoneIdentityActivation({ configPath, agentId, dryRun: true, force });
+  if (dryRun || !preview.wouldWrite) {
+    if (json) {
+      output.write(`${JSON.stringify(preview, null, 2)}\n`);
+    } else if (!preview.wouldWrite) {
+      output.write(`${gold("Identity activation skipped")}\n`);
+      output.write(`Reason: ${preview.reason ?? "unchanged"}\n`);
+      output.write(`Identity: ${preview.identityPath ?? "unset"}\n`);
+    } else {
+      output.write(`${gold("Identity activation dry run")}\n`);
+      output.write(`Agent: ${preview.agentId}\n`);
+      output.write(`Name: ${preview.name}\n`);
+      output.write(`Identity: ${preview.identityPath ?? "unset"}\n`);
+      output.write(`User: ${preview.userPath ?? "unset"}\n`);
+      output.write(`Would replace pending identity: ${preview.previousIdentityPending}\n`);
+    }
+    return;
+  }
+
+  if (!yes) {
+    if (!input.isTTY || !output.isTTY) {
+      throw new Error("Refusing non-interactive identity activation without --yes");
+    }
+    const prompter = makeTerminalPrompter();
+    try {
+      await prompter.note(
+        [
+          `Agent: ${preview.agentId}`,
+          `Synthesized name: ${preview.name}`,
+          `Identity path: ${preview.identityPath ?? "unset"}`,
+          `User path: ${preview.userPath ?? "unset"}`,
+          `Previous identity pending: ${preview.previousIdentityPending}`,
+          "A backup will be written before replacing an existing pending identity.",
+        ].join("\n"),
+        "First-activation identity synthesis",
+      );
+      const accepted = await prompter.confirm({ message: "Activate this identity now?", initialValue: false });
+      if (!accepted) {
+        output.write("Identity activation cancelled.\n");
+        return;
+      }
+    } finally {
+      prompter.close();
+    }
+  }
+
+  const result = synthesizeMindStoneIdentityActivation({ configPath, agentId, force });
+  if (json) {
+    output.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  output.write(`${gold("Identity activated")}\n`);
+  output.write(`Agent: ${result.agentId}\n`);
+  output.write(`Name: ${result.name}\n`);
+  output.write(`Identity: ${result.identityPath ?? "unset"}\n`);
+  if (result.backupPath) output.write(`Backup: ${result.backupPath}\n`);
+}
+
 async function main(): Promise<void> {
   const command = parseCommand(process.argv);
   if (command === "help") {
@@ -682,6 +771,10 @@ async function main(): Promise<void> {
   }
   if (command === "memory") {
     await runMemoryCommand(process.argv);
+    return;
+  }
+  if (command === "identity") {
+    await runIdentityCommand(process.argv);
     return;
   }
   if (command === "chat") {

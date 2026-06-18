@@ -29,6 +29,7 @@
     "smoke:sliding-window": "./scripts/smoke-sliding-window.sh",
     "smoke:router-mock": "./scripts/smoke-router-mock.sh",
     "smoke:identity-context": "./scripts/smoke-identity-context.sh",
+    "smoke:identity-activation": "./scripts/smoke-identity-activation.sh",
     "smoke:pi-provider-config": "./scripts/smoke-pi-provider-config.sh",
     "smoke:config-wizard": "./scripts/smoke-config-wizard.sh",
     "smoke:onboard": "./scripts/smoke-onboard.sh",

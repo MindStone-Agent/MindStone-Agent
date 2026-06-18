@@ -62,6 +62,7 @@
 - [x] Add read-only Pi adapter memory/transcript tools for session-backed Pi use: `mindstone_memory_status`, `mindstone_memory_search`, `mindstone_memory_read`, and `mindstone_transcript_status`; memory read is restricted to discovered MindStone memory docs and smoke coverage verifies search/read/status behavior.
 - [x] Add conservative Pi adapter lifecycle marker hooks for `session_shutdown`, `session_compact`, and `session_tree`; they append sanitized lifecycle events to the configured MindStone transcript without persisting raw summaries/details/messages. This is not full raw Pi transcript archive parity yet.
 - [x] Add first-pass Pi adapter `before_agent_start` prompt-context injection for configured `IDENTITY.md`/`USER.md` and ephemeral Core memory recall when `memory.autoRecall` is enabled; verified without live model calls.
+- [x] Add conservative first-activation identity synthesis via `mindstone identity activate`: derives a working identity from onboarding profile/preferences/identity seed, supports dry-run/JSON, backs up pending scaffolds, and refuses to overwrite non-pending identity without `--force`.
 - [x] Add `npm run smoke:core-boundary` to verify `mindstone-core` compiles independently and does not import Gateway/CLI/Pi adapter or Pi-specific packages directly.
 - [ ] Complete full live authenticated event/stream validation, live-observed durable metadata allowlist refinements if needed, and any necessary full staged compaction-safeguard summary parity for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
@@ -225,7 +226,10 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - Gateway loads the routed agent identity/user files from config.
   - REST/RPC/OpenAI-compatible/WebChat routed calls report `identityContext` diagnostics.
   - Verified with `npm run smoke:identity-context`, `npm run smoke:router-mock`, and `npm run smoke:webchat-ui`.
-- [ ] Expand identity emergence into a real first-activation synthesis step.
+- [x] Expand identity emergence into a real first-activation synthesis step.
+  - `mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]` synthesizes a first-activation working identity from onboarding profile/preferences/identity seed.
+  - The command is auditable and conservative: it writes a backup for pending scaffolds and refuses to overwrite non-pending identities unless forced.
+  - Smoke validation: `npm run smoke:identity-activation`.
 - [ ] Build the initial `Integration Builder` skill surface.
   - [x] Add Integration Builder as an onboarding profile.
   - [ ] Add reusable Integration Builder skill behavior for creating/configuring integrations/channels/tools.

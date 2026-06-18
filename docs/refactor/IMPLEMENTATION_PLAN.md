@@ -87,7 +87,10 @@ The preferred order is:
 - [x] Add initial “getting to know the user” onboarding phase for preferences, boundaries, style, memory/checkpoint style, and project/domain context.
 - [ ] Expand preference onboarding with richer collaboration-pattern and clarifying-question tuning.
 - [x] Add initial naming/identity emergence phase without forcing human-assigned names.
-- [ ] Expand identity emergence into a real first-activation synthesis step.
+- [x] Expand identity emergence into a real first-activation synthesis step.
+  - `mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]` derives a first-activation working identity from onboarding profile/preferences/identity seed.
+  - It backs up pending scaffolds and refuses to overwrite a non-pending identity unless `--force` is used.
+  - Smoke validation: `npm run smoke:identity-activation`.
 - [ ] Preserve channel onboarding adapters for Telegram, Signal, Discord, Slack.
 - [x] Add fake prompter smoke tests for wizard sections.
 - [x] Ensure sensitive provider API-key entry avoids echo/logging.
