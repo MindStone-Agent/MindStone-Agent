@@ -22,6 +22,10 @@ type PiSessionStreamDiagnostics = {
   events: unknown[];
 };
 
+type PiSessionQueuedStreamEvent =
+  | { type: "substrate_event"; event: unknown }
+  | { type: "text_delta"; text: string };
+
 type AsyncQueueResult<T> = IteratorResult<T>;
 
 class AsyncEventQueue<T> {
@@ -120,13 +124,19 @@ export class PiSessionAgentRunner implements AgentRunner {
         model: input.model,
       },
     };
-    const liveEvents = new AsyncEventQueue<unknown>();
+    const liveEvents = new AsyncEventQueue<PiSessionQueuedStreamEvent>();
     let didLiveCapture = false;
+    let didLiveTextCapture = false;
     let result: AgentRunResult | undefined;
     let runError: unknown;
     const onPiSessionEvent = (payload: PiSessionEventCallbackPayload): void => {
       didLiveCapture = true;
-      liveEvents.push(payload.summary);
+      if (payload.textDelta) {
+        didLiveTextCapture = true;
+        liveEvents.push({ type: "text_delta", text: payload.textDelta });
+        return;
+      }
+      liveEvents.push({ type: "substrate_event", event: payload.summary });
     };
     const runPromise = this.run({
       ...input,
@@ -148,6 +158,22 @@ export class PiSessionAgentRunner implements AgentRunner {
       while (true) {
         const next = await liveEvents.next();
         if (next.done) break;
+        if (next.value.type === "text_delta") {
+          yield {
+            type: "text_delta",
+            sequence: sequence++,
+            timestamp: new Date().toISOString(),
+            runnerId: this.id,
+            runId: runContext.runId,
+            surface: runContext.surface,
+            metadata: {
+              ...runContext.metadata,
+              liveCapture: true,
+            },
+            text: next.value.text,
+          };
+          continue;
+        }
         yield {
           type: "substrate_event",
           sequence: sequence++,
@@ -160,7 +186,7 @@ export class PiSessionAgentRunner implements AgentRunner {
             liveCapture: true,
           },
           substrate: "pi",
-          event: next.value,
+          event: next.value.event,
         };
       }
       await runPromise;
@@ -185,7 +211,7 @@ export class PiSessionAgentRunner implements AgentRunner {
           };
         }
       }
-      if (result.result.text) {
+      if (result.result.text && !didLiveTextCapture) {
         yield {
           type: "text_delta",
           sequence: sequence++,

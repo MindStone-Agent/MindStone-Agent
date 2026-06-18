@@ -97,7 +97,7 @@ const liveProvider = {
     const callback = request.metadata?.[PI_SESSION_EVENT_CALLBACK_METADATA_KEY];
     if (typeof callback !== 'function') throw new Error('live Pi session event callback missing');
     callback({ summary: { type: 'agent_start' } });
-    callback({ summary: { type: 'message_update', assistantStreamEventType: 'text_delta', assistantStreamDeltaChars: 11 } });
+    callback({ summary: { type: 'message_update', assistantStreamEventType: 'text_delta', assistantStreamDeltaChars: 11 }, textDelta: 'live delta ' });
     return {
       role: 'assistant',
       text: 'live stream response',
@@ -112,10 +112,14 @@ const liveProvider = {
 };
 const liveEvents = await collect(new PiSessionAgentRunner({ provider: liveProvider }).stream({ ...baseInput, provider: liveProvider }));
 const liveSubstrateEvents = liveEvents.filter((event) => event.type === 'substrate_event');
-if (liveSubstrateEvents.length !== 2) throw new Error(`expected 2 live substrate events, got ${liveSubstrateEvents.length}`);
-if (!liveSubstrateEvents.every((event) => event.metadata?.liveCapture === true)) throw new Error('live substrate events were not marked liveCapture');
+const liveTextEvents = liveEvents.filter((event) => event.type === 'text_delta');
+if (liveSubstrateEvents.length !== 1) throw new Error(`expected 1 live substrate event, got ${liveSubstrateEvents.length}`);
+if (liveTextEvents.length !== 1) throw new Error(`expected 1 live text delta, got ${liveTextEvents.length}`);
+if (!liveEvents.filter((event) => event.type === 'substrate_event' || event.type === 'text_delta').every((event) => event.metadata?.liveCapture === true)) throw new Error('live stream events were not marked liveCapture');
 if (liveSubstrateEvents.some((event) => event.event?.type === 'should_not_replay_when_live_capture_exists')) throw new Error('diagnostic replay was not skipped after live capture');
-if (!liveSubstrateEvents.some((event) => event.event?.assistantStreamEventType === 'text_delta')) throw new Error('live assistant stream event was not yielded');
+if (liveTextEvents[0].text !== 'live delta ') throw new Error('live assistant text delta was not yielded');
+if (liveTextEvents.some((event) => event.metadata?.completedTextReplay === true)) throw new Error('live text delta was incorrectly marked as completed replay');
+if (liveEvents.some((event) => event.type === 'text_delta' && event.text === 'live stream response')) throw new Error('completed text replay was not suppressed after live text capture');
 
 const runtimeDir = mkdtempSync(join(tmpdir(), 'mindstone-agent-runner-stream-transcript.'));
 process.env.MINDSTONE_AGENT_RUNTIME_DIR = runtimeDir;

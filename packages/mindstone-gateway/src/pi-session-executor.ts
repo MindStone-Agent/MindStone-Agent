@@ -75,6 +75,7 @@ export const PI_SESSION_EVENT_CALLBACK_METADATA_KEY = "__mindstonePiSessionEvent
 
 export type PiSessionEventCallbackPayload = {
   summary: PiSessionEventSummary;
+  textDelta?: string;
 };
 
 export type PiSessionEventCallback = (payload: PiSessionEventCallbackPayload) => void;
@@ -218,6 +219,13 @@ function textCharsFromResult(value: unknown): number | undefined {
   if (!input) return undefined;
   const text = textFromContent(input.content);
   return text ? text.length : undefined;
+}
+
+function textDeltaFromAssistantStreamEvent(value: unknown): string | undefined {
+  const input = record(value);
+  if (!input) return undefined;
+  if (input.type !== "text_delta") return undefined;
+  return stringValue(input.delta);
 }
 
 function assistantStreamEventSummary(value: unknown): Partial<PiSessionEventSummary> {
@@ -459,7 +467,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     const onEvent = piSessionEventCallbackFromMetadata(request.metadata);
     const unsubscribe = session.subscribe?.((event) => {
       const summary = record(event);
-      onEvent?.({ summary });
+      onEvent?.({ summary, textDelta: textDeltaFromAssistantStreamEvent(event.assistantMessageEvent) });
     });
 
     try {
