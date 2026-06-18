@@ -247,11 +247,25 @@ function eventEntryLabel(entry: TranscriptEntry): string | undefined {
   return undefined;
 }
 
+function substrateEventDetail(event: unknown): string | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const record = event as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : undefined;
+  const toolName = typeof record.toolName === "string" ? record.toolName : undefined;
+  const toolCallId = typeof record.toolCallId === "string" ? record.toolCallId : undefined;
+  const message = typeof record.message === "string" ? record.message : undefined;
+  const parts = [type, toolName ? `tool ${toolName}` : undefined, toolCallId ? `call ${toolCallId}` : undefined, message].filter(Boolean);
+  return parts.length ? parts.join(" • ") : undefined;
+}
+
 function runnerStreamEventLabel(event: AgentRunStreamEvent): string {
   if (event.type === "run_started") return `runner ${event.runnerId} started`;
   if (event.type === "route_planned") return `runner ${event.runnerId} planned route`;
   if (event.type === "text_delta") return `runner ${event.runnerId} text delta (${event.text.length} chars)`;
-  if (event.type === "substrate_event") return `runner ${event.runnerId} ${event.substrate} event`;
+  if (event.type === "substrate_event") {
+    const detail = substrateEventDetail(event.event);
+    return `runner ${event.runnerId} ${event.substrate} event${detail ? `: ${detail}` : ""}`;
+  }
   if (event.type === "run_completed") return `runner ${event.runnerId} completed`;
   return `runner ${event.runnerId} failed: ${event.error.message}`;
 }
@@ -578,6 +592,14 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
     timestamp: "2026-06-18T00:00:00.000Z",
     runnerId: "provider-route",
     input: { agentId: ctx.agentId, sessionKey: ctx.sessionKey, model: ctx.model },
+  }));
+  chat.addEvent(runnerStreamEventLabel({
+    type: "substrate_event",
+    sequence: 1,
+    timestamp: "2026-06-18T00:00:00.000Z",
+    runnerId: "pi-session",
+    substrate: "pi",
+    event: { type: "tool_execution_start", toolName: "read", toolCallId: "tool-1" },
   }));
   const smokeConfig = {
     routing: { mode: "mock" as const, defaultAgentId: "default", defaultModel: "mindstone/mock" },
