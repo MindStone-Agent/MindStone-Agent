@@ -12,6 +12,7 @@ import {
   getMindStoneDoctorReport,
   getMindStoneSystemStatus,
   getSqliteMemoryIndexStats,
+  maintainSqliteMemoryIndex,
   loadMindStoneConfig,
   probeMemoryEmbeddingProvider,
   resolveConfigPath,
@@ -51,6 +52,7 @@ function usage(): string {
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
     "  mindstone memory backfill [--embed] [--force]  Index file memory/transcripts and optionally embed chunks",
+    "  mindstone memory maintain [--dry-run] [--dedupe-text]  Clean stale rows and compact SQLite memory DB",
     "  mindstone memory status    Show SQLite memory DB status",
     "  mindstone help         Show this help",
     "",
@@ -302,6 +304,9 @@ function printMemoryStatus(): void {
       stats.sqliteVec.extensionPath ? `sqlite-vec extension: ${stats.sqliteVec.extensionPath}` : undefined,
       stats.sqliteVec.error ? `sqlite-vec note: ${stats.sqliteVec.error}` : undefined,
       stats.updatedAt ? `Updated: ${stats.updatedAt}` : undefined,
+      stats.bloat ? `DB bytes: ${stats.bloat.databaseBytes}` : undefined,
+      stats.bloat ? `WAL bytes: ${stats.bloat.walBytes}` : undefined,
+      stats.bloat ? `Estimated free bytes: ${stats.bloat.estimatedFreeBytes}` : undefined,
       stats.error ? `Error: ${stats.error}` : undefined,
     ]
       .filter((line) => line !== undefined)
@@ -353,6 +358,46 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
     output.write(`${gold("🔶 MindStone memory backfill")}\n\n`);
     output.write(lines.join("\n"));
     output.write("\n");
+    return;
+  }
+  if (subcommand === "maintain") {
+    const paths = runtimePathsFromEnv();
+    const result = maintainSqliteMemoryIndex({
+      paths,
+      dryRun: argv.includes("--dry-run"),
+      deduplicateText: argv.includes("--dedupe-text"),
+      removeStaleSources: !argv.includes("--no-stale"),
+      optimize: !argv.includes("--no-optimize"),
+      vacuum: !argv.includes("--no-vacuum"),
+    });
+    const lines = [
+      `Database: ${result.databasePath}`,
+      `Present: ${result.present}`,
+      `Dry run: ${result.dryRun}`,
+      result.before ? `Sources before: ${result.before.sources}` : undefined,
+      result.before ? `Chunks before: ${result.before.chunks}` : undefined,
+      result.before ? `Embedded chunks before: ${result.before.embeddedChunks}` : undefined,
+      result.before?.bloat ? `DB bytes before: ${result.before.bloat.databaseBytes}` : undefined,
+      result.before?.bloat ? `Estimated free bytes before: ${result.before.bloat.estimatedFreeBytes}` : undefined,
+      `Stale sources found: ${result.staleSourcesFound}`,
+      `Stale sources removed: ${result.staleSourcesRemoved}`,
+      `Duplicate text chunks found: ${result.duplicateTextChunksFound}`,
+      `Duplicate text chunks removed: ${result.duplicateTextChunksRemoved}`,
+      `Empty sources found: ${result.emptySourcesFound}`,
+      `Empty sources removed: ${result.emptySourcesRemoved}`,
+      `Optimized: ${result.optimized}`,
+      `Vacuumed: ${result.vacuumed}`,
+      result.after ? `Sources after: ${result.after.sources}` : undefined,
+      result.after ? `Chunks after: ${result.after.chunks}` : undefined,
+      result.after ? `Embedded chunks after: ${result.after.embeddedChunks}` : undefined,
+      result.after?.bloat ? `DB bytes after: ${result.after.bloat.databaseBytes}` : undefined,
+      result.after?.bloat ? `Estimated free bytes after: ${result.after.bloat.estimatedFreeBytes}` : undefined,
+      result.error ? `Error: ${result.error}` : undefined,
+    ].filter((line) => line !== undefined);
+    output.write(`${gold("🔶 MindStone memory maintenance")}\n\n`);
+    output.write(lines.join("\n"));
+    output.write("\n");
+    if (result.error) process.exitCode = 1;
     return;
   }
   throw new Error(`Unknown memory command: ${subcommand}\n\n${usage()}`);

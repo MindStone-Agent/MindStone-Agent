@@ -49,6 +49,16 @@ export type SqliteVecStatus = {
   error?: string;
 };
 
+export type SqliteMemoryBloatStats = {
+  databaseBytes: number;
+  walBytes: number;
+  shmBytes: number;
+  pageSize: number;
+  pageCount: number;
+  freelistCount: number;
+  estimatedFreeBytes: number;
+};
+
 export type SqliteMemoryIndexStats = {
   databasePath: string;
   present: boolean;
@@ -58,6 +68,33 @@ export type SqliteMemoryIndexStats = {
   vectorBackend: "sqlite-vec" | "js-cosine" | "lexical";
   sqliteVec: SqliteVecStatus;
   updatedAt?: string;
+  bloat?: SqliteMemoryBloatStats;
+  error?: string;
+};
+
+export type SqliteMemoryMaintenanceOptions = {
+  paths?: MindStoneRuntimePaths;
+  dryRun?: boolean;
+  removeStaleSources?: boolean;
+  deduplicateText?: boolean;
+  optimize?: boolean;
+  vacuum?: boolean;
+};
+
+export type SqliteMemoryMaintenanceResult = {
+  databasePath: string;
+  present: boolean;
+  dryRun: boolean;
+  staleSourcesFound: number;
+  staleSourcesRemoved: number;
+  duplicateTextChunksFound: number;
+  duplicateTextChunksRemoved: number;
+  emptySourcesFound: number;
+  emptySourcesRemoved: number;
+  optimized: boolean;
+  vacuumed: boolean;
+  before?: Pick<SqliteMemoryIndexStats, "sources" | "chunks" | "embeddedChunks" | "bloat">;
+  after?: Pick<SqliteMemoryIndexStats, "sources" | "chunks" | "embeddedChunks" | "bloat">;
   error?: string;
 };
 
@@ -129,6 +166,48 @@ function openDatabase(path: string): DatabaseSync {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
   return db;
+}
+
+function fileSize(path: string): number {
+  try {
+    return existsSync(path) ? statSync(path).size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function pragmaNumber(db: DatabaseSync, statement: string): number {
+  const row = db.prepare(statement).get() as Record<string, unknown> | undefined;
+  const value = row ? Object.values(row)[0] : 0;
+  const numeric = Number(value ?? 0);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function readBloatStats(db: DatabaseSync, databasePath: string): SqliteMemoryBloatStats {
+  const pageSize = pragmaNumber(db, "PRAGMA page_size");
+  const pageCount = pragmaNumber(db, "PRAGMA page_count");
+  const freelistCount = pragmaNumber(db, "PRAGMA freelist_count");
+  return {
+    databaseBytes: fileSize(databasePath),
+    walBytes: fileSize(`${databasePath}-wal`),
+    shmBytes: fileSize(`${databasePath}-shm`),
+    pageSize,
+    pageCount,
+    freelistCount,
+    estimatedFreeBytes: pageSize * freelistCount,
+  };
+}
+
+function readIndexCounts(db: DatabaseSync, databasePath: string): Pick<SqliteMemoryIndexStats, "sources" | "chunks" | "embeddedChunks" | "bloat"> {
+  const sources = db.prepare("SELECT count(*) AS count FROM memory_sources").get() as { count: number };
+  const chunks = db.prepare("SELECT count(*) AS count FROM memory_chunks").get() as { count: number };
+  const embeddedChunks = db.prepare("SELECT count(*) AS count FROM memory_chunks WHERE embedding_json IS NOT NULL").get() as { count: number };
+  return {
+    sources: Number(sources.count ?? 0),
+    chunks: Number(chunks.count ?? 0),
+    embeddedChunks: Number(embeddedChunks.count ?? 0),
+    bloat: readBloatStats(db, databasePath),
+  };
 }
 
 function initializeSchema(db: DatabaseSync): void {
@@ -424,24 +503,154 @@ export function getSqliteMemoryIndexStats(paths: MindStoneRuntimePaths = runtime
   try {
     const db = openDatabase(databasePath);
     initializeSchema(db);
-    const sources = db.prepare("SELECT count(*) AS count FROM memory_sources").get() as { count: number };
-    const chunks = db.prepare("SELECT count(*) AS count FROM memory_chunks").get() as { count: number };
-    const embeddedChunks = db.prepare("SELECT count(*) AS count FROM memory_chunks WHERE embedding_json IS NOT NULL").get() as { count: number };
+    const counts = readIndexCounts(db, databasePath);
     const updated = db.prepare("SELECT max(updated_at) AS updatedAt FROM memory_chunks").get() as { updatedAt?: string };
     db.close();
-    const embedded = Number(embeddedChunks.count ?? 0);
+    const embedded = counts.embeddedChunks;
     return {
       databasePath,
       present: true,
-      sources: Number(sources.count ?? 0),
-      chunks: Number(chunks.count ?? 0),
-      embeddedChunks: embedded,
+      ...counts,
       vectorBackend: sqliteVec.available ? "sqlite-vec" : embedded > 0 ? "js-cosine" : "lexical",
       sqliteVec,
       updatedAt: updated.updatedAt,
     };
   } catch (error) {
     return { ...empty, present: true, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function staleSourceIds(db: DatabaseSync): string[] {
+  const rows = db.prepare("SELECT id, path FROM memory_sources WHERE path IS NOT NULL").all() as Array<{ id: string; path?: string }>;
+  return rows.filter((row) => row.path && !existsSync(row.path)).map((row) => row.id);
+}
+
+function duplicateTextChunkIds(db: DatabaseSync): string[] {
+  const rows = db.prepare(`
+    SELECT chunk_id, text, updated_at
+    FROM memory_chunks
+    ORDER BY updated_at DESC, chunk_id ASC
+  `).all() as Array<{ chunk_id: string; text: string; updated_at: string }>;
+  const seen = new Set<string>();
+  const duplicates: string[] = [];
+  for (const row of rows) {
+    const key = hashText(row.text.trim());
+    if (seen.has(key)) {
+      duplicates.push(row.chunk_id);
+      continue;
+    }
+    seen.add(key);
+  }
+  return duplicates;
+}
+
+function emptySourceIds(db: DatabaseSync): string[] {
+  const rows = db.prepare("SELECT id FROM memory_sources WHERE id NOT IN (SELECT DISTINCT source_id FROM memory_chunks)").all() as Array<{ id: string }>;
+  return rows.map((row) => row.id);
+}
+
+export function maintainSqliteMemoryIndex(options: SqliteMemoryMaintenanceOptions = {}): SqliteMemoryMaintenanceResult {
+  const paths = options.paths ?? runtimePathsFromEnv();
+  const databasePath = sqliteMemoryDatabasePath(paths);
+  const dryRun = options.dryRun ?? false;
+  const removeStaleSources = options.removeStaleSources ?? true;
+  const deduplicateText = options.deduplicateText ?? false;
+  const optimize = options.optimize ?? true;
+  const vacuum = options.vacuum ?? true;
+  if (!existsSync(databasePath)) {
+    return {
+      databasePath,
+      present: false,
+      dryRun,
+      staleSourcesFound: 0,
+      staleSourcesRemoved: 0,
+      duplicateTextChunksFound: 0,
+      duplicateTextChunksRemoved: 0,
+      emptySourcesFound: 0,
+      emptySourcesRemoved: 0,
+      optimized: false,
+      vacuumed: false,
+    };
+  }
+
+  const db = openDatabase(databasePath);
+  initializeSchema(db);
+  try {
+    const before = readIndexCounts(db, databasePath);
+    const staleIds = removeStaleSources ? staleSourceIds(db) : [];
+    const duplicateIds = deduplicateText ? duplicateTextChunkIds(db) : [];
+    const emptyIdsBefore = emptySourceIds(db);
+    let staleSourcesRemoved = 0;
+    let duplicateTextChunksRemoved = 0;
+    let emptySourcesRemoved = 0;
+
+    if (!dryRun) {
+      db.exec("BEGIN");
+      try {
+        const deleteSource = db.prepare("DELETE FROM memory_sources WHERE id = ?");
+        for (const id of staleIds) {
+          const result = deleteSource.run(id);
+          staleSourcesRemoved += Number(result.changes ?? 0);
+        }
+        const deleteChunk = db.prepare("DELETE FROM memory_chunks WHERE chunk_id = ?");
+        for (const id of duplicateIds) {
+          const result = deleteChunk.run(id);
+          duplicateTextChunksRemoved += Number(result.changes ?? 0);
+        }
+        const emptyResult = db.prepare("DELETE FROM memory_sources WHERE id NOT IN (SELECT DISTINCT source_id FROM memory_chunks)").run();
+        emptySourcesRemoved = Number(emptyResult.changes ?? 0);
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+
+    let optimized = false;
+    let vacuumed = false;
+    if (!dryRun && optimize) {
+      db.exec("PRAGMA optimize");
+      db.exec("REINDEX");
+      optimized = true;
+    }
+    if (!dryRun && vacuum) {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      db.exec("VACUUM");
+      vacuumed = true;
+    }
+    const after = readIndexCounts(db, databasePath);
+    return {
+      databasePath,
+      present: true,
+      dryRun,
+      staleSourcesFound: staleIds.length,
+      staleSourcesRemoved,
+      duplicateTextChunksFound: duplicateIds.length,
+      duplicateTextChunksRemoved,
+      emptySourcesFound: emptyIdsBefore.length,
+      emptySourcesRemoved,
+      optimized,
+      vacuumed,
+      before,
+      after,
+    };
+  } catch (error) {
+    return {
+      databasePath,
+      present: true,
+      dryRun,
+      staleSourcesFound: 0,
+      staleSourcesRemoved: 0,
+      duplicateTextChunksFound: 0,
+      duplicateTextChunksRemoved: 0,
+      emptySourcesFound: 0,
+      emptySourcesRemoved: 0,
+      optimized: false,
+      vacuumed: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    db.close();
   }
 }
 
