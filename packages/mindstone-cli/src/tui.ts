@@ -34,6 +34,7 @@ import {
   CombinedAutocompleteProvider,
   Container,
   Editor,
+  Input,
   Key,
   Loader,
   Markdown,
@@ -253,34 +254,90 @@ class MindStoneChatLog extends Container {
 }
 
 class MindStoneSelectOverlay implements Component {
-  readonly selectList: SelectList;
+  private readonly allItems: SelectItem[];
+  private readonly input = new Input();
+  private selectList: SelectList;
+  private selectHandler: ((item: SelectItem) => void) | undefined;
+  private cancelHandler: (() => void) | undefined;
 
   constructor(private readonly title: string, items: SelectItem[], private readonly hint: string) {
-    this.selectList = new SelectList(items, 9, selectListTheme, { maxPrimaryColumnWidth: 34 });
+    this.allItems = items;
+    this.selectList = this.createSelectList(items);
   }
 
   set onSelect(handler: ((item: SelectItem) => void) | undefined) {
+    this.selectHandler = handler;
     this.selectList.onSelect = handler;
   }
 
   set onCancel(handler: (() => void) | undefined) {
+    this.cancelHandler = handler;
     this.selectList.onCancel = handler;
   }
 
+  private createSelectList(items: SelectItem[]): SelectList {
+    const list = new SelectList(items, 9, selectListTheme, { maxPrimaryColumnWidth: 34 });
+    list.onSelect = this.selectHandler;
+    list.onCancel = this.cancelHandler;
+    return list;
+  }
+
+  private applyFilter(): void {
+    const query = this.input.getValue().trim().toLowerCase();
+    if (!query) {
+      this.selectList = this.createSelectList(this.allItems);
+      return;
+    }
+    const terms = query.split(/\s+/).filter(Boolean);
+    const filtered = this.allItems.filter((item) => {
+      const haystack = [item.value, item.label, item.description].filter(Boolean).join(" ").toLowerCase();
+      return terms.every((term) => haystack.includes(term));
+    });
+    this.selectList = this.createSelectList(filtered);
+  }
+
   render(width: number): string[] {
+    const filterLabel = muted("filter: ");
+    const inputLines = this.input.render(Math.max(1, width - 8));
     return [
       truncateToWidth(`${gold("◆")} ${bold(gold(this.title))}`, width),
       truncateToWidth(muted(this.hint), width),
+      `${filterLabel}${inputLines[0] ?? ""}`,
       truncateToWidth(muted("─".repeat(Math.max(0, width))), width),
       ...this.selectList.render(width),
     ];
   }
 
   handleInput(data: string): void {
-    this.selectList.handleInput(data);
+    if (matchesKey(data, Key.up) || matchesKey(data, Key.ctrl("p")) || (!this.input.getValue().trim() && data === "k")) {
+      this.selectList.handleInput("\x1b[A");
+      return;
+    }
+    if (matchesKey(data, Key.down) || matchesKey(data, Key.ctrl("n")) || (!this.input.getValue().trim() && data === "j")) {
+      this.selectList.handleInput("\x1b[B");
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      const selected = this.selectList.getSelectedItem();
+      if (selected) this.selectHandler?.(selected);
+      return;
+    }
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+      if (this.input.getValue()) {
+        this.input.setValue("");
+        this.applyFilter();
+      } else {
+        this.cancelHandler?.();
+      }
+      return;
+    }
+    const before = this.input.getValue();
+    this.input.handleInput(data);
+    if (this.input.getValue() !== before) this.applyFilter();
   }
 
   invalidate(): void {
+    this.input.invalidate();
     this.selectList.invalidate();
   }
 }
@@ -784,15 +841,19 @@ function createMindStoneTuiSelectorSnapshot(width = 80): string {
   const config = smokeSelectorConfig();
   const ctx = smokeSelectorContext();
   const paths = runtimePathsFromEnv();
-  const agents = new MindStoneSelectOverlay("select agent", tuiAgentSelectItems(config, ctx), "Enter selects • Esc cancels • config is not changed");
-  const models = new MindStoneSelectOverlay("select model", tuiModelSelectItems(config, ctx), "Enter selects • Esc cancels • config is not changed");
-  const sessions = new MindStoneSelectOverlay("select session", tuiSessionSelectItems({ config, ctx, paths }), "Enter selects • Esc cancels • config is not changed");
+  const agents = new MindStoneSelectOverlay("select agent", tuiAgentSelectItems(config, ctx), "Type to filter • Enter selects • Esc clears/cancels • config is not changed");
+  const models = new MindStoneSelectOverlay("select model", tuiModelSelectItems(config, ctx), "Type to filter • Enter selects • Esc clears/cancels • config is not changed");
+  const sessions = new MindStoneSelectOverlay("select session", tuiSessionSelectItems({ config, ctx, paths }), "Type to filter • Enter selects • Esc clears/cancels • config is not changed");
+  const filteredModels = new MindStoneSelectOverlay("filtered model", tuiModelSelectItems(config, ctx), "Filter text: research");
+  for (const char of "research") filteredModels.handleInput(char);
   return [
     ...agents.render(width),
     "",
     ...models.render(width),
     "",
     ...sessions.render(width),
+    "",
+    ...filteredModels.render(width),
   ].join("\n");
 }
 
@@ -897,7 +958,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         tui.requestRender();
         return;
       }
-      const overlay = new MindStoneSelectOverlay(params.title, params.items, "Enter selects • Esc cancels • config is not changed");
+      const overlay = new MindStoneSelectOverlay(params.title, params.items, "Type to filter • Enter selects • Esc clears/cancels • config is not changed");
       overlay.onSelect = (item) => {
         closeOverlay();
         params.onSelect(item);

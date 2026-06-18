@@ -165,12 +165,20 @@ if ! grep -q "select agent" <<<"${SELECTOR_OUTPUT}" || ! grep -q "select model" 
   echo "TUI selector smoke output missing selector headings" >&2
   exit 1
 fi
-if ! grep -q "Enter selects" <<<"${SELECTOR_OUTPUT}" || ! grep -q "Esc cancels" <<<"${SELECTOR_OUTPUT}"; then
+if ! grep -q "Type to filter" <<<"${SELECTOR_OUTPUT}" || ! grep -q "Enter selects" <<<"${SELECTOR_OUTPUT}" || ! grep -q "Esc clears/cancels" <<<"${SELECTOR_OUTPUT}"; then
   echo "TUI selector smoke output missing interaction hint" >&2
+  exit 1
+fi
+if ! grep -q "filter:" <<<"${SELECTOR_OUTPUT}"; then
+  echo "TUI selector smoke output missing filter input" >&2
   exit 1
 fi
 if ! grep -q "research" <<<"${SELECTOR_OUTPUT}" || ! grep -q "mindstone/research" <<<"${SELECTOR_OUTPUT}"; then
   echo "TUI selector smoke output missing agent/model choices" >&2
+  exit 1
+fi
+if ! grep -q "filtered model" <<<"${SELECTOR_OUTPUT}" || ! grep -q "Filter text: research" <<<"${SELECTOR_OUTPUT}"; then
+  echo "TUI selector smoke output missing filtered selector snapshot" >&2
   exit 1
 fi
 if grep -q "Config was changed" <<<"${SELECTOR_OUTPUT}"; then
