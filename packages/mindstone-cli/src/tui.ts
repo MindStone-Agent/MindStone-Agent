@@ -87,6 +87,46 @@ type TuiCommandContext = {
   routingMode: "mock" | "pi" | "pi-session";
 };
 
+type TuiCommandDefinition = {
+  name: string;
+  description: string;
+  usage?: string;
+};
+
+const TUI_COMMANDS: TuiCommandDefinition[] = [
+  { name: "help", description: "Show TUI commands" },
+  { name: "clear", description: "Clear the visible chat log" },
+  { name: "status", description: "Show current TUI/session status" },
+  { name: "config", description: "Show sanitized active runtime config" },
+  { name: "gateway", description: "Show configured Gateway surfaces" },
+  { name: "pi", description: "Show isolated Pi runtime/session mapping" },
+  { name: "transcript", description: "Show active transcript file status" },
+  { name: "memory", description: "Show memory/recall index status" },
+  { name: "context", description: "Show context window policy and current session estimate" },
+  { name: "handoff", description: "Show current compaction handoff status" },
+  { name: "identity", description: "Show active agent identity/user context status" },
+  { name: "events", description: "Show recent transcript/runner events" },
+  { name: "runs", description: "Show recent transcript runs" },
+  { name: "doctor", description: "Show compact runtime doctor summary" },
+  { name: "sessions", description: "Show known/configured sessions" },
+  { name: "session", description: "Switch this TUI session", usage: "<key>" },
+  { name: "agents", description: "Show configured agents" },
+  { name: "agent", description: "Switch this TUI session to an agent", usage: "<id>" },
+  { name: "models", description: "Show configured model choices" },
+  { name: "model", description: "Switch this TUI session model", usage: "<id>" },
+  { name: "exit", description: "Exit the TUI" },
+  { name: "quit", description: "Exit the TUI" },
+];
+
+const TUI_HELP_TEXT = `Commands: ${TUI_COMMANDS.map((command) => `/${command.name}${command.usage ? ` ${command.usage}` : ""}`).join(", ")}. Regular text sends a MindStone turn.`;
+
+function tuiAutocompleteCommands(): Array<{ name: string; description: string }> {
+  return TUI_COMMANDS.map((command) => ({
+    name: command.name,
+    description: command.usage ? `${command.description}: /${command.name} ${command.usage}` : command.description,
+  }));
+}
+
 class MindStoneHeader implements Component {
   constructor(private readonly ctx: TuiCommandContext) {}
 
@@ -1142,30 +1182,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
   const chat = new MindStoneChatLog();
   const footer = new MindStoneFooter();
   const editor = new Editor(tui, editorTheme, { paddingX: 1, autocompleteMaxVisible: 8 });
-  editor.setAutocompleteProvider(new CombinedAutocompleteProvider([
-    { name: "help", description: "Show TUI commands" },
-    { name: "clear", description: "Clear the visible chat log" },
-    { name: "status", description: "Show current TUI/session status" },
-    { name: "config", description: "Show sanitized active runtime config" },
-    { name: "gateway", description: "Show configured Gateway surfaces" },
-    { name: "pi", description: "Show isolated Pi runtime/session mapping" },
-    { name: "transcript", description: "Show active transcript file status" },
-    { name: "memory", description: "Show memory/recall index status" },
-    { name: "context", description: "Show context window policy and current session estimate" },
-    { name: "handoff", description: "Show current compaction handoff status" },
-    { name: "identity", description: "Show active agent identity/user context status" },
-    { name: "events", description: "Show recent transcript/runner events" },
-    { name: "runs", description: "Show recent transcript runs" },
-    { name: "doctor", description: "Show compact runtime doctor summary" },
-    { name: "sessions", description: "Show known/configured sessions" },
-    { name: "session", description: "Switch this TUI session: /session <key>" },
-    { name: "agents", description: "Show configured agents" },
-    { name: "agent", description: "Switch this TUI session to an agent: /agent <id>" },
-    { name: "models", description: "Show configured model choices" },
-    { name: "model", description: "Switch this TUI session model: /model <id>" },
-    { name: "exit", description: "Exit the TUI" },
-    { name: "quit", description: "Exit the TUI" },
-  ], process.cwd()));
+  editor.setAutocompleteProvider(new CombinedAutocompleteProvider(tuiAutocompleteCommands(), process.cwd()));
 
   const historyLimit = numberOption(argv, "--history-limit", 40);
   const entries = recentTranscriptEntries(ctx.sessionKey, historyLimit);
@@ -1228,7 +1245,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /config, /gateway, /pi, /transcript, /memory, /context, /handoff, /identity, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem(TUI_HELP_TEXT);
         tui.requestRender();
         return;
       }
