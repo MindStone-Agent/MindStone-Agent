@@ -345,6 +345,7 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
       `Database: ${result.databasePath}`,
       `Sources indexed: ${result.sourcesIndexed}`,
       `Chunks indexed: ${result.chunksIndexed}`,
+      `Chunk embeddings preserved: ${result.chunkEmbeddingsPreserved}`,
       `File documents: ${result.fileDocuments}`,
       `Transcript documents: ${result.transcriptDocuments}`,
     ];

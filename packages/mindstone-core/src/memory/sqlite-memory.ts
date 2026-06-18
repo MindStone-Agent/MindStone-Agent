@@ -38,6 +38,7 @@ export type SqliteMemoryBackfillResult = {
   databasePath: string;
   sourcesIndexed: number;
   chunksIndexed: number;
+  chunkEmbeddingsPreserved: number;
   fileDocuments: number;
   transcriptDocuments: number;
 };
@@ -355,9 +356,21 @@ function transcriptDocuments(paths: MindStoneRuntimePaths): MemoryDocument[] {
   return docs;
 }
 
-function indexDocument(db: DatabaseSync, document: MemoryDocument): number {
+function preservedChunkEmbeddings(db: DatabaseSync, sourceId: string): Map<string, string> {
+  const rows = db.prepare("SELECT text, embedding_json FROM memory_chunks WHERE source_id = ? AND embedding_json IS NOT NULL").all(sourceId) as Array<{ text: string; embedding_json?: string }>;
+  const output = new Map<string, string>();
+  for (const row of rows) {
+    if (!row.embedding_json || !parseEmbedding(row.embedding_json)) continue;
+    const key = hashText(row.text.trim());
+    if (!output.has(key)) output.set(key, row.embedding_json);
+  }
+  return output;
+}
+
+function indexDocument(db: DatabaseSync, document: MemoryDocument): { chunksIndexed: number; chunkEmbeddingsPreserved: number } {
   const now = new Date().toISOString();
   const contentHash = hashText(document.text);
+  const preservedEmbeddings = preservedChunkEmbeddings(db, document.id);
   db.prepare(`
     INSERT INTO memory_sources (id, kind, path, title, timestamp, content_hash, metadata_json, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -382,11 +395,14 @@ function indexDocument(db: DatabaseSync, document: MemoryDocument): number {
   db.prepare("DELETE FROM memory_chunks WHERE source_id = ?").run(document.id);
 
   const insertChunk = db.prepare(`
-    INSERT INTO memory_chunks (chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, metadata_json, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO memory_chunks (chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, metadata_json, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const chunks = chunkText(document.text);
+  let chunkEmbeddingsPreserved = 0;
   chunks.forEach((text, ordinal) => {
+    const preservedEmbedding = preservedEmbeddings.get(hashText(text.trim()));
+    if (preservedEmbedding) chunkEmbeddingsPreserved += 1;
     insertChunk.run(
       `${document.id}#${ordinal}`,
       document.id,
@@ -396,11 +412,12 @@ function indexDocument(db: DatabaseSync, document: MemoryDocument): number {
       ordinal,
       text,
       estimatePromptTokens(text),
+      preservedEmbedding ?? null,
       JSON.stringify({ ...(document.metadata ?? {}), sourceId: document.id }),
       now,
     );
   });
-  return chunks.length;
+  return { chunksIndexed: chunks.length, chunkEmbeddingsPreserved };
 }
 
 export function backfillSqliteMemoryIndex(options: SqliteMemoryBackfillOptions = {}): SqliteMemoryBackfillResult {
@@ -413,10 +430,15 @@ export function backfillSqliteMemoryIndex(options: SqliteMemoryBackfillOptions =
   const transcriptDocs = options.includeTranscripts === false ? [] : transcriptDocuments(paths);
   const documents = [...fileDocuments, ...transcriptDocs];
   let chunksIndexed = 0;
+  let chunkEmbeddingsPreserved = 0;
 
   db.exec("BEGIN");
   try {
-    for (const document of documents) chunksIndexed += indexDocument(db, document);
+    for (const document of documents) {
+      const indexed = indexDocument(db, document);
+      chunksIndexed += indexed.chunksIndexed;
+      chunkEmbeddingsPreserved += indexed.chunkEmbeddingsPreserved;
+    }
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
@@ -429,6 +451,7 @@ export function backfillSqliteMemoryIndex(options: SqliteMemoryBackfillOptions =
     databasePath,
     sourcesIndexed: documents.length,
     chunksIndexed,
+    chunkEmbeddingsPreserved,
     fileDocuments: fileDocuments.length,
     transcriptDocuments: transcriptDocs.length,
   };

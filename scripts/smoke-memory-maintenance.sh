@@ -132,6 +132,41 @@ grep -q "Maintenance empty sources removed: 2" <<<"${integrated_output}"
 grep -q "Maintenance optimized: true" <<<"${integrated_output}"
 grep -q "Maintenance vacuumed: true" <<<"${integrated_output}"
 
+cat >"${MEMORY_DIR}/preserve_embedding.md" <<'MD'
+---
+name: preserve_embedding
+description: Embedding preservation smoke memory.
+type: project
+---
+
+# Embedding preservation smoke
+
+The SQLite backfill should preserve existing chunk embeddings when the chunk text has not changed.
+MD
+
+./scripts/mindstone memory backfill
+node <<'NODE'
+const { DatabaseSync } = require('node:sqlite');
+const path = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone/vectors/memory.sqlite`;
+const db = new DatabaseSync(path);
+db.prepare('UPDATE memory_chunks SET embedding_json = ? WHERE chunk_id = ?').run('[0.1,0.2,0.3]', 'memory:memory/preserve_embedding.md#0');
+const row = db.prepare('SELECT count(*) AS count FROM memory_chunks WHERE chunk_id = ? AND embedding_json IS NOT NULL').get('memory:memory/preserve_embedding.md#0');
+db.close();
+if (row.count !== 1) process.exit(1);
+NODE
+
+preserve_output="$(./scripts/mindstone memory backfill)"
+printf '%s\n' "${preserve_output}"
+grep -q "Chunk embeddings preserved: 1" <<<"${preserve_output}"
+node <<'NODE'
+const { DatabaseSync } = require('node:sqlite');
+const path = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone/vectors/memory.sqlite`;
+const db = new DatabaseSync(path);
+const row = db.prepare('SELECT embedding_json FROM memory_chunks WHERE chunk_id = ?').get('memory:memory/preserve_embedding.md#0');
+db.close();
+if (row.embedding_json !== '[0.1,0.2,0.3]') process.exit(1);
+NODE
+
 status_output="$(./scripts/mindstone memory status)"
 printf '%s\n' "${status_output}"
 grep -q "DB bytes:" <<<"${status_output}"

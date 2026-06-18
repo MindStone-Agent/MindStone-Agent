@@ -57,7 +57,7 @@
 - [x] Add pi-session file serialization around `AgentSession.prompt(...)` and `AgentSession.compact(...)`, including in-process ordering, cross-process lockfile/stale-lock safety, and pre-open malformed-tail JSONL repair with backup preservation.
 - [x] Add in-memory Pi SessionManager resume cap after open, derived from `routing.pi.resumeCap`, preserving append-only session files while bounding live resume context and dropping assistant error turns.
 - [x] Add `docs/refactor/PI_SESSION_PARITY.md` tracking MindStone embedded-runner parity tiers and next gaps.
-- [x] Add `mindstone memory maintain` and `mindstone memory backfill --maintain` for memory substrate maintenance: stale-source cleanup, opt-in exact-text dedupe, orphan-source cleanup, SQLite optimize/reindex/VACUUM, WAL checkpointing, bloat diagnostics, and doctor/status/TUI visibility.
+- [x] Add `mindstone memory maintain` and `mindstone memory backfill --maintain` for memory substrate maintenance: stale-source cleanup, opt-in exact-text dedupe, orphan-source cleanup, SQLite optimize/reindex/VACUUM, WAL checkpointing, bloat diagnostics, doctor/status/TUI visibility, and embedding preservation across unchanged backfilled chunks.
 - [ ] Complete full live authenticated event/stream validation, live-observed durable metadata allowlist refinements if needed, and any necessary full staged compaction-safeguard summary parity for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
@@ -251,7 +251,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] Add candidate dedup to avoid repeated chunks/text consuming recall budget.
   - [x] Add sqlite-vec capability probe and explicit fallback diagnostics.
   - [x] Report current vector backend as `sqlite-vec`, `js-cosine`, or `lexical` in memory status/doctor.
-  - [x] Add first maintenance command: `mindstone memory maintain` removes stale sources, optionally deduplicates exact repeated chunk text with `--dedupe-text`, removes empty sources, runs SQLite optimize/reindex/VACUUM/WAL checkpoint, and reports bloat; `mindstone memory backfill --maintain --dedupe-text` can run the same cleanup before optional embedding work; doctor/status/TUI surface maintenance and bloat signals.
+  - [x] Add first maintenance command: `mindstone memory maintain` removes stale sources, optionally deduplicates exact repeated chunk text with `--dedupe-text`, removes empty sources, runs SQLite optimize/reindex/VACUUM/WAL checkpoint, and reports bloat; `mindstone memory backfill --maintain --dedupe-text` can run the same cleanup before optional embedding work; doctor/status/TUI surface maintenance and bloat signals; unchanged chunk text preserves existing embeddings during backfill.
   - [ ] Add actual sqlite-vec extension nearest-neighbor search when the extension is available/packaged.
   - [ ] Tune full SCRI salience model against real agent traces.
 - [ ] Implement embedding/provider configuration.
