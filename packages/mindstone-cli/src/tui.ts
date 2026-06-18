@@ -157,7 +157,7 @@ class MindStoneFooter implements Component {
   render(width: number): string[] {
     return [
       truncateToWidth(muted("─".repeat(Math.max(0, width))), width),
-      truncateToWidth(`${gold("◆")} ${muted(this.status)} ${dim("• Enter send • /help • /clear • /exit")}`, width),
+      truncateToWidth(`${gold("◆")} ${muted(this.status)} ${dim("• Enter send • Ctrl-P commands • /help • /clear • /exit")}`, width),
     ];
   }
 
@@ -769,6 +769,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     };
 
     tui.addInputListener((data) => {
+      if (tui.hasOverlay()) return undefined;
       if (matchesKey(data, Key.ctrl("c")) || matchesKey(data, Key.ctrl("d"))) {
         stop();
         return { consume: true };
@@ -821,6 +822,28 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       tui.requestRender();
     };
 
+    const openCommandPalette = () => {
+      openTuiSelector({
+        title: "command palette",
+        items: tuiCommandSelectItems(TUI_COMMANDS),
+        emptyText: "No TUI commands found.",
+        hint: "Type to filter • Enter inserts command • Esc clears/cancels",
+        onSelect: (item) => {
+          editor.setText(item.value);
+          footer.setStatus(`selected ${item.value} • press Enter to run`);
+        },
+      });
+    };
+
+    tui.addInputListener((data) => {
+      if (tui.hasOverlay() || responding) return undefined;
+      if (matchesKey(data, Key.ctrl("p"))) {
+        openCommandPalette();
+        return { consume: true };
+      }
+      return undefined;
+    });
+
     editor.onSubmit = (raw: string) => {
       const message = raw.trim();
       editor.setText("");
@@ -837,16 +860,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/commands") {
-        openTuiSelector({
-          title: "command palette",
-          items: tuiCommandSelectItems(TUI_COMMANDS),
-          emptyText: "No TUI commands found.",
-          hint: "Type to filter • Enter inserts command • Esc clears/cancels",
-          onSelect: (item) => {
-            editor.setText(item.value);
-            footer.setStatus(`selected ${item.value} • press Enter to run`);
-          },
-        });
+        openCommandPalette();
         return;
       }
       if (message === "/status") {

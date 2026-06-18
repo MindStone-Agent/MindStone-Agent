@@ -55,7 +55,7 @@ if ! grep -q "agent:default:main" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing canonical session" >&2
   exit 1
 fi
-if ! grep -q "/help" <<<"${OUTPUT}"; then
+if ! grep -q "/help" <<<"${OUTPUT}" || ! grep -q "Ctrl-P commands" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing command hint" >&2
   exit 1
 fi
