@@ -33,6 +33,7 @@ export {
   type PiSessionEventCallbackPayload,
   type PiSessionEventSummary,
   type PiSessionExecutorOptions,
+  type PiSessionFileLockOptions,
   type PiSessionResourceLoaderOptions,
 } from "./pi-session-executor.js";
 export { PiSessionMindStoneProvider, buildPiSessionPromptParts, createPiSessionEventCapture, piSessionFileForKey, summarizePiSessionEvent } from "./pi-session-provider.js";

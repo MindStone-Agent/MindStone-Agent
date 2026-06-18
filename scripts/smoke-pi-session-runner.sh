@@ -45,7 +45,8 @@ NODE
 node --input-type=module <<'NODE'
 import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
 import { applyPiSessionCompactionSettings, buildMindStonePiExtensionFactories, buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR, PiSessionAgentRunner, piSessionFileForKey, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
 const actual = piSessionFileForKey(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions`, process.env.CHAT_SESSION_KEY);
 console.log(JSON.stringify({ sessionKey: process.env.CHAT_SESSION_KEY, sessionFile: actual }, null, 2));
@@ -67,6 +68,19 @@ const secondLock = withPiSessionFileLock('/tmp/mindstone-pi-session-lock-smoke.j
 const lockResults = await Promise.all([firstLock, secondLock]);
 if (lockResults.join(',') !== 'first,second') throw new Error('session lock results were unexpected');
 if (lockOrder.join(',') !== 'first:start,first:end,second:start,second:end') throw new Error(`session lock did not serialize same-file operations: ${lockOrder.join(',')}`);
+
+const staleSessionFile = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/stale-lock-smoke.jsonl`;
+const staleLockFile = `${staleSessionFile}.lock`;
+mkdirSync(dirname(staleLockFile), { recursive: true });
+writeFileSync(staleLockFile, JSON.stringify({ token: 'stale', pid: 0, createdAt: '1970-01-01T00:00:00.000Z' }));
+await delay(20);
+const staleResult = await withPiSessionFileLock(staleSessionFile, async () => 'stale-cleared', {
+  staleMs: 1,
+  timeoutMs: 500,
+  retryDelayMs: 5,
+});
+if (staleResult !== 'stale-cleared') throw new Error('stale cross-process lock was not cleared');
+if (existsSync(staleLockFile)) throw new Error('cross-process lock file was not released');
 
 const { capture, record } = createPiSessionEventCapture(5);
 record({ type: 'agent_start' });

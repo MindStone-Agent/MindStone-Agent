@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AgentCompactionInput, AgentCompactionResult, ContextManagementPolicy, MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo, MindStonePiCompactionConfig } from "@mindstone-agent/core";
@@ -277,7 +278,99 @@ export function buildPiSessionResourceLoaderOptions(input: {
 
 const piSessionFileLocks = new Map<string, Promise<void>>();
 
-export async function withPiSessionFileLock<T>(sessionFile: string, operation: () => Promise<T>): Promise<T> {
+export type PiSessionFileLockOptions = {
+  /** Cross-process lock acquisition timeout. Defaults to 30 seconds. */
+  timeoutMs?: number;
+  /** Retry delay while another process owns the lock. Defaults to 25ms. */
+  retryDelayMs?: number;
+  /** Consider a lock abandoned after this age. Defaults to 10 minutes. */
+  staleMs?: number;
+  /** Override lock file path for tests. Defaults to `${sessionFile}.lock`. */
+  lockFile?: string;
+};
+
+const DEFAULT_PI_SESSION_LOCK_TIMEOUT_MS = 30_000;
+const DEFAULT_PI_SESSION_LOCK_RETRY_DELAY_MS = 25;
+const DEFAULT_PI_SESSION_LOCK_STALE_MS = 10 * 60_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+function isNodeError(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === code);
+}
+
+function lockFileForSession(sessionFile: string, options?: PiSessionFileLockOptions): string {
+  return options?.lockFile ?? `${sessionFile}.lock`;
+}
+
+function readLockToken(lockFile: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(lockFile, "utf-8")) as { token?: unknown };
+    return typeof parsed.token === "string" ? parsed.token : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function removeStaleLockIfNeeded(lockFile: string, staleMs: number): boolean {
+  if (staleMs <= 0) return false;
+  try {
+    const stat = statSync(lockFile);
+    if (Date.now() - stat.mtimeMs < staleMs) return false;
+    unlinkSync(lockFile);
+    return true;
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return true;
+    return false;
+  }
+}
+
+async function acquirePiSessionCrossProcessLock(
+  sessionFile: string,
+  options?: PiSessionFileLockOptions,
+): Promise<() => void> {
+  const lockFile = lockFileForSession(sessionFile, options);
+  const timeoutMs = Math.max(1, Math.floor(options?.timeoutMs ?? DEFAULT_PI_SESSION_LOCK_TIMEOUT_MS));
+  const retryDelayMs = Math.max(1, Math.floor(options?.retryDelayMs ?? DEFAULT_PI_SESSION_LOCK_RETRY_DELAY_MS));
+  const staleMs = Math.max(0, Math.floor(options?.staleMs ?? DEFAULT_PI_SESSION_LOCK_STALE_MS));
+  const token = randomUUID();
+  const started = Date.now();
+  mkdirSync(dirname(lockFile), { recursive: true });
+
+  while (true) {
+    let fd: number | undefined;
+    try {
+      fd = openSync(lockFile, "wx", 0o600);
+      writeFileSync(fd, JSON.stringify({ token, pid: process.pid, sessionFile, createdAt: new Date().toISOString() }));
+      closeSync(fd);
+      fd = undefined;
+      return () => {
+        if (readLockToken(lockFile) !== token) return;
+        try {
+          unlinkSync(lockFile);
+        } catch (error) {
+          if (!isNodeError(error, "ENOENT")) throw error;
+        }
+      };
+    } catch (error) {
+      if (fd !== undefined) closeSync(fd);
+      if (!isNodeError(error, "EEXIST")) throw error;
+      if (removeStaleLockIfNeeded(lockFile, staleMs)) continue;
+      if (Date.now() - started >= timeoutMs) {
+        throw new Error(`Timed out waiting for Pi session file lock: ${sessionFile}`);
+      }
+      await delay(retryDelayMs);
+    }
+  }
+}
+
+export async function withPiSessionFileLock<T>(
+  sessionFile: string,
+  operation: () => Promise<T>,
+  options?: PiSessionFileLockOptions,
+): Promise<T> {
   const previous = piSessionFileLocks.get(sessionFile) ?? Promise.resolve();
   let releaseCurrent!: () => void;
   const current = new Promise<void>((resolveLock) => {
@@ -287,12 +380,18 @@ export async function withPiSessionFileLock<T>(sessionFile: string, operation: (
   piSessionFileLocks.set(sessionFile, tail);
 
   await previous.catch(() => undefined);
+  let releaseCrossProcessLock: (() => void) | undefined;
   try {
+    releaseCrossProcessLock = await acquirePiSessionCrossProcessLock(sessionFile, options);
     return await operation();
   } finally {
-    releaseCurrent();
-    if (piSessionFileLocks.get(sessionFile) === tail) {
-      piSessionFileLocks.delete(sessionFile);
+    try {
+      releaseCrossProcessLock?.();
+    } finally {
+      releaseCurrent();
+      if (piSessionFileLocks.get(sessionFile) === tail) {
+        piSessionFileLocks.delete(sessionFile);
+      }
     }
   }
 }
