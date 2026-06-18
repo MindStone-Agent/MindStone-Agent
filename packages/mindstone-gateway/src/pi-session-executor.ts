@@ -3,7 +3,19 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AgentCompactionInput, AgentCompactionResult, MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo } from "@mindstone-agent/core";
 
-export type PiSessionExecutorOptions = {
+export type PiSessionResourceLoaderOptions = {
+  additionalExtensionPaths?: string[];
+  additionalSkillPaths?: string[];
+  additionalPromptTemplatePaths?: string[];
+  additionalThemePaths?: string[];
+  noExtensions?: boolean;
+  noSkills?: boolean;
+  noPromptTemplates?: boolean;
+  noThemes?: boolean;
+  noContextFiles?: boolean;
+};
+
+export type PiSessionExecutorOptions = PiSessionResourceLoaderOptions & {
   projectRoot?: string;
   agentDir?: string;
   sessionDir?: string;
@@ -176,6 +188,30 @@ function toModelInfo(model: PiModel): MindStoneModelInfo {
 
 export function piSessionFileForKey(sessionDir: string, sessionKey: string): string {
   return join(sessionDir, `${Buffer.from(sessionKey, "utf8").toString("base64url")}.jsonl`);
+}
+
+export function buildPiSessionResourceLoaderOptions(input: {
+  cwd: string;
+  agentDir: string;
+  settingsManager: unknown;
+  appendSystemPrompt: string[];
+  options?: PiSessionResourceLoaderOptions;
+}): Record<string, unknown> {
+  return {
+    cwd: input.cwd,
+    agentDir: input.agentDir,
+    settingsManager: input.settingsManager,
+    appendSystemPrompt: input.appendSystemPrompt,
+    additionalExtensionPaths: input.options?.additionalExtensionPaths,
+    additionalSkillPaths: input.options?.additionalSkillPaths,
+    additionalPromptTemplatePaths: input.options?.additionalPromptTemplatePaths,
+    additionalThemePaths: input.options?.additionalThemePaths,
+    noExtensions: input.options?.noExtensions,
+    noSkills: input.options?.noSkills,
+    noPromptTemplates: input.options?.noPromptTemplates,
+    noThemes: input.options?.noThemes,
+    noContextFiles: input.options?.noContextFiles,
+  };
 }
 
 function textFromContent(content: unknown): string {
@@ -388,6 +424,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
   readonly #cwd: string;
   readonly #defaultProvider?: string;
   readonly #defaultModel?: string;
+  readonly #resourceOptions: PiSessionResourceLoaderOptions;
   #modules?: PiSessionModules;
   #registry?: PiRegistry;
 
@@ -398,6 +435,17 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     this.#cwd = resolve(options.cwd ?? this.#projectRoot);
     this.#defaultProvider = options.defaultProvider;
     this.#defaultModel = options.defaultModel;
+    this.#resourceOptions = {
+      additionalExtensionPaths: options.additionalExtensionPaths,
+      additionalSkillPaths: options.additionalSkillPaths,
+      additionalPromptTemplatePaths: options.additionalPromptTemplatePaths,
+      additionalThemePaths: options.additionalThemePaths,
+      noExtensions: options.noExtensions,
+      noSkills: options.noSkills,
+      noPromptTemplates: options.noPromptTemplates,
+      noThemes: options.noThemes,
+      noContextFiles: options.noContextFiles,
+    };
   }
 
   async #load(): Promise<{ modules: PiSessionModules; registry: PiRegistry }> {
@@ -483,12 +531,13 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     mkdirSync(dirname(sessionFile), { recursive: true });
     const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
     const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
-    const resourceLoader = new modules.DefaultResourceLoader({
+    const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
       cwd: this.#cwd,
       agentDir: this.#agentDir,
       settingsManager,
       appendSystemPrompt: [],
-    });
+      options: this.#resourceOptions,
+    }));
     await resourceLoader.reload();
     const { session } = await modules.createAgentSession({
       cwd: this.#cwd,
@@ -549,12 +598,13 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
     const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
     const promptParts = buildPiSessionPromptParts(request.messages);
-    const resourceLoader = new modules.DefaultResourceLoader({
+    const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
       cwd: this.#cwd,
       agentDir: this.#agentDir,
       settingsManager,
       appendSystemPrompt: promptParts.appendSystemPrompt,
-    });
+      options: this.#resourceOptions,
+    }));
     await resourceLoader.reload();
     const { session, modelFallbackMessage } = await modules.createAgentSession({
       cwd: this.#cwd,

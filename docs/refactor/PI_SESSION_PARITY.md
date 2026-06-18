@@ -27,6 +27,7 @@ Implemented now:
 - deterministic MindStone session-key → Pi session-file mapping
 - isolated Pi auth/model registry loading from project runtime, not global Pi state
 - `DefaultResourceLoader.appendSystemPrompt` for MindStone system context
+- config-backed Pi `DefaultResourceLoader` resource options: additional extension/skill/prompt/theme paths plus disable flags
 - `AgentSession.prompt(...)` path when isolated auth/model config is available
 - bounded sanitized Pi session diagnostics
 - live Pi diagnostic callback streaming as runner `substrate_event`
@@ -94,8 +95,9 @@ Current MindStone embedded runner includes production-grade behavior that should
    - Keep raw tool args/secrets out; preserve names/ids/arg keys/counts only.
 
 3. **Resource loader / extension parity**
-   - Decide whether MindStone-Agent needs embedded extension factories for context pruning/compaction safeguards before live MVP.
-   - If yes, port the smallest compatible extension path from current MindStone, not the whole runner.
+   - Config-backed Pi resource loader path/disable options now pass through CLI, TUI, Gateway, `PiSessionMindStoneProvider`, and real `PiSessionAgentRunner` construction.
+   - Still decide whether MindStone-Agent needs embedded extension factories for context pruning/compaction safeguards before live MVP.
+   - If yes, port the smallest compatible extension-factory path from current MindStone, not the whole runner.
 
 4. **Tool behavior boundary**
    - Decide MVP tool set for MindStone-Agent pi-session execution.
@@ -133,6 +135,6 @@ Current MindStone embedded runner includes production-grade behavior that should
 
 1. Run gated live prompt/stream validation when Clint intentionally provides isolated auth/model.
 2. Add durable event metadata policy/tests for Pi stream events.
-3. Add the smallest extension/resource-loader parity needed for context pruning or compaction safeguards.
+3. Add the smallest extension-factory parity needed for context pruning or compaction safeguards, if config-backed Pi resource loader paths are not sufficient.
 4. Validate `AgentSession.compact(...)` under isolated auth/model with `MINDSTONE_PI_SESSION_LIVE=1 MINDSTONE_PI_SESSION_LIVE_COMPACT=1 npm run smoke:pi-session-live`.
 5. Revisit session lock/repair/resume-cap once live basic execution is proven.

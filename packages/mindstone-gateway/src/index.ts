@@ -12,10 +12,13 @@ export { MockMindStoneProvider } from "./mock-provider.js";
 export { PiMindStoneProvider } from "./pi-provider.js";
 export {
   PI_SESSION_EVENT_CALLBACK_METADATA_KEY,
+  buildPiSessionResourceLoaderOptions,
   PiSessionExecutor,
   type PiSessionEventCallback,
   type PiSessionEventCallbackPayload,
   type PiSessionEventSummary,
+  type PiSessionExecutorOptions,
+  type PiSessionResourceLoaderOptions,
 } from "./pi-session-executor.js";
 export { PiSessionMindStoneProvider, buildPiSessionPromptParts, createPiSessionEventCapture, piSessionFileForKey, summarizePiSessionEvent } from "./pi-session-provider.js";
 export { PiSessionAgentRunner } from "./pi-session-runner.js";
@@ -246,6 +249,15 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
       sessionDir: paths.piSessionDir,
       cwd: config?.workspace?.root,
       defaultModel: config?.routing?.defaultModel,
+      additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
+      additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
+      additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
+      additionalThemePaths: config?.routing?.pi?.additionalThemePaths,
+      noExtensions: config?.routing?.pi?.noExtensions,
+      noSkills: config?.routing?.pi?.noSkills,
+      noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
+      noThemes: config?.routing?.pi?.noThemes,
+      noContextFiles: config?.routing?.pi?.noContextFiles,
     });
   }
   if (mode === "pi") {
@@ -267,6 +279,15 @@ function resolveRunner(config: MindStoneConfig | undefined, provider: MindStoneM
       sessionDir: paths.piSessionDir,
       cwd: config?.workspace?.root,
       defaultModel: config?.routing?.defaultModel,
+      additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
+      additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
+      additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
+      additionalThemePaths: config?.routing?.pi?.additionalThemePaths,
+      noExtensions: config?.routing?.pi?.noExtensions,
+      noSkills: config?.routing?.pi?.noSkills,
+      noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
+      noThemes: config?.routing?.pi?.noThemes,
+      noContextFiles: config?.routing?.pi?.noContextFiles,
     });
   }
   void provider;

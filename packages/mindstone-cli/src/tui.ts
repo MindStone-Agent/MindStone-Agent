@@ -418,6 +418,15 @@ function resolveTuiProvider(config: ReturnType<typeof loadMindStoneConfig>["conf
       sessionDir: paths.piSessionDir,
       cwd: config?.workspace?.root,
       defaultModel: config?.routing?.defaultModel,
+      additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
+      additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
+      additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
+      additionalThemePaths: config?.routing?.pi?.additionalThemePaths,
+      noExtensions: config?.routing?.pi?.noExtensions,
+      noSkills: config?.routing?.pi?.noSkills,
+      noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
+      noThemes: config?.routing?.pi?.noThemes,
+      noContextFiles: config?.routing?.pi?.noContextFiles,
     });
   }
   if (mode === "pi") {
@@ -430,7 +439,25 @@ function resolveTuiProvider(config: ReturnType<typeof loadMindStoneConfig>["conf
 }
 
 function resolveTuiRunner(config: ReturnType<typeof loadMindStoneConfig>["config"], provider: MockMindStoneProvider | PiMindStoneProvider | PiSessionMindStoneProvider): AgentRunner | undefined {
-  return config?.routing?.mode === "pi-session" ? new PiSessionAgentRunner({ provider }) : undefined;
+  if (config?.routing?.mode !== "pi-session") return undefined;
+  void provider;
+  const paths = runtimePathsFromEnv();
+  return new PiSessionAgentRunner({
+    projectRoot: paths.root,
+    agentDir: config?.routing?.pi?.agentDir ?? paths.piAgentDir,
+    sessionDir: paths.piSessionDir,
+    cwd: config?.workspace?.root,
+    defaultModel: config?.routing?.defaultModel,
+    additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
+    additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
+    additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
+    additionalThemePaths: config?.routing?.pi?.additionalThemePaths,
+    noExtensions: config?.routing?.pi?.noExtensions,
+    noSkills: config?.routing?.pi?.noSkills,
+    noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
+    noThemes: config?.routing?.pi?.noThemes,
+    noContextFiles: config?.routing?.pi?.noContextFiles,
+  });
 }
 
 async function sendTuiTurn(params: {

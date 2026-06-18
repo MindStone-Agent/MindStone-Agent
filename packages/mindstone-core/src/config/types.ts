@@ -60,6 +60,24 @@ export type MindStoneRoutingConfig = {
   pi?: {
     /** Isolated Pi agent/config directory. Defaults to PI_CODING_AGENT_DIR. */
     agentDir?: string;
+    /** Additional Pi extension module paths passed to DefaultResourceLoader. */
+    additionalExtensionPaths?: string[];
+    /** Additional Pi skill paths passed to DefaultResourceLoader. */
+    additionalSkillPaths?: string[];
+    /** Additional Pi prompt-template paths passed to DefaultResourceLoader. */
+    additionalPromptTemplatePaths?: string[];
+    /** Additional Pi theme paths passed to DefaultResourceLoader. */
+    additionalThemePaths?: string[];
+    /** Disable Pi extension loading for this route. */
+    noExtensions?: boolean;
+    /** Disable Pi skill loading for this route. */
+    noSkills?: boolean;
+    /** Disable Pi prompt-template loading for this route. */
+    noPromptTemplates?: boolean;
+    /** Disable Pi theme loading for this route. */
+    noThemes?: boolean;
+    /** Disable Pi context-file loading for this route. */
+    noContextFiles?: boolean;
   };
 };
 

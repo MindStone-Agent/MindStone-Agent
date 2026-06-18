@@ -44,7 +44,7 @@ NODE
 
 node --input-type=module <<'NODE'
 import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
-import { buildPiSessionPromptParts, createPiSessionEventCapture, PiSessionAgentRunner, piSessionFileForKey } from './packages/mindstone-gateway/dist/index.js';
+import { buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, PiSessionAgentRunner, piSessionFileForKey } from './packages/mindstone-gateway/dist/index.js';
 import { resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
 const actual = piSessionFileForKey(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions`, process.env.CHAT_SESSION_KEY);
@@ -75,6 +75,31 @@ if (promptParts.appendSystemPrompt.length !== 1) throw new Error('system context
 if (!promptParts.appendSystemPrompt[0].includes('<mindstone_context index="1">')) throw new Error('system context wrapper missing');
 if (promptParts.promptText !== 'latest user turn') throw new Error('latest user turn was not selected as prompt text');
 if (promptParts.diagnostics.nonUserPromptMessagesSkipped !== 2) throw new Error('non-user prompt skip diagnostics wrong');
+
+const resourceOptions = buildPiSessionResourceLoaderOptions({
+  cwd: '/tmp/mindstone-cwd',
+  agentDir: '/tmp/mindstone-agent',
+  settingsManager: { sentinel: true },
+  appendSystemPrompt: ['system context'],
+  options: {
+    additionalExtensionPaths: ['/tmp/ext-a.js'],
+    additionalSkillPaths: ['/tmp/skills'],
+    additionalPromptTemplatePaths: ['/tmp/prompts'],
+    additionalThemePaths: ['/tmp/themes'],
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+  },
+});
+if (resourceOptions.cwd !== '/tmp/mindstone-cwd' || resourceOptions.agentDir !== '/tmp/mindstone-agent') throw new Error('resource loader base options missing');
+if (resourceOptions.appendSystemPrompt?.[0] !== 'system context') throw new Error('resource loader appendSystemPrompt missing');
+if (resourceOptions.additionalExtensionPaths?.[0] !== '/tmp/ext-a.js') throw new Error('resource loader extension paths missing');
+if (resourceOptions.additionalSkillPaths?.[0] !== '/tmp/skills') throw new Error('resource loader skill paths missing');
+if (resourceOptions.additionalPromptTemplatePaths?.[0] !== '/tmp/prompts') throw new Error('resource loader prompt paths missing');
+if (resourceOptions.additionalThemePaths?.[0] !== '/tmp/themes') throw new Error('resource loader theme paths missing');
+if (!resourceOptions.noExtensions || !resourceOptions.noSkills || !resourceOptions.noPromptTemplates || !resourceOptions.noThemes || !resourceOptions.noContextFiles) throw new Error('resource loader disable flags missing');
 
 const providerDiagnostics = providerDiagnosticsFromChatResult({
   role: 'assistant',
