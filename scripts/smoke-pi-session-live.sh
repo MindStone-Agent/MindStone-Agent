@@ -91,6 +91,13 @@ config.agents = {
     contextWindowTokens: 128000,
   },
 };
+config.observability = {
+  runnerStream: {
+    persistTranscriptEvents: true,
+    eventTypes: ['run_started', 'text_delta', 'substrate_event', 'run_completed', 'run_failed'],
+    maxEvents: 50,
+  },
+};
 mkdirSync(`${runtime}/agents/default`, { recursive: true });
 writeFileSync(`${runtime}/agents/default/IDENTITY.md`, '# Live Probe Identity\n\nYou are a MindStone-Agent live Pi session validation probe.');
 writeFileSync(`${runtime}/agents/default/USER.md`, '# Live Probe User\n\nThe user is validating isolated Pi AgentSession execution.');
@@ -119,14 +126,23 @@ const outputPath = process.argv[2];
 const result = JSON.parse(readFileSync(outputPath, 'utf8'));
 const text = result?.assistantEntry?.text ?? result?.result?.text ?? '';
 const runnerId = result?.runner?.id ?? result?.runnerResult?.runner?.id ?? result?.providerDiagnostics?.runner?.id;
-const model = result?.assistantEntry?.model ?? result?.result?.model ?? result?.model;
+const model = result?.model ?? result?.assistantEntry?.metadata?.model ?? result?.result?.model;
 if (typeof text !== 'string' || text.trim().length === 0) {
   throw new Error('live probe produced no assistant text');
 }
-if (runnerId && runnerId !== 'pi-session') {
+if (runnerId !== 'pi-session') {
   throw new Error(`unexpected runner id: ${runnerId}`);
 }
-console.log(JSON.stringify({ ok: true, sessionKey: process.env.SESSION_KEY, model, assistantTextChars: text.length }, null, 2));
+if (!result?.runnerStream || result.runnerStream.eventCount < 3 || result.runnerStream.persistedEventCount < 3) {
+  throw new Error(`runner stream validation missing or incomplete: ${JSON.stringify(result?.runnerStream)}`);
+}
+console.log(JSON.stringify({
+  ok: true,
+  sessionKey: process.env.SESSION_KEY,
+  model,
+  assistantTextChars: text.length,
+  runnerStream: result.runnerStream,
+}, null, 2));
 NODE
 
 echo "Pi session live validation probe completed."
