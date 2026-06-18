@@ -1,3 +1,4 @@
+import { existsSync, statSync } from "node:fs";
 import {
   loadMindStoneConfig,
   loadMindStoneIdentity,
@@ -18,7 +19,7 @@ import {
   type MindStoneModelInfo,
   type TranscriptEntry,
 } from "@mindstone-agent/core";
-import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
+import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider, piSessionFileForKey } from "@mindstone-agent/gateway";
 import {
   CombinedAutocompleteProvider,
   Container,
@@ -319,6 +320,38 @@ function buildTuiMemoryPanel(config: ReturnType<typeof loadMindStoneConfig>["con
     stats.error ? `- error: \`${stats.error}\`` : undefined,
     `- database: \`${stats.databasePath}\``,
   ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function fileStatus(path: string): { exists: boolean; bytes: number; updatedAt?: string } {
+  if (!existsSync(path)) return { exists: false, bytes: 0 };
+  const stats = statSync(path);
+  return { exists: true, bytes: stats.size, updatedAt: stats.mtime.toISOString() };
+}
+
+function buildTuiPiPanel(params: {
+  config: ReturnType<typeof loadMindStoneConfig>["config"];
+  ctx: TuiCommandContext;
+  paths: ReturnType<typeof runtimePathsFromEnv>;
+}): string {
+  const agentDir = params.config?.routing?.pi?.agentDir ?? params.paths.piAgentDir;
+  const sessionFile = piSessionFileForKey(params.paths.piSessionDir, params.ctx.sessionKey);
+  const status = fileStatus(sessionFile);
+  return [
+    `- routing mode: \`${params.ctx.routingMode}\``,
+    `- pi-session runner selected: \`${params.ctx.routingMode === "pi-session"}\``,
+    `- project root: \`${params.paths.root}\``,
+    `- isolated Pi agent dir: \`${agentDir}\``,
+    `- isolated Pi session dir: \`${params.paths.piSessionDir}\``,
+    `- cwd: \`${params.config?.workspace?.root ?? process.cwd()}\``,
+    `- default model: \`${params.config?.routing?.defaultModel ?? params.ctx.model.id}\``,
+    `- active MindStone session: \`${params.ctx.sessionKey}\``,
+    `- deterministic Pi session file: \`${sessionFile}\``,
+    `- Pi session file exists: \`${status.exists}\``,
+    `- Pi session file bytes: \`${status.bytes}\``,
+    status.updatedAt ? `- Pi session file updated: \`${status.updatedAt}\`` : undefined,
+    "",
+    "This panel is diagnostic only. It does not open, compact, or mutate the Pi session.",
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 function buildTuiTranscriptPanel(params: {
@@ -937,6 +970,7 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   }));
   const smokePaths = runtimePathsFromEnv();
   chat.addPanel("config", buildTuiConfigPanel({ config: smokeConfig, configPath: "/tmp/mindstone/config.json", paths: smokePaths }));
+  chat.addPanel("pi", buildTuiPiPanel({ config: smokeConfig, ctx, paths: smokePaths }));
   chat.addPanel("transcript", buildTuiTranscriptPanel({
     ctx,
     paths: smokePaths,
@@ -1085,6 +1119,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "clear", description: "Clear the visible chat log" },
     { name: "status", description: "Show current TUI/session status" },
     { name: "config", description: "Show sanitized active runtime config" },
+    { name: "pi", description: "Show isolated Pi runtime/session mapping" },
     { name: "transcript", description: "Show active transcript file status" },
     { name: "memory", description: "Show memory/recall index status" },
     { name: "context", description: "Show context window policy and current session estimate" },
@@ -1164,7 +1199,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /config, /transcript, /memory, /context, /handoff, /identity, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /config, /pi, /transcript, /memory, /context, /handoff, /identity, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -1182,6 +1217,11 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       }
       if (message === "/config") {
         chat.addPanel("config", buildTuiConfigPanel({ config: loaded.config, configPath: loaded.path, paths }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/pi") {
+        chat.addPanel("pi", buildTuiPiPanel({ config: loaded.config, ctx, paths }));
         tui.requestRender();
         return;
       }
