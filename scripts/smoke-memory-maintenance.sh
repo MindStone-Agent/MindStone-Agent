@@ -85,6 +85,53 @@ printf '%s\n' "${second_output}"
 grep -q "Stale sources found: 0" <<<"${second_output}"
 grep -q "Duplicate text chunks found: 0" <<<"${second_output}"
 
+cat >"${MEMORY_DIR}/duplicate_c.md" <<'MD'
+---
+name: duplicate_c
+description: Integrated duplicate maintenance smoke C.
+type: project
+---
+
+# Integrated duplicate maintenance smoke
+
+The integrated backfill maintenance pass should deduplicate exact repeated chunks before optional embedding work runs.
+MD
+
+cat >"${MEMORY_DIR}/duplicate_d.md" <<'MD'
+---
+name: duplicate_d
+description: Integrated duplicate maintenance smoke D.
+type: project
+---
+
+# Integrated duplicate maintenance smoke
+
+The integrated backfill maintenance pass should deduplicate exact repeated chunks before optional embedding work runs.
+MD
+
+cat >"${MEMORY_DIR}/integrated_stale.md" <<'MD'
+---
+name: integrated_stale
+description: Integrated stale maintenance smoke memory.
+type: project
+---
+
+# Integrated stale maintenance smoke
+
+This source should be removed by mindstone memory backfill --maintain after the file is deleted.
+MD
+
+./scripts/mindstone memory backfill
+rm "${MEMORY_DIR}/integrated_stale.md"
+
+integrated_output="$(./scripts/mindstone memory backfill --maintain --dedupe-text)"
+printf '%s\n' "${integrated_output}"
+grep -q "Maintenance stale sources removed: 1" <<<"${integrated_output}"
+grep -q "Maintenance duplicate text chunks removed: 2" <<<"${integrated_output}"
+grep -q "Maintenance empty sources removed: 2" <<<"${integrated_output}"
+grep -q "Maintenance optimized: true" <<<"${integrated_output}"
+grep -q "Maintenance vacuumed: true" <<<"${integrated_output}"
+
 status_output="$(./scripts/mindstone memory status)"
 printf '%s\n' "${status_output}"
 grep -q "DB bytes:" <<<"${status_output}"

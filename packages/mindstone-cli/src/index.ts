@@ -51,7 +51,7 @@ function usage(): string {
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
-    "  mindstone memory backfill [--embed] [--force]  Index file memory/transcripts and optionally embed chunks",
+    "  mindstone memory backfill [--embed] [--force] [--maintain] [--dedupe-text]  Index memory/transcripts and optionally maintain/embed chunks",
     "  mindstone memory maintain [--dry-run] [--dedupe-text]  Clean stale rows and compact SQLite memory DB",
     "  mindstone memory status    Show SQLite memory DB status",
     "  mindstone help         Show this help",
@@ -338,6 +338,8 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
     if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
     const embed = argv.includes("--embed");
     const force = argv.includes("--force");
+    const maintain = argv.includes("--maintain") || argv.includes("--dedupe-text");
+    const deduplicateText = argv.includes("--dedupe-text");
     const result = backfillSqliteMemoryIndex({ config: loaded.config, paths });
     const lines = [
       `Database: ${result.databasePath}`,
@@ -346,6 +348,17 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
       `File documents: ${result.fileDocuments}`,
       `Transcript documents: ${result.transcriptDocuments}`,
     ];
+    if (maintain) {
+      const maintenanceResult = maintainSqliteMemoryIndex({ paths, deduplicateText });
+      lines.push(
+        `Maintenance stale sources removed: ${maintenanceResult.staleSourcesRemoved}`,
+        `Maintenance duplicate text chunks removed: ${maintenanceResult.duplicateTextChunksRemoved}`,
+        `Maintenance empty sources removed: ${maintenanceResult.emptySourcesRemoved}`,
+        `Maintenance optimized: ${maintenanceResult.optimized}`,
+        `Maintenance vacuumed: ${maintenanceResult.vacuumed}`,
+      );
+      if (maintenanceResult.error) lines.push(`Maintenance error: ${maintenanceResult.error}`);
+    }
     if (embed) {
       const embeddingResult = await backfillSqliteMemoryEmbeddings({ config: loaded.config, paths, force });
       lines.push(
