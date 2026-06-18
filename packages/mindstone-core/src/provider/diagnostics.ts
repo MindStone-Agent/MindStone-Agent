@@ -3,9 +3,31 @@ import type { MindStoneChatResult } from "./types.js";
 export type PiSessionEventDiagnostic = {
   type: string;
   messageRole?: string;
+  messageTextChars?: number;
   assistantTextChars?: number;
+  assistantStreamEventType?: string;
+  assistantStreamDeltaChars?: number;
+  assistantStreamContentChars?: number;
+  assistantStreamContentIndex?: number;
+  stopReason?: string;
+  errorMessage?: string;
   toolName?: string;
   toolCallId?: string;
+  toolArgsKeys?: string[];
+  toolResultTextChars?: number;
+  toolResultIsError?: boolean;
+  compactionReason?: string;
+  compactionWillRetry?: boolean;
+  compactionAborted?: boolean;
+  retryAttempt?: number;
+  retryMaxAttempts?: number;
+  retryDelayMs?: number;
+  retrySuccess?: boolean;
+  queueSteeringCount?: number;
+  queueFollowUpCount?: number;
+  sessionName?: string;
+  thinkingLevel?: string;
+  messagesCount?: number;
   willRetry?: boolean;
 };
 
@@ -43,6 +65,12 @@ function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function stringArrayValue(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const values = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 50);
+  return values.length > 0 ? values : undefined;
+}
+
 function sanitizeEventCounts(value: unknown): Record<string, number> | undefined {
   const input = record(value);
   if (!input) return undefined;
@@ -65,9 +93,31 @@ function sanitizePiSessionEvents(value: unknown): PiSessionEventDiagnostic[] | u
     events.push({
       type,
       messageRole: stringValue(event?.messageRole),
+      messageTextChars: numberValue(event?.messageTextChars),
       assistantTextChars: numberValue(event?.assistantTextChars),
+      assistantStreamEventType: stringValue(event?.assistantStreamEventType),
+      assistantStreamDeltaChars: numberValue(event?.assistantStreamDeltaChars),
+      assistantStreamContentChars: numberValue(event?.assistantStreamContentChars),
+      assistantStreamContentIndex: numberValue(event?.assistantStreamContentIndex),
+      stopReason: stringValue(event?.stopReason),
+      errorMessage: stringValue(event?.errorMessage),
       toolName: stringValue(event?.toolName),
       toolCallId: stringValue(event?.toolCallId),
+      toolArgsKeys: stringArrayValue(event?.toolArgsKeys),
+      toolResultTextChars: numberValue(event?.toolResultTextChars),
+      toolResultIsError: booleanValue(event?.toolResultIsError),
+      compactionReason: stringValue(event?.compactionReason),
+      compactionWillRetry: booleanValue(event?.compactionWillRetry),
+      compactionAborted: booleanValue(event?.compactionAborted),
+      retryAttempt: numberValue(event?.retryAttempt),
+      retryMaxAttempts: numberValue(event?.retryMaxAttempts),
+      retryDelayMs: numberValue(event?.retryDelayMs),
+      retrySuccess: booleanValue(event?.retrySuccess),
+      queueSteeringCount: numberValue(event?.queueSteeringCount),
+      queueFollowUpCount: numberValue(event?.queueFollowUpCount),
+      sessionName: stringValue(event?.sessionName),
+      thinkingLevel: stringValue(event?.thinkingLevel),
+      messagesCount: numberValue(event?.messagesCount),
       willRetry: booleanValue(event?.willRetry),
     });
   }

@@ -40,7 +40,8 @@ const fakeProvider = {
         piSession: {
           events: [
             { type: 'agent_start' },
-            { type: 'tool_execution_start', toolName: 'read', toolCallId: 'tool-1' },
+            { type: 'message_update', messageRole: 'assistant', assistantStreamEventType: 'text_delta', assistantStreamDeltaChars: 6 },
+            { type: 'tool_execution_start', toolName: 'read', toolCallId: 'tool-1', toolArgsKeys: ['path'] },
           ],
         },
       },
@@ -79,14 +80,15 @@ const baseInput = {
 assertLifecycle(await collect(createProviderRouteAgentRunner().stream(baseInput)), 'provider-route');
 
 const piSessionEvents = await collect(new PiSessionAgentRunner({ provider: fakeProvider }).stream(baseInput));
-if (piSessionEvents.length !== 5) throw new Error(`pi-session: expected started+2 substrate+text_delta+completed events, got ${piSessionEvents.length}`);
+if (piSessionEvents.length !== 6) throw new Error(`pi-session: expected started+3 substrate+text_delta+completed events, got ${piSessionEvents.length}`);
 if (piSessionEvents[0].type !== 'run_started') throw new Error('pi-session: first event was not run_started');
 if (piSessionEvents[1].type !== 'substrate_event' || piSessionEvents[1].substrate !== 'pi') throw new Error('pi-session: first diagnostic was not a Pi substrate_event');
-if (piSessionEvents[2].type !== 'substrate_event' || piSessionEvents[2].event.toolName !== 'read') throw new Error('pi-session: tool diagnostic substrate_event missing');
-if (piSessionEvents[3].type !== 'text_delta' || piSessionEvents[3].metadata?.completedTextReplay !== true) throw new Error('pi-session: completed text replay delta missing');
-if (piSessionEvents[4].type !== 'run_completed') throw new Error('pi-session: final event was not run_completed');
+if (piSessionEvents[2].type !== 'substrate_event' || piSessionEvents[2].event.assistantStreamEventType !== 'text_delta') throw new Error('pi-session: assistant diagnostic substrate_event missing');
+if (piSessionEvents[3].type !== 'substrate_event' || piSessionEvents[3].event.toolName !== 'read' || !piSessionEvents[3].event.toolArgsKeys?.includes('path')) throw new Error('pi-session: tool diagnostic substrate_event missing');
+if (piSessionEvents[4].type !== 'text_delta' || piSessionEvents[4].metadata?.completedTextReplay !== true) throw new Error('pi-session: completed text replay delta missing');
+if (piSessionEvents[5].type !== 'run_completed') throw new Error('pi-session: final event was not run_completed');
 if (piSessionEvents.some((event, index) => event.sequence !== index)) throw new Error('pi-session: stream sequence was not monotonic from zero');
-if (piSessionEvents[4].result.runner.id !== 'pi-session') throw new Error('pi-session: completed result runner diagnostics missing');
+if (piSessionEvents[5].result.runner.id !== 'pi-session') throw new Error('pi-session: completed result runner diagnostics missing');
 
 const runtimeDir = mkdtempSync(join(tmpdir(), 'mindstone-agent-runner-stream-transcript.'));
 process.env.MINDSTONE_AGENT_RUNTIME_DIR = runtimeDir;
@@ -109,15 +111,15 @@ try {
     runner: new PiSessionAgentRunner({ provider: fakeProvider }),
     source: { substrate: 'smoke', channel: 'runner-stream', chatType: 'internal' },
   });
-  if (turn.runnerStream?.eventCount !== 5 || turn.runnerStream?.persistedEventCount !== 2) {
+  if (turn.runnerStream?.eventCount !== 6 || turn.runnerStream?.persistedEventCount !== 3) {
     throw new Error(`unexpected runnerStream summary: ${JSON.stringify(turn.runnerStream)}`);
   }
-  if (turn.events.filter((entry) => entry.metadata?.event === 'runner_stream_event').length !== 2) {
+  if (turn.events.filter((entry) => entry.metadata?.event === 'runner_stream_event').length !== 3) {
     throw new Error('runner stream events were not returned from chat turn');
   }
   const transcript = readTranscriptEntries('agent:default:main');
   const streamEntries = transcript.filter((entry) => entry.metadata?.event === 'runner_stream_event');
-  if (streamEntries.length !== 2) throw new Error(`expected 2 persisted runner stream events, got ${streamEntries.length}`);
+  if (streamEntries.length !== 3) throw new Error(`expected 3 persisted runner stream events, got ${streamEntries.length}`);
   if (!streamEntries.every((entry) => entry.metadata?.streamType === 'substrate_event' && entry.metadata?.substrate === 'pi')) {
     throw new Error('persisted runner stream events were not Pi substrate events');
   }
@@ -148,7 +150,7 @@ if (failureEvents.length !== 2) throw new Error(`expected started+failed events,
 if (failureEvents[0].type !== 'run_started' || failureEvents[1].type !== 'run_failed') throw new Error('failure stream did not emit started then failed');
 if (failureEvents[1].error.message !== 'stream failure sentinel') throw new Error('failure stream did not serialize error message');
 
-console.log(JSON.stringify({ ok: true, providerRouteEvents: 3, piSessionEvents: piSessionEvents.length, persistedStreamEvents: 2, failureEvents: 2 }, null, 2));
+console.log(JSON.stringify({ ok: true, providerRouteEvents: 3, piSessionEvents: piSessionEvents.length, persistedStreamEvents: 3, failureEvents: 2 }, null, 2));
 NODE
 
 echo "AgentRunner stream contract smoke test passed."

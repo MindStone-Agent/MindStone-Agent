@@ -52,15 +52,53 @@ type PiAgentEvent = {
   assistantMessageEvent?: unknown;
   toolName?: string;
   toolCallId?: string;
+  args?: unknown;
+  result?: unknown;
+  partialResult?: unknown;
+  isError?: boolean;
+  reason?: string;
   willRetry?: boolean;
+  aborted?: boolean;
+  errorMessage?: string;
+  attempt?: number;
+  maxAttempts?: number;
+  delayMs?: number;
+  success?: boolean;
+  finalError?: string;
+  steering?: readonly unknown[];
+  followUp?: readonly unknown[];
+  name?: string;
+  level?: string;
 };
 
 type PiSessionEventSummary = {
   type: string;
   messageRole?: string;
+  messageTextChars?: number;
   assistantTextChars?: number;
+  assistantStreamEventType?: string;
+  assistantStreamDeltaChars?: number;
+  assistantStreamContentChars?: number;
+  assistantStreamContentIndex?: number;
+  stopReason?: string;
+  errorMessage?: string;
   toolName?: string;
   toolCallId?: string;
+  toolArgsKeys?: string[];
+  toolResultTextChars?: number;
+  toolResultIsError?: boolean;
+  compactionReason?: string;
+  compactionWillRetry?: boolean;
+  compactionAborted?: boolean;
+  retryAttempt?: number;
+  retryMaxAttempts?: number;
+  retryDelayMs?: number;
+  retrySuccess?: boolean;
+  queueSteeringCount?: number;
+  queueFollowUpCount?: number;
+  sessionName?: string;
+  thinkingLevel?: string;
+  messagesCount?: number;
   willRetry?: boolean;
 };
 
@@ -144,21 +182,102 @@ function textFromContent(content: unknown): string {
     .join("\n");
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function objectKeys(value: unknown): string[] | undefined {
+  const input = record(value);
+  if (!input) return undefined;
+  const keys = Object.keys(input).filter(Boolean).sort();
+  return keys.length > 0 ? keys.slice(0, 50) : undefined;
+}
+
+function textCharsFromResult(value: unknown): number | undefined {
+  const input = record(value);
+  if (!input) return undefined;
+  const text = textFromContent(input.content);
+  return text ? text.length : undefined;
+}
+
+function assistantStreamEventSummary(value: unknown): Partial<PiSessionEventSummary> {
+  const input = record(value);
+  if (!input) return {};
+  const delta = stringValue(input.delta);
+  const content = stringValue(input.content);
+  const toolCall = record(input.toolCall);
+  const finalMessage = record(input.message) ?? record(input.error);
+  const finalText = textFromContent(finalMessage?.content).trim();
+  return {
+    assistantStreamEventType: stringValue(input.type),
+    assistantStreamDeltaChars: delta ? delta.length : undefined,
+    assistantStreamContentChars: content ? content.length : finalText ? finalText.length : undefined,
+    assistantStreamContentIndex: numberValue(input.contentIndex),
+    stopReason: stringValue(input.reason) ?? stringValue(finalMessage?.stopReason),
+    errorMessage: stringValue(finalMessage?.errorMessage),
+    toolName: stringValue(toolCall?.name),
+    toolCallId: stringValue(toolCall?.id),
+    toolArgsKeys: objectKeys(toolCall?.arguments),
+  };
+}
+
+function messageSummary(message: PiAgentMessage | undefined): Partial<PiSessionEventSummary> {
+  const input = record(message);
+  const role = stringValue(message?.role);
+  const text = textFromContent(message?.content).trim();
+  return {
+    messageRole: role,
+    messageTextChars: text ? text.length : undefined,
+    assistantTextChars: role === "assistant" && text ? text.length : undefined,
+    stopReason: stringValue(input?.stopReason),
+    errorMessage: stringValue(input?.errorMessage),
+  };
+}
+
 function lastAssistantText(messages: PiAgentMessage[] | undefined): string {
   const assistant = [...(messages ?? [])].reverse().find((message) => message.role === "assistant");
   return textFromContent(assistant?.content).trim();
 }
 
 export function summarizePiSessionEvent(event: PiAgentEvent): PiSessionEventSummary {
-  const type = typeof event.type === "string" ? event.type : "unknown";
-  const assistantText = event.message?.role === "assistant" ? textFromContent(event.message.content).trim() : undefined;
+  const type = stringValue(event.type) ?? "unknown";
+  const assistantEvent = assistantStreamEventSummary(event.assistantMessageEvent);
+  const message = messageSummary(event.message);
   return {
     type,
-    messageRole: event.message?.role,
-    assistantTextChars: assistantText ? assistantText.length : undefined,
-    toolName: typeof event.toolName === "string" ? event.toolName : undefined,
-    toolCallId: typeof event.toolCallId === "string" ? event.toolCallId : undefined,
-    willRetry: typeof event.willRetry === "boolean" ? event.willRetry : undefined,
+    ...message,
+    ...assistantEvent,
+    toolName: stringValue(event.toolName) ?? assistantEvent.toolName,
+    toolCallId: stringValue(event.toolCallId) ?? assistantEvent.toolCallId,
+    toolArgsKeys: objectKeys(event.args) ?? assistantEvent.toolArgsKeys,
+    toolResultTextChars: textCharsFromResult(event.result) ?? textCharsFromResult(event.partialResult),
+    toolResultIsError: booleanValue(event.isError),
+    compactionReason: type === "compaction_start" || type === "compaction_end" ? stringValue(event.reason) : undefined,
+    compactionWillRetry: type === "compaction_end" ? booleanValue(event.willRetry) : undefined,
+    compactionAborted: type === "compaction_end" ? booleanValue(event.aborted) : undefined,
+    retryAttempt: type === "auto_retry_start" || type === "auto_retry_end" ? numberValue(event.attempt) : undefined,
+    retryMaxAttempts: type === "auto_retry_start" ? numberValue(event.maxAttempts) : undefined,
+    retryDelayMs: type === "auto_retry_start" ? numberValue(event.delayMs) : undefined,
+    retrySuccess: type === "auto_retry_end" ? booleanValue(event.success) : undefined,
+    queueSteeringCount: type === "queue_update" && Array.isArray(event.steering) ? event.steering.length : undefined,
+    queueFollowUpCount: type === "queue_update" && Array.isArray(event.followUp) ? event.followUp.length : undefined,
+    sessionName: type === "session_info_changed" ? stringValue(event.name) : undefined,
+    thinkingLevel: type === "thinking_level_changed" ? stringValue(event.level) : undefined,
+    messagesCount: Array.isArray(event.messages) ? event.messages.length : undefined,
+    willRetry: booleanValue(event.willRetry),
+    errorMessage: stringValue(event.errorMessage) ?? message.errorMessage ?? assistantEvent.errorMessage ?? stringValue(event.finalError),
   };
 }
 

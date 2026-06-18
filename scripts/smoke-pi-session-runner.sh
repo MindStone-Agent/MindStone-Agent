@@ -51,15 +51,19 @@ const actual = piSessionFileForKey(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/p
 console.log(JSON.stringify({ sessionKey: process.env.CHAT_SESSION_KEY, sessionFile: actual }, null, 2));
 if (actual !== expected) process.exit(1);
 
-const { capture, record } = createPiSessionEventCapture(3);
+const { capture, record } = createPiSessionEventCapture(5);
 record({ type: 'agent_start' });
-record({ type: 'message_end', message: { role: 'assistant', content: 'hello from event capture' } });
-record({ type: 'tool_execution_start', toolName: 'read', toolCallId: 'tool-1' });
+record({ type: 'message_update', message: { role: 'assistant', content: 'partial assistant text' }, assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'partial', partial: { role: 'assistant', content: 'partial assistant text' } } });
+record({ type: 'message_end', message: { role: 'assistant', content: 'hello from event capture', stopReason: 'stop' } });
+record({ type: 'tool_execution_start', toolName: 'read', toolCallId: 'tool-1', args: { path: 'README.md' } });
+record({ type: 'tool_execution_end', toolName: 'read', toolCallId: 'tool-1', result: { content: [{ type: 'text', text: 'tool result text' }] }, isError: false });
 record({ type: 'agent_end', messages: [{ role: 'assistant', content: 'final assistant text' }], willRetry: false });
-if (capture.events.length !== 3) throw new Error(`expected bounded event capture length 3, got ${capture.events.length}`);
-if (capture.eventCounts.agent_start !== 1 || capture.eventCounts.message_end !== 1 || capture.eventCounts.agent_end !== 1) throw new Error('event counts not captured');
+if (capture.events.length !== 5) throw new Error(`expected bounded event capture length 5, got ${capture.events.length}`);
+if (capture.eventCounts.agent_start !== 1 || capture.eventCounts.message_update !== 1 || capture.eventCounts.message_end !== 1 || capture.eventCounts.agent_end !== 1) throw new Error('event counts not captured');
 if (capture.lastAssistantText !== 'final assistant text') throw new Error('last assistant text not captured from agent_end');
-if (!capture.events.some((event) => event.toolName === 'read' && event.toolCallId === 'tool-1')) throw new Error('tool event summary not captured');
+if (!capture.events.some((event) => event.assistantStreamEventType === 'text_delta' && event.assistantStreamDeltaChars === 7)) throw new Error('assistant stream event summary not captured');
+if (!capture.events.some((event) => event.toolName === 'read' && event.toolCallId === 'tool-1' && event.toolArgsKeys?.includes('path'))) throw new Error('tool event summary not captured');
+if (!capture.events.some((event) => event.type === 'tool_execution_end' && event.toolResultTextChars === 16 && event.toolResultIsError === false)) throw new Error('tool result summary not captured');
 
 const promptParts = buildPiSessionPromptParts([
   { role: 'system', text: 'identity and SCRI context' },
@@ -89,8 +93,9 @@ const providerDiagnostics = providerDiagnosticsFromChatResult({
 if (providerDiagnostics?.piSession?.sessionId !== 'session-1') throw new Error('provider diagnostics did not preserve pi session id');
 if (providerDiagnostics?.piSession?.prompt?.appendSystemPromptCount !== 1) throw new Error('provider diagnostics did not preserve prompt diagnostics');
 if (providerDiagnostics?.piSession?.eventCounts?.agent_end !== 1) throw new Error('provider diagnostics did not preserve event counts');
-if (!providerDiagnostics?.piSession?.events?.some((event) => event.toolName === 'read')) throw new Error('provider diagnostics did not preserve event summaries');
-if (providerDiagnostics?.piSession?.assistantTextCount !== 2) throw new Error('provider diagnostics did not preserve assistant text count');
+if (!providerDiagnostics?.piSession?.events?.some((event) => event.toolName === 'read' && event.toolArgsKeys?.includes('path'))) throw new Error('provider diagnostics did not preserve event summaries');
+if (!providerDiagnostics?.piSession?.events?.some((event) => event.assistantStreamEventType === 'text_delta')) throw new Error('provider diagnostics did not preserve assistant stream event summaries');
+if (providerDiagnostics?.piSession?.assistantTextCount !== 3) throw new Error('provider diagnostics did not preserve assistant text count');
 
 const fakeProvider = {
   id: 'fake-pi-session-provider',
