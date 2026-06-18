@@ -28,6 +28,7 @@ Implemented now:
 - isolated Pi auth/model registry loading from project runtime, not global Pi state
 - `DefaultResourceLoader.appendSystemPrompt` for MindStone system context
 - config-backed Pi `DefaultResourceLoader` resource options: additional extension/skill/prompt/theme paths plus disable flags
+- process-local per-session-file serialization around pi-session prompt and compaction operations
 - `AgentSession.prompt(...)` path when isolated auth/model config is available
 - bounded sanitized Pi session diagnostics
 - live Pi diagnostic callback streaming as runner `substrate_event`
@@ -111,7 +112,7 @@ Current MindStone embedded runner includes production-grade behavior that should
 
 ### Tier 2 — important but not absolute MVP blockers
 
-- session write locks and repair
+- cross-process/session-file repair locking beyond the current process-local pi-session file lock
 - resume cap / session-store indirection
 - provider-specific stream function wrappers
 - thinking-block sanitization policies

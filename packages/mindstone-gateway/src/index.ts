@@ -14,6 +14,7 @@ export {
   PI_SESSION_EVENT_CALLBACK_METADATA_KEY,
   buildPiSessionResourceLoaderOptions,
   PiSessionExecutor,
+  withPiSessionFileLock,
   type PiSessionEventCallback,
   type PiSessionEventCallbackPayload,
   type PiSessionEventSummary,

@@ -214,6 +214,28 @@ export function buildPiSessionResourceLoaderOptions(input: {
   };
 }
 
+const piSessionFileLocks = new Map<string, Promise<void>>();
+
+export async function withPiSessionFileLock<T>(sessionFile: string, operation: () => Promise<T>): Promise<T> {
+  const previous = piSessionFileLocks.get(sessionFile) ?? Promise.resolve();
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolveLock) => {
+    releaseCurrent = resolveLock;
+  });
+  const tail = previous.catch(() => undefined).then(() => current);
+  piSessionFileLocks.set(sessionFile, tail);
+
+  await previous.catch(() => undefined);
+  try {
+    return await operation();
+  } finally {
+    releaseCurrent();
+    if (piSessionFileLocks.get(sessionFile) === tail) {
+      piSessionFileLocks.delete(sessionFile);
+    }
+  }
+}
+
 function textFromContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -528,130 +550,134 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     }
     const { modules } = await this.#load();
     const sessionFile = piSessionFileForKey(this.#sessionDir, input.sessionKey);
-    mkdirSync(dirname(sessionFile), { recursive: true });
-    const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
-    const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
-    const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
-      cwd: this.#cwd,
-      agentDir: this.#agentDir,
-      settingsManager,
-      appendSystemPrompt: [],
-      options: this.#resourceOptions,
-    }));
-    await resourceLoader.reload();
-    const { session } = await modules.createAgentSession({
-      cwd: this.#cwd,
-      agentDir: this.#agentDir,
-      model,
-      sessionManager,
-      settingsManager,
-      resourceLoader,
-      sessionStartEvent: { type: "session_start", reason: "startup" },
-    });
-    const abortSession = (): void => {
-      void session.abort?.().catch(() => undefined);
-    };
-    input.signal?.addEventListener("abort", abortSession, { once: true });
-    try {
-      throwIfAborted(input.signal);
-      if (typeof session.compact !== "function") {
-        return unavailable("pi_agent_session_compact_not_available", { sessionFile });
-      }
-      const result = await session.compact(input.customInstructions);
-      throwIfAborted(input.signal);
-      return {
-        requested: true,
-        available: true,
-        runnerId: "pi-session",
-        substrate: "pi",
-        reason: "pi_agent_session_compact_completed",
-        sessionKey: input.sessionKey,
-        agentId: input.agentId,
-        model: toModelInfo(model),
-        startedAt,
-        completedAt: new Date().toISOString(),
-        durationMs: Math.max(0, Date.now() - startedMs),
-        runId: input.runContext?.runId,
-        surface: input.runContext?.surface,
-        details: {
-          sessionFile,
-          result,
-        },
-      };
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") throw error;
-      return unavailable("pi_agent_session_compact_failed", {
-        sessionFile,
-        error: error instanceof Error ? error.message : String(error),
+    return withPiSessionFileLock(sessionFile, async () => {
+      mkdirSync(dirname(sessionFile), { recursive: true });
+      const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
+      const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
+      const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
+        cwd: this.#cwd,
+        agentDir: this.#agentDir,
+        settingsManager,
+        appendSystemPrompt: [],
+        options: this.#resourceOptions,
+      }));
+      await resourceLoader.reload();
+      const { session } = await modules.createAgentSession({
+        cwd: this.#cwd,
+        agentDir: this.#agentDir,
+        model,
+        sessionManager,
+        settingsManager,
+        resourceLoader,
+        sessionStartEvent: { type: "session_start", reason: "startup" },
       });
-    } finally {
-      input.signal?.removeEventListener("abort", abortSession);
-      session.dispose();
-    }
+      const abortSession = (): void => {
+        void session.abort?.().catch(() => undefined);
+      };
+      input.signal?.addEventListener("abort", abortSession, { once: true });
+      try {
+        throwIfAborted(input.signal);
+        if (typeof session.compact !== "function") {
+          return unavailable("pi_agent_session_compact_not_available", { sessionFile });
+        }
+        const result = await session.compact(input.customInstructions);
+        throwIfAborted(input.signal);
+        return {
+          requested: true,
+          available: true,
+          runnerId: "pi-session",
+          substrate: "pi",
+          reason: "pi_agent_session_compact_completed",
+          sessionKey: input.sessionKey,
+          agentId: input.agentId,
+          model: toModelInfo(model),
+          startedAt,
+          completedAt: new Date().toISOString(),
+          durationMs: Math.max(0, Date.now() - startedMs),
+          runId: input.runContext?.runId,
+          surface: input.runContext?.surface,
+          details: {
+            sessionFile,
+            result,
+          },
+        };
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") throw error;
+        return unavailable("pi_agent_session_compact_failed", {
+          sessionFile,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        input.signal?.removeEventListener("abort", abortSession);
+        session.dispose();
+      }
+    });
   }
 
   async completeChat(request: MindStoneChatRequest): Promise<MindStoneChatResult> {
     const { modules } = await this.#load();
     const model = await this.#resolvePiModel(request.model.id);
     const sessionFile = piSessionFileForKey(this.#sessionDir, request.sessionKey);
-    mkdirSync(dirname(sessionFile), { recursive: true });
-    const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
-    const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
-    const promptParts = buildPiSessionPromptParts(request.messages);
-    const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
-      cwd: this.#cwd,
-      agentDir: this.#agentDir,
-      settingsManager,
-      appendSystemPrompt: promptParts.appendSystemPrompt,
-      options: this.#resourceOptions,
-    }));
-    await resourceLoader.reload();
-    const { session, modelFallbackMessage } = await modules.createAgentSession({
-      cwd: this.#cwd,
-      agentDir: this.#agentDir,
-      model,
-      sessionManager,
-      settingsManager,
-      resourceLoader,
-      sessionStartEvent: { type: "session_start", reason: "startup" },
-    });
+    return withPiSessionFileLock(sessionFile, async () => {
+      mkdirSync(dirname(sessionFile), { recursive: true });
+      const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
+      const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
+      const promptParts = buildPiSessionPromptParts(request.messages);
+      const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
+        cwd: this.#cwd,
+        agentDir: this.#agentDir,
+        settingsManager,
+        appendSystemPrompt: promptParts.appendSystemPrompt,
+        options: this.#resourceOptions,
+      }));
+      await resourceLoader.reload();
+      const { session, modelFallbackMessage } = await modules.createAgentSession({
+        cwd: this.#cwd,
+        agentDir: this.#agentDir,
+        model,
+        sessionManager,
+        settingsManager,
+        resourceLoader,
+        sessionStartEvent: { type: "session_start", reason: "startup" },
+      });
 
-    const { capture, record } = createPiSessionEventCapture();
-    const onEvent = piSessionEventCallbackFromMetadata(request.metadata);
-    const unsubscribe = session.subscribe?.((event) => {
-      const summary = record(event);
-      onEvent?.({ summary, textDelta: textDeltaFromAssistantStreamEvent(event.assistantMessageEvent) });
-    });
-    const abortSession = (): void => {
-      void session.abort?.().catch(() => undefined);
-    };
-    request.signal?.addEventListener("abort", abortSession, { once: true });
-
-    try {
-      throwIfAborted(request.signal);
-      await session.prompt(promptParts.promptText || request.transcriptEntries.at(-1)?.text || "", { source: "rpc" });
-      throwIfAborted(request.signal);
-      const text = capture.lastAssistantText ?? lastAssistantText(session.messages ?? session.state?.messages);
-      return {
-        role: "assistant",
-        text,
-        model: toModelInfo(model),
-        raw: {
-          sessionId: session.sessionId,
-          sessionFile,
-          modelFallbackMessage,
-          piSession: {
-            prompt: promptParts.diagnostics,
-            eventCounts: capture.eventCounts,
-            events: capture.events,
-            assistantTexts: capture.assistantTexts,
-          },
-        },
+      const { capture, record } = createPiSessionEventCapture();
+      const onEvent = piSessionEventCallbackFromMetadata(request.metadata);
+      const unsubscribe = session.subscribe?.((event) => {
+        const summary = record(event);
+        onEvent?.({ summary, textDelta: textDeltaFromAssistantStreamEvent(event.assistantMessageEvent) });
+      });
+      const abortSession = (): void => {
+        void session.abort?.().catch(() => undefined);
       };
-    } finally {
-      request.signal?.removeEventListener("abort", abortSession);
-      unsubscribe?.();
-      session.dispose();
-    }
+      request.signal?.addEventListener("abort", abortSession, { once: true });
+
+      try {
+        throwIfAborted(request.signal);
+        await session.prompt(promptParts.promptText || request.transcriptEntries.at(-1)?.text || "", { source: "rpc" });
+        throwIfAborted(request.signal);
+        const text = capture.lastAssistantText ?? lastAssistantText(session.messages ?? session.state?.messages);
+        return {
+          role: "assistant",
+          text,
+          model: toModelInfo(model),
+          raw: {
+            sessionId: session.sessionId,
+            sessionFile,
+            modelFallbackMessage,
+            piSession: {
+              prompt: promptParts.diagnostics,
+              eventCounts: capture.eventCounts,
+              events: capture.events,
+              assistantTexts: capture.assistantTexts,
+            },
+          },
+        };
+      } finally {
+        request.signal?.removeEventListener("abort", abortSession);
+        unsubscribe?.();
+        session.dispose();
+      }
+    });
   }
 }

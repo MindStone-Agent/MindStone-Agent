@@ -49,6 +49,7 @@
 - [x] Add gated `smoke:pi-session-live` probe for isolated-auth live `AgentSession.prompt(...)`, runner-stream validation, and optional `AgentSession.compact(...)` validation via `MINDSTONE_PI_SESSION_LIVE_COMPACT=1`.
 - [x] Add config-backed Pi `DefaultResourceLoader` option pass-through for additional extension/skill/prompt/theme paths and resource disable flags.
 - [x] Use real `PiSessionAgentRunner` construction for CLI/TUI pi-session routes instead of injected-provider runners.
+- [x] Add process-local pi-session file serialization around `AgentSession.prompt(...)` and `AgentSession.compact(...)`.
 - [x] Add `docs/refactor/PI_SESSION_PARITY.md` tracking MindStone embedded-runner parity tiers and next gaps.
 - [ ] Complete full live authenticated event/stream validation and durable transcript/source metadata policy for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.

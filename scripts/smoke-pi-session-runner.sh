@@ -44,12 +44,29 @@ NODE
 
 node --input-type=module <<'NODE'
 import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
-import { buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, PiSessionAgentRunner, piSessionFileForKey } from './packages/mindstone-gateway/dist/index.js';
+import { buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, PiSessionAgentRunner, piSessionFileForKey, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
 import { resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
 const actual = piSessionFileForKey(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions`, process.env.CHAT_SESSION_KEY);
 console.log(JSON.stringify({ sessionKey: process.env.CHAT_SESSION_KEY, sessionFile: actual }, null, 2));
 if (actual !== expected) process.exit(1);
+
+const lockOrder = [];
+const delay = (ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+const firstLock = withPiSessionFileLock('/tmp/mindstone-pi-session-lock-smoke.jsonl', async () => {
+  lockOrder.push('first:start');
+  await delay(25);
+  lockOrder.push('first:end');
+  return 'first';
+});
+const secondLock = withPiSessionFileLock('/tmp/mindstone-pi-session-lock-smoke.jsonl', async () => {
+  lockOrder.push('second:start');
+  lockOrder.push('second:end');
+  return 'second';
+});
+const lockResults = await Promise.all([firstLock, secondLock]);
+if (lockResults.join(',') !== 'first,second') throw new Error('session lock results were unexpected');
+if (lockOrder.join(',') !== 'first:start,first:end,second:start,second:end') throw new Error(`session lock did not serialize same-file operations: ${lockOrder.join(',')}`);
 
 const { capture, record } = createPiSessionEventCapture(5);
 record({ type: 'agent_start' });
