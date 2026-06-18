@@ -202,6 +202,15 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
             : "no stale or empty sources found",
         );
       }
+      check(
+        checks,
+        sqliteMemoryStats.duplicateTextChunks > 0 ? "info" : "pass",
+        "memory.sqlite.duplicates",
+        "SQLite memory exact duplicate chunk candidates",
+        sqliteMemoryStats.duplicateTextChunks > 0
+          ? `${sqliteMemoryStats.duplicateTextChunks} exact duplicate chunks; run mindstone memory maintain --dedupe-text if unwanted`
+          : "no exact duplicate text chunks found",
+      );
       if (sqliteMemoryStats.bloat) {
         const freeBytes = sqliteMemoryStats.bloat.estimatedFreeBytes;
         const freeRatio = sqliteMemoryStats.bloat.databaseBytes > 0 ? freeBytes / sqliteMemoryStats.bloat.databaseBytes : 0;

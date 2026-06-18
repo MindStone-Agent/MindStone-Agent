@@ -169,6 +169,7 @@ NODE
 
 status_output="$(./scripts/mindstone memory status)"
 printf '%s\n' "${status_output}"
+grep -q "Duplicate text chunks:" <<<"${status_output}"
 grep -q "DB bytes:" <<<"${status_output}"
 grep -q "Estimated free bytes:" <<<"${status_output}"
 

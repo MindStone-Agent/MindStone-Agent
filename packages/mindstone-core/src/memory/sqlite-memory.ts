@@ -66,6 +66,7 @@ export type SqliteMemoryIndexStats = {
   sources: number;
   chunks: number;
   embeddedChunks: number;
+  duplicateTextChunks: number;
   vectorBackend: "sqlite-vec" | "js-cosine" | "lexical";
   sqliteVec: SqliteVecStatus;
   updatedAt?: string;
@@ -94,8 +95,8 @@ export type SqliteMemoryMaintenanceResult = {
   emptySourcesRemoved: number;
   optimized: boolean;
   vacuumed: boolean;
-  before?: Pick<SqliteMemoryIndexStats, "sources" | "chunks" | "embeddedChunks" | "bloat">;
-  after?: Pick<SqliteMemoryIndexStats, "sources" | "chunks" | "embeddedChunks" | "bloat">;
+  before?: Pick<SqliteMemoryIndexStats, "sources" | "chunks" | "embeddedChunks" | "duplicateTextChunks" | "bloat">;
+  after?: Pick<SqliteMemoryIndexStats, "sources" | "chunks" | "embeddedChunks" | "duplicateTextChunks" | "bloat">;
   error?: string;
 };
 
@@ -199,14 +200,16 @@ function readBloatStats(db: DatabaseSync, databasePath: string): SqliteMemoryBlo
   };
 }
 
-function readIndexCounts(db: DatabaseSync, databasePath: string): Pick<SqliteMemoryIndexStats, "sources" | "chunks" | "embeddedChunks" | "bloat"> {
+function readIndexCounts(db: DatabaseSync, databasePath: string): Pick<SqliteMemoryIndexStats, "sources" | "chunks" | "embeddedChunks" | "duplicateTextChunks" | "bloat"> {
   const sources = db.prepare("SELECT count(*) AS count FROM memory_sources").get() as { count: number };
   const chunks = db.prepare("SELECT count(*) AS count FROM memory_chunks").get() as { count: number };
   const embeddedChunks = db.prepare("SELECT count(*) AS count FROM memory_chunks WHERE embedding_json IS NOT NULL").get() as { count: number };
+  const textDedup = db.prepare("SELECT count(*) AS chunks, count(DISTINCT trim(text)) AS uniqueChunks FROM memory_chunks").get() as { chunks: number; uniqueChunks: number };
   return {
     sources: Number(sources.count ?? 0),
     chunks: Number(chunks.count ?? 0),
     embeddedChunks: Number(embeddedChunks.count ?? 0),
+    duplicateTextChunks: Math.max(0, Number(textDedup.chunks ?? 0) - Number(textDedup.uniqueChunks ?? 0)),
     bloat: readBloatStats(db, databasePath),
   };
 }
@@ -519,6 +522,7 @@ export function getSqliteMemoryIndexStats(paths: MindStoneRuntimePaths = runtime
     sources: 0,
     chunks: 0,
     embeddedChunks: 0,
+    duplicateTextChunks: 0,
     vectorBackend: "lexical" as const,
     sqliteVec,
   };

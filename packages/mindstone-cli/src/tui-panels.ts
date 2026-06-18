@@ -94,6 +94,7 @@ export function buildTuiMemoryPanel(config: ReturnType<typeof loadMindStoneConfi
     `- sources: \`${stats.sources}\``,
     `- chunks: \`${stats.chunks}\``,
     `- embedded chunks: \`${stats.embeddedChunks}\``,
+    `- duplicate text chunks: \`${stats.duplicateTextChunks}\``,
     `- vector backend: \`${stats.vectorBackend}\``,
     `- sqlite-vec available: \`${stats.sqliteVec.available}\``,
     stats.sqliteVec.version ? `- sqlite-vec version: \`${stats.sqliteVec.version}\`` : undefined,
