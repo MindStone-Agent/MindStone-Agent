@@ -1,5 +1,7 @@
 import {
   agentRunStreamErrorFromUnknown,
+  completeMindStoneRoutePlan,
+  planMindStoneRoute,
   runMindStoneRoute,
   type AgentCompactionInput,
   type AgentCompactionResult,
@@ -168,23 +170,50 @@ export class PiSessionAgentRunner implements AgentRunner {
       }
       liveEvents.push({ type: "substrate_event", event: payload.summary });
     };
-    const runPromise = this.run({
+    const startedMs = Date.now();
+    const routeInput = {
       ...input,
+      provider: this.#provider,
       metadata: {
         ...input.metadata,
         [PI_SESSION_EVENT_CALLBACK_METADATA_KEY]: onPiSessionEvent,
       },
       runContext,
-    }).then(
-      (value) => {
-        result = value;
-      },
-      (error) => {
-        runError = error;
-      },
-    ).finally(() => liveEvents.close());
+    };
 
     try {
+      const plan = await planMindStoneRoute(routeInput);
+      yield {
+        type: "route_planned",
+        sequence: sequence++,
+        timestamp: new Date().toISOString(),
+        runnerId: this.id,
+        runId: runContext.runId,
+        surface: runContext.surface,
+        metadata: runContext.metadata,
+        plan,
+      };
+      const runPromise = completeMindStoneRoutePlan(routeInput, plan).then(
+        (route) => {
+          const completedAt = new Date().toISOString();
+          result = {
+            ...route,
+            runner: {
+              id: this.id,
+              mode: "pi-session",
+              startedAt,
+              completedAt,
+              durationMs: Math.max(0, Date.now() - startedMs),
+              runId: runContext.runId,
+              surface: runContext.surface,
+            },
+          };
+        },
+        (error) => {
+          runError = error;
+        },
+      ).finally(() => liveEvents.close());
+
       while (true) {
         const next = await liveEvents.next();
         if (next.done) break;

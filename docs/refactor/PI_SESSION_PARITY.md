@@ -31,6 +31,7 @@ Implemented now:
 - process-local per-session-file serialization around pi-session prompt and compaction operations
 - `AgentSession.prompt(...)` path when isolated auth/model config is available
 - bounded sanitized Pi session diagnostics
+- explicit runner `route_planned` stream events before provider/substrate execution
 - live Pi diagnostic callback streaming as runner `substrate_event`
 - live Pi assistant `text_delta` forwarding
 - completed-response text replay suppression after live text capture

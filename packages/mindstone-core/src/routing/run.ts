@@ -137,7 +137,7 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
   };
 }
 
-export async function runMindStoneRoute(input: MindStoneRouteInput): Promise<MindStoneRouteResult> {
+export async function planMindStoneRoute(input: MindStoneRouteInput): Promise<MindStoneRoutePlan> {
   const memoryRecall = input.memoryRecall?.enabled
     ? await recallMindStoneMemory({
         agentId: input.agentId,
@@ -146,7 +146,10 @@ export async function runMindStoneRoute(input: MindStoneRouteInput): Promise<Min
         config: input.memoryRecall.config,
       })
     : undefined;
-  const plan = buildMindStoneRoutePlan({ ...input, memoryRecall });
+  return buildMindStoneRoutePlan({ ...input, memoryRecall });
+}
+
+export async function completeMindStoneRoutePlan(input: MindStoneRouteInput, plan: MindStoneRoutePlan): Promise<MindStoneRouteResult> {
   const result = await input.provider.completeChat({
     agentId: input.agentId,
     sessionKey: input.sessionKey,
@@ -157,4 +160,9 @@ export async function runMindStoneRoute(input: MindStoneRouteInput): Promise<Min
     metadata: input.metadata,
   });
   return { ...plan, result };
+}
+
+export async function runMindStoneRoute(input: MindStoneRouteInput): Promise<MindStoneRouteResult> {
+  const plan = await planMindStoneRoute(input);
+  return completeMindStoneRoutePlan(input, plan);
 }

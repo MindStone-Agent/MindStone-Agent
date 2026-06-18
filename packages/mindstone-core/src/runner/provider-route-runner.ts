@@ -1,4 +1,4 @@
-import { runMindStoneRoute } from "../routing/run.js";
+import { completeMindStoneRoutePlan, planMindStoneRoute, runMindStoneRoute } from "../routing/run.js";
 import { agentRunStreamErrorFromUnknown } from "./stream.js";
 import type { AgentCompactionInput, AgentCompactionResult, AgentRunInput, AgentRunResult, AgentRunner, AgentRunStreamEvent } from "./types.js";
 
@@ -71,7 +71,32 @@ export class ProviderRouteAgentRunner implements AgentRunner {
       },
     };
     try {
-      const result = await this.run({ ...input, runContext });
+      const startedMs = Date.now();
+      const plan = await planMindStoneRoute(input);
+      yield {
+        type: "route_planned",
+        sequence: sequence++,
+        timestamp: new Date().toISOString(),
+        runnerId: this.id,
+        runId: runContext.runId,
+        surface: runContext.surface,
+        metadata: runContext.metadata,
+        plan,
+      };
+      const route = await completeMindStoneRoutePlan(input, plan);
+      const completedAt = new Date().toISOString();
+      const result: AgentRunResult = {
+        ...route,
+        runner: {
+          id: this.id,
+          mode: "provider-route",
+          startedAt,
+          completedAt,
+          durationMs: Math.max(0, Date.now() - startedMs),
+          runId: runContext.runId,
+          surface: runContext.surface,
+        },
+      };
       if (result.result.text) {
         yield {
           type: "text_delta",
