@@ -41,6 +41,7 @@ export type MindStoneChatTurnInput = {
   source?: TranscriptSource;
   metadata?: Record<string, unknown>;
   runnerStream?: MindStoneRunnerStreamTranscriptOptions;
+  onRunnerStreamEvent?: (event: AgentRunStreamEvent) => void;
   signal?: AbortSignal;
 };
 
@@ -143,14 +144,17 @@ async function runAgentRunner(input: {
   runner: AgentRunner;
   runInput: Parameters<AgentRunner["run"]>[0];
   streamOptions: Required<MindStoneRunnerStreamTranscriptOptions>;
+  onRunnerStreamEvent?: (event: AgentRunStreamEvent) => void;
 }): Promise<{ route: AgentRunResult; streamEvents: AgentRunStreamEvent[] }> {
-  if (!input.streamOptions.persistTranscriptEvents) {
+  const shouldStream = input.streamOptions.persistTranscriptEvents || Boolean(input.onRunnerStreamEvent);
+  if (!shouldStream) {
     return { route: await input.runner.run(input.runInput), streamEvents: [] };
   }
   const streamEvents: AgentRunStreamEvent[] = [];
   let route: AgentRunResult | undefined;
   for await (const event of input.runner.stream(input.runInput)) {
     streamEvents.push(event);
+    input.onRunnerStreamEvent?.(event);
     if (event.type === "run_completed") route = event.result;
   }
   if (!route) throw new Error("AgentRunner stream completed without run_completed event");
@@ -314,6 +318,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   const { route, streamEvents } = await runAgentRunner({
     runner,
     streamOptions,
+    onRunnerStreamEvent: input.onRunnerStreamEvent,
     runInput: {
       agentId: input.agentId,
       sessionKey: input.sessionKey,

@@ -59,6 +59,7 @@
 - [x] Add first TUI in-place assistant response update path and event-line rendering for returned turn events.
 - [x] Add first TUI status panel via `/status`, showing agent/session/route/model/provider/config/transcript/runtime details.
 - [x] Add first non-mutating TUI selector panels via `/sessions`, `/agents`, and `/models`.
+- [x] Surface `AgentRunner.stream(...)` lifecycle/diagnostic events into the TUI turn path as compact event lines.
 
 ### Completed
 
@@ -146,10 +147,11 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - TUI now starts a mutable assistant message as “thinking…” and updates it with the final response.
   - Returned turn event entries render as compact event lines.
   - This is not live token streaming yet.
+- [x] Render `AgentRunner.stream(...)` lifecycle/diagnostic events during TUI turns.
 - [ ] Stream/update assistant text and tool/substrate events live from Gateway/runner events.
 - [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
 - [x] Add first non-mutating `/sessions`, `/agents`, and `/models` panels.
-- [ ] Add interactive session/agent/model selectors and richer status/settings overlays.
+- [x] Add first TUI rendering path for `AgentRunner.stream(...)` lifecycle/diagnostic events.- [ ] Add interactive session/agent/model selectors and richer status/settings overlays.
 - [ ] Adapt richer current MindStone TUI components and event handlers from `/Users/clint/Projects/MindStone/src/tui/`.
 
 ### Onboarding and identity

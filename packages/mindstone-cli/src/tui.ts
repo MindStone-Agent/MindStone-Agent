@@ -8,6 +8,7 @@ import {
   runMindStoneChatTurn,
   runtimePathsFromEnv,
   type AgentRunner,
+  type AgentRunStreamEvent,
   type MindStoneModelInfo,
   type TranscriptEntry,
 } from "@mindstone-agent/core";
@@ -183,9 +184,10 @@ class MindStoneChatLog extends Container {
     this.startAssistant(text);
   }
 
-  addTurnEvents(entries: TranscriptEntry[]): void {
+  addTurnEvents(entries: TranscriptEntry[], options: { skipRunnerStreamEvents?: boolean } = {}): void {
     for (const entry of entries) {
       if (entry.role !== "event") continue;
+      if (options.skipRunnerStreamEvents && isRunnerStreamTranscriptEvent(entry)) continue;
       const label = eventEntryLabel(entry);
       if (label) this.addEvent(label);
     }
@@ -243,6 +245,19 @@ function eventEntryLabel(entry: TranscriptEntry): string | undefined {
   if (text) return text;
   if (metadataEvent) return metadataEvent.replaceAll("_", " ");
   return undefined;
+}
+
+function runnerStreamEventLabel(event: AgentRunStreamEvent): string {
+  if (event.type === "run_started") return `runner ${event.runnerId} started`;
+  if (event.type === "route_planned") return `runner ${event.runnerId} planned route`;
+  if (event.type === "text_delta") return `runner ${event.runnerId} text delta (${event.text.length} chars)`;
+  if (event.type === "substrate_event") return `runner ${event.runnerId} ${event.substrate} event`;
+  if (event.type === "run_completed") return `runner ${event.runnerId} completed`;
+  return `runner ${event.runnerId} failed: ${event.error.message}`;
+}
+
+function isRunnerStreamTranscriptEvent(entry: TranscriptEntry): boolean {
+  return entry.metadata?.event === "runner_stream_event";
 }
 
 function buildTuiStatusPanel(params: {
@@ -443,6 +458,7 @@ async function sendTuiTurn(params: {
   loaded: ReturnType<typeof loadMindStoneConfig>;
   ctx: TuiCommandContext;
   message: string;
+  onRunnerStreamEvent?: (event: AgentRunStreamEvent) => void;
 }): Promise<Awaited<ReturnType<typeof runMindStoneChatTurn>>> {
   const config = params.loaded.config;
   if (!config) throw new Error(`Config not found. Run ./scripts/init-runtime.sh or mindstone onboard first. Expected: ${params.loaded.path}`);
@@ -470,6 +486,7 @@ async function sendTuiTurn(params: {
       senderId: "local",
     },
     metadata,
+    onRunnerStreamEvent: params.onRunnerStreamEvent,
   });
 }
 
@@ -515,6 +532,13 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   const assistant = chat.startAssistant(dim("MindStone is thinking…"));
   assistant.setText("TUI smoke response with **markdown** and `code`.");
   chat.addEvent("runner stream event smoke");
+  chat.addEvent(runnerStreamEventLabel({
+    type: "run_started",
+    sequence: 0,
+    timestamp: "2026-06-18T00:00:00.000Z",
+    runnerId: "provider-route",
+    input: { agentId: ctx.agentId, sessionKey: ctx.sessionKey, model: ctx.model },
+  }));
   const smokeConfig = {
     routing: { mode: "mock" as const, defaultAgentId: "default", defaultModel: "mindstone/mock" },
     session: { mode: "single" as const, defaultSessionKey: "agent:default:main" },
@@ -694,10 +718,20 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       chat.addChild(loader);
       tui.requestRender();
 
-      void sendTuiTurn({ argv, loaded, ctx, message })
+      void sendTuiTurn({
+        argv,
+        loaded,
+        ctx,
+        message,
+        onRunnerStreamEvent: (event) => {
+          chat.addEvent(runnerStreamEventLabel(event));
+          footer.setStatus(event.type === "run_completed" ? "finalizing…" : runnerStreamEventLabel(event));
+          tui.requestRender();
+        },
+      })
         .then((result) => {
           chat.removeChild(loader);
-          chat.addTurnEvents(result.events);
+          chat.addTurnEvents(result.events, { skipRunnerStreamEvents: true });
           assistant.setText(result.assistantEntry.text ?? "");
           footer.setStatus(`idle • ${ctx.sessionKey}`);
         })
