@@ -25,6 +25,8 @@ printf '%s\n' "$status_output"
 grep -q "WebChat: http://127.0.0.1:19789/webchat" <<<"$status_output"
 grep -q "WebChat default session: agent:default:main" <<<"$status_output"
 grep -q "WebChat source: gateway-rest/webchat/internal" <<<"$status_output"
+grep -q "Memory SQLite present: false" <<<"$status_output"
+grep -q "Memory SQLite chunks: 0 (0 embedded)" <<<"$status_output"
 grep -q "Pi-session safety active: false" <<<"$status_output"
 
 node <<'NODE'

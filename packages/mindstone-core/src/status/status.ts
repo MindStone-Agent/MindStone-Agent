@@ -3,6 +3,7 @@ import { loadMindStoneConfig, resolveConfigPath, type LoadedMindStoneConfig } fr
 import { resolveContextManagementPolicy, type ResolvedContextManagementPolicy } from "../context/index.js";
 import type { MindStoneRoutingConfig } from "../config/index.js";
 import { getCurrentHandoffStatus, type CurrentHandoffStatus } from "../lifecycle/index.js";
+import { getSqliteMemoryIndexStats, type SqliteMemoryIndexStats } from "../memory/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { listTranscriptSessions } from "../transcript/index.js";
 import { getPiSessionSafetyStatus, type PiSessionSafetyStatus } from "./pi-session-safety.js";
@@ -36,6 +37,9 @@ export type MindStoneSystemStatus = {
   };
   handoff: CurrentHandoffStatus;
   webchat: MindStoneWebChatStatus;
+  memory: {
+    sqlite: SqliteMemoryIndexStats;
+  };
   contextManagement: ResolvedContextManagementPolicy;
   routing: {
     mode: Required<MindStoneRoutingConfig>["mode"];
@@ -81,6 +85,9 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
     },
     handoff: getCurrentHandoffStatus(paths),
     webchat: getMindStoneWebChatStatus(loadedConfig.config),
+    memory: {
+      sqlite: getSqliteMemoryIndexStats(paths),
+    },
     contextManagement: resolveContextManagementPolicy(loadedConfig.config?.contextManagement),
     routing: {
       mode: loadedConfig.config?.routing?.mode ?? "placeholder",

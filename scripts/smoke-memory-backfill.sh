@@ -100,5 +100,7 @@ doctor_output="$(./scripts/mindstone doctor)"
 printf '%s\n' "$doctor_output"
 grep -q "memory.sqlite" <<<"$doctor_output"
 grep -q "memory.sqlite.chunks" <<<"$doctor_output"
+grep -q "memory.sqlite.maintenance" <<<"$doctor_output"
+grep -q "memory.sqlite.bloat" <<<"$doctor_output"
 
 echo "SQLite memory backfill smoke test passed."

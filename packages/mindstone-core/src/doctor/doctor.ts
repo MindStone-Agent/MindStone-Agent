@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { resolveContextManagementPolicy } from "../context/index.js";
 import { loadConfiguredIdentities } from "../identity/index.js";
 import { getCurrentHandoffStatus } from "../lifecycle/index.js";
-import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats } from "../memory/index.js";
+import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats, maintainSqliteMemoryIndex } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { resolveDefaultSessionKey } from "../routing/session.js";
 import { getPiSessionSafetyStatus } from "../status/pi-session-safety.js";
@@ -52,6 +52,12 @@ function summarize(checks: MindStoneDoctorCheck[]): MindStoneDoctorReport["summa
     fail: checks.filter((entry) => entry.severity === "fail").length,
     info: checks.filter((entry) => entry.severity === "info").length,
   };
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${bytes} B`;
 }
 
 export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): MindStoneDoctorReport {
@@ -175,6 +181,40 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
         "SQLite memory index has chunks",
         `${sqliteMemoryStats.sources} sources, ${sqliteMemoryStats.chunks} chunks, ${sqliteMemoryStats.embeddedChunks} embedded`,
       );
+      const maintenance = maintainSqliteMemoryIndex({
+        paths,
+        dryRun: true,
+        deduplicateText: false,
+        optimize: false,
+        vacuum: false,
+      });
+      if (maintenance.error) {
+        check(checks, "warn", "memory.sqlite.maintenance", "SQLite memory maintenance dry-run works", maintenance.error);
+      } else {
+        const maintenanceCandidates = maintenance.staleSourcesFound + maintenance.emptySourcesFound;
+        check(
+          checks,
+          maintenanceCandidates > 0 ? "warn" : "pass",
+          "memory.sqlite.maintenance",
+          "SQLite memory index has no stale/empty maintenance candidates",
+          maintenanceCandidates > 0
+            ? `${maintenance.staleSourcesFound} stale sources, ${maintenance.emptySourcesFound} empty sources; run mindstone memory maintain`
+            : "no stale or empty sources found",
+        );
+      }
+      if (sqliteMemoryStats.bloat) {
+        const freeBytes = sqliteMemoryStats.bloat.estimatedFreeBytes;
+        const freeRatio = sqliteMemoryStats.bloat.databaseBytes > 0 ? freeBytes / sqliteMemoryStats.bloat.databaseBytes : 0;
+        const bloatElevated = freeBytes >= 1024 * 1024 && freeRatio >= 0.15;
+        const walElevated = sqliteMemoryStats.bloat.walBytes >= 16 * 1024 * 1024;
+        check(
+          checks,
+          bloatElevated || walElevated ? "warn" : "pass",
+          "memory.sqlite.bloat",
+          "SQLite memory index bloat is within maintenance bounds",
+          `db=${formatBytes(sqliteMemoryStats.bloat.databaseBytes)}, wal=${formatBytes(sqliteMemoryStats.bloat.walBytes)}, estimatedFree=${formatBytes(freeBytes)}`,
+        );
+      }
       if (sqliteMemoryStats.sqliteVec.available) {
         check(
           checks,

@@ -99,6 +99,9 @@ export function buildTuiMemoryPanel(config: ReturnType<typeof loadMindStoneConfi
     stats.sqliteVec.version ? `- sqlite-vec version: \`${stats.sqliteVec.version}\`` : undefined,
     stats.sqliteVec.error ? `- sqlite-vec note: \`${stats.sqliteVec.error}\`` : undefined,
     stats.updatedAt ? `- updated: \`${stats.updatedAt}\`` : undefined,
+    stats.bloat ? `- database bytes: \`${stats.bloat.databaseBytes}\`` : undefined,
+    stats.bloat ? `- WAL bytes: \`${stats.bloat.walBytes}\`` : undefined,
+    stats.bloat ? `- estimated free bytes: \`${stats.bloat.estimatedFreeBytes}\`` : undefined,
     stats.error ? `- error: \`${stats.error}\`` : undefined,
     `- database: \`${stats.databasePath}\``,
   ].filter((line): line is string => Boolean(line)).join("\n");
