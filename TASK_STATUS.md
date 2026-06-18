@@ -54,6 +54,7 @@
 - [x] Add unified session/transcript invariant smoke proving REST, HTTP RPC, WebSocket RPC, and OpenAI-compatible default traffic append to one canonical transcript with distinct source metadata.
 - [x] Add native `mindstone chat` terminal/REPL surface over the canonical session and routed identity/SCRI prompt path.
 - [x] Validate autoRecall/SCRI injection through native `mindstone chat` with `npm run smoke:cli-chat-recall`.
+- [x] Add first styled `mindstone tui` shell using vendored Pi TUI primitives, MindStone gold/diamond theme, chat log, editor, footer/status, slash commands, and routed chat path.
 
 ### Completed
 
@@ -126,6 +127,18 @@
 ## Core MVP Remaining
 
 This is the current functional backlog for making MindStone-Agent feel like MindStone proper rather than only a Gateway/router scaffold.
+
+### TUI / user-facing shell
+
+- [x] Add first standalone MindStone-Agent TUI command modeled on current MindStone/OpenClaw's TUI shape.
+  - Uses vendored Pi TUI primitives (`TUI`, `ProcessTerminal`, `Editor`, `Markdown`, `Loader`, `Container`).
+  - Provides styled header, chat log, footer/status, editor, command hints, `/help`, `/clear`, `/status`, and `/exit`.
+  - Routes submitted turns through existing MindStone-Agent chat pipeline and canonical session selection.
+  - Smoke validation: `npm run smoke:tui`.
+- [ ] Load recent transcript history into the TUI on startup.
+- [ ] Stream/update assistant text and tool/substrate events in-place from Gateway/runner events.
+- [ ] Add session/agent/model selectors and status overlays.
+- [ ] Adapt richer current MindStone TUI components and event handlers from `/Users/clint/Projects/MindStone/src/tui/`.
 
 ### Onboarding and identity
 

@@ -41,6 +41,7 @@
     "smoke:scri-recall": "./scripts/smoke-scri-recall.sh",
     "smoke:auto-compact": "./scripts/smoke-auto-compact.sh",
     "smoke:unified-session": "./scripts/smoke-unified-session.sh",
+    "smoke:tui": "./scripts/smoke-tui.sh",
     "smoke:agent-runner-stream": "./scripts/smoke-agent-runner-stream.sh",
     "smoke:gateway-runner-stream": "./scripts/smoke-gateway-runner-stream.sh",
     "smoke:cli-chat": "./scripts/smoke-cli-chat.sh",

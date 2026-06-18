@@ -116,6 +116,8 @@ The current lightweight provider-level completion path is acceptable only as a s
 
 Current MindStone already follows this principle through its embedded Pi runner: it opens a Pi `SessionManager`, creates an `AgentSession`, applies the MindStone system prompt override, subscribes to Pi session events, and calls `activeSession.prompt(...)`. MindStone-Agent should rebuild toward that shape rather than reimplementing the Pi wheel.
 
+MindStone-Agent's user-facing terminal path follows the current MindStone/OpenClaw pattern: a MindStone-owned TUI app built from Pi TUI primitives, backed by Gateway/Core routing and Pi session execution. The first `mindstone tui` shell uses vendored Pi TUI components (`TUI`, `ProcessTerminal`, `Editor`, `Markdown`, `Loader`, `Container`) with MindStone styling, while the raw `mindstone chat` command remains a plumbing/test harness.
+
 ### 2.3 Current repo mapping
 
 Likely extraction sources:

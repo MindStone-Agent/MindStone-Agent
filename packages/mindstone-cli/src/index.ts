@@ -30,8 +30,9 @@ import {
   type MindStoneSelectOption,
 } from "@mindstone-agent/core";
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
+import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "config" | "onboard" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;214m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -44,6 +45,7 @@ function usage(): string {
     "Usage:",
     "  mindstone chat         Start native terminal chat over the canonical MindStone session",
     "  mindstone chat --once \"message\"  Send one chat turn and print the assistant response",
+    "  mindstone tui          Start styled MindStone-Agent TUI over the canonical MindStone session",
     "  mindstone config       Configure MindStone-Agent runtime settings",
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone status       Show isolated runtime/config status",
@@ -62,7 +64,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "config" || raw === "onboard" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -558,6 +560,10 @@ async function main(): Promise<void> {
   }
   if (command === "chat") {
     await runChatCommand(process.argv);
+    return;
+  }
+  if (command === "tui") {
+    await runTuiCommand(process.argv);
     return;
   }
   if (command === "doctor") {
