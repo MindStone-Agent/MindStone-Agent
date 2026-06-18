@@ -31,7 +31,8 @@ Implemented now:
 - smallest MindStone-owned inline extension-factory parity: a Pi `context` hook derived from MindStone `sliding_window` policy that prunes only live Pi LLM context while preserving MindStone transcript authority
 - session-local Pi native compaction settings derived from `routing.pi.compaction`, with a 20k reserve-token floor, applied before prompt/compact without relying on global Pi state
 - optional fallback-only compaction safeguard inline factory, gated by `routing.pi.compaction.safeguardFallback: true`, which preserves safe tool-failure and file-operation summaries only when Pi compaction lacks authenticated model context; it does not replace normal authenticated Pi LLM compaction summaries
-- Core status/doctor visibility for pi-session safety posture: isolated agent dir, resume-cap settings, compaction reserve floor, and optional safeguard fallback
+- Core status/doctor/TUI visibility for pi-session safety posture: isolated agent dir, resume-cap settings, compaction reserve floor, and optional safeguard fallback
+- native config-wizard advanced routing support for pi-session safety settings
 - per-session-file serialization around pi-session prompt and compaction operations, combining in-process ordering with a conservative cross-process `.lock` file and stale-lock recovery
 - pre-open Pi session JSONL tail repair for interrupted trailing writes, with `.corrupt-*.bak` backup preservation; this trims malformed tails only and does not rewrite valid history
 - in-memory Pi SessionManager resume cap derived from `routing.pi.resumeCap`, defaulting to 800 message-emitting entries and dropping assistant error turns; this mutates only loaded SessionManager state after open and does not rewrite the Pi session JSONL or MindStone transcript

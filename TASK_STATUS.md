@@ -52,6 +52,7 @@
 - [x] Add session-local Pi native compaction setting parity with `routing.pi.compaction` and a 20k reserve-token floor, applied before pi-session prompt/compact.
 - [x] Add optional fallback-only Pi compaction safeguard factory via `routing.pi.compaction.safeguardFallback`, preserving safe tool-failure/file-operation context only when authenticated Pi compaction summary generation is unavailable.
 - [x] Surface pi-session safety posture in Core status and doctor: isolated agent dir, resume-cap settings, compaction reserve floor, and optional safeguard fallback.
+- [x] Add native config-wizard support for advanced pi-session safety settings: resume cap, drop-error-turn filtering, compaction reserve floor, and fallback-only safeguard.
 - [x] Use real `PiSessionAgentRunner` construction for CLI/TUI pi-session routes instead of injected-provider runners.
 - [x] Add pi-session file serialization around `AgentSession.prompt(...)` and `AgentSession.compact(...)`, including in-process ordering, cross-process lockfile/stale-lock safety, and pre-open malformed-tail JSONL repair with backup preservation.
 - [x] Add in-memory Pi SessionManager resume cap after open, derived from `routing.pi.resumeCap`, preserving append-only session files while bounding live resume context and dropping assistant error turns.

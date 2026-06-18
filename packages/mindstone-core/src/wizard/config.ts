@@ -156,6 +156,13 @@ export function formatConfigSummary(config: MindStoneConfig): string {
   const routing = config.routing?.mode ?? "placeholder";
   const context = resolveContextManagementPolicy(config.contextManagement);
   const defaultAgent = config.routing?.defaultAgentId ?? "default";
+  const piSafetyLines = routing === "pi-session"
+    ? [
+        `routing.pi.resumeCap: ${config.routing?.pi?.resumeCap?.enabled !== false} (${config.routing?.pi?.resumeCap?.maxEntries ?? 800} entries, dropErrorTurns=${config.routing?.pi?.resumeCap?.dropErrorTurns !== false})`,
+        `routing.pi.compaction.reserveTokensFloor: ${config.routing?.pi?.compaction?.reserveTokensFloor ?? 20_000}`,
+        `routing.pi.compaction.safeguardFallback: ${config.routing?.pi?.compaction?.safeguardFallback === true}`,
+      ]
+    : [];
   return [
     `workspace.root: ${config.workspace?.root ?? "."}`,
     `gateway: ${config.gateway?.host ?? "127.0.0.1"}:${config.gateway?.port ?? 19789} auth=${auth}`,
@@ -164,6 +171,7 @@ export function formatConfigSummary(config: MindStoneConfig): string {
     `routing.mode: ${routing}`,
     `routing.defaultAgentId: ${defaultAgent}`,
     `routing.defaultModel: ${config.routing?.defaultModel ?? config.agents?.[defaultAgent]?.defaultModel ?? "unset"}`,
+    ...piSafetyLines,
     `onboarding.profile: ${selectedProfileSummary(config.onboarding?.profile)}`,
     `onboarding.preferences: ${selectedPreferencesSummary(config.onboarding?.preferences)}`,
     `onboarding.identity: ${selectedIdentitySummary(config.onboarding?.identity)}`,
@@ -655,6 +663,90 @@ async function choosePiModel(params: {
   return modelChoice.replace(/^model:/, "");
 }
 
+async function configurePiSessionSafety(
+  routing: MindStoneRoutingConfig,
+  prompter: MindStonePrompter,
+): Promise<MindStoneRoutingConfig> {
+  const action = await prompter.select<"recommended" | "custom">({
+    message: "Pi-session safety settings",
+    options: [
+      { value: "recommended", label: "Use recommended/current values", hint: "resume cap on; 20k reserve floor" },
+      { value: "custom", label: "Customize safety settings", hint: "advanced" },
+    ],
+    initialValue: "recommended",
+  });
+
+  const currentResumeCap = routing.pi?.resumeCap;
+  const currentCompaction = routing.pi?.compaction;
+  if (action === "recommended") {
+    return {
+      ...routing,
+      pi: {
+        ...routing.pi,
+        resumeCap: {
+          enabled: currentResumeCap?.enabled ?? true,
+          maxEntries: currentResumeCap?.maxEntries ?? 800,
+          dropErrorTurns: currentResumeCap?.dropErrorTurns ?? true,
+        },
+        compaction: {
+          ...currentCompaction,
+          reserveTokensFloor: currentCompaction?.reserveTokensFloor ?? 20_000,
+        },
+      },
+    };
+  }
+
+  const resumeCapEnabled = await prompter.select<"enabled" | "disabled">({
+    message: "Pi-session resume cap",
+    options: [
+      { value: "enabled", label: "Enabled", hint: "recommended for long-running sessions" },
+      { value: "disabled", label: "Disabled", hint: "advanced; may reload very large sessions" },
+    ],
+    initialValue: currentResumeCap?.enabled === false ? "disabled" : "enabled",
+  });
+  const maxEntries = asPositiveInteger(
+    await prompter.text({ message: "Resume cap max message-emitting entries", placeholder: "800", initialValue: String(currentResumeCap?.maxEntries ?? 800) }),
+    800,
+  );
+  const dropErrorTurns = await prompter.select<"enabled" | "disabled">({
+    message: "Drop assistant error turns from resumed in-memory branch",
+    options: [
+      { value: "enabled", label: "Enabled", hint: "recommended" },
+      { value: "disabled", label: "Disabled", hint: "preserve error turns in live resume context" },
+    ],
+    initialValue: currentResumeCap?.dropErrorTurns === false ? "disabled" : "enabled",
+  });
+  const reserveTokensFloor = asPositiveInteger(
+    await prompter.text({ message: "Pi compaction reserve token floor", placeholder: "20000", initialValue: String(currentCompaction?.reserveTokensFloor ?? 20_000) }),
+    20_000,
+  );
+  const safeguardFallback = await prompter.select<"enabled" | "disabled">({
+    message: "Fallback-only compaction safeguard",
+    options: [
+      { value: "disabled", label: "Disabled", hint: "normal Pi behavior unless manually enabled" },
+      { value: "enabled", label: "Enabled", hint: "preserve file/tool-failure context when no model auth is available" },
+    ],
+    initialValue: currentCompaction?.safeguardFallback === true ? "enabled" : "disabled",
+  });
+
+  return {
+    ...routing,
+    pi: {
+      ...routing.pi,
+      resumeCap: {
+        enabled: resumeCapEnabled === "enabled",
+        maxEntries,
+        dropErrorTurns: dropErrorTurns === "enabled",
+      },
+      compaction: {
+        ...currentCompaction,
+        reserveTokensFloor,
+        safeguardFallback: safeguardFallback === "enabled",
+      },
+    },
+  };
+}
+
 async function configureRouting(
   config: MindStoneConfig,
   prompter: MindStonePrompter,
@@ -739,6 +831,10 @@ async function configureRouting(
         current: nextRouting.pi?.agentDir ?? paths.piAgentDir,
       });
       nextRouting.pi = { ...nextRouting.pi, agentDir };
+    }
+
+    if (mode === "pi-session") {
+      Object.assign(nextRouting, await configurePiSessionSafety(nextRouting, prompter));
     }
   }
 
