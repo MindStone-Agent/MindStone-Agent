@@ -6,6 +6,7 @@ import {
   runMindStoneConfigWizard,
   runtimePathsFromEnv,
   loadMindStoneConfig,
+  loadMindStoneIdentity,
   resolveConfigPath,
   sqliteMemoryDatabasePath,
   SqliteMemoryRecallProvider,
@@ -130,6 +131,65 @@ function resolveLimit(value: unknown, fallback = 5): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(Math.floor(parsed), 20) : fallback;
 }
 
+function loadedRuntimeConfig() {
+  const paths = runtimePathsFromEnv();
+  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+  if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  return { paths, loaded };
+}
+
+function runtimeIsolationMessage(): string {
+  const paths = runtimePathsFromEnv();
+  return [
+    "MindStone-Agent runtime isolation",
+    `Pi agent dir: ${paths.piAgentDir}`,
+    `Pi session dir: ${paths.piSessionDir}`,
+    `Data dir: ${paths.dataDir}`,
+  ].join("\n");
+}
+
+function gatewayStatusMessage(): string {
+  const { loaded } = loadedRuntimeConfig();
+  const gateway = loaded.config?.gateway;
+  const host = gateway?.host ?? "127.0.0.1";
+  const port = gateway?.port ?? 19789;
+  return [
+    "MindStone Gateway status",
+    `Config: ${loaded.path}`,
+    `Endpoint: http://${host}:${port}`,
+    `Auth mode: ${gateway?.auth?.mode ?? "none"}`,
+    `OpenAI chat completions: ${gateway?.http?.chatCompletions?.enabled ?? true}`,
+    `OpenResponses: ${gateway?.http?.responses?.enabled ?? false}`,
+    "Live probe: not run by this command",
+    "Secret values are intentionally not displayed.",
+  ].join("\n");
+}
+
+function mindstoneContextMessage(): string {
+  const { paths, loaded } = loadedRuntimeConfig();
+  const config = loaded.config;
+  const agentId = config?.routing?.defaultAgentId ?? "default";
+  const agent = config?.agents?.[agentId];
+  const identity = agent ? loadMindStoneIdentity(agentId, agent, loaded.path) : undefined;
+  return [
+    "MindStone context status",
+    `Config: ${loaded.path}`,
+    `Runtime data dir: ${paths.dataDir}`,
+    `Default agent: ${agentId}`,
+    `Routing mode: ${config?.routing?.mode ?? "placeholder"}`,
+    `Default model: ${config?.routing?.defaultModel ?? agent?.defaultModel ?? "not configured"}`,
+    `Default session: ${config?.session?.defaultSessionKey ?? "agent:default:main"}`,
+    `Identity path: ${identity?.identityPath ?? "not configured"}`,
+    `Identity exists: ${identity?.identityExists ?? false}`,
+    `User path: ${identity?.userPath ?? "not configured"}`,
+    `User exists: ${identity?.userExists ?? false}`,
+    `Memory autoRecall: ${config?.memory?.autoRecall ?? false}`,
+    `Memory vector store: ${config?.memory?.vectorStore ?? "memory"}`,
+    `Context mode: ${config?.contextManagement?.mode ?? "sliding_window"}`,
+    identity?.error ? `Identity error: ${identity.error}` : undefined,
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
 function memoryStatusMessage(): { text: string; details: Record<string, unknown> } {
   const paths = runtimePathsFromEnv();
   const stats = getSqliteMemoryIndexStats(paths);
@@ -156,9 +216,7 @@ function memoryStatusText(): string {
 }
 
 function discoverReadableMemoryDocuments(): MemoryDocument[] {
-  const paths = runtimePathsFromEnv();
-  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
-  if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  const { paths, loaded } = loadedRuntimeConfig();
   return discoverFileMemoryDocuments({ config: loaded.config, paths });
 }
 
@@ -229,9 +287,7 @@ async function memorySearchMessage(query: string, limit: number): Promise<{ text
 }
 
 function resolveMemoryRecallProvider(): MemoryRecallProvider | undefined {
-  const paths = runtimePathsFromEnv();
-  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
-  if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  const { paths, loaded } = loadedRuntimeConfig();
   const stats = getSqliteMemoryIndexStats(paths);
   if (stats.present && stats.chunks > 0) {
     return new SqliteMemoryRecallProvider({
@@ -271,6 +327,22 @@ function piPrompter(ctx: PiCommandContext): MindStonePrompter {
       return resolved;
     },
   };
+}
+
+async function runConfigWizardCommand(ctx: PiCommandContext): Promise<void> {
+  try {
+    const result = await runMindStoneConfigWizard(piPrompter(ctx));
+    ctx.ui.notify(
+      [
+        result.wrote ? "MindStone-Agent config updated." : "MindStone-Agent config unchanged.",
+        `Path: ${result.path}`,
+        `Changed sections: ${result.changedSections.length ? result.changedSections.join(", ") : "none"}`,
+      ].join("\n"),
+      "info",
+    );
+  } catch (error) {
+    ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+  }
 }
 
 export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
@@ -320,16 +392,36 @@ export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
   pi.registerCommand("mindstone-agent-status", {
     description: "Show MindStone-Agent isolated runtime status",
     handler: async (_args, ctx) => {
-      const paths = runtimePathsFromEnv();
-      ctx.ui.notify(
-        [
-          "MindStone-Agent runtime isolation",
-          `Pi agent dir: ${paths.piAgentDir}`,
-          `Pi session dir: ${paths.piSessionDir}`,
-          `Data dir: ${paths.dataDir}`,
-        ].join("\n"),
-        "info",
-      );
+      ctx.ui.notify(runtimeIsolationMessage(), "info");
+    },
+  });
+
+  pi.registerCommand("mindstone-status", {
+    description: "Show MindStone-Agent isolated runtime status",
+    handler: async (_args, ctx) => {
+      ctx.ui.notify(runtimeIsolationMessage(), "info");
+    },
+  });
+
+  pi.registerCommand("mindstone-context", {
+    description: "Show read-only MindStone-Agent context/config/identity status",
+    handler: async (_args, ctx) => {
+      try {
+        ctx.ui.notify(mindstoneContextMessage(), "info");
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("mindstone-gateway-status", {
+    description: "Show configured MindStone Gateway endpoint/auth status without probing live network state",
+    handler: async (_args, ctx) => {
+      try {
+        ctx.ui.notify(gatewayStatusMessage(), "info");
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
     },
   });
 
@@ -363,20 +455,11 @@ export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
 
   pi.registerCommand("mindstone-config", {
     description: "Configure MindStone-Agent runtime settings",
-    handler: async (_args, ctx) => {
-      try {
-        const result = await runMindStoneConfigWizard(piPrompter(ctx));
-        ctx.ui.notify(
-          [
-            result.wrote ? "MindStone-Agent config updated." : "MindStone-Agent config unchanged.",
-            `Path: ${result.path}`,
-            `Changed sections: ${result.changedSections.length ? result.changedSections.join(", ") : "none"}`,
-          ].join("\n"),
-          "info",
-        );
-      } catch (error) {
-        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-      }
-    },
+    handler: async (_args, ctx) => runConfigWizardCommand(ctx),
+  });
+
+  pi.registerCommand("mindstone-setup", {
+    description: "Run MindStone-Agent setup/configuration flow",
+    handler: async (_args, ctx) => runConfigWizardCommand(ctx),
   });
 }

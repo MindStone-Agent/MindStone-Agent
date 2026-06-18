@@ -79,8 +79,8 @@ The preferred order is:
 - [ ] Implement Pi prompter adapter using current Pi `ctx.ui` APIs.
 - [x] Add native CLI command for setup/onboarding.
 - [x] Add native CLI command for section reconfiguration.
-- [ ] Add command for setup/onboarding in Pi adapter.
-- [ ] Add command for section reconfiguration in Pi adapter.
+- [x] Add command for setup/onboarding in Pi adapter: `/mindstone-setup` runs the shared config wizard.
+- [x] Add command for section reconfiguration in Pi adapter: `/mindstone-config` runs the shared config wizard.
 - [x] Add default onboarding profiles with write-in option.
 - [x] Add `Integration Builder` as an initial onboarding profile.
 - [ ] Add reusable `Integration Builder` skill behavior.
@@ -128,7 +128,7 @@ The preferred order is:
 - [ ] Add identity/context injection at prompt start.
 - [ ] Add Pi transcript archive hook.
 - [ ] Add compaction/session lifecycle handling where Pi supports it.
-- [ ] Add Gateway status/check commands.
+- [x] Add read-only Gateway status command: `/mindstone-gateway-status` reports configured endpoint/auth/surfaces without live probing.
 - [ ] Add smoke validation instructions.
 - [x] Add a Core/Gateway `AgentRunner` boundary so CLI, Gateway, WebChat, OpenAI-compatible, and future channel surfaces do not call route/provider execution directly.
   - Current default: `ProviderRouteAgentRunner`, a behavior-preserving wrapper around the existing routed provider path.
@@ -183,12 +183,12 @@ The preferred order is:
 
 ### Candidate commands
 
-- [ ] `/mindstone-setup`
-- [x] `/mindstone-status` equivalent exists as `/mindstone-agent-status`
-- [ ] `/mindstone-context`
+- [x] `/mindstone-setup`
+- [x] `/mindstone-status` and `/mindstone-agent-status`
+- [x] `/mindstone-context`
 - [x] `/mindstone-recall-status`
 - [x] `/mindstone-recall-search <query>`
-- [ ] `/mindstone-gateway-status`
+- [x] `/mindstone-gateway-status`
 - [ ] `/mindstone-channels`
 
 ### Exit criteria

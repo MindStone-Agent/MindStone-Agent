@@ -58,7 +58,7 @@
 - [x] Add in-memory Pi SessionManager resume cap after open, derived from `routing.pi.resumeCap`, preserving append-only session files while bounding live resume context and dropping assistant error turns.
 - [x] Add `docs/refactor/PI_SESSION_PARITY.md` tracking MindStone embedded-runner parity tiers and next gaps.
 - [x] Add `mindstone memory maintain` and `mindstone memory backfill --maintain` for memory substrate maintenance: stale-source cleanup, opt-in exact-text dedupe, orphan-source cleanup, SQLite optimize/reindex/VACUUM, WAL checkpointing, bloat/duplicate diagnostics, doctor/status/TUI visibility, JSON automation output, and embedding preservation across unchanged backfilled chunks.
-- [x] Add read-only Pi adapter commands for isolated runtime memory status/search: `/mindstone-recall-status` and `/mindstone-recall-search <query> [--limit N]`, with smoke coverage.
+- [x] Add Pi adapter setup/status/context/gateway/recall commands with smoke coverage: `/mindstone-setup`, `/mindstone-config`, `/mindstone-status`, `/mindstone-agent-status`, `/mindstone-context`, `/mindstone-gateway-status`, `/mindstone-recall-status`, and `/mindstone-recall-search <query> [--limit N]`.
 - [x] Add read-only Pi adapter memory tools for session-backed Pi use: `mindstone_memory_status`, `mindstone_memory_search`, and `mindstone_memory_read`; read is restricted to discovered MindStone memory docs and smoke coverage verifies search/read/status behavior.
 - [ ] Complete full live authenticated event/stream validation, live-observed durable metadata allowlist refinements if needed, and any necessary full staged compaction-safeguard summary parity for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
