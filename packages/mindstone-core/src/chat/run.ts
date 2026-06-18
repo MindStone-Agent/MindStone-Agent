@@ -12,6 +12,7 @@ import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
 import {
   createProviderRouteAgentRunner,
+  sanitizeRunnerStreamSubstrateEventPayload,
   type AgentRunResult,
   type AgentRunStreamEvent,
   type AgentRunner,
@@ -181,7 +182,7 @@ function runnerStreamEventMetadata(event: AgentRunStreamEvent): Record<string, u
     streamMetadata: event.metadata,
   };
   if (event.type === "substrate_event") {
-    return { ...base, substrate: event.substrate, payload: event.event };
+    return { ...base, substrate: event.substrate, payload: sanitizeRunnerStreamSubstrateEventPayload(event.event) };
   }
   if (event.type === "text_delta") {
     return { ...base, textChars: event.text.length };
@@ -225,7 +226,7 @@ function appendRunnerStreamTranscriptEvents(input: {
     agentId: input.agentId,
     role: "event",
     text: runnerStreamEventText(event),
-    content: event.type === "substrate_event" ? event.event : undefined,
+    content: event.type === "substrate_event" ? sanitizeRunnerStreamSubstrateEventPayload(event.event) : undefined,
     runId: input.runId,
     source: input.source,
     metadata: runnerStreamEventMetadata(event),

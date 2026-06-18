@@ -41,6 +41,7 @@ import {
   providerDiagnosticsFromChatResult,
   readCurrentHandoff,
   requestGatewaySubstrateCompaction,
+  sanitizeRunnerStreamSubstrateEventPayload,
   writeAutoCompactHandoff,
   type MindStoneConfig,
   type AgentRunResult,
@@ -176,7 +177,7 @@ function runnerStreamEventMetadata(event: AgentRunStreamEvent): Record<string, u
     surface: event.surface,
     streamMetadata: event.metadata,
   };
-  if (event.type === "substrate_event") return { ...base, substrate: event.substrate, payload: event.event };
+  if (event.type === "substrate_event") return { ...base, substrate: event.substrate, payload: sanitizeRunnerStreamSubstrateEventPayload(event.event) };
   if (event.type === "text_delta") return { ...base, textChars: event.text.length };
   if (event.type === "run_failed") return { ...base, error: event.error };
   if (event.type === "run_started") return { ...base, input: event.input };
@@ -213,7 +214,7 @@ function appendRunnerStreamTranscriptEvents(input: {
       agentId: input.agentId,
       role: "event",
       text: runnerStreamEventText(event),
-      content: event.type === "substrate_event" ? event.event : undefined,
+      content: event.type === "substrate_event" ? sanitizeRunnerStreamSubstrateEventPayload(event.event) : undefined,
       runId: input.runId,
       source: input.source,
       metadata: runnerStreamEventMetadata(event),

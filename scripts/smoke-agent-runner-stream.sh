@@ -41,7 +41,7 @@ const fakeProvider = {
           events: [
             { type: 'agent_start' },
             { type: 'message_update', messageRole: 'assistant', assistantStreamEventType: 'text_delta', assistantStreamDeltaChars: 6 },
-            { type: 'tool_execution_start', toolName: 'read', toolCallId: 'tool-1', toolArgsKeys: ['path'] },
+            { type: 'tool_execution_start', toolName: 'read', toolCallId: 'tool-1', toolArgsKeys: ['path'], args: { path: 'SECRET_PATH_SHOULD_NOT_PERSIST', token: 'SECRET_TOKEN_SHOULD_NOT_PERSIST' }, result: { content: 'SECRET_RESULT_SHOULD_NOT_PERSIST' } },
           ],
         },
       },
@@ -153,6 +153,18 @@ try {
   if (streamEntries.length !== 3) throw new Error(`expected 3 persisted runner stream events, got ${streamEntries.length}`);
   if (!streamEntries.every((entry) => entry.metadata?.streamType === 'substrate_event' && entry.metadata?.substrate === 'pi')) {
     throw new Error('persisted runner stream events were not Pi substrate events');
+  }
+  const serializedStreamEntries = JSON.stringify(streamEntries);
+  if (serializedStreamEntries.includes('SECRET_PATH_SHOULD_NOT_PERSIST') || serializedStreamEntries.includes('SECRET_TOKEN_SHOULD_NOT_PERSIST') || serializedStreamEntries.includes('SECRET_RESULT_SHOULD_NOT_PERSIST')) {
+    throw new Error('persisted runner stream events leaked raw substrate args/result values');
+  }
+  const sanitizedToolEntry = streamEntries.find((entry) => entry.metadata?.payload?.toolName === 'read');
+  if (!sanitizedToolEntry) throw new Error('sanitized tool stream entry missing');
+  if (!sanitizedToolEntry.metadata?.payload?.unknownKeys?.includes('args') || !sanitizedToolEntry.metadata?.payload?.unknownKeys?.includes('result')) {
+    throw new Error(`sanitized tool stream entry did not preserve unknown key names: ${JSON.stringify(sanitizedToolEntry.metadata?.payload)}`);
+  }
+  if (JSON.stringify(sanitizedToolEntry.content) !== JSON.stringify(sanitizedToolEntry.metadata.payload)) {
+    throw new Error('persisted stream content and metadata payload sanitizer output diverged');
   }
   const assistantIndex = transcript.findIndex((entry) => entry.role === 'assistant');
   const lastStreamIndex = transcript.findLastIndex((entry) => entry.metadata?.event === 'runner_stream_event');
