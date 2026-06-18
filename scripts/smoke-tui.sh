@@ -83,6 +83,10 @@ if ! grep -q "gateway auth mode" <<<"${OUTPUT}" || ! grep -q "Secret values are 
   echo "TUI smoke output missing sanitized config panel" >&2
   exit 1
 fi
+if ! grep -q "Transcript history is append-only" <<<"${OUTPUT}" || ! grep -q "entries on disk" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing transcript panel" >&2
+  exit 1
+fi
 if ! grep -q "autoRecall" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing memory panel" >&2
   exit 1

@@ -9,6 +9,7 @@ import {
   listTranscriptSessions,
   planMindStonePromptWindow,
   readTranscriptEntries,
+  transcriptPathForSession,
   resolveMindStoneChatModel,
   runMindStoneChatTurn,
   runtimePathsFromEnv,
@@ -318,6 +319,35 @@ function buildTuiMemoryPanel(config: ReturnType<typeof loadMindStoneConfig>["con
     stats.error ? `- error: \`${stats.error}\`` : undefined,
     `- database: \`${stats.databasePath}\``,
   ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function buildTuiTranscriptPanel(params: {
+  ctx: TuiCommandContext;
+  entries: TranscriptEntry[];
+  paths: ReturnType<typeof runtimePathsFromEnv>;
+  summaries?: ReturnType<typeof listTranscriptSessions>;
+}): string {
+  const summaries = params.summaries ?? listTranscriptSessions({ paths: params.paths });
+  const summary = summaries.find((item) => item.sessionKey === params.ctx.sessionKey);
+  const events = params.entries.filter((entry) => entry.role === "event").length;
+  const roles = params.entries.reduce<Record<string, number>>((counts, entry) => {
+    counts[entry.role] = (counts[entry.role] ?? 0) + 1;
+    return counts;
+  }, {});
+  const roleCounts = Object.entries(roles).map(([role, count]) => `${role}:${count}`).join(" ") || "none";
+  return [
+    `- session: \`${params.ctx.sessionKey}\``,
+    `- path: \`${summary?.path ?? transcriptPathForSession(params.ctx.sessionKey, { paths: params.paths })}\``,
+    `- exists: \`${Boolean(summary)}\``,
+    `- entries on disk: \`${summary?.entries ?? 0}\``,
+    `- entries read: \`${params.entries.length}\``,
+    `- role counts read: \`${roleCounts}\``,
+    `- event entries read: \`${events}\``,
+    `- bytes: \`${summary?.bytes ?? 0}\``,
+    summary?.updatedAt ? `- updated: \`${summary.updatedAt}\`` : undefined,
+    "",
+    "Transcript history is append-only. This panel does not prune, compact, or rewrite it.",
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 function buildTuiConfigPanel(params: {
@@ -907,6 +937,15 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   }));
   const smokePaths = runtimePathsFromEnv();
   chat.addPanel("config", buildTuiConfigPanel({ config: smokeConfig, configPath: "/tmp/mindstone/config.json", paths: smokePaths }));
+  chat.addPanel("transcript", buildTuiTranscriptPanel({
+    ctx,
+    paths: smokePaths,
+    entries: [
+      { id: "user-smoke", sessionKey: ctx.sessionKey, agentId: ctx.agentId, role: "user", text: "hello tui", timestamp: "2026-06-18T00:00:00.000Z" },
+      { id: "assistant-smoke", sessionKey: ctx.sessionKey, agentId: ctx.agentId, role: "assistant", text: "TUI smoke response", timestamp: "2026-06-18T00:00:01.000Z" },
+    ],
+    summaries: [{ sessionKey: ctx.sessionKey, path: "/tmp/mindstone/transcripts/YWdlbnQ6ZGVmYXVsdDptYWlu.jsonl", entries: 2, bytes: 2048, updatedAt: "2026-06-18T00:00:01.000Z" }],
+  }));
   chat.addPanel("memory", buildTuiMemoryPanel(smokeConfig, smokePaths));
   chat.addPanel("context", buildTuiContextPanel({ config: smokeConfig, ctx, entries: [] }));
   chat.addPanel("handoff", buildTuiHandoffPanel(smokePaths));
@@ -1046,6 +1085,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "clear", description: "Clear the visible chat log" },
     { name: "status", description: "Show current TUI/session status" },
     { name: "config", description: "Show sanitized active runtime config" },
+    { name: "transcript", description: "Show active transcript file status" },
     { name: "memory", description: "Show memory/recall index status" },
     { name: "context", description: "Show context window policy and current session estimate" },
     { name: "handoff", description: "Show current compaction handoff status" },
@@ -1124,7 +1164,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /config, /memory, /context, /handoff, /identity, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /config, /transcript, /memory, /context, /handoff, /identity, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -1142,6 +1182,15 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       }
       if (message === "/config") {
         chat.addPanel("config", buildTuiConfigPanel({ config: loaded.config, configPath: loaded.path, paths }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/transcript") {
+        chat.addPanel("transcript", buildTuiTranscriptPanel({
+          ctx,
+          paths,
+          entries: readTranscriptEntries(ctx.sessionKey),
+        }));
         tui.requestRender();
         return;
       }
