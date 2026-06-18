@@ -60,6 +60,22 @@ if ! grep -q "/help" <<<"${OUTPUT}"; then
   exit 1
 fi
 
+./scripts/mindstone chat --once "history sentinel for tui" --json >/tmp/mindstone-agent-tui-chat.json
+HISTORY_OUTPUT="$(./scripts/mindstone tui --smoke-history --history-limit 10 --width 72)"
+echo "${HISTORY_OUTPUT}"
+if ! grep -q "history sentinel for tui" <<<"${HISTORY_OUTPUT}"; then
+  echo "TUI history smoke output missing user transcript entry" >&2
+  exit 1
+fi
+if ! grep -q "tui-smoke: history sentinel for tui" <<<"${HISTORY_OUTPUT}"; then
+  echo "TUI history smoke output missing assistant transcript entry" >&2
+  exit 1
+fi
+if ! grep -q "Loaded 2 recent transcript" <<<"${HISTORY_OUTPUT}"; then
+  echo "TUI history smoke output missing loaded history count" >&2
+  exit 1
+fi
+
 HELP="$(./scripts/mindstone help)"
 if ! grep -q "mindstone tui" <<<"${HELP}"; then
   echo "CLI help missing tui command" >&2

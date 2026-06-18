@@ -2,11 +2,13 @@ import {
   loadMindStoneConfig,
   resolveConfigPath,
   resolveConfiguredSessionKey,
+  readTranscriptEntries,
   resolveMindStoneChatModel,
   runMindStoneChatTurn,
   runtimePathsFromEnv,
   type AgentRunner,
   type MindStoneModelInfo,
+  type TranscriptEntry,
 } from "@mindstone-agent/core";
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 import {
@@ -130,6 +132,16 @@ class MindStoneChatLog extends Container {
     this.append(new Text(muted(text), 1, 0));
   }
 
+  addEvent(text: string): void {
+    this.append(new Text(dim(`• ${text}`), 1, 0));
+  }
+
+  addTool(text: string): void {
+    this.append(new Spacer(1));
+    this.append(new Text(`${amber("◇")} ${bold("tool")}`, 1, 0));
+    this.append(new Markdown(text || muted("(empty tool result)"), 2, 0, markdownTheme));
+  }
+
   addUser(text: string): void {
     this.append(new Spacer(1));
     this.append(new Text(`${gold("◆")} ${bold("you")}`, 1, 0));
@@ -158,6 +170,83 @@ function optionValue(argv: string[], name: string): string | undefined {
 
 function hasOption(argv: string[], name: string): boolean {
   return argv.includes(name);
+}
+
+function numberOption(argv: string[], name: string, fallback: number): number {
+  const raw = optionValue(argv, name);
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function textFromContent(content: unknown): string | undefined {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object") return "";
+      const record = part as Record<string, unknown>;
+      if (record.type === "text" && typeof record.text === "string") return record.text;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  return text || undefined;
+}
+
+function transcriptEntryText(entry: TranscriptEntry): string {
+  return (entry.text ?? textFromContent(entry.content) ?? "").trim();
+}
+
+function eventEntryLabel(entry: TranscriptEntry): string | undefined {
+  const metadataEvent = typeof entry.metadata?.event === "string" ? entry.metadata.event : undefined;
+  const text = transcriptEntryText(entry);
+  if (text) return text;
+  if (metadataEvent) return metadataEvent.replaceAll("_", " ");
+  return undefined;
+}
+
+function appendTranscriptEntryToChatLog(chat: MindStoneChatLog, entry: TranscriptEntry): boolean {
+  const text = transcriptEntryText(entry);
+  if (entry.role === "user") {
+    chat.addUser(text || muted("(empty user message)"));
+    return true;
+  }
+  if (entry.role === "assistant") {
+    chat.addAssistant(text || muted("(empty assistant response)"));
+    return true;
+  }
+  if (entry.role === "tool") {
+    chat.addTool(text || muted("(empty tool result)"));
+    return true;
+  }
+  if (entry.role === "event") {
+    const label = eventEntryLabel(entry);
+    if (!label) return false;
+    chat.addEvent(label);
+    return true;
+  }
+  return false;
+}
+
+function isRenderableTranscriptEntry(entry: TranscriptEntry): boolean {
+  if (entry.role === "user" || entry.role === "assistant" || entry.role === "tool") return true;
+  if (entry.role === "event") return Boolean(eventEntryLabel(entry));
+  return false;
+}
+
+function appendRecentTranscriptToChatLog(chat: MindStoneChatLog, entries: TranscriptEntry[]): number {
+  let rendered = 0;
+  for (const entry of entries) {
+    if (appendTranscriptEntryToChatLog(chat, entry)) rendered += 1;
+  }
+  return rendered;
+}
+
+function recentTranscriptEntries(sessionKey: string, limit: number): TranscriptEntry[] {
+  return readTranscriptEntries(sessionKey, { limit });
 }
 
 function resolveTuiProvider(config: ReturnType<typeof loadMindStoneConfig>["config"]): MockMindStoneProvider | PiMindStoneProvider | PiSessionMindStoneProvider {
@@ -265,9 +354,34 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
 }
 
+function createMindStoneTuiHistorySnapshot(argv: string[], width: number): string {
+  const paths = runtimePathsFromEnv();
+  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+  if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  const ctx = resolveTuiContext(argv, loaded);
+  const header = new MindStoneHeader(ctx);
+  const chat = new MindStoneChatLog();
+  const footer = new MindStoneFooter();
+  const historyLimit = numberOption(argv, "--history-limit", 40);
+  const entries = recentTranscriptEntries(ctx.sessionKey, historyLimit);
+  const renderableCount = entries.filter(isRenderableTranscriptEntry).length;
+  if (renderableCount === 0) {
+    chat.addSystem("No transcript history yet. Type a message to begin.");
+  } else {
+    chat.addSystem(`Loaded ${renderableCount} recent transcript entr${renderableCount === 1 ? "y" : "ies"}.`);
+    appendRecentTranscriptToChatLog(chat, entries);
+  }
+  footer.setStatus(`session ${ctx.sessionKey}`);
+  return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
+}
+
 export async function runTuiCommand(argv: string[]): Promise<void> {
+  if (hasOption(argv, "--smoke-history")) {
+    process.stdout.write(`${createMindStoneTuiHistorySnapshot(argv, numberOption(argv, "--width", 80))}\n`);
+    return;
+  }
   if (hasOption(argv, "--smoke")) {
-    process.stdout.write(`${createMindStoneTuiSmokeSnapshot(Number(optionValue(argv, "--width") ?? 80))}\n`);
+    process.stdout.write(`${createMindStoneTuiSmokeSnapshot(numberOption(argv, "--width", 80))}\n`);
     return;
   }
 
@@ -294,7 +408,15 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "quit", description: "Exit the TUI" },
   ], process.cwd()));
 
-  chat.addSystem("Welcome back. Type a message, /help, /clear, or /exit.");
+  const historyLimit = numberOption(argv, "--history-limit", 40);
+  const entries = recentTranscriptEntries(ctx.sessionKey, historyLimit);
+  const renderableCount = entries.filter(isRenderableTranscriptEntry).length;
+  if (renderableCount === 0) {
+    chat.addSystem("Welcome back. Type a message, /help, /clear, or /exit.");
+  } else {
+    chat.addSystem(`Loaded ${renderableCount} recent transcript entr${renderableCount === 1 ? "y" : "ies"}. Type /help for commands.`);
+    appendRecentTranscriptToChatLog(chat, entries);
+  }
   footer.setStatus(`session ${ctx.sessionKey}`);
 
   tui.addChild(header);

@@ -55,6 +55,7 @@
 - [x] Add native `mindstone chat` terminal/REPL surface over the canonical session and routed identity/SCRI prompt path.
 - [x] Validate autoRecall/SCRI injection through native `mindstone chat` with `npm run smoke:cli-chat-recall`.
 - [x] Add first styled `mindstone tui` shell using vendored Pi TUI primitives, MindStone gold/diamond theme, chat log, editor, footer/status, slash commands, and routed chat path.
+- [x] Load recent transcript history into `mindstone tui` startup; smoke validates rendering prior user/assistant transcript entries.
 
 ### Completed
 
@@ -135,7 +136,9 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - Provides styled header, chat log, footer/status, editor, command hints, `/help`, `/clear`, `/status`, and `/exit`.
   - Routes submitted turns through existing MindStone-Agent chat pipeline and canonical session selection.
   - Smoke validation: `npm run smoke:tui`.
-- [ ] Load recent transcript history into the TUI on startup.
+- [x] Load recent transcript history into the TUI on startup.
+  - Supports `--history-limit` and renders user, assistant, tool, and labeled event entries.
+  - Smoke validation seeds a transcript via `mindstone chat --once` and verifies `mindstone tui --smoke-history`.
 - [ ] Stream/update assistant text and tool/substrate events in-place from Gateway/runner events.
 - [ ] Add session/agent/model selectors and status overlays.
 - [ ] Adapt richer current MindStone TUI components and event handlers from `/Users/clint/Projects/MindStone/src/tui/`.
