@@ -189,7 +189,7 @@ The preferred order is:
 - [x] `/mindstone-recall-status`
 - [x] `/mindstone-recall-search <query>`
 - [x] `/mindstone-gateway-status`
-- [ ] `/mindstone-channels`
+- [x] `/mindstone-channels` diagnostic command; reports configured channel keys and honest surface/plugin status without starting listeners or probing networks.
 
 ### Exit criteria
 

@@ -57,7 +57,7 @@ const ctx = {
     notify(message, kind = 'info') { notifications.push({ kind, message }); },
   },
 };
-for (const name of ['mindstone-agent-status', 'mindstone-status', 'mindstone-context', 'mindstone-gateway-status', 'mindstone-recall-status', 'mindstone-recall-search', 'mindstone-config', 'mindstone-setup']) {
+for (const name of ['mindstone-agent-status', 'mindstone-status', 'mindstone-context', 'mindstone-gateway-status', 'mindstone-channels', 'mindstone-recall-status', 'mindstone-recall-search', 'mindstone-config', 'mindstone-setup']) {
   if (!commands.has(name)) throw new Error(`missing command ${name}`);
 }
 for (const name of ['mindstone_memory_status', 'mindstone_memory_search', 'mindstone_memory_read']) {
@@ -67,6 +67,7 @@ await commands.get('mindstone-agent-status').handler('', ctx);
 await commands.get('mindstone-status').handler('', ctx);
 await commands.get('mindstone-context').handler('', ctx);
 await commands.get('mindstone-gateway-status').handler('', ctx);
+await commands.get('mindstone-channels').handler('', ctx);
 await commands.get('mindstone-recall-status').handler('', ctx);
 await commands.get('mindstone-recall-search').handler('adapter recall sentinel --limit 3', ctx);
 const statusTool = await tools.get('mindstone_memory_status').execute('tool-status', {});
@@ -84,8 +85,8 @@ NODE
 
 echo "${OUTPUT}"
 
-if ! grep -q 'mindstone-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-context' <<<"${OUTPUT}" || ! grep -q 'mindstone-gateway-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-setup' <<<"${OUTPUT}"; then
-  echo "Pi adapter smoke output missing status/context/gateway/setup commands" >&2
+if ! grep -q 'mindstone-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-context' <<<"${OUTPUT}" || ! grep -q 'mindstone-gateway-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-channels' <<<"${OUTPUT}" || ! grep -q 'mindstone-setup' <<<"${OUTPUT}"; then
+  echo "Pi adapter smoke output missing status/context/gateway/channels/setup commands" >&2
   exit 1
 fi
 if ! grep -q 'mindstone-recall-status' <<<"${OUTPUT}"; then
@@ -110,6 +111,10 @@ if ! grep -q 'MindStone context status' <<<"${OUTPUT}" || ! grep -q 'Default age
 fi
 if ! grep -q 'MindStone Gateway status' <<<"${OUTPUT}" || ! grep -q 'Live probe: not run by this command' <<<"${OUTPUT}"; then
   echo "Pi adapter gateway status command did not report non-probing gateway status" >&2
+  exit 1
+fi
+if ! grep -q 'MindStone channel/surface status' <<<"${OUTPUT}" || ! grep -q 'Telegram: not implemented/validated' <<<"${OUTPUT}" || ! grep -q 'diagnostic only' <<<"${OUTPUT}"; then
+  echo "Pi adapter channels command did not report honest channel status" >&2
   exit 1
 fi
 if ! grep -q 'MindStone memory status' <<<"${OUTPUT}"; then
