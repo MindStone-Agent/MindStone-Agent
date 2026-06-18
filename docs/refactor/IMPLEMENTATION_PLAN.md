@@ -127,8 +127,8 @@ The preferred order is:
   - `/mindstone-recall-search <query> [--limit N]`
   - Smoke validation: `npm run smoke:pi-adapter`
 - [x] Add first-pass identity/user and SCRI/recall context injection at prompt start: Pi adapter `before_agent_start` appends configured `IDENTITY.md`/`USER.md` as standing orientation and, when `memory.autoRecall` is enabled, injects Core-ranked ephemeral recall into the Pi system prompt. Live model behavior remains unverified.
-- [x] Add conservative Pi transcript lifecycle marker hook: on `session_shutdown`, the Pi adapter appends a sanitized `pi_adapter_session_shutdown` event to the configured MindStone transcript. Full raw Pi transcript/message archive parity remains pending.
-- [ ] Add compaction/session lifecycle handling where Pi supports it.
+- [x] Add conservative Pi transcript lifecycle marker hooks: on `session_shutdown`, `session_compact`, and `session_tree`, the Pi adapter appends sanitized lifecycle events to the configured MindStone transcript without raw summaries/details/messages. Full raw Pi transcript/message archive parity remains pending.
+- [x] Add first-pass compaction/session lifecycle handling where Pi supports it via sanitized lifecycle markers. Actual compaction control/customization remains owned by the session-backed runner path and live validation.
 - [x] Add read-only Gateway status command: `/mindstone-gateway-status` reports configured endpoint/auth/surfaces without live probing.
 - [ ] Add smoke validation instructions.
 - [x] Add a Core/Gateway `AgentRunner` boundary so CLI, Gateway, WebChat, OpenAI-compatible, and future channel surfaces do not call route/provider execution directly.

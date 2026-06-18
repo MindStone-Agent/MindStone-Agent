@@ -87,6 +87,8 @@ for (const name of ['mindstone_memory_status', 'mindstone_memory_search', 'minds
   if (!tools.has(name)) throw new Error(`missing tool ${name}`);
 }
 if (!handlers.has('session_shutdown')) throw new Error('missing session_shutdown handler');
+if (!handlers.has('session_compact')) throw new Error('missing session_compact handler');
+if (!handlers.has('session_tree')) throw new Error('missing session_tree handler');
 if (!handlers.has('before_agent_start')) throw new Error('missing before_agent_start handler');
 await commands.get('mindstone-agent-status').handler('', ctx);
 await commands.get('mindstone-status').handler('', ctx);
@@ -105,6 +107,33 @@ const promptContextResult = await handlers.get('before_agent_start')({
   type: 'before_agent_start',
   prompt: 'adapter recall sentinel',
   systemPrompt: 'base system prompt',
+}, ctx);
+await handlers.get('session_compact')({
+  type: 'session_compact',
+  fromExtension: false,
+  compactionEntry: {
+    id: 'compact-1',
+    parentId: 'parent-1',
+    timestamp: '2026-06-18T00:00:00.000Z',
+    firstKeptEntryId: 'kept-1',
+    tokensBefore: 12345,
+    summary: 'RAW-COMPACTION-SUMMARY-SHOULD-NOT-PERSIST',
+    details: { rawSecret: 'RAW-COMPACTION-DETAIL-SHOULD-NOT-PERSIST' },
+  },
+}, ctx);
+await handlers.get('session_tree')({
+  type: 'session_tree',
+  newLeafId: 'leaf-new',
+  oldLeafId: 'leaf-old',
+  fromExtension: false,
+  summaryEntry: {
+    id: 'summary-1',
+    parentId: 'parent-2',
+    timestamp: '2026-06-18T00:00:01.000Z',
+    fromId: 'leaf-old',
+    summary: 'RAW-TREE-SUMMARY-SHOULD-NOT-PERSIST',
+    details: { rawTreeSecret: 'RAW-TREE-DETAIL-SHOULD-NOT-PERSIST' },
+  },
 }, ctx);
 await handlers.get('session_shutdown')({ type: 'session_shutdown', reason: 'quit' }, ctx);
 const transcriptAfterShutdownTool = await tools.get('mindstone_transcript_status').execute('tool-transcript-after', {});
@@ -128,8 +157,8 @@ if ! grep -q 'mindstone-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-context' 
   echo "Pi adapter smoke output missing status/context/gateway/channels/transcript/setup commands" >&2
   exit 1
 fi
-if ! grep -q 'session_shutdown' <<<"${OUTPUT}"; then
-  echo "Pi adapter smoke output missing session shutdown handler" >&2
+if ! grep -q 'session_shutdown' <<<"${OUTPUT}" || ! grep -q 'session_compact' <<<"${OUTPUT}" || ! grep -q 'session_tree' <<<"${OUTPUT}"; then
+  echo "Pi adapter smoke output missing lifecycle handlers" >&2
   exit 1
 fi
 if ! grep -q 'before_agent_start' <<<"${OUTPUT}"; then
@@ -176,8 +205,12 @@ if ! grep -q 'MindStone transcript status' <<<"${OUTPUT}" || ! grep -q 'Transcri
   echo "Pi adapter transcript status command/tool did not report diagnostic transcript status" >&2
   exit 1
 fi
-if ! grep -q 'pi_adapter_session_shutdown' <<<"${OUTPUT}" || ! grep -q 'lifecycle_marker_only' <<<"${OUTPUT}"; then
-  echo "Pi adapter session shutdown hook did not append lifecycle marker" >&2
+if ! grep -q 'pi_adapter_session_shutdown' <<<"${OUTPUT}" || ! grep -q 'pi_adapter_session_compact' <<<"${OUTPUT}" || ! grep -q 'pi_adapter_session_tree' <<<"${OUTPUT}" || ! grep -q 'lifecycle_marker_only' <<<"${OUTPUT}"; then
+  echo "Pi adapter lifecycle hooks did not append sanitized markers" >&2
+  exit 1
+fi
+if grep -q 'RAW-COMPACTION-SUMMARY-SHOULD-NOT-PERSIST' <<<"${OUTPUT}" || grep -q 'RAW-TREE-SUMMARY-SHOULD-NOT-PERSIST' <<<"${OUTPUT}" || grep -q 'RAW-COMPACTION-DETAIL-SHOULD-NOT-PERSIST' <<<"${OUTPUT}" || grep -q 'RAW-TREE-DETAIL-SHOULD-NOT-PERSIST' <<<"${OUTPUT}"; then
+  echo "Pi adapter lifecycle hooks persisted raw summary/detail content" >&2
   exit 1
 fi
 if ! grep -q 'MindStone memory status' <<<"${OUTPUT}"; then

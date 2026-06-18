@@ -60,6 +60,37 @@ type PiSessionShutdownEvent = {
   targetSessionFile?: string;
 };
 
+type PiSessionCompactEvent = {
+  type: "session_compact";
+  compactionEntry?: {
+    id?: string;
+    parentId?: string | null;
+    timestamp?: string;
+    firstKeptEntryId?: string;
+    tokensBefore?: number;
+    fromHook?: boolean;
+    summary?: string;
+    details?: unknown;
+  };
+  fromExtension?: boolean;
+};
+
+type PiSessionTreeEvent = {
+  type: "session_tree";
+  newLeafId?: string | null;
+  oldLeafId?: string | null;
+  fromExtension?: boolean;
+  summaryEntry?: {
+    id?: string;
+    parentId?: string | null;
+    timestamp?: string;
+    fromId?: string;
+    fromHook?: boolean;
+    summary?: string;
+    details?: unknown;
+  };
+};
+
 type PiBeforeAgentStartEvent = {
   type: "before_agent_start";
   prompt: string;
@@ -72,6 +103,8 @@ type PiBeforeAgentStartResult = {
 
 type PiExtensionApi = {
   on(event: "session_shutdown", handler: (event: PiSessionShutdownEvent, ctx: unknown) => Promise<void> | void): void;
+  on(event: "session_compact", handler: (event: PiSessionCompactEvent, ctx: unknown) => Promise<void> | void): void;
+  on(event: "session_tree", handler: (event: PiSessionTreeEvent, ctx: unknown) => Promise<void> | void): void;
   on(event: "before_agent_start", handler: (event: PiBeforeAgentStartEvent, ctx: unknown) => Promise<PiBeforeAgentStartResult | void> | PiBeforeAgentStartResult | void): void;
   registerCommand(
     name: string,
@@ -401,25 +434,80 @@ async function injectPiAdapterPromptContext(event: PiBeforeAgentStartEvent): Pro
   };
 }
 
-function recordPiAdapterShutdown(event: PiSessionShutdownEvent): void {
+function detailKeys(value: unknown): string[] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return Object.keys(value as Record<string, unknown>).sort().slice(0, 50);
+}
+
+function appendPiAdapterLifecycleMarker(input: { text: string; metadata: Record<string, unknown> }): void {
   const { agentId, sessionKey } = defaultAgentAndSession();
   appendTranscriptEntry({
     sessionKey,
     agentId,
     role: "event",
-    text: `Pi adapter session shutdown observed: ${event.reason}.`,
+    text: input.text,
     source: {
       substrate: "pi-adapter",
       channel: "pi",
       chatType: "internal",
       senderId: "extension",
     },
+    metadata: input.metadata,
+  });
+}
+
+function recordPiAdapterShutdown(event: PiSessionShutdownEvent): void {
+  appendPiAdapterLifecycleMarker({
+    text: `Pi adapter session shutdown observed: ${event.reason}.`,
     metadata: {
       event: "pi_adapter_session_shutdown",
       reason: event.reason,
       targetSessionFile: event.targetSessionFile,
       archiveScope: "lifecycle_marker_only",
       note: "Conservative first-pass archive hook; raw Pi transcript/message archival is not implemented here.",
+    },
+  });
+}
+
+function recordPiAdapterCompaction(event: PiSessionCompactEvent): void {
+  const entry = event.compactionEntry;
+  appendPiAdapterLifecycleMarker({
+    text: "Pi adapter session compaction observed.",
+    metadata: {
+      event: "pi_adapter_session_compact",
+      compactionEntryId: entry?.id,
+      compactionParentId: entry?.parentId,
+      compactionTimestamp: entry?.timestamp,
+      firstKeptEntryId: entry?.firstKeptEntryId,
+      tokensBefore: entry?.tokensBefore,
+      fromExtension: event.fromExtension,
+      fromHook: entry?.fromHook,
+      summaryChars: typeof entry?.summary === "string" ? entry.summary.length : undefined,
+      detailKeys: detailKeys(entry?.details),
+      archiveScope: "lifecycle_marker_only",
+      note: "Sanitized compaction lifecycle marker only; compaction summary/details are not persisted here.",
+    },
+  });
+}
+
+function recordPiAdapterTree(event: PiSessionTreeEvent): void {
+  const summary = event.summaryEntry;
+  appendPiAdapterLifecycleMarker({
+    text: "Pi adapter session tree navigation observed.",
+    metadata: {
+      event: "pi_adapter_session_tree",
+      newLeafId: event.newLeafId,
+      oldLeafId: event.oldLeafId,
+      fromExtension: event.fromExtension,
+      summaryEntryId: summary?.id,
+      summaryParentId: summary?.parentId,
+      summaryTimestamp: summary?.timestamp,
+      summaryFromId: summary?.fromId,
+      summaryFromHook: summary?.fromHook,
+      summaryChars: typeof summary?.summary === "string" ? summary.summary.length : undefined,
+      detailKeys: detailKeys(summary?.details),
+      archiveScope: "lifecycle_marker_only",
+      note: "Sanitized tree lifecycle marker only; branch summary/details are not persisted here.",
     },
   });
 }
@@ -584,6 +672,14 @@ export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
 
   pi.on("session_shutdown", async (event) => {
     recordPiAdapterShutdown(event);
+  });
+
+  pi.on("session_compact", async (event) => {
+    recordPiAdapterCompaction(event);
+  });
+
+  pi.on("session_tree", async (event) => {
+    recordPiAdapterTree(event);
   });
 
   pi.registerTool({
