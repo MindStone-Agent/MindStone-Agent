@@ -1,6 +1,6 @@
 import { runMindStoneRoute } from "../routing/run.js";
 import { agentRunStreamErrorFromUnknown } from "./stream.js";
-import type { AgentRunInput, AgentRunResult, AgentRunner, AgentRunStreamEvent } from "./types.js";
+import type { AgentCompactionInput, AgentCompactionResult, AgentRunInput, AgentRunResult, AgentRunner, AgentRunStreamEvent } from "./types.js";
 
 /**
  * Default MindStone-Agent runner for current routed provider execution.
@@ -29,6 +29,26 @@ export class ProviderRouteAgentRunner implements AgentRunner {
         runId: input.runContext?.runId,
         surface: input.runContext?.surface,
       },
+    };
+  }
+
+  async compact(input: AgentCompactionInput): Promise<AgentCompactionResult> {
+    const startedAt = input.runContext?.startedAt ?? new Date().toISOString();
+    const startedMs = Date.now();
+    return {
+      requested: false,
+      available: false,
+      runnerId: this.id,
+      substrate: "provider",
+      reason: "provider_route_runner_has_no_substrate_compaction",
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      model: input.model,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      durationMs: Math.max(0, Date.now() - startedMs),
+      runId: input.runContext?.runId,
+      surface: input.runContext?.surface,
     };
   }
 

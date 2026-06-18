@@ -43,7 +43,7 @@ writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
 NODE
 
 node --input-type=module <<'NODE'
-import { providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
+import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
 import { buildPiSessionPromptParts, createPiSessionEventCapture, PiSessionAgentRunner, piSessionFileForKey } from './packages/mindstone-gateway/dist/index.js';
 import { resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
@@ -127,6 +127,30 @@ const runnerResult = await runner.run({
 if (runnerResult.runner.id !== 'pi-session' || runnerResult.runner.mode !== 'pi-session') throw new Error('pi-session runner diagnostics missing');
 if (runnerResult.runner.runId !== 'run-smoke' || runnerResult.runner.surface !== 'smoke') throw new Error('pi-session runner context missing');
 if (!runnerResult.result.text.includes('runner boundary sentinel')) throw new Error('pi-session runner did not execute routed provider path');
+
+const providerRouteCompact = await createProviderRouteAgentRunner().compact({
+  agentId: 'default',
+  sessionKey: process.env.CHAT_SESSION_KEY,
+  model: { id: 'fake/model', provider: 'provider-route' },
+  runContext: { runId: 'compact-provider-route-smoke', surface: 'smoke' },
+});
+if (providerRouteCompact.available !== false || providerRouteCompact.reason !== 'provider_route_runner_has_no_substrate_compaction') throw new Error('provider-route compact boundary should be unavailable');
+
+const injectedRunnerCompact = await runner.compact({
+  agentId: 'default',
+  sessionKey: process.env.CHAT_SESSION_KEY,
+  model: { id: 'fake/model', provider: 'pi-session' },
+  runContext: { runId: 'compact-injected-provider-smoke', surface: 'smoke' },
+});
+if (injectedRunnerCompact.available !== false || injectedRunnerCompact.reason !== 'pi_session_compaction_unavailable_for_injected_provider') throw new Error('pi-session compact should be unavailable for injected provider');
+
+const realRunnerCompact = await new PiSessionAgentRunner().compact({
+  agentId: 'default',
+  sessionKey: process.env.CHAT_SESSION_KEY,
+  model: { id: 'openai/gpt-5.1', provider: 'pi-session' },
+  runContext: { runId: 'compact-no-auth-smoke', surface: 'smoke' },
+});
+if (realRunnerCompact.available !== false || realRunnerCompact.reason !== 'pi_model_unavailable_for_compaction') throw new Error(`unexpected real pi-session compact result: ${JSON.stringify(realRunnerCompact)}`);
 NODE
 
 set +e

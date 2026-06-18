@@ -1,6 +1,8 @@
 import {
   agentRunStreamErrorFromUnknown,
   runMindStoneRoute,
+  type AgentCompactionInput,
+  type AgentCompactionResult,
   type AgentRunInput,
   type AgentRunResult,
   type AgentRunner,
@@ -80,9 +82,15 @@ function piSessionStreamDiagnosticsFromRaw(raw: unknown): PiSessionStreamDiagnos
 export class PiSessionAgentRunner implements AgentRunner {
   readonly id = "pi-session";
   readonly #provider: MindStoneModelProvider;
+  readonly #executor?: PiSessionExecutor;
 
   constructor(options: PiSessionAgentRunnerOptions = {}) {
-    this.#provider = options.provider ?? new PiSessionExecutor(options);
+    if (options.provider) {
+      this.#provider = options.provider;
+    } else {
+      this.#executor = new PiSessionExecutor(options);
+      this.#provider = this.#executor;
+    }
   }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
@@ -104,6 +112,28 @@ export class PiSessionAgentRunner implements AgentRunner {
         surface: input.runContext?.surface,
       },
     };
+  }
+
+  async compact(input: AgentCompactionInput): Promise<AgentCompactionResult> {
+    if (!this.#executor) {
+      const startedAt = input.runContext?.startedAt ?? new Date().toISOString();
+      return {
+        requested: false,
+        available: false,
+        runnerId: this.id,
+        substrate: "pi",
+        reason: "pi_session_compaction_unavailable_for_injected_provider",
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        model: input.model,
+        startedAt,
+        completedAt: new Date().toISOString(),
+        durationMs: 0,
+        runId: input.runContext?.runId,
+        surface: input.runContext?.surface,
+      };
+    }
+    return this.#executor.compactSession(input);
   }
 
   async *stream(input: AgentRunInput): AsyncIterable<AgentRunStreamEvent> {

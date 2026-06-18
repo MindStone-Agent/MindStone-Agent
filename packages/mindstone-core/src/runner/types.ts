@@ -21,6 +21,32 @@ export type AgentRunInput = MindStoneRouteInput & {
   runContext?: AgentRunContext;
 };
 
+export type AgentCompactionInput = {
+  agentId: string;
+  sessionKey: string;
+  model: MindStoneRouteInput["model"];
+  customInstructions?: string;
+  signal?: AbortSignal;
+  runContext?: AgentRunContext;
+};
+
+export type AgentCompactionResult = {
+  requested: boolean;
+  available: boolean;
+  runnerId: string;
+  substrate: "pi" | "provider" | "none" | string;
+  reason: string;
+  sessionKey: string;
+  agentId: string;
+  model?: MindStoneRouteInput["model"];
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  runId?: string;
+  surface?: string;
+  details?: Record<string, unknown>;
+};
+
 export type AgentRunResult = MindStoneRouteResult & {
   runner: AgentRunnerDiagnostics;
 };
@@ -85,4 +111,5 @@ export interface AgentRunner {
   id: string;
   run(input: AgentRunInput): Promise<AgentRunResult>;
   stream(input: AgentRunInput): AsyncIterable<AgentRunStreamEvent>;
+  compact?(input: AgentCompactionInput): Promise<AgentCompactionResult>;
 }

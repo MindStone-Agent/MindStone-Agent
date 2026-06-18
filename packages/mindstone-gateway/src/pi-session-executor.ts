@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo } from "@mindstone-agent/core";
+import type { AgentCompactionInput, AgentCompactionResult, MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo } from "@mindstone-agent/core";
 
 export type PiSessionExecutorOptions = {
   projectRoot?: string;
@@ -120,6 +120,7 @@ type PiSessionEventCapture = {
 
 type PiAgentSession = {
   prompt(text: string, options?: Record<string, unknown>): Promise<void>;
+  compact?(customInstructions?: string): Promise<unknown>;
   abort?(): Promise<void>;
   subscribe?(listener: (event: PiAgentEvent) => void): () => void;
   dispose(): void;
@@ -447,6 +448,97 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     const available = registry.getAvailable();
     if (available.length > 0) return available[0];
     throw new Error("No isolated Pi model is available/configured for session-backed MindStone-Agent routing");
+  }
+
+  async compactSession(input: AgentCompactionInput): Promise<AgentCompactionResult> {
+    const startedAt = input.runContext?.startedAt ?? new Date().toISOString();
+    const startedMs = Date.now();
+    const unavailable = (reason: string, details?: Record<string, unknown>): AgentCompactionResult => ({
+      requested: false,
+      available: false,
+      runnerId: "pi-session",
+      substrate: "pi",
+      reason,
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      model: input.model,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      durationMs: Math.max(0, Date.now() - startedMs),
+      runId: input.runContext?.runId,
+      surface: input.runContext?.surface,
+      details,
+    });
+
+    let model: PiModel;
+    try {
+      model = await this.#resolvePiModel(input.model.id);
+    } catch (error) {
+      return unavailable("pi_model_unavailable_for_compaction", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const { modules } = await this.#load();
+    const sessionFile = piSessionFileForKey(this.#sessionDir, input.sessionKey);
+    mkdirSync(dirname(sessionFile), { recursive: true });
+    const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
+    const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
+    const resourceLoader = new modules.DefaultResourceLoader({
+      cwd: this.#cwd,
+      agentDir: this.#agentDir,
+      settingsManager,
+      appendSystemPrompt: [],
+    });
+    await resourceLoader.reload();
+    const { session } = await modules.createAgentSession({
+      cwd: this.#cwd,
+      agentDir: this.#agentDir,
+      model,
+      sessionManager,
+      settingsManager,
+      resourceLoader,
+      sessionStartEvent: { type: "session_start", reason: "startup" },
+    });
+    const abortSession = (): void => {
+      void session.abort?.().catch(() => undefined);
+    };
+    input.signal?.addEventListener("abort", abortSession, { once: true });
+    try {
+      throwIfAborted(input.signal);
+      if (typeof session.compact !== "function") {
+        return unavailable("pi_agent_session_compact_not_available", { sessionFile });
+      }
+      const result = await session.compact(input.customInstructions);
+      throwIfAborted(input.signal);
+      return {
+        requested: true,
+        available: true,
+        runnerId: "pi-session",
+        substrate: "pi",
+        reason: "pi_agent_session_compact_completed",
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        model: toModelInfo(model),
+        startedAt,
+        completedAt: new Date().toISOString(),
+        durationMs: Math.max(0, Date.now() - startedMs),
+        runId: input.runContext?.runId,
+        surface: input.runContext?.surface,
+        details: {
+          sessionFile,
+          result,
+        },
+      };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
+      return unavailable("pi_agent_session_compact_failed", {
+        sessionFile,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      input.signal?.removeEventListener("abort", abortSession);
+      session.dispose();
+    }
   }
 
   async completeChat(request: MindStoneChatRequest): Promise<MindStoneChatResult> {
