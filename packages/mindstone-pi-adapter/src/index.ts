@@ -9,6 +9,7 @@ import {
   resolveConfigPath,
   sqliteMemoryDatabasePath,
   SqliteMemoryRecallProvider,
+  type MemoryDocument,
   type MemoryHit,
   type MemoryRecallProvider,
   type MindStonePrompter,
@@ -26,6 +27,27 @@ type PiCommandContext = {
   };
 };
 
+type PiToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  details?: Record<string, unknown>;
+};
+
+type PiToolDefinition = {
+  name: string;
+  label: string;
+  description: string;
+  promptSnippet?: string;
+  promptGuidelines?: string[];
+  parameters: unknown;
+  execute(
+    toolCallId: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+    onUpdate?: unknown,
+    ctx?: unknown,
+  ): Promise<PiToolResult> | PiToolResult;
+};
+
 type PiExtensionApi = {
   registerCommand(
     name: string,
@@ -34,10 +56,40 @@ type PiExtensionApi = {
       handler(args: string, ctx: PiCommandContext): Promise<void> | void;
     },
   ): void;
+  registerTool(tool: PiToolDefinition): void;
 };
 
 function formatOption<T extends string>(option: MindStoneSelectOption<T>): string {
   return option.hint ? `${option.label} — ${option.hint}` : option.label;
+}
+
+const EMPTY_PARAMETERS_SCHEMA = {
+  type: "object",
+  properties: {},
+  additionalProperties: false,
+};
+
+const MEMORY_SEARCH_PARAMETERS_SCHEMA = {
+  type: "object",
+  properties: {
+    query: { type: "string", description: "Memory search query." },
+    limit: { type: "number", description: "Maximum hits to return. Defaults to 5; maximum 20." },
+  },
+  required: ["query"],
+  additionalProperties: false,
+};
+
+const MEMORY_READ_PARAMETERS_SCHEMA = {
+  type: "object",
+  properties: {
+    id: { type: "string", description: "Memory document id, title, absolute path, or runtime-relative path." },
+  },
+  required: ["id"],
+  additionalProperties: false,
+};
+
+function textToolResult(text: string, details?: Record<string, unknown>): PiToolResult {
+  return { content: [{ type: "text", text }], details };
 }
 
 function parseRecallSearchArgs(args: string): { query: string; limit: number } {
@@ -73,10 +125,15 @@ function formatMemoryHit(hit: MemoryHit, index: number): string {
   ].join("\n");
 }
 
-function memoryStatusMessage(): string {
+function resolveLimit(value: unknown, fallback = 5): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(Math.floor(parsed), 20) : fallback;
+}
+
+function memoryStatusMessage(): { text: string; details: Record<string, unknown> } {
   const paths = runtimePathsFromEnv();
   const stats = getSqliteMemoryIndexStats(paths);
-  return [
+  const text = [
     "MindStone memory status",
     `Database: ${stats.databasePath}`,
     `Present: ${stats.present}`,
@@ -91,6 +148,84 @@ function memoryStatusMessage(): string {
     stats.updatedAt ? `Updated: ${stats.updatedAt}` : undefined,
     stats.error ? `Error: ${stats.error}` : undefined,
   ].filter((line): line is string => Boolean(line)).join("\n");
+  return { text, details: { ...stats, sqliteVec: stats.sqliteVec } };
+}
+
+function memoryStatusText(): string {
+  return memoryStatusMessage().text;
+}
+
+function discoverReadableMemoryDocuments(): MemoryDocument[] {
+  const paths = runtimePathsFromEnv();
+  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+  if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  return discoverFileMemoryDocuments({ config: loaded.config, paths });
+}
+
+function documentMatchesId(document: MemoryDocument, id: string): boolean {
+  const normalized = id.trim();
+  if (!normalized) return false;
+  const relativePath = typeof document.metadata?.relativePath === "string" ? document.metadata.relativePath : undefined;
+  return [document.id, document.path, relativePath, document.title]
+    .filter((value): value is string => Boolean(value))
+    .some((value) => value === normalized || value.endsWith(`/${normalized}`));
+}
+
+function memoryReadMessage(id: string): { text: string; details: Record<string, unknown> } {
+  const documents = discoverReadableMemoryDocuments();
+  const document = documents.find((candidate) => documentMatchesId(candidate, id));
+  if (!document) {
+    return {
+      text: `No MindStone memory document matched '${id}'. Search memory first, then read by id or runtime-relative path.`,
+      details: { found: false, id, documents: documents.length },
+    };
+  }
+  const relativePath = typeof document.metadata?.relativePath === "string" ? document.metadata.relativePath : undefined;
+  return {
+    text: [
+      `MindStone memory document: ${document.title ?? document.id}`,
+      `ID: ${document.id}`,
+      relativePath ? `Path: ${relativePath}` : document.path ? `Path: ${document.path}` : undefined,
+      `Kind: ${document.kind}`,
+      "",
+      document.text.trim(),
+    ].filter((line): line is string => Boolean(line)).join("\n"),
+    details: {
+      found: true,
+      id: document.id,
+      title: document.title,
+      path: document.path,
+      relativePath,
+      kind: document.kind,
+      chars: document.text.length,
+    },
+  };
+}
+
+async function memorySearchMessage(query: string, limit: number): Promise<{ text: string; details: Record<string, unknown> }> {
+  const provider = resolveMemoryRecallProvider();
+  if (!provider) {
+    return {
+      text: "No MindStone memory provider is available. Run memory backfill or add memory files first.",
+      details: { query, hits: 0, provider: undefined },
+    };
+  }
+  const hits = await provider.search({ text: query, limit });
+  return {
+    text: [
+      `MindStone recall search: ${query}`,
+      `Provider: ${provider.id}`,
+      `Hits: ${hits.length}`,
+      "",
+      ...hits.map(formatMemoryHit),
+    ].join("\n"),
+    details: {
+      query,
+      provider: provider.id,
+      hits: hits.length,
+      hitIds: hits.map((hit) => hit.chunkId),
+    },
+  };
 }
 
 function resolveMemoryRecallProvider(): MemoryRecallProvider | undefined {
@@ -139,6 +274,49 @@ function piPrompter(ctx: PiCommandContext): MindStonePrompter {
 }
 
 export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
+  pi.registerTool({
+    name: "mindstone_memory_status",
+    label: "MindStone Memory Status",
+    description: "Show read-only MindStone-Agent memory index and recall backend status for the isolated runtime.",
+    promptSnippet: "Inspect MindStone-Agent memory index and recall backend status",
+    promptGuidelines: ["Use mindstone_memory_status before memory search when recall/index health is uncertain."],
+    parameters: EMPTY_PARAMETERS_SCHEMA,
+    execute: async () => {
+      const { text, details } = memoryStatusMessage();
+      return textToolResult(text, details);
+    },
+  });
+
+  pi.registerTool({
+    name: "mindstone_memory_search",
+    label: "MindStone Memory Search",
+    description: "Search MindStone-Agent memory from the isolated runtime. This is read-only and does not mutate memory files or indexes.",
+    promptSnippet: "Search MindStone-Agent structured memory, journals, LOG, transcripts, or SQLite memory index",
+    promptGuidelines: ["Use mindstone_memory_search when prior MindStone context may help answer the current request."],
+    parameters: MEMORY_SEARCH_PARAMETERS_SCHEMA,
+    execute: async (_toolCallId, params) => {
+      const query = typeof params.query === "string" ? params.query.trim() : "";
+      if (!query) return textToolResult("query is required", { error: "missing_query" });
+      const { text, details } = await memorySearchMessage(query, resolveLimit(params.limit));
+      return textToolResult(text, details);
+    },
+  });
+
+  pi.registerTool({
+    name: "mindstone_memory_read",
+    label: "MindStone Memory Read",
+    description: "Read a discovered MindStone-Agent memory document by id, title, absolute path, or runtime-relative path. Does not read arbitrary filesystem paths.",
+    promptSnippet: "Read a discovered MindStone-Agent memory document by id or runtime-relative path",
+    promptGuidelines: ["Use mindstone_memory_read after mindstone_memory_search when more exact memory detail is needed."],
+    parameters: MEMORY_READ_PARAMETERS_SCHEMA,
+    execute: async (_toolCallId, params) => {
+      const id = typeof params.id === "string" ? params.id.trim() : "";
+      if (!id) return textToolResult("id is required", { error: "missing_id" });
+      const { text, details } = memoryReadMessage(id);
+      return textToolResult(text, details);
+    },
+  });
+
   pi.registerCommand("mindstone-agent-status", {
     description: "Show MindStone-Agent isolated runtime status",
     handler: async (_args, ctx) => {
@@ -159,7 +337,7 @@ export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
     description: "Show MindStone-Agent memory/recall index status",
     handler: async (_args, ctx) => {
       try {
-        ctx.ui.notify(memoryStatusMessage(), "info");
+        ctx.ui.notify(memoryStatusText(), "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
@@ -175,22 +353,8 @@ export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
           ctx.ui.notify("Usage: /mindstone-recall-search <query> [--limit N]", "warning");
           return;
         }
-        const provider = resolveMemoryRecallProvider();
-        if (!provider) {
-          ctx.ui.notify("No MindStone memory provider is available. Run memory backfill or add memory files first.", "warning");
-          return;
-        }
-        const hits = await provider.search({ text: query, limit });
-        ctx.ui.notify(
-          [
-            `MindStone recall search: ${query}`,
-            `Provider: ${provider.id}`,
-            `Hits: ${hits.length}`,
-            "",
-            ...hits.map(formatMemoryHit),
-          ].join("\n"),
-          hits.length ? "info" : "warning",
-        );
+        const { text, details } = await memorySearchMessage(query, limit);
+        ctx.ui.notify(text, typeof details.hits === "number" && details.hits > 0 ? "info" : "warning");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }

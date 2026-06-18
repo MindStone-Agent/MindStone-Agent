@@ -39,9 +39,13 @@ MD
 OUTPUT="$(node <<'NODE'
 const mod = await import('./packages/mindstone-pi-adapter/dist/index.js');
 const commands = new Map();
+const tools = new Map();
 mod.default({
   registerCommand(name, command) {
     commands.set(name, command);
+  },
+  registerTool(tool) {
+    tools.set(tool.name, tool);
   },
 });
 const notifications = [];
@@ -56,12 +60,21 @@ const ctx = {
 for (const name of ['mindstone-agent-status', 'mindstone-recall-status', 'mindstone-recall-search', 'mindstone-config']) {
   if (!commands.has(name)) throw new Error(`missing command ${name}`);
 }
+for (const name of ['mindstone_memory_status', 'mindstone_memory_search', 'mindstone_memory_read']) {
+  if (!tools.has(name)) throw new Error(`missing tool ${name}`);
+}
 await commands.get('mindstone-agent-status').handler('', ctx);
 await commands.get('mindstone-recall-status').handler('', ctx);
 await commands.get('mindstone-recall-search').handler('adapter recall sentinel --limit 3', ctx);
+const statusTool = await tools.get('mindstone_memory_status').execute('tool-status', {});
+const searchTool = await tools.get('mindstone_memory_search').execute('tool-search', { query: 'adapter recall sentinel', limit: 3 });
+const readTool = await tools.get('mindstone_memory_read').execute('tool-read', { id: 'memory/reference_adapter_recall_smoke.md' });
+const missingReadTool = await tools.get('mindstone_memory_read').execute('tool-missing-read', { id: '../not-allowed' });
 console.log(JSON.stringify({
   commands: [...commands.keys()].sort(),
+  tools: [...tools.keys()].sort(),
   notifications,
+  toolResults: { statusTool, searchTool, readTool, missingReadTool },
 }, null, 2));
 NODE
 )"
@@ -74,6 +87,10 @@ if ! grep -q 'mindstone-recall-status' <<<"${OUTPUT}"; then
 fi
 if ! grep -q 'mindstone-recall-search' <<<"${OUTPUT}"; then
   echo "Pi adapter smoke output missing recall search command" >&2
+  exit 1
+fi
+if ! grep -q 'mindstone_memory_status' <<<"${OUTPUT}" || ! grep -q 'mindstone_memory_search' <<<"${OUTPUT}" || ! grep -q 'mindstone_memory_read' <<<"${OUTPUT}"; then
+  echo "Pi adapter smoke output missing memory tool registration" >&2
   exit 1
 fi
 if ! grep -q 'MindStone-Agent runtime isolation' <<<"${OUTPUT}"; then
@@ -90,6 +107,14 @@ if ! grep -q 'MindStone recall search: adapter recall sentinel' <<<"${OUTPUT}"; 
 fi
 if ! grep -q 'Adapter recall sentinel verifies' <<<"${OUTPUT}"; then
   echo "Pi adapter recall search command did not return local memory hit" >&2
+  exit 1
+fi
+if ! grep -q 'MindStone memory document' <<<"${OUTPUT}" || ! grep -q 'reference_adapter_recall_smoke.md' <<<"${OUTPUT}"; then
+  echo "Pi adapter memory read tool did not return the discovered memory document" >&2
+  exit 1
+fi
+if ! grep -q "No MindStone memory document matched '../not-allowed'" <<<"${OUTPUT}"; then
+  echo "Pi adapter memory read tool did not reject undiscovered path" >&2
   exit 1
 fi
 

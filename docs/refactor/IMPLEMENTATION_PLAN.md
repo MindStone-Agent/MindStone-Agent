@@ -115,7 +115,12 @@ The preferred order is:
 
 - [ ] Create current-Pi adapter extension/module.
 - [ ] Register MindStone commands.
-- [ ] Register memory read/search/status tools.
+- [x] Register read-only memory read/search/status tools:
+  - `mindstone_memory_status`
+  - `mindstone_memory_search`
+  - `mindstone_memory_read`
+  - `mindstone_memory_read` only returns discovered MindStone memory documents, not arbitrary filesystem paths.
+  - Smoke validation: `npm run smoke:pi-adapter`
 - [x] Register read-only Pi adapter recall commands for memory status/search:
   - `/mindstone-recall-status`
   - `/mindstone-recall-search <query> [--limit N]`
@@ -164,7 +169,8 @@ The preferred order is:
   - [x] `SessionManager.open(...)`
   - [x] `createAgentSession(...)`
   - [x] first MindStone identity/SCRI prompt injection via Pi `DefaultResourceLoader.appendSystemPrompt`, with latest user turn sent through `AgentSession.prompt(...)` instead of crude all-message prompt concatenation
-  - [ ] Pi tools/custom tools/resource loader/extension lifecycle preserved where available
+  - [x] first read-only Pi custom tools for MindStone memory status/search/read are registered in the Pi adapter and smoke-tested
+  - [ ] broader Pi tools/custom tools/resource loader/extension lifecycle preserved where available
   - [x] `AgentSession.prompt(...)` for real turns when isolated auth/model config is available
   - [x] first bounded `AgentSession.subscribe(...)` event diagnostics capture in `pi-session` raw results, including event counts, bounded event summaries, tool metadata summaries, and final assistant-text extraction
   - [x] sanitized `pi-session` provider diagnostics are copied into assistant transcript metadata for native chat and Gateway routes when available
