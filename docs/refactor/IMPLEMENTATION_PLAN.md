@@ -113,8 +113,8 @@ The preferred order is:
 
 ### Tasks
 
-- [ ] Create current-Pi adapter extension/module.
-- [ ] Register MindStone commands.
+- [x] Create current-Pi adapter extension/module.
+- [x] Register MindStone commands for setup/status/context/gateway/channels/transcript/recall.
 - [x] Register read-only memory read/search/status tools:
   - `mindstone_memory_status`
   - `mindstone_memory_search`
@@ -130,7 +130,7 @@ The preferred order is:
 - [x] Add conservative Pi transcript lifecycle marker hooks: on `session_shutdown`, `session_compact`, and `session_tree`, the Pi adapter appends sanitized lifecycle events to the configured MindStone transcript without raw summaries/details/messages. Full raw Pi transcript/message archive parity remains pending.
 - [x] Add first-pass compaction/session lifecycle handling where Pi supports it via sanitized lifecycle markers. Actual compaction control/customization remains owned by the session-backed runner path and live validation.
 - [x] Add read-only Gateway status command: `/mindstone-gateway-status` reports configured endpoint/auth/surfaces without live probing.
-- [ ] Add smoke validation instructions.
+- [x] Add smoke validation path: `npm run smoke:pi-adapter` verifies command/tool registration, read-only memory and transcript tools, prompt-context injection, and sanitized lifecycle markers without live model/auth.
 - [x] Add a Core/Gateway `AgentRunner` boundary so CLI, Gateway, WebChat, OpenAI-compatible, and future channel surfaces do not call route/provider execution directly.
   - Current default: `ProviderRouteAgentRunner`, a behavior-preserving wrapper around the existing routed provider path.
   - Native chat and Gateway route execution now call the runner boundary, preparing for future live Pi session handles, streaming, abort, and compaction control.
@@ -195,9 +195,10 @@ The preferred order is:
 
 ### Exit criteria
 
-- [ ] Current Pi can onboard/load a MindStone identity.
-- [ ] Current Pi can perform memory recall through Core.
-- [ ] Current Pi can query Gateway status.
+- [x] Automated Pi adapter smoke proves the extension can register onboarding/config commands and load configured identity/user context through the Pi prompt hook.
+- [x] Automated Pi adapter smoke proves memory recall can run through Core and be injected ephemerally when `memory.autoRecall` is enabled.
+- [x] Automated Pi adapter smoke proves Gateway status can be queried/config-rendered without live probing.
+- [ ] Manual/live Pi UI validation of those commands/hooks remains pending.
 
 ## 6. Phase 4 — Gateway API Stabilization
 
