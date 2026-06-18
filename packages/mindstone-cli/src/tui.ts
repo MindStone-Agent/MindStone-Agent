@@ -390,6 +390,41 @@ function buildTuiHandoffPanel(paths: ReturnType<typeof runtimePathsFromEnv>): st
   ].filter((line): line is string => line !== undefined).join("\n");
 }
 
+function buildTuiEventsPanel(params: { ctx: TuiCommandContext; entries: TranscriptEntry[]; limit?: number }): string {
+  const limit = Math.max(1, Math.floor(params.limit ?? 12));
+  const events = params.entries.filter((entry) => entry.role === "event");
+  const selected = events.slice(-limit).reverse();
+  const lines = [
+    `- session: \`${params.ctx.sessionKey}\``,
+    `- event entries: \`${events.length}\``,
+    `- showing: \`${selected.length}/${limit}\``,
+    "",
+  ];
+  if (selected.length === 0) {
+    lines.push("No transcript event entries found for this session.");
+  } else {
+    lines.push(...selected.map((entry) => {
+      const eventName = typeof entry.metadata?.event === "string" ? entry.metadata.event : "event";
+      const streamType = typeof entry.metadata?.streamType === "string" ? entry.metadata.streamType : undefined;
+      const runnerId = typeof entry.metadata?.runnerId === "string" ? entry.metadata.runnerId : undefined;
+      const substrate = typeof entry.metadata?.substrate === "string" ? entry.metadata.substrate : undefined;
+      const payloadDetail = substrateEventDetail(entry.metadata?.payload ?? entry.content);
+      const label = eventEntryLabel(entry);
+      const parts = [
+        entry.timestamp,
+        `\`${streamType ? `${eventName}/${streamType}` : eventName}\``,
+        runnerId ? `runner \`${runnerId}\`` : undefined,
+        substrate ? `substrate \`${substrate}\`` : undefined,
+        entry.runId ? `run \`${entry.runId}\`` : undefined,
+        label,
+        payloadDetail,
+      ].filter(Boolean);
+      return `- ${parts.join(" — ")}`;
+    }));
+  }
+  return lines.join("\n");
+}
+
 type TuiPanelItem = {
   id: string;
   detail?: string;
@@ -716,6 +751,37 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   chat.addPanel("memory", buildTuiMemoryPanel(smokeConfig, smokePaths));
   chat.addPanel("context", buildTuiContextPanel({ config: smokeConfig, ctx, entries: [] }));
   chat.addPanel("handoff", buildTuiHandoffPanel(smokePaths));
+  chat.addPanel("events", buildTuiEventsPanel({
+    ctx,
+    entries: [
+      {
+        id: "event-smoke-1",
+        sessionKey: ctx.sessionKey,
+        agentId: ctx.agentId,
+        role: "event",
+        text: "Runner pi-session emitted pi substrate event.",
+        timestamp: "2026-06-18T00:00:00.000Z",
+        runId: "run_smoke",
+        metadata: {
+          event: "runner_stream_event",
+          streamType: "substrate_event",
+          runnerId: "pi-session",
+          substrate: "pi",
+          payload: { type: "tool_execution_start", toolName: "read", toolCallId: "tool-1" },
+        },
+      },
+      {
+        id: "event-smoke-2",
+        sessionKey: ctx.sessionKey,
+        agentId: ctx.agentId,
+        role: "event",
+        text: "Injected 1 recalled memory chunk(s) into prompt context.",
+        timestamp: "2026-06-18T00:00:01.000Z",
+        runId: "run_smoke",
+        metadata: { event: "memory_recall_injected", hitCount: 1 },
+      },
+    ],
+  }));
   chat.addPanel("doctor", buildTuiDoctorPanel());
   chat.addPanel("sessions", buildTuiSessionsPanel({
     ctx,
@@ -813,6 +879,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "memory", description: "Show memory/recall index status" },
     { name: "context", description: "Show context window policy and current session estimate" },
     { name: "handoff", description: "Show current compaction handoff status" },
+    { name: "events", description: "Show recent transcript/runner events" },
     { name: "doctor", description: "Show compact runtime doctor summary" },
     { name: "sessions", description: "Show known/configured sessions" },
     { name: "session", description: "Switch this TUI session: /session <key>" },
@@ -885,7 +952,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /handoff, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /handoff, /events, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -917,6 +984,14 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       }
       if (message === "/handoff") {
         chat.addPanel("handoff", buildTuiHandoffPanel(paths));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/events") {
+        chat.addPanel("events", buildTuiEventsPanel({
+          ctx,
+          entries: readTranscriptEntries(ctx.sessionKey, { limit: Math.max(historyLimit, 80) }),
+        }));
         tui.requestRender();
         return;
       }

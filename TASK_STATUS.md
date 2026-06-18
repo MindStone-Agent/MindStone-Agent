@@ -66,6 +66,7 @@
 - [x] Add non-mutating TUI `/memory` and `/context` panels for recall index and prompt-window status.
 - [x] Add non-mutating TUI `/doctor` panel backed by Core doctor report summary.
 - [x] Add non-mutating TUI `/handoff` panel for current compaction handoff status.
+- [x] Add non-mutating TUI `/events` panel for recent transcript/runner events.
 
 ### Completed
 
@@ -165,6 +166,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [x] Add non-mutating `/memory` and `/context` panels for recall index and prompt-window status.
 - [x] Add non-mutating `/doctor` panel backed by Core doctor report summary.
 - [x] Add non-mutating `/handoff` panel for current compaction handoff status.
+- [x] Add non-mutating `/events` panel for recent transcript/runner events.
 - [ ] Add richer interactive selector overlays and status/settings overlays.
 - [ ] Adapt richer current MindStone TUI components and event handlers from `/Users/clint/Projects/MindStone/src/tui/`.
 
