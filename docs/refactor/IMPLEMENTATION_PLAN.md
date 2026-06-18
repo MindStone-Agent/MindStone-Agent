@@ -52,7 +52,7 @@ The preferred order is:
 - [x] Define context-management policy config for selectable `auto_compact` vs `sliding_window` modes.
 - [x] Define runtime context-window pruning contracts and tests.
 - [ ] Define config service interface and migration boundary.
-- [ ] Add dependency direction checks or lint guidance: Core must not import Gateway/Pi.
+- [x] Add dependency direction smoke check: `npm run smoke:core-boundary` builds `packages/mindstone-core` alone and fails if Core imports Gateway/CLI/Pi adapter or Pi-specific packages directly.
 - [ ] Add unit tests for pure Core helpers.
 
 ### Candidate files to inspect/extract
@@ -67,7 +67,7 @@ The preferred order is:
 
 ### Exit criteria
 
-- [ ] Core compiles independently of Pi adapter.
+- [x] Core compiles independently of Pi adapter via `npm run smoke:core-boundary`.
 - [ ] Core contracts are documented.
 - [ ] Existing code can still run through compatibility exports.
 

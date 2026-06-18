@@ -62,6 +62,7 @@
 - [x] Add read-only Pi adapter memory/transcript tools for session-backed Pi use: `mindstone_memory_status`, `mindstone_memory_search`, `mindstone_memory_read`, and `mindstone_transcript_status`; memory read is restricted to discovered MindStone memory docs and smoke coverage verifies search/read/status behavior.
 - [x] Add conservative Pi adapter lifecycle marker hooks for `session_shutdown`, `session_compact`, and `session_tree`; they append sanitized lifecycle events to the configured MindStone transcript without persisting raw summaries/details/messages. This is not full raw Pi transcript archive parity yet.
 - [x] Add first-pass Pi adapter `before_agent_start` prompt-context injection for configured `IDENTITY.md`/`USER.md` and ephemeral Core memory recall when `memory.autoRecall` is enabled; verified without live model calls.
+- [x] Add `npm run smoke:core-boundary` to verify `mindstone-core` compiles independently and does not import Gateway/CLI/Pi adapter or Pi-specific packages directly.
 - [ ] Complete full live authenticated event/stream validation, live-observed durable metadata allowlist refinements if needed, and any necessary full staged compaction-safeguard summary parity for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.

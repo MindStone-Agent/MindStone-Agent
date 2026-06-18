@@ -49,7 +49,8 @@
     "smoke:cli-chat-recall": "./scripts/smoke-cli-chat-recall.sh",
     "smoke:pi-session-runner": "./scripts/smoke-pi-session-runner.sh",
     "smoke:pi-session-live": "./scripts/smoke-pi-session-live.sh",
-    "smoke:pi-adapter": "./scripts/smoke-pi-adapter.sh"
+    "smoke:pi-adapter": "./scripts/smoke-pi-adapter.sh",
+    "smoke:core-boundary": "./scripts/smoke-core-boundary.sh"
   },
   "engines": {
     "node": ">=22.19.0"
