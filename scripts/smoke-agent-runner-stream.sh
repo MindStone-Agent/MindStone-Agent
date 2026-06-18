@@ -163,6 +163,29 @@ try {
   rmSync(runtimeDir, { recursive: true, force: true });
 }
 
+const abortedController = new AbortController();
+abortedController.abort();
+const abortAwareProvider = {
+  id: 'abort-aware-stream-provider',
+  listModels() { return [model]; },
+  async completeChat(request) {
+    if (!request.signal?.aborted) throw new Error('abort signal was not propagated');
+    const error = new Error('aborted');
+    error.name = 'AbortError';
+    throw error;
+  },
+};
+const abortEvents = [];
+try {
+  for await (const event of new PiSessionAgentRunner({ provider: abortAwareProvider }).stream({ ...baseInput, provider: abortAwareProvider, signal: abortedController.signal })) abortEvents.push(event);
+  throw new Error('expected aborted stream was not thrown');
+} catch (error) {
+  if (!(error instanceof Error) || error.name !== 'AbortError') throw error;
+}
+if (abortEvents.length !== 2) throw new Error(`expected started+failed abort events, got ${abortEvents.length}`);
+if (abortEvents[0].type !== 'run_started' || abortEvents[1].type !== 'run_failed') throw new Error('abort stream did not emit started then failed');
+if (abortEvents[1].error.name !== 'AbortError') throw new Error('abort stream did not serialize AbortError name');
+
 const failingProvider = {
   id: 'failing-stream-provider',
   listModels() { return [model]; },
@@ -181,7 +204,7 @@ if (failureEvents.length !== 2) throw new Error(`expected started+failed events,
 if (failureEvents[0].type !== 'run_started' || failureEvents[1].type !== 'run_failed') throw new Error('failure stream did not emit started then failed');
 if (failureEvents[1].error.message !== 'stream failure sentinel') throw new Error('failure stream did not serialize error message');
 
-console.log(JSON.stringify({ ok: true, providerRouteEvents: 3, piSessionEvents: piSessionEvents.length, livePiSessionEvents: liveEvents.length, persistedStreamEvents: 3, failureEvents: 2 }, null, 2));
+console.log(JSON.stringify({ ok: true, providerRouteEvents: 3, piSessionEvents: piSessionEvents.length, livePiSessionEvents: liveEvents.length, persistedStreamEvents: 3, abortEvents: 2, failureEvents: 2 }, null, 2));
 NODE
 
 echo "AgentRunner stream contract smoke test passed."

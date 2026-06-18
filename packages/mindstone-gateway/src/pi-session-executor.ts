@@ -120,6 +120,7 @@ type PiSessionEventCapture = {
 
 type PiAgentSession = {
   prompt(text: string, options?: Record<string, unknown>): Promise<void>;
+  abort?(): Promise<void>;
   subscribe?(listener: (event: PiAgentEvent) => void): () => void;
   dispose(): void;
   messages?: PiAgentMessage[];
@@ -205,6 +206,16 @@ function numberValue(value: unknown): number | undefined {
 
 function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function abortError(): Error {
+  const error = new Error("aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortError();
 }
 
 function objectKeys(value: unknown): string[] | undefined {
@@ -469,9 +480,15 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       const summary = record(event);
       onEvent?.({ summary, textDelta: textDeltaFromAssistantStreamEvent(event.assistantMessageEvent) });
     });
+    const abortSession = (): void => {
+      void session.abort?.().catch(() => undefined);
+    };
+    request.signal?.addEventListener("abort", abortSession, { once: true });
 
     try {
+      throwIfAborted(request.signal);
       await session.prompt(promptParts.promptText || request.transcriptEntries.at(-1)?.text || "", { source: "rpc" });
+      throwIfAborted(request.signal);
       const text = capture.lastAssistantText ?? lastAssistantText(session.messages ?? session.state?.messages);
       return {
         role: "assistant",
@@ -490,6 +507,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
         },
       };
     } finally {
+      request.signal?.removeEventListener("abort", abortSession);
       unsubscribe?.();
       session.dispose();
     }
