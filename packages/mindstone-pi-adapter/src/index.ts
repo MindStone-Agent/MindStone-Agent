@@ -58,8 +58,19 @@ type PiSessionShutdownEvent = {
   targetSessionFile?: string;
 };
 
+type PiBeforeAgentStartEvent = {
+  type: "before_agent_start";
+  prompt: string;
+  systemPrompt: string;
+};
+
+type PiBeforeAgentStartResult = {
+  systemPrompt?: string;
+};
+
 type PiExtensionApi = {
   on(event: "session_shutdown", handler: (event: PiSessionShutdownEvent, ctx: unknown) => Promise<void> | void): void;
+  on(event: "before_agent_start", handler: (event: PiBeforeAgentStartEvent, ctx: unknown) => Promise<PiBeforeAgentStartResult | void> | PiBeforeAgentStartResult | void): void;
   registerCommand(
     name: string,
     command: {
@@ -222,6 +233,49 @@ function defaultAgentAndSession() {
   return { loaded, config, agentId, sessionKey };
 }
 
+function buildPiAdapterPromptContext(): { text?: string; details: Record<string, unknown> } {
+  const { loaded, config, agentId } = defaultAgentAndSession();
+  const agent = config?.agents?.[agentId];
+  if (!agent) return { details: { injected: false, reason: "agent_not_configured", agentId } };
+  const identity = loadMindStoneIdentity(agentId, agent, loaded.path);
+  const sections: string[] = [];
+  if (identity.identity?.identityMarkdown?.trim()) {
+    sections.push(["<mindstone-identity>", identity.identity.identityMarkdown.trim(), "</mindstone-identity>"].join("\n"));
+  }
+  if (identity.identity?.userMarkdown?.trim()) {
+    sections.push(["<mindstone-user-context>", identity.identity.userMarkdown.trim(), "</mindstone-user-context>"].join("\n"));
+  }
+  if (sections.length === 0) {
+    return {
+      details: {
+        injected: false,
+        reason: identity.error ?? "identity_or_user_context_missing",
+        agentId,
+        identityPath: identity.identityPath,
+        userPath: identity.userPath,
+        identityExists: identity.identityExists,
+        userExists: identity.userExists,
+      },
+    };
+  }
+  return {
+    text: [
+      "MindStone-Agent identity/user context from the isolated runtime. Treat this as standing orientation, not as a replacement for current user instructions or local evidence.",
+      "",
+      ...sections,
+    ].join("\n\n"),
+    details: {
+      injected: true,
+      agentId,
+      identityPath: identity.identityPath,
+      userPath: identity.userPath,
+      identityExists: identity.identityExists,
+      userExists: identity.userExists,
+      chars: sections.join("\n").length,
+    },
+  };
+}
+
 function mindstoneContextMessage(): string {
   const { paths, loaded } = loadedRuntimeConfig();
   const config = loaded.config;
@@ -276,6 +330,14 @@ function transcriptStatusMessage(sessionKeyInput?: unknown): { text: string; det
       updatedAt: current?.updatedAt,
       sessions: sessions.length,
     },
+  };
+}
+
+function injectPiAdapterPromptContext(event: PiBeforeAgentStartEvent): PiBeforeAgentStartResult | undefined {
+  const context = buildPiAdapterPromptContext();
+  if (!context.text) return undefined;
+  return {
+    systemPrompt: [event.systemPrompt, "", context.text].filter(Boolean).join("\n"),
   };
 }
 
@@ -458,6 +520,8 @@ async function runConfigWizardCommand(ctx: PiCommandContext): Promise<void> {
 }
 
 export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
+  pi.on("before_agent_start", async (event) => injectPiAdapterPromptContext(event));
+
   pi.on("session_shutdown", async (event) => {
     recordPiAdapterShutdown(event);
   });

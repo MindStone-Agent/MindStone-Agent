@@ -19,7 +19,17 @@ echo "== MindStone Pi adapter smoke test =="
 npm run build:mindstone
 ./scripts/init-runtime.sh >/tmp/mindstone-agent-pi-adapter-init.log
 
-mkdir -p "${TEMP_RUNTIME}/mindstone/memory"
+mkdir -p "${TEMP_RUNTIME}/mindstone/memory" "${TEMP_RUNTIME}/mindstone/agents/default"
+cat >"${TEMP_RUNTIME}/mindstone/agents/default/IDENTITY.md" <<'MD'
+# Pi Adapter Smoke Identity
+
+Identity sentinel: PI-ADAPTER-SMOKE-IDENTITY.
+MD
+cat >"${TEMP_RUNTIME}/mindstone/agents/default/USER.md" <<'MD'
+# Pi Adapter Smoke User
+
+User sentinel: PI-ADAPTER-SMOKE-USER.
+MD
 cat >"${TEMP_RUNTIME}/mindstone/memory/reference_adapter_recall_smoke.md" <<'MD'
 ---
 name: reference_adapter_recall_smoke
@@ -69,6 +79,7 @@ for (const name of ['mindstone_memory_status', 'mindstone_memory_search', 'minds
   if (!tools.has(name)) throw new Error(`missing tool ${name}`);
 }
 if (!handlers.has('session_shutdown')) throw new Error('missing session_shutdown handler');
+if (!handlers.has('before_agent_start')) throw new Error('missing before_agent_start handler');
 await commands.get('mindstone-agent-status').handler('', ctx);
 await commands.get('mindstone-status').handler('', ctx);
 await commands.get('mindstone-context').handler('', ctx);
@@ -82,6 +93,11 @@ const searchTool = await tools.get('mindstone_memory_search').execute('tool-sear
 const readTool = await tools.get('mindstone_memory_read').execute('tool-read', { id: 'memory/reference_adapter_recall_smoke.md' });
 const missingReadTool = await tools.get('mindstone_memory_read').execute('tool-missing-read', { id: '../not-allowed' });
 const transcriptBeforeShutdownTool = await tools.get('mindstone_transcript_status').execute('tool-transcript-before', {});
+const promptContextResult = await handlers.get('before_agent_start')({
+  type: 'before_agent_start',
+  prompt: 'hello from smoke',
+  systemPrompt: 'base system prompt',
+}, ctx);
 await handlers.get('session_shutdown')({ type: 'session_shutdown', reason: 'quit' }, ctx);
 const transcriptAfterShutdownTool = await tools.get('mindstone_transcript_status').execute('tool-transcript-after', {});
 const transcriptPath = transcriptAfterShutdownTool.details.path;
@@ -91,6 +107,7 @@ console.log(JSON.stringify({
   tools: [...tools.keys()].sort(),
   handlers: [...handlers.keys()].sort(),
   notifications,
+  promptContextResult,
   toolResults: { statusTool, searchTool, readTool, missingReadTool, transcriptBeforeShutdownTool, transcriptAfterShutdownTool },
   transcriptContent,
 }, null, 2));
@@ -105,6 +122,14 @@ if ! grep -q 'mindstone-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-context' 
 fi
 if ! grep -q 'session_shutdown' <<<"${OUTPUT}"; then
   echo "Pi adapter smoke output missing session shutdown handler" >&2
+  exit 1
+fi
+if ! grep -q 'before_agent_start' <<<"${OUTPUT}"; then
+  echo "Pi adapter smoke output missing before_agent_start handler" >&2
+  exit 1
+fi
+if ! grep -q 'PI-ADAPTER-SMOKE-IDENTITY' <<<"${OUTPUT}" || ! grep -q 'PI-ADAPTER-SMOKE-USER' <<<"${OUTPUT}" || ! grep -q 'mindstone-identity' <<<"${OUTPUT}"; then
+  echo "Pi adapter before_agent_start hook did not inject identity/user prompt context" >&2
   exit 1
 fi
 if ! grep -q 'mindstone-recall-status' <<<"${OUTPUT}"; then
