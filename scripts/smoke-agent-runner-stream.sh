@@ -14,7 +14,7 @@ node --input-type=module <<'NODE'
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult, readTranscriptEntries, runMindStoneChatTurn, sanitizeRunnerStreamSubstrateEventPayload } from './packages/mindstone-core/dist/index.js';
+import { createProviderRouteAgentRunner, PI_SESSION_DURABLE_EVENT_FIELDS, PI_SESSION_RAW_EVENT_FIELDS_EXCLUDED_FROM_DURABLE_METADATA, providerDiagnosticsFromChatResult, readTranscriptEntries, runMindStoneChatTurn, sanitizeRunnerStreamSubstrateEventPayload } from './packages/mindstone-core/dist/index.js';
 import { PI_SESSION_EVENT_CALLBACK_METADATA_KEY, PiSessionAgentRunner } from './packages/mindstone-gateway/dist/index.js';
 
 const transcriptEntry = {
@@ -27,6 +27,14 @@ const transcriptEntry = {
 };
 
 const model = { id: 'mindstone/mock', provider: 'mock' };
+const rawPiFields = ['message', 'messages', 'args', 'result', 'partialResult', 'assistantMessageEvent'];
+for (const field of rawPiFields) {
+  if (PI_SESSION_DURABLE_EVENT_FIELDS.includes(field)) throw new Error(`raw Pi field was allowed by durable metadata policy: ${field}`);
+  if (!PI_SESSION_RAW_EVENT_FIELDS_EXCLUDED_FROM_DURABLE_METADATA.includes(field)) throw new Error(`raw Pi field missing from explicit durable metadata exclusion list: ${field}`);
+}
+if (!PI_SESSION_DURABLE_EVENT_FIELDS.includes('toolArgsKeys') || !PI_SESSION_DURABLE_EVENT_FIELDS.includes('toolResultTextChars')) {
+  throw new Error('durable metadata policy is missing expected safe tool summary fields');
+}
 
 const fakeProvider = {
   id: 'fake-stream-provider',
@@ -121,6 +129,9 @@ if (providerDiagnosticsText.includes('SECRET_PATH_SHOULD_NOT_PERSIST') || provid
 }
 if (!providerDiagnostics?.piSession?.events?.some((event) => event.toolName === 'read' && event.toolArgsKeys?.includes('path'))) {
   throw new Error('provider diagnostics did not preserve sanitized tool event summary');
+}
+if (providerDiagnosticsText.includes('SECRET_MESSAGE_SHOULD_NOT_PERSIST') || providerDiagnosticsText.includes('SECRET_RESULT_SHOULD_NOT_PERSIST')) {
+  throw new Error('provider diagnostics persisted raw Pi message/result fields despite durable metadata policy');
 }
 
 const liveProvider = {

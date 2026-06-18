@@ -45,7 +45,7 @@
 - [x] Add `AgentRunner.stream(...)` contract scaffold and lifecycle event smoke validation for provider-route and pi-session runners.
 - [x] Replay bounded `pi-session` diagnostics as `substrate_event` stream events after runner execution; this is not live token streaming yet.
 - [x] Add explicit `route_planned` events plus live `pi-session` diagnostic and assistant text-delta callback plumbing through `AgentRunner.stream(...)`; authenticated provider behavior remains unverified.
-- [x] Add gated transcript persistence for selected `AgentRunner.stream(...)` events in native chat and Gateway route paths, with durable sanitizer smoke coverage for raw Pi message/tool args/results.
+- [x] Add gated transcript persistence for selected `AgentRunner.stream(...)` events in native chat and Gateway route paths, with an explicit durable Pi-session metadata policy and sanitizer smoke coverage for raw Pi message/tool args/results.
 - [x] Add gated `smoke:pi-session-live` probe for isolated-auth live `AgentSession.prompt(...)`, runner-stream validation, and optional `AgentSession.compact(...)` validation via `MINDSTONE_PI_SESSION_LIVE_COMPACT=1`.
 - [x] Add config-backed Pi `DefaultResourceLoader` option pass-through for additional extension/skill/prompt/theme paths and resource disable flags.
 - [x] Add smallest MindStone-owned Pi inline extension-factory parity: context-pruning derived from `contextManagement.mode = "sliding_window"`, affecting live Pi LLM context only and preserving append-only transcript authority.
@@ -54,7 +54,7 @@
 - [x] Add pi-session file serialization around `AgentSession.prompt(...)` and `AgentSession.compact(...)`, including in-process ordering, cross-process lockfile/stale-lock safety, and pre-open malformed-tail JSONL repair with backup preservation.
 - [x] Add in-memory Pi SessionManager resume cap after open, derived from `routing.pi.resumeCap`, preserving append-only session files while bounding live resume context and dropping assistant error turns.
 - [x] Add `docs/refactor/PI_SESSION_PARITY.md` tracking MindStone embedded-runner parity tiers and next gaps.
-- [ ] Complete full live authenticated event/stream validation, live-observed durable transcript/source metadata policy, and any necessary full staged compaction-safeguard summary parity for the session-backed Pi runner.
+- [ ] Complete full live authenticated event/stream validation, live-observed durable metadata allowlist refinements if needed, and any necessary full staged compaction-safeguard summary parity for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
 - [x] Add provider-first isolated Pi provider/model discovery to native config/onboarding routing setup.

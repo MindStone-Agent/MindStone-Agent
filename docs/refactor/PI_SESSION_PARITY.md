@@ -35,7 +35,7 @@ Implemented now:
 - in-memory Pi SessionManager resume cap derived from `routing.pi.resumeCap`, defaulting to 800 message-emitting entries and dropping assistant error turns; this mutates only loaded SessionManager state after open and does not rewrite the Pi session JSONL or MindStone transcript
 - `AgentSession.prompt(...)` path when isolated auth/model config is available
 - bounded sanitized Pi session diagnostics
-- durable transcript boundary sanitizer coverage for runner substrate events and provider diagnostics, proving raw Pi message/args/result payloads do not persist while safe summary key names/counts survive
+- explicit durable Pi-session metadata policy in Core, shared by runner substrate-event persistence and provider diagnostics; raw Pi message/messages/args/result/partialResult/assistantMessageEvent values are excluded while safe summary names/ids/counts survive
 - explicit runner `route_planned` stream events before provider/substrate execution
 - live Pi diagnostic callback streaming as runner `substrate_event`
 - live Pi assistant `text_delta` forwarding
@@ -98,8 +98,9 @@ Current MindStone embedded runner includes production-grade behavior that should
 
 2. **Durable transcript/source metadata parity**
    - Current stream event persistence stores selected runner events behind an observability gate.
-   - Sanitizer smoke coverage now proves raw Pi message/tool args/results are not persisted in runner stream events or provider diagnostics, while names/ids/arg keys/counts survive.
-   - Remaining work: after live authenticated Pi behavior is observed, decide which additional Pi events are durable transcript facts versus ephemeral UI diagnostics.
+   - Core now has an explicit durable Pi-session metadata policy shared by runner substrate-event persistence and provider diagnostics.
+   - Sanitizer smoke coverage proves raw Pi message/messages/tool args/results/partial results/assistant stream payloads are not persisted as values, while safe summary names/ids/arg keys/counts survive.
+   - Remaining work: after live authenticated Pi behavior is observed, decide whether any additional Pi event summaries should be added to the durable allowlist versus remaining ephemeral UI diagnostics.
 
 3. **Resource loader / extension parity**
    - Config-backed Pi resource loader path/disable options now pass through CLI, TUI, Gateway, `PiSessionMindStoneProvider`, and real `PiSessionAgentRunner` construction.
@@ -142,7 +143,7 @@ Current MindStone embedded runner includes production-grade behavior that should
 ## Recommended next implementation order
 
 1. Run gated live prompt/stream validation when Clint intentionally provides isolated auth/model.
-2. Add durable event metadata policy/tests for Pi stream events.
+2. Use live authenticated Pi event observations to refine the durable metadata allowlist only if necessary.
 3. Decide whether full staged compaction-safeguard summary parity is needed before MVP; minimal native compaction setting parity is already implemented.
 4. Validate `AgentSession.compact(...)` under isolated auth/model with `MINDSTONE_PI_SESSION_LIVE=1 MINDSTONE_PI_SESSION_LIVE_COMPACT=1 npm run smoke:pi-session-live`.
 5. Revisit deeper tree repair/session-store indirection once live basic execution is proven; basic cross-process lockfile safety, malformed-tail repair, and in-memory resume cap are now implemented.

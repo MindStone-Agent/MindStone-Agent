@@ -1,3 +1,8 @@
+import {
+  isPiSessionDurableEventField,
+  isPiSessionDurableResumeCapField,
+  sanitizePiSessionDurableMetadataValue,
+} from "./pi-session-metadata-policy.js";
 import type { MindStoneChatResult } from "./types.js";
 
 export type PiSessionEventDiagnostic = {
@@ -75,12 +80,6 @@ function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
-function stringArrayValue(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const values = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).slice(0, 50);
-  return values.length > 0 ? values : undefined;
-}
-
 function sanitizeEventCounts(value: unknown): Record<string, number> | undefined {
   const input = record(value);
   if (!input) return undefined;
@@ -93,43 +92,29 @@ function sanitizeEventCounts(value: unknown): Record<string, number> | undefined
   return Object.keys(output).length > 0 ? output : undefined;
 }
 
+function sanitizeDurablePolicyRecord(
+  value: unknown,
+  isAllowedField: (key: string) => boolean,
+): Record<string, unknown> | undefined {
+  const input = record(value);
+  if (!input) return undefined;
+  const output: Record<string, unknown> = {};
+  for (const key of Object.keys(input).sort()) {
+    if (!isAllowedField(key)) continue;
+    const sanitized = sanitizePiSessionDurableMetadataValue(input[key]);
+    if (sanitized !== undefined) output[key] = sanitized;
+  }
+  return Object.keys(output).length > 0 ? output : undefined;
+}
+
 function sanitizePiSessionEvents(value: unknown): PiSessionEventDiagnostic[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const events: PiSessionEventDiagnostic[] = [];
   for (const item of value.slice(-200)) {
-    const event = record(item);
+    const event = sanitizeDurablePolicyRecord(item, isPiSessionDurableEventField);
     const type = stringValue(event?.type);
     if (!type) continue;
-    events.push({
-      type,
-      messageRole: stringValue(event?.messageRole),
-      messageTextChars: numberValue(event?.messageTextChars),
-      assistantTextChars: numberValue(event?.assistantTextChars),
-      assistantStreamEventType: stringValue(event?.assistantStreamEventType),
-      assistantStreamDeltaChars: numberValue(event?.assistantStreamDeltaChars),
-      assistantStreamContentChars: numberValue(event?.assistantStreamContentChars),
-      assistantStreamContentIndex: numberValue(event?.assistantStreamContentIndex),
-      stopReason: stringValue(event?.stopReason),
-      errorMessage: stringValue(event?.errorMessage),
-      toolName: stringValue(event?.toolName),
-      toolCallId: stringValue(event?.toolCallId),
-      toolArgsKeys: stringArrayValue(event?.toolArgsKeys),
-      toolResultTextChars: numberValue(event?.toolResultTextChars),
-      toolResultIsError: booleanValue(event?.toolResultIsError),
-      compactionReason: stringValue(event?.compactionReason),
-      compactionWillRetry: booleanValue(event?.compactionWillRetry),
-      compactionAborted: booleanValue(event?.compactionAborted),
-      retryAttempt: numberValue(event?.retryAttempt),
-      retryMaxAttempts: numberValue(event?.retryMaxAttempts),
-      retryDelayMs: numberValue(event?.retryDelayMs),
-      retrySuccess: booleanValue(event?.retrySuccess),
-      queueSteeringCount: numberValue(event?.queueSteeringCount),
-      queueFollowUpCount: numberValue(event?.queueFollowUpCount),
-      sessionName: stringValue(event?.sessionName),
-      thinkingLevel: stringValue(event?.thinkingLevel),
-      messagesCount: numberValue(event?.messagesCount),
-      willRetry: booleanValue(event?.willRetry),
-    });
+    events.push({ ...event, type } as PiSessionEventDiagnostic);
   }
   return events.length > 0 ? events : undefined;
 }
@@ -147,19 +132,7 @@ function sanitizePromptDiagnostics(value: unknown): NonNullable<ProviderDiagnost
 }
 
 function sanitizeResumeCapDiagnostics(value: unknown): NonNullable<ProviderDiagnostics["piSession"]>["resumeCap"] {
-  const input = record(value);
-  if (!input) return undefined;
-  const output = {
-    action: stringValue(input.action),
-    branchLengthBefore: numberValue(input.branchLengthBefore),
-    dropped: numberValue(input.dropped),
-    kept: numberValue(input.kept),
-    messageEmittersKept: numberValue(input.messageEmittersKept),
-    compactionExpanded: booleanValue(input.compactionExpanded),
-    toolPairExpanded: booleanValue(input.toolPairExpanded),
-    errorTurnsDropped: numberValue(input.errorTurnsDropped),
-  };
-  return Object.values(output).some((item) => item !== undefined) ? output : undefined;
+  return sanitizeDurablePolicyRecord(value, isPiSessionDurableResumeCapField) as NonNullable<ProviderDiagnostics["piSession"]>["resumeCap"];
 }
 
 export function providerDiagnosticsFromChatResult(result: MindStoneChatResult): ProviderDiagnostics | undefined {
