@@ -2,11 +2,13 @@ import {
   estimatePromptTokens,
   resolveContextManagementPolicy,
   type ContextManagementPolicy,
+  type MindStonePiCompactionConfig,
   type ResolvedSlidingWindowContextPolicy,
 } from "@mindstone-agent/core";
 
 export type MindStonePiExtensionApi = {
   on(event: "context", handler: MindStonePiContextHandler): void;
+  on(event: "session_before_compact", handler: MindStonePiSessionBeforeCompactHandler): void;
 };
 
 export type MindStonePiExtensionFactory = (api: MindStonePiExtensionApi) => void;
@@ -39,8 +41,52 @@ export type MindStonePiContextHandler = (
 
 export type MindStonePiExtensionFactoryOptions = {
   contextManagement?: ContextManagementPolicy;
+  compaction?: MindStonePiCompactionConfig;
   noExtensions?: boolean;
 };
+
+export type MindStonePiFileOperations = {
+  read?: Iterable<string>;
+  edited?: Iterable<string>;
+  written?: Iterable<string>;
+};
+
+export type MindStonePiCompactionPreparation = {
+  messagesToSummarize?: MindStonePiContextMessage[];
+  turnPrefixMessages?: MindStonePiContextMessage[];
+  firstKeptEntryId?: string;
+  tokensBefore?: number;
+  fileOps?: MindStonePiFileOperations;
+};
+
+export type MindStonePiSessionBeforeCompactEvent = {
+  type: "session_before_compact";
+  preparation?: MindStonePiCompactionPreparation;
+};
+
+export type MindStonePiSessionBeforeCompactContext = {
+  model?: unknown;
+  modelRegistry?: {
+    getApiKey?: (model: unknown) => Promise<unknown> | unknown;
+  };
+};
+
+export type MindStonePiCompactionSafeguardResult = {
+  compaction: {
+    summary: string;
+    firstKeptEntryId?: string;
+    tokensBefore?: number;
+    details: {
+      readFiles: string[];
+      modifiedFiles: string[];
+    };
+  };
+};
+
+export type MindStonePiSessionBeforeCompactHandler = (
+  event: MindStonePiSessionBeforeCompactEvent,
+  ctx: MindStonePiSessionBeforeCompactContext,
+) => MindStonePiCompactionSafeguardResult | undefined | Promise<MindStonePiCompactionSafeguardResult | undefined>;
 
 type PruneUnit = {
   indexes: number[];
@@ -60,6 +106,51 @@ function textFromContent(content: unknown): string {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function compactIterableStrings(value: Iterable<string> | undefined): string[] {
+  return [...(value ?? [])].filter((item) => item.trim()).sort();
+}
+
+function computeFileLists(fileOps: MindStonePiFileOperations | undefined): { readFiles: string[]; modifiedFiles: string[] } {
+  const modified = new Set([...compactIterableStrings(fileOps?.edited), ...compactIterableStrings(fileOps?.written)]);
+  const readFiles = compactIterableStrings(fileOps?.read).filter((file) => !modified.has(file));
+  return { readFiles, modifiedFiles: [...modified].sort() };
+}
+
+function formatFileOperations(readFiles: string[], modifiedFiles: string[]): string {
+  const sections: string[] = [];
+  if (readFiles.length > 0) sections.push(`<read-files>\n${readFiles.join("\n")}\n</read-files>`);
+  if (modifiedFiles.length > 0) sections.push(`<modified-files>\n${modifiedFiles.join("\n")}\n</modified-files>`);
+  return sections.length > 0 ? `\n\n${sections.join("\n\n")}` : "";
+}
+
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function truncateText(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function formatToolFailures(messages: readonly MindStonePiContextMessage[]): string {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "toolResult" || message.isError !== true) continue;
+    const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : "";
+    if (!toolCallId || seen.has(toolCallId)) continue;
+    seen.add(toolCallId);
+    const toolName = typeof message.toolName === "string" && message.toolName.trim() ? message.toolName : "tool";
+    const details = message.details && typeof message.details === "object" ? message.details as Record<string, unknown> : undefined;
+    const status = typeof details?.status === "string" ? details.status : undefined;
+    const exitCode = typeof details?.exitCode === "number" && Number.isFinite(details.exitCode) ? details.exitCode : undefined;
+    const meta = [status ? `status=${status}` : undefined, exitCode !== undefined ? `exitCode=${exitCode}` : undefined].filter(Boolean).join(" ");
+    const summary = truncateText(normalizeWhitespace(textFromContent(message.content)) || (meta ? "failed" : "failed (no output)"), 240);
+    lines.push(`- ${toolName}${meta ? ` (${meta})` : ""}: ${summary}`);
+    if (lines.length >= 8) break;
+  }
+  return lines.length > 0 ? `\n\n## Tool Failures\n${lines.join("\n")}` : "";
 }
 
 function estimateMessageTokens(message: MindStonePiContextMessage): number {
@@ -157,10 +248,48 @@ export function createMindStoneContextPruningExtension(
   };
 }
 
+export function createMindStoneCompactionSafeguardExtension(
+  compaction?: MindStonePiCompactionConfig,
+): MindStonePiExtensionFactory | undefined {
+  if (compaction?.safeguardFallback !== true) return undefined;
+
+  return (api: MindStonePiExtensionApi): void => {
+    api.on("session_before_compact", async (event, ctx) => {
+      if (ctx.model && typeof ctx.modelRegistry?.getApiKey === "function") {
+        const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
+        if (apiKey) return undefined;
+      }
+
+      const preparation = event.preparation;
+      const { readFiles, modifiedFiles } = computeFileLists(preparation?.fileOps);
+      const messages = [
+        ...(preparation?.messagesToSummarize ?? []),
+        ...(preparation?.turnPrefixMessages ?? []),
+      ];
+      const summary = [
+        "Summary unavailable because Pi compaction had no authenticated model context. Older messages were truncated by MindStone-Agent's fallback safeguard.",
+        formatToolFailures(messages),
+        formatFileOperations(readFiles, modifiedFiles),
+      ].join("");
+
+      return {
+        compaction: {
+          summary,
+          firstKeptEntryId: preparation?.firstKeptEntryId,
+          tokensBefore: preparation?.tokensBefore,
+          details: { readFiles, modifiedFiles },
+        },
+      };
+    });
+  };
+}
+
 export function buildMindStonePiExtensionFactories(
   options: MindStonePiExtensionFactoryOptions = {},
 ): MindStonePiExtensionFactory[] {
   if (options.noExtensions) return [];
-  const contextPruning = createMindStoneContextPruningExtension(options.contextManagement);
-  return contextPruning ? [contextPruning] : [];
+  return [
+    createMindStoneContextPruningExtension(options.contextManagement),
+    createMindStoneCompactionSafeguardExtension(options.compaction),
+  ].filter((factory): factory is MindStonePiExtensionFactory => Boolean(factory));
 }

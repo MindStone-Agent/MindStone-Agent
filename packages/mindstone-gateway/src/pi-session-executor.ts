@@ -722,6 +722,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
         ...(options.extensionFactories ?? []),
         ...buildMindStonePiExtensionFactories({
           contextManagement: options.contextManagement,
+          compaction: options.compaction,
           noExtensions: options.noExtensions,
         }),
       ],

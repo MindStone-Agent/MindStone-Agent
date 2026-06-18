@@ -12,15 +12,22 @@ export { MockMindStoneProvider } from "./mock-provider.js";
 export { PiMindStoneProvider } from "./pi-provider.js";
 export {
   buildMindStonePiExtensionFactories,
+  createMindStoneCompactionSafeguardExtension,
   createMindStoneContextPruningExtension,
   type MindStonePiContext,
   type MindStonePiContextEvent,
   type MindStonePiContextHandler,
   type MindStonePiContextMessage,
   type MindStonePiContextResult,
+  type MindStonePiCompactionPreparation,
+  type MindStonePiCompactionSafeguardResult,
   type MindStonePiExtensionApi,
   type MindStonePiExtensionFactory,
   type MindStonePiExtensionFactoryOptions,
+  type MindStonePiFileOperations,
+  type MindStonePiSessionBeforeCompactContext,
+  type MindStonePiSessionBeforeCompactEvent,
+  type MindStonePiSessionBeforeCompactHandler,
 } from "./pi-context-pruning-extension.js";
 export {
   DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR,

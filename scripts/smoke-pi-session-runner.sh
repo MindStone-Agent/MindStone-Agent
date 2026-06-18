@@ -44,7 +44,7 @@ NODE
 
 node --input-type=module <<'NODE'
 import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
-import { applyPiSessionCompactionSettings, buildMindStonePiExtensionFactories, buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, capPiSessionManagerOnLoad, createPiSessionEventCapture, DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR, PiSessionAgentRunner, piSessionFileForKey, repairPiSessionFileTailIfNeeded, resolvePiSessionResumeCapOptions, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
+import { applyPiSessionCompactionSettings, buildMindStonePiExtensionFactories, buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, capPiSessionManagerOnLoad, createMindStoneCompactionSafeguardExtension, createPiSessionEventCapture, DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR, PiSessionAgentRunner, piSessionFileForKey, repairPiSessionFileTailIfNeeded, resolvePiSessionResumeCapOptions, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
@@ -212,8 +212,10 @@ const contextPruningFactories = buildMindStonePiExtensionFactories({
   contextManagement: { mode: 'sliding_window', ceilingPercent: 2, floorPercent: 1, minRecentMessages: 1 },
 });
 if (contextPruningFactories.length !== 1) throw new Error('sliding-window context policy did not create Pi extension factory');
-if (buildMindStonePiExtensionFactories({ contextManagement: { mode: 'auto_compact' } }).length !== 0) throw new Error('auto-compact policy should not create context-pruning extension');
-if (buildMindStonePiExtensionFactories({ contextManagement: { mode: 'sliding_window' }, noExtensions: true }).length !== 0) throw new Error('noExtensions should suppress MindStone inline factories');
+if (buildMindStonePiExtensionFactories({ contextManagement: { mode: 'auto_compact' } }).length !== 0) throw new Error('auto-compact policy should not create context-pruning extension by default');
+if (buildMindStonePiExtensionFactories({ contextManagement: { mode: 'auto_compact' }, compaction: { safeguardFallback: true } }).length !== 1) throw new Error('compaction safeguard fallback did not create Pi extension factory');
+if (buildMindStonePiExtensionFactories({ contextManagement: { mode: 'sliding_window' }, compaction: { safeguardFallback: true } }).length !== 2) throw new Error('context pruning plus compaction safeguard should create two Pi extension factories');
+if (buildMindStonePiExtensionFactories({ contextManagement: { mode: 'sliding_window' }, compaction: { safeguardFallback: true }, noExtensions: true }).length !== 0) throw new Error('noExtensions should suppress MindStone inline factories');
 const contextHandlers = [];
 contextPruningFactories[0]({ on(event, handler) { if (event === 'context') contextHandlers.push(handler); } });
 if (contextHandlers.length !== 1) throw new Error('context pruning factory did not register context handler');
@@ -230,6 +232,30 @@ const prunedContext = await contextHandlers[0]({
 if (!prunedContext || prunedContext.messages.length >= 4) throw new Error('context pruning extension did not prune live context');
 if (prunedContext.messages[0].role !== 'system') throw new Error('context pruning extension pruned system context');
 if (prunedContext.messages.at(-1)?.content !== 'preserve latest user') throw new Error('context pruning extension pruned latest user message');
+
+const safeguardFactory = createMindStoneCompactionSafeguardExtension({ safeguardFallback: true });
+if (!safeguardFactory) throw new Error('compaction safeguard factory missing');
+const compactHandlers = [];
+safeguardFactory({ on(event, handler) { if (event === 'session_before_compact') compactHandlers.push(handler); } });
+if (compactHandlers.length !== 1) throw new Error('compaction safeguard did not register session_before_compact handler');
+const fallbackCompaction = await compactHandlers[0]({
+  type: 'session_before_compact',
+  preparation: {
+    firstKeptEntryId: 'keep-1',
+    tokensBefore: 1234,
+    fileOps: { read: ['README.md', 'src/changed.ts'], edited: ['src/changed.ts'], written: ['src/new.ts'] },
+    messagesToSummarize: [
+      { role: 'toolResult', toolCallId: 'tool-1', toolName: 'bash', isError: true, details: { status: 'failed', exitCode: 2 }, content: [{ type: 'text', text: 'command failed with sentinel output' }] },
+    ],
+    turnPrefixMessages: [],
+  },
+}, { model: undefined, modelRegistry: { getApiKey: async () => undefined } });
+if (!fallbackCompaction?.compaction?.summary.includes('Summary unavailable') || !fallbackCompaction.compaction.summary.includes('## Tool Failures')) throw new Error('fallback compaction summary missing expected sections');
+if (!fallbackCompaction.compaction.summary.includes('README.md') || fallbackCompaction.compaction.summary.includes('<read-files>\nREADME.md\nsrc/changed.ts')) throw new Error('fallback compaction read file list was wrong');
+if (!fallbackCompaction.compaction.summary.includes('src/changed.ts') || !fallbackCompaction.compaction.summary.includes('src/new.ts')) throw new Error('fallback compaction modified file list was wrong');
+if (fallbackCompaction.compaction.firstKeptEntryId !== 'keep-1' || fallbackCompaction.compaction.tokensBefore !== 1234) throw new Error('fallback compaction metadata was not preserved');
+const normalCompaction = await compactHandlers[0]({ type: 'session_before_compact', preparation: {} }, { model: { id: 'model' }, modelRegistry: { getApiKey: async () => 'configured-key' } });
+if (normalCompaction !== undefined) throw new Error('compaction safeguard should not override normal authenticated Pi compaction');
 
 const compactionOverrides = [];
 const compactionSettingsResult = applyPiSessionCompactionSettings({

@@ -30,6 +30,7 @@ Implemented now:
 - config-backed Pi `DefaultResourceLoader` resource options: additional extension/skill/prompt/theme paths plus disable flags
 - smallest MindStone-owned inline extension-factory parity: a Pi `context` hook derived from MindStone `sliding_window` policy that prunes only live Pi LLM context while preserving MindStone transcript authority
 - session-local Pi native compaction settings derived from `routing.pi.compaction`, with a 20k reserve-token floor, applied before prompt/compact without relying on global Pi state
+- optional fallback-only compaction safeguard inline factory, gated by `routing.pi.compaction.safeguardFallback: true`, which preserves safe tool-failure and file-operation summaries only when Pi compaction lacks authenticated model context; it does not replace normal authenticated Pi LLM compaction summaries
 - per-session-file serialization around pi-session prompt and compaction operations, combining in-process ordering with a conservative cross-process `.lock` file and stale-lock recovery
 - pre-open Pi session JSONL tail repair for interrupted trailing writes, with `.corrupt-*.bak` backup preservation; this trims malformed tails only and does not rewrite valid history
 - in-memory Pi SessionManager resume cap derived from `routing.pi.resumeCap`, defaulting to 800 message-emitting entries and dropping assistant error turns; this mutates only loaded SessionManager state after open and does not rewrite the Pi session JSONL or MindStone transcript
@@ -106,6 +107,7 @@ Current MindStone embedded runner includes production-grade behavior that should
    - Config-backed Pi resource loader path/disable options now pass through CLI, TUI, Gateway, `PiSessionMindStoneProvider`, and real `PiSessionAgentRunner` construction.
    - A smallest compatible context-pruning inline factory now exists for `contextManagement.mode = "sliding_window"` and is suppressed when Pi extensions are disabled.
    - Native Pi compaction settings now get session-local overrides and a reserve-token floor from `routing.pi.compaction`.
+   - Optional fallback-only compaction safeguard now exists for no-model/no-api-key compaction paths and preserves tool-failure/file-operation context in the fallback summary.
    - Remaining extension-factory gap: full staged compaction-safeguard summary parity, if needed, should still be ported incrementally rather than by copying the whole runner.
 
 4. **Tool behavior boundary**
@@ -144,6 +146,6 @@ Current MindStone embedded runner includes production-grade behavior that should
 
 1. Run gated live prompt/stream validation when Clint intentionally provides isolated auth/model.
 2. Use live authenticated Pi event observations to refine the durable metadata allowlist only if necessary.
-3. Decide whether full staged compaction-safeguard summary parity is needed before MVP; minimal native compaction setting parity is already implemented.
+3. Decide whether full staged compaction-safeguard summary parity is needed before MVP; minimal native compaction setting parity and optional fallback-only safeguard parity are already implemented.
 4. Validate `AgentSession.compact(...)` under isolated auth/model with `MINDSTONE_PI_SESSION_LIVE=1 MINDSTONE_PI_SESSION_LIVE_COMPACT=1 npm run smoke:pi-session-live`.
 5. Revisit deeper tree repair/session-store indirection once live basic execution is proven; basic cross-process lockfile safety, malformed-tail repair, and in-memory resume cap are now implemented.

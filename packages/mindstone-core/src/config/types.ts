@@ -58,6 +58,8 @@ export type MindStonePiCompactionConfig = {
   keepRecentTokens?: number;
   /** Minimum reserve tokens to enforce for Pi native compaction. Defaults to 20000. */
   reserveTokensFloor?: number;
+  /** Install a fallback-only compaction safeguard hook for no-model/no-api-key compaction paths. Defaults to false. */
+  safeguardFallback?: boolean;
 };
 
 export type MindStonePiResumeCapConfig = {
