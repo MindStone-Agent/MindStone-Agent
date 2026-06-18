@@ -259,12 +259,20 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
 function resolveRunner(config: MindStoneConfig | undefined, provider: MindStoneModelProvider): AgentRunner {
   const mode = resolveRoutingMode(config);
   if (mode === "pi-session") {
-    return new PiSessionAgentRunner({ provider });
+    const paths = runtimePathsFromEnv();
+    return new PiSessionAgentRunner({
+      projectRoot: paths.root,
+      agentDir: config?.routing?.pi?.agentDir ?? paths.piAgentDir,
+      sessionDir: paths.piSessionDir,
+      cwd: config?.workspace?.root,
+      defaultModel: config?.routing?.defaultModel,
+    });
   }
+  void provider;
   return createProviderRouteAgentRunner();
 }
 
-function appendAutoCompactTranscriptEvent(input: {
+async function appendAutoCompactTranscriptEvent(input: {
   sessionKey: string;
   agentId: string;
   event: PromptWindowAutoCompactEvent;
@@ -272,7 +280,10 @@ function appendAutoCompactTranscriptEvent(input: {
   source?: TranscriptEntry["source"];
   runId?: string;
   config?: MindStoneConfig;
-}): TranscriptEntry {
+  runner?: AgentRunner;
+  model?: MindStoneModelInfo;
+  signal?: AbortSignal;
+}): Promise<TranscriptEntry> {
   const metadata: Record<string, unknown> = { ...input.event };
   let text = input.event.event === "auto_compact_required"
     ? `Auto-compact threshold reached at ${input.event.utilizationPercent.toFixed(1)}% utilization. Checkpoint/handoff/compact should run.`
@@ -288,17 +299,31 @@ function appendAutoCompactTranscriptEvent(input: {
         source: input.source,
         runId: input.runId,
       });
-      const compaction = requestGatewaySubstrateCompaction({
-        sessionKey: input.sessionKey,
-        agentId: input.agentId,
-        event: input.event,
-        handoff,
-        config: input.config,
-        runId: input.runId,
-      });
+      const compaction = resolveRoutingMode(input.config) === "pi-session" && input.runner?.compact && input.model
+        ? await input.runner.compact({
+            sessionKey: input.sessionKey,
+            agentId: input.agentId,
+            model: input.model,
+            customInstructions: `MindStone auto-compact after emergency handoff: ${handoff.latestPath}`,
+            signal: input.signal,
+            runContext: {
+              runId: input.runId,
+              surface: input.source?.substrate ?? "gateway",
+            },
+          })
+        : requestGatewaySubstrateCompaction({
+            sessionKey: input.sessionKey,
+            agentId: input.agentId,
+            event: input.event,
+            handoff,
+            config: input.config,
+            runId: input.runId,
+          });
       metadata.handoff = handoff;
       metadata.compaction = compaction;
-      text = `${text} Emergency auto-handoff written to ${handoff.latestPath}. Substrate compaction not requested: ${compaction.reason}.`;
+      text = compaction.requested
+        ? `${text} Emergency auto-handoff written to ${handoff.latestPath}. Substrate compaction requested: ${compaction.reason}.`
+        : `${text} Emergency auto-handoff written to ${handoff.latestPath}. Substrate compaction not requested: ${compaction.reason}.`;
     } else {
       metadata.handoff = { written: false, reason: "emergency_auto_handoff_disabled" };
       metadata.compaction = { requested: false, reason: "manual_checkpoint_handoff_required" };
@@ -344,14 +369,14 @@ function maybeRecordPromptWindowEvent(input: {
     });
   }
   if (result.autoCompactEvent) {
-    appendAutoCompactTranscriptEvent({
+    void appendAutoCompactTranscriptEvent({
       sessionKey: input.sessionKey,
       agentId: input.agentId,
       event: result.autoCompactEvent,
       entries,
       source,
       config: input.config,
-    });
+    }).catch(() => undefined);
   }
 
   return result;
@@ -653,7 +678,7 @@ async function runConfiguredRoute(input: {
       });
     }
     if (route.promptWindow.autoCompactEvent) {
-      appendAutoCompactTranscriptEvent({
+      await appendAutoCompactTranscriptEvent({
         sessionKey: input.sessionKey,
         agentId: input.agentId,
         event: route.promptWindow.autoCompactEvent,
@@ -661,6 +686,9 @@ async function runConfiguredRoute(input: {
         runId: run.id,
         source,
         config: input.config,
+        runner,
+        model,
+        signal: run.abortController.signal,
       });
     }
 
