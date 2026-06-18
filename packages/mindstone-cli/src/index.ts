@@ -542,6 +542,10 @@ function printStatus(): void {
       `WebChat default session: ${status.webchat.defaultSessionKey}`,
       `WebChat source: ${status.webchat.source.substrate}/${status.webchat.source.channel}/${status.webchat.source.chatType}`,
       `WebChat API auth applies: ${status.webchat.apiAuthApplies}`,
+      `Pi-session safety active: ${status.piSessionSafety.active}`,
+      `Pi-session resume cap: ${status.piSessionSafety.resumeCap.enabled} (${status.piSessionSafety.resumeCap.maxEntries} entries, dropErrorTurns=${status.piSessionSafety.resumeCap.dropErrorTurns})`,
+      `Pi-session compaction floor: ${status.piSessionSafety.compaction.reserveTokensFloor}`,
+      `Pi-session safeguard fallback: ${status.piSessionSafety.compaction.safeguardFallback}`,
       loaded.config ? "" : undefined,
       loaded.config ? formatConfigSummary(loaded.config) : undefined,
     ]

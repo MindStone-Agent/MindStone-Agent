@@ -5,6 +5,7 @@ import type { MindStoneRoutingConfig } from "../config/index.js";
 import { getCurrentHandoffStatus, type CurrentHandoffStatus } from "../lifecycle/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { listTranscriptSessions } from "../transcript/index.js";
+import { getPiSessionSafetyStatus, type PiSessionSafetyStatus } from "./pi-session-safety.js";
 import { getMindStoneWebChatStatus, type MindStoneWebChatStatus } from "./webchat.js";
 
 export type MindStoneAgentStatus = {
@@ -41,6 +42,7 @@ export type MindStoneSystemStatus = {
     defaultAgentId?: string;
     defaultModel?: string;
   };
+  piSessionSafety: PiSessionSafetyStatus;
 };
 
 function summarizeAgents(loadedConfig: LoadedMindStoneConfig): MindStoneAgentStatus[] {
@@ -85,5 +87,10 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
       defaultAgentId: loadedConfig.config?.routing?.defaultAgentId,
       defaultModel: loadedConfig.config?.routing?.defaultModel,
     },
+    piSessionSafety: getPiSessionSafetyStatus({
+      config: loadedConfig.config,
+      piAgentDir: paths.piAgentDir,
+      piSessionDir: paths.piSessionDir,
+    }),
   };
 }

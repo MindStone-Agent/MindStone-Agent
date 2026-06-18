@@ -5,6 +5,7 @@ import { getCurrentHandoffStatus } from "../lifecycle/index.js";
 import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { resolveDefaultSessionKey } from "../routing/session.js";
+import { getPiSessionSafetyStatus } from "../status/pi-session-safety.js";
 import { getMindStoneWebChatStatus } from "../status/webchat.js";
 import { loadMindStoneConfig, resolveConfigPath } from "../config/load.js";
 import type { MindStoneConfig } from "../config/types.js";
@@ -246,6 +247,40 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
     check(checks, "warn", "routing.model", "Pi routing default model is configured", "routing.defaultModel is unset");
   } else if (config?.routing?.defaultModel) {
     check(checks, "pass", "routing.model", "Default model is configured", config.routing.defaultModel);
+  }
+
+  const piSessionSafety = getPiSessionSafetyStatus({ config, piAgentDir: paths.piAgentDir, piSessionDir: paths.piSessionDir, homeDir: env.HOME });
+  if (routingMode === "pi-session") {
+    check(
+      checks,
+      piSessionSafety.usesGlobalPiAgentDir ? "fail" : "pass",
+      "piSession.isolation",
+      "Pi-session route does not use global Pi agent dir",
+      piSessionSafety.isolatedAgentDir,
+    );
+    check(
+      checks,
+      piSessionSafety.resumeCap.enabled ? "pass" : "warn",
+      "piSession.resumeCap",
+      "Pi-session resume cap is enabled",
+      `${piSessionSafety.resumeCap.maxEntries} entries; dropErrorTurns=${piSessionSafety.resumeCap.dropErrorTurns}`,
+    );
+    check(
+      checks,
+      piSessionSafety.compaction.reserveTokensFloor >= 20000 ? "pass" : "warn",
+      "piSession.compactionFloor",
+      "Pi-session compaction reserve floor is at least 20k tokens",
+      String(piSessionSafety.compaction.reserveTokensFloor),
+    );
+    check(
+      checks,
+      piSessionSafety.compaction.safeguardFallback ? "pass" : "info",
+      "piSession.safeguardFallback",
+      "Optional fallback-only compaction safeguard is configured",
+      String(piSessionSafety.compaction.safeguardFallback),
+    );
+  } else {
+    check(checks, "info", "piSession.safety", "Pi-session safety checks are inactive", `routing.mode=${routingMode}`);
   }
 
   const providerDiscovery = options.providerDiscovery;
