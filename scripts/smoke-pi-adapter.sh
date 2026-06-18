@@ -43,8 +43,16 @@ evergreen: false
 
 # Adapter recall smoke
 
-Adapter recall sentinel verifies that the MindStone Pi adapter can search local memory without live model auth.
+Adapter recall sentinel verifies that the MindStone Pi adapter can search local memory and inject ephemeral recall without live model auth.
 MD
+
+node <<'NODE'
+const { readFileSync, writeFileSync } = require('node:fs');
+const path = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone/config.json`;
+const config = JSON.parse(readFileSync(path, 'utf8'));
+config.memory = { ...(config.memory ?? {}), autoRecall: true };
+writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+NODE
 
 OUTPUT="$(node <<'NODE'
 const { readFileSync, existsSync } = await import('node:fs');
@@ -95,7 +103,7 @@ const missingReadTool = await tools.get('mindstone_memory_read').execute('tool-m
 const transcriptBeforeShutdownTool = await tools.get('mindstone_transcript_status').execute('tool-transcript-before', {});
 const promptContextResult = await handlers.get('before_agent_start')({
   type: 'before_agent_start',
-  prompt: 'hello from smoke',
+  prompt: 'adapter recall sentinel',
   systemPrompt: 'base system prompt',
 }, ctx);
 await handlers.get('session_shutdown')({ type: 'session_shutdown', reason: 'quit' }, ctx);
@@ -130,6 +138,10 @@ if ! grep -q 'before_agent_start' <<<"${OUTPUT}"; then
 fi
 if ! grep -q 'PI-ADAPTER-SMOKE-IDENTITY' <<<"${OUTPUT}" || ! grep -q 'PI-ADAPTER-SMOKE-USER' <<<"${OUTPUT}" || ! grep -q 'mindstone-identity' <<<"${OUTPUT}"; then
   echo "Pi adapter before_agent_start hook did not inject identity/user prompt context" >&2
+  exit 1
+fi
+if ! grep -q 'mindstone-ephemeral-recall' <<<"${OUTPUT}" || ! grep -q 'Relevant MindStone memory follows' <<<"${OUTPUT}" || ! grep -q 'inject ephemeral recall' <<<"${OUTPUT}"; then
+  echo "Pi adapter before_agent_start hook did not inject autoRecall context" >&2
   exit 1
 fi
 if ! grep -q 'mindstone-recall-status' <<<"${OUTPUT}"; then

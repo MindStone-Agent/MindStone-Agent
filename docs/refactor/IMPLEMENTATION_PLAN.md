@@ -126,7 +126,7 @@ The preferred order is:
   - `/mindstone-recall-status`
   - `/mindstone-recall-search <query> [--limit N]`
   - Smoke validation: `npm run smoke:pi-adapter`
-- [x] Add first-pass identity/user context injection at prompt start: Pi adapter `before_agent_start` appends configured `IDENTITY.md` and `USER.md` as standing orientation in the Pi system prompt. Full SCRI/recall injection through Pi adapter prompt hooks remains pending.
+- [x] Add first-pass identity/user and SCRI/recall context injection at prompt start: Pi adapter `before_agent_start` appends configured `IDENTITY.md`/`USER.md` as standing orientation and, when `memory.autoRecall` is enabled, injects Core-ranked ephemeral recall into the Pi system prompt. Live model behavior remains unverified.
 - [x] Add conservative Pi transcript lifecycle marker hook: on `session_shutdown`, the Pi adapter appends a sanitized `pi_adapter_session_shutdown` event to the configured MindStone transcript. Full raw Pi transcript/message archive parity remains pending.
 - [ ] Add compaction/session lifecycle handling where Pi supports it.
 - [x] Add read-only Gateway status command: `/mindstone-gateway-status` reports configured endpoint/auth/surfaces without live probing.

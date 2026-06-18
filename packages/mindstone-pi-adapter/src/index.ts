@@ -7,6 +7,7 @@ import {
   listTranscriptSessions,
   loadMindStoneConfig,
   loadMindStoneIdentity,
+  recallMindStoneMemory,
   resolveConfigPath,
   runMindStoneConfigWizard,
   runtimePathsFromEnv,
@@ -18,6 +19,7 @@ import {
   type MemoryRecallProvider,
   type MindStonePrompter,
   type MindStoneSelectOption,
+  type TranscriptEntry,
 } from "@mindstone-agent/core";
 
 type PiNotifyKind = "info" | "warning" | "error";
@@ -233,6 +235,24 @@ function defaultAgentAndSession() {
   return { loaded, config, agentId, sessionKey };
 }
 
+function currentPromptUserEntry(input: { prompt: string; agentId: string; sessionKey: string }): TranscriptEntry {
+  return {
+    id: "pi-adapter-current-prompt",
+    timestamp: new Date().toISOString(),
+    sessionKey: input.sessionKey,
+    agentId: input.agentId,
+    role: "user",
+    text: input.prompt,
+    source: {
+      substrate: "pi-adapter",
+      channel: "pi",
+      chatType: "direct",
+      senderId: "local",
+    },
+    metadata: { event: "pi_adapter_current_prompt" },
+  };
+}
+
 function buildPiAdapterPromptContext(): { text?: string; details: Record<string, unknown> } {
   const { loaded, config, agentId } = defaultAgentAndSession();
   const agent = config?.agents?.[agentId];
@@ -333,11 +353,51 @@ function transcriptStatusMessage(sessionKeyInput?: unknown): { text: string; det
   };
 }
 
-function injectPiAdapterPromptContext(event: PiBeforeAgentStartEvent): PiBeforeAgentStartResult | undefined {
-  const context = buildPiAdapterPromptContext();
-  if (!context.text) return undefined;
+async function buildPiAdapterRecallContext(event: PiBeforeAgentStartEvent): Promise<{ text?: string; details: Record<string, unknown> }> {
+  const { config, agentId, sessionKey } = defaultAgentAndSession();
+  if (config?.memory?.autoRecall !== true) return { details: { injected: false, reason: "autoRecall_disabled" } };
+  const provider = resolveMemoryRecallProvider();
+  if (!provider) return { details: { injected: false, reason: "provider_unavailable" } };
+  const recall = await recallMindStoneMemory({
+    agentId,
+    entries: [currentPromptUserEntry({ prompt: event.prompt, agentId, sessionKey })],
+    provider,
+    config: config.memory?.recall,
+  });
+  if (!recall?.promptText) {
+    return {
+      details: {
+        injected: false,
+        reason: "no_hits",
+        query: recall?.query ?? event.prompt,
+        diagnostics: recall?.diagnostics,
+      },
+    };
+  }
   return {
-    systemPrompt: [event.systemPrompt, "", context.text].filter(Boolean).join("\n"),
+    text: [
+      "<mindstone-ephemeral-recall>",
+      recall.promptText,
+      "</mindstone-ephemeral-recall>",
+    ].join("\n"),
+    details: {
+      injected: true,
+      query: recall.query,
+      hitCount: recall.hits.length,
+      promptTokens: recall.promptTokens,
+      provider: provider.id,
+      diagnostics: recall.diagnostics,
+    },
+  };
+}
+
+async function injectPiAdapterPromptContext(event: PiBeforeAgentStartEvent): Promise<PiBeforeAgentStartResult | undefined> {
+  const identityContext = buildPiAdapterPromptContext();
+  const recallContext = await buildPiAdapterRecallContext(event);
+  const sections = [identityContext.text, recallContext.text].filter((section): section is string => Boolean(section));
+  if (sections.length === 0) return undefined;
+  return {
+    systemPrompt: [event.systemPrompt, "", ...sections].filter(Boolean).join("\n"),
   };
 }
 
