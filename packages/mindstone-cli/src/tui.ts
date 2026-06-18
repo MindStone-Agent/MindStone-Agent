@@ -1,5 +1,6 @@
 import {
   loadMindStoneConfig,
+  loadMindStoneIdentity,
   resolveConfigPath,
   resolveConfiguredSessionKey,
   getCurrentHandoffStatus,
@@ -388,6 +389,39 @@ function buildTuiHandoffPanel(paths: ReturnType<typeof runtimePathsFromEnv>): st
       ? "This handoff can be replayed into prompt context once per transcript continuity span."
       : "No current handoff exists for this runtime.",
   ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function buildTuiIdentityPanel(params: {
+  config: ReturnType<typeof loadMindStoneConfig>["config"];
+  configPath: string;
+  ctx: TuiCommandContext;
+}): string {
+  const agent = params.config?.agents?.[params.ctx.agentId];
+  if (!agent) {
+    return [
+      `- agent: \`${params.ctx.agentId}\``,
+      "- configured: `false`",
+      "",
+      "No configured agent identity is available for this TUI context.",
+    ].join("\n");
+  }
+  const loaded = loadMindStoneIdentity(params.ctx.agentId, agent, params.configPath);
+  const identityChars = loaded.identity?.identityMarkdown.length ?? 0;
+  const userChars = loaded.identity?.userMarkdown?.length ?? 0;
+  const tokenEstimate = Math.ceil((identityChars + userChars) / 4);
+  return [
+    `- agent: \`${params.ctx.agentId}\``,
+    `- name: \`${loaded.identity?.name ?? agent.id}\``,
+    agent.profileId ? `- profile: \`${agent.profileId}\`` : undefined,
+    agent.defaultModel ? `- agent default model: \`${agent.defaultModel}\`` : undefined,
+    `- identity exists: \`${loaded.identityExists}\``,
+    `- user exists: \`${loaded.userExists}\``,
+    loaded.identityPath ? `- identity path: \`${loaded.identityPath}\`` : undefined,
+    loaded.userPath ? `- user path: \`${loaded.userPath}\`` : undefined,
+    loaded.identity ? `- loaded into prompt context: \`true\`` : `- loaded into prompt context: \`false\``,
+    loaded.identity ? `- identity/user token estimate: \`${tokenEstimate}\`` : undefined,
+    loaded.error ? `- error: \`${loaded.error}\`` : undefined,
+  ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
 function buildTuiEventsPanel(params: { ctx: TuiCommandContext; entries: TranscriptEntry[]; limit?: number }): string {
@@ -821,6 +855,7 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   chat.addPanel("memory", buildTuiMemoryPanel(smokeConfig, smokePaths));
   chat.addPanel("context", buildTuiContextPanel({ config: smokeConfig, ctx, entries: [] }));
   chat.addPanel("handoff", buildTuiHandoffPanel(smokePaths));
+  chat.addPanel("identity", buildTuiIdentityPanel({ config: smokeConfig, configPath: "/tmp/mindstone/config.json", ctx }));
   const smokeRunEntries: TranscriptEntry[] = [
     {
       id: "event-smoke-1",
@@ -958,6 +993,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "memory", description: "Show memory/recall index status" },
     { name: "context", description: "Show context window policy and current session estimate" },
     { name: "handoff", description: "Show current compaction handoff status" },
+    { name: "identity", description: "Show active agent identity/user context status" },
     { name: "events", description: "Show recent transcript/runner events" },
     { name: "runs", description: "Show recent transcript runs" },
     { name: "doctor", description: "Show compact runtime doctor summary" },
@@ -1032,7 +1068,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /handoff, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /handoff, /identity, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -1064,6 +1100,11 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       }
       if (message === "/handoff") {
         chat.addPanel("handoff", buildTuiHandoffPanel(paths));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/identity") {
+        chat.addPanel("identity", buildTuiIdentityPanel({ config: loaded.config, configPath: loaded.path, ctx }));
         tui.requestRender();
         return;
       }

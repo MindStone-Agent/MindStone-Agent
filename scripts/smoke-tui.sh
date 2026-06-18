@@ -95,6 +95,10 @@ if ! grep -q "handoff" <<<"${OUTPUT}" || ! grep -q ".handoff.md" <<<"${OUTPUT}";
   echo "TUI smoke output missing handoff panel" >&2
   exit 1
 fi
+if ! grep -q "identity exists" <<<"${OUTPUT}" || ! grep -q "loaded into prompt context" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing identity panel" >&2
+  exit 1
+fi
 if ! grep -q "event entries" <<<"${OUTPUT}" || ! grep -q "runner_stream_event/substrate_event" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing events panel" >&2
   exit 1
