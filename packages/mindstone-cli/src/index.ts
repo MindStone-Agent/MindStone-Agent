@@ -51,9 +51,9 @@ function usage(): string {
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
-    "  mindstone memory backfill [--embed] [--force] [--maintain] [--dedupe-text]  Index memory/transcripts and optionally maintain/embed chunks",
-    "  mindstone memory maintain [--dry-run] [--dedupe-text]  Clean stale rows and compact SQLite memory DB",
-    "  mindstone memory status    Show SQLite memory DB status",
+    "  mindstone memory backfill [--embed] [--force] [--maintain] [--dedupe-text] [--json]  Index memory/transcripts and optionally maintain/embed chunks",
+    "  mindstone memory maintain [--dry-run] [--dedupe-text] [--json]  Clean stale rows and compact SQLite memory DB",
+    "  mindstone memory status [--json]    Show SQLite memory DB status",
     "  mindstone help         Show this help",
     "",
     "Environment:",
@@ -288,8 +288,16 @@ function setupProviderAuth(request: MindStoneProviderAuthSetupRequest): string |
     : `Stored ${request.providerId} API key in isolated auth.json.`;
 }
 
-function printMemoryStatus(): void {
+function printJson(value: unknown): void {
+  output.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function printMemoryStatus(options: { json?: boolean } = {}): void {
   const stats = getSqliteMemoryIndexStats(runtimePathsFromEnv());
+  if (options.json) {
+    printJson(stats);
+    return;
+  }
   output.write(`${gold("🔶 MindStone memory status")}\n\n`);
   output.write(
     [
@@ -329,8 +337,9 @@ function hasOption(argv: string[], name: string): boolean {
 
 async function runMemoryCommand(argv: string[]): Promise<void> {
   const subcommand = argv[3] ?? "status";
+  const json = argv.includes("--json");
   if (subcommand === "status") {
-    printMemoryStatus();
+    printMemoryStatus({ json });
     return;
   }
   if (subcommand === "backfill") {
@@ -342,6 +351,8 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
     const maintain = argv.includes("--maintain") || argv.includes("--dedupe-text");
     const deduplicateText = argv.includes("--dedupe-text");
     const result = backfillSqliteMemoryIndex({ config: loaded.config, paths });
+    let maintenanceResult: ReturnType<typeof maintainSqliteMemoryIndex> | undefined;
+    let embeddingResult: Awaited<ReturnType<typeof backfillSqliteMemoryEmbeddings>> | undefined;
     const lines = [
       `Database: ${result.databasePath}`,
       `Sources indexed: ${result.sourcesIndexed}`,
@@ -351,7 +362,7 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
       `Transcript documents: ${result.transcriptDocuments}`,
     ];
     if (maintain) {
-      const maintenanceResult = maintainSqliteMemoryIndex({ paths, deduplicateText });
+      maintenanceResult = maintainSqliteMemoryIndex({ paths, deduplicateText });
       lines.push(
         `Maintenance stale sources removed: ${maintenanceResult.staleSourcesRemoved}`,
         `Maintenance duplicate text chunks removed: ${maintenanceResult.duplicateTextChunksRemoved}`,
@@ -362,7 +373,7 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
       if (maintenanceResult.error) lines.push(`Maintenance error: ${maintenanceResult.error}`);
     }
     if (embed) {
-      const embeddingResult = await backfillSqliteMemoryEmbeddings({ config: loaded.config, paths, force });
+      embeddingResult = await backfillSqliteMemoryEmbeddings({ config: loaded.config, paths, force });
       lines.push(
         `Embedding provider: ${embeddingResult.providerId}:${embeddingResult.model}`,
         `Chunks considered for embedding: ${embeddingResult.chunksConsidered}`,
@@ -370,9 +381,15 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
         embeddingResult.dimensions ? `Embedding dimensions: ${embeddingResult.dimensions}` : "Embedding dimensions: n/a",
       );
     }
+    if (json) {
+      printJson({ backfill: result, maintenance: maintenanceResult, embedding: embeddingResult });
+      if (maintenanceResult?.error) process.exitCode = 1;
+      return;
+    }
     output.write(`${gold("🔶 MindStone memory backfill")}\n\n`);
     output.write(lines.join("\n"));
     output.write("\n");
+    if (maintenanceResult?.error) process.exitCode = 1;
     return;
   }
   if (subcommand === "maintain") {
@@ -385,6 +402,11 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
       optimize: !argv.includes("--no-optimize"),
       vacuum: !argv.includes("--no-vacuum"),
     });
+    if (json) {
+      printJson(result);
+      if (result.error) process.exitCode = 1;
+      return;
+    }
     const lines = [
       `Database: ${result.databasePath}`,
       `Present: ${result.present}`,

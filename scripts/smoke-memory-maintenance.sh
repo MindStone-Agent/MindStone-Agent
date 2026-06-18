@@ -64,6 +64,15 @@ rm "${MEMORY_DIR}/stale.md"
 dry_output="$(./scripts/mindstone memory maintain --dry-run --dedupe-text)"
 printf '%s\n' "${dry_output}"
 grep -q "Dry run: true" <<<"${dry_output}"
+
+json_dry_output="$(./scripts/mindstone memory maintain --dry-run --dedupe-text --json)"
+printf '%s\n' "${json_dry_output}"
+JSON_INPUT="${json_dry_output}" node <<'NODE'
+const data = JSON.parse(process.env.JSON_INPUT);
+if (data.dryRun !== true) process.exit(1);
+if (data.staleSourcesFound !== 1) process.exit(1);
+if (data.duplicateTextChunksFound !== 1) process.exit(1);
+NODE
 grep -q "Stale sources found: 1" <<<"${dry_output}"
 grep -q "Stale sources removed: 0" <<<"${dry_output}"
 grep -q "Duplicate text chunks found: 1" <<<"${dry_output}"
@@ -127,6 +136,15 @@ rm "${MEMORY_DIR}/integrated_stale.md"
 integrated_output="$(./scripts/mindstone memory backfill --maintain --dedupe-text)"
 printf '%s\n' "${integrated_output}"
 grep -q "Maintenance stale sources removed: 1" <<<"${integrated_output}"
+
+integrated_json_output="$(./scripts/mindstone memory backfill --maintain --dedupe-text --json)"
+printf '%s\n' "${integrated_json_output}"
+JSON_INPUT="${integrated_json_output}" node <<'NODE'
+const data = JSON.parse(process.env.JSON_INPUT);
+if (!data.backfill || !data.maintenance) process.exit(1);
+if (typeof data.backfill.chunksIndexed !== 'number') process.exit(1);
+if (typeof data.maintenance.duplicateTextChunksRemoved !== 'number') process.exit(1);
+NODE
 grep -q "Maintenance duplicate text chunks removed: 2" <<<"${integrated_output}"
 grep -q "Maintenance empty sources removed: 2" <<<"${integrated_output}"
 grep -q "Maintenance optimized: true" <<<"${integrated_output}"
@@ -170,6 +188,15 @@ NODE
 status_output="$(./scripts/mindstone memory status)"
 printf '%s\n' "${status_output}"
 grep -q "Duplicate text chunks:" <<<"${status_output}"
+
+status_json_output="$(./scripts/mindstone memory status --json)"
+printf '%s\n' "${status_json_output}"
+JSON_INPUT="${status_json_output}" node <<'NODE'
+const data = JSON.parse(process.env.JSON_INPUT);
+if (data.present !== true) process.exit(1);
+if (typeof data.chunks !== 'number') process.exit(1);
+if (typeof data.duplicateTextChunks !== 'number') process.exit(1);
+NODE
 grep -q "DB bytes:" <<<"${status_output}"
 grep -q "Estimated free bytes:" <<<"${status_output}"
 
