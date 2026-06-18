@@ -58,6 +58,7 @@
 - [x] Load recent transcript history into `mindstone tui` startup; smoke validates rendering prior user/assistant transcript entries.
 - [x] Add first TUI in-place assistant response update path and event-line rendering for returned turn events.
 - [x] Add first TUI status panel via `/status`, showing agent/session/route/model/provider/config/transcript/runtime details.
+- [x] Add first non-mutating TUI selector panels via `/sessions`, `/agents`, and `/models`.
 
 ### Completed
 
@@ -147,7 +148,8 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - This is not live token streaming yet.
 - [ ] Stream/update assistant text and tool/substrate events live from Gateway/runner events.
 - [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
-- [ ] Add session/agent/model selectors and richer status/settings overlays.
+- [x] Add first non-mutating `/sessions`, `/agents`, and `/models` panels.
+- [ ] Add interactive session/agent/model selectors and richer status/settings overlays.
 - [ ] Adapt richer current MindStone TUI components and event handlers from `/Users/clint/Projects/MindStone/src/tui/`.
 
 ### Onboarding and identity

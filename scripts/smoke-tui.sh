@@ -71,6 +71,22 @@ if ! grep -q "provider:" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing status provider details" >&2
   exit 1
 fi
+if ! grep -q "sessions" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing sessions panel" >&2
+  exit 1
+fi
+if ! grep -q "agents" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing agents panel" >&2
+  exit 1
+fi
+if ! grep -q "models" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing models panel" >&2
+  exit 1
+fi
+if ! grep -q "Selector mutation is not enabled yet" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing selector mutation boundary" >&2
+  exit 1
+fi
 
 ./scripts/mindstone chat --once "history sentinel for tui" --json >/tmp/mindstone-agent-tui-chat.json
 HISTORY_OUTPUT="$(./scripts/mindstone tui --smoke-history --history-limit 10 --width 72)"

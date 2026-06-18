@@ -2,6 +2,7 @@ import {
   loadMindStoneConfig,
   resolveConfigPath,
   resolveConfiguredSessionKey,
+  listTranscriptSessions,
   readTranscriptEntries,
   resolveMindStoneChatModel,
   runMindStoneChatTurn,
@@ -154,10 +155,14 @@ class MindStoneChatLog extends Container {
     this.append(new Markdown(text || muted("(empty tool result)"), 2, 0, markdownTheme));
   }
 
-  addStatusPanel(text: string): void {
+  addPanel(title: string, text: string): void {
     this.append(new Spacer(1));
-    this.append(new Text(`${gold("◆")} ${bold(gold("status"))}`, 1, 0));
+    this.append(new Text(`${gold("◆")} ${bold(gold(title))}`, 1, 0));
     this.append(new Markdown(text, 2, 0, markdownTheme));
+  }
+
+  addStatusPanel(text: string): void {
+    this.addPanel("status", text);
   }
 
   addUser(text: string): void {
@@ -259,6 +264,111 @@ function buildTuiStatusPanel(params: {
     `- config: \`${params.configPath}\``,
     `- loaded history: \`${params.renderedHistoryCount}/${params.historyLimit}\``,
   ].join("\n");
+}
+
+type TuiPanelItem = {
+  id: string;
+  detail?: string;
+  current?: boolean;
+};
+
+function buildTuiListPanel(params: { emptyText: string; items: TuiPanelItem[]; next?: string }): string {
+  const lines = params.items.length === 0
+    ? [`- ${params.emptyText}`]
+    : params.items.map((item) => {
+      const current = item.current ? " **current**" : "";
+      const detail = item.detail ? ` — ${item.detail}` : "";
+      return `- \`${item.id}\`${current}${detail}`;
+    });
+  if (params.next) lines.push("", params.next);
+  return lines.join("\n");
+}
+
+function uniqueValues(values: Array<string | undefined>): string[] {
+  return Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
+}
+
+function configuredAgentIds(config: ReturnType<typeof loadMindStoneConfig>["config"], ctx: TuiCommandContext): string[] {
+  return uniqueValues([
+    ctx.agentId,
+    config?.routing?.defaultAgentId,
+    ...Object.keys(config?.agents ?? {}),
+  ]).sort((a, b) => a.localeCompare(b));
+}
+
+function buildTuiAgentsPanel(config: ReturnType<typeof loadMindStoneConfig>["config"], ctx: TuiCommandContext): string {
+  const ids = configuredAgentIds(config, ctx);
+  return buildTuiListPanel({
+    emptyText: "No configured agents found.",
+    items: ids.map((id) => {
+      const agent = config?.agents?.[id];
+      const detailParts = [
+        id === config?.routing?.defaultAgentId ? "default" : undefined,
+        agent?.profileId ? `profile ${agent.profileId}` : undefined,
+        agent?.defaultModel ? `model ${agent.defaultModel}` : undefined,
+      ].filter(Boolean);
+      return {
+        id,
+        current: id === ctx.agentId,
+        detail: detailParts.join("; ") || undefined,
+      };
+    }),
+    next: "Selector mutation is not enabled yet. Start with `--agent <id>` or update config intentionally.",
+  });
+}
+
+function buildTuiModelsPanel(config: ReturnType<typeof loadMindStoneConfig>["config"], ctx: TuiCommandContext): string {
+  const agent = config?.agents?.[ctx.agentId];
+  const ids = uniqueValues([
+    ctx.model.id,
+    agent?.defaultModel,
+    config?.routing?.defaultModel,
+    ctx.routingMode === "mock" ? "mindstone/mock" : undefined,
+  ]).sort((a, b) => a.localeCompare(b));
+  return buildTuiListPanel({
+    emptyText: "No configured models found.",
+    items: ids.map((id) => ({
+      id,
+      current: id === ctx.model.id,
+      detail: [
+        id === config?.routing?.defaultModel ? "routing default" : undefined,
+        id === agent?.defaultModel ? "agent default" : undefined,
+      ].filter(Boolean).join("; ") || undefined,
+    })),
+    next: "Model switching is not enabled yet. Start with `--model <id>` or update config intentionally.",
+  });
+}
+
+function buildTuiSessionsPanel(params: {
+  ctx: TuiCommandContext;
+  config: ReturnType<typeof loadMindStoneConfig>["config"];
+  sessions: Array<{ sessionKey: string; entries: number; updatedAt?: string }>;
+}): string {
+  const defaultSession = params.config?.session?.defaultSessionKey;
+  const mode = params.config?.session?.mode ?? "single";
+  const configured = uniqueValues([params.ctx.sessionKey, defaultSession]);
+  const byKey = new Map<string, TuiPanelItem>();
+  for (const key of configured) {
+    byKey.set(key, {
+      id: key,
+      current: key === params.ctx.sessionKey,
+      detail: key === defaultSession ? `configured default; mode ${mode}` : `mode ${mode}`,
+    });
+  }
+  for (const session of params.sessions) {
+    const existing = byKey.get(session.sessionKey);
+    const detail = `${session.entries} entr${session.entries === 1 ? "y" : "ies"}${session.updatedAt ? `; updated ${session.updatedAt}` : ""}`;
+    byKey.set(session.sessionKey, {
+      id: session.sessionKey,
+      current: session.sessionKey === params.ctx.sessionKey || Boolean(existing?.current),
+      detail: existing?.detail ? `${existing.detail}; ${detail}` : detail,
+    });
+  }
+  return buildTuiListPanel({
+    emptyText: "No sessions found.",
+    items: Array.from(byKey.values()).sort((a, b) => Number(Boolean(b.current)) - Number(Boolean(a.current)) || a.id.localeCompare(b.id)),
+    next: "Session switching is not enabled yet. Start with `--session <key>` or update config intentionally.",
+  });
 }
 
 function appendTranscriptEntryToChatLog(chat: MindStoneChatLog, entry: TranscriptEntry): boolean {
@@ -405,6 +515,11 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   const assistant = chat.startAssistant(dim("MindStone is thinking…"));
   assistant.setText("TUI smoke response with **markdown** and `code`.");
   chat.addEvent("runner stream event smoke");
+  const smokeConfig = {
+    routing: { mode: "mock" as const, defaultAgentId: "default", defaultModel: "mindstone/mock" },
+    session: { mode: "single" as const, defaultSessionKey: "agent:default:main" },
+    agents: { default: { id: "default", defaultModel: "mindstone/mock", profileId: "software-engineering-partner" } },
+  };
   chat.addStatusPanel(buildTuiStatusPanel({
     ctx,
     configPath: "/tmp/mindstone/config.json",
@@ -413,6 +528,13 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
     transcriptDir: "/tmp/mindstone/transcripts",
     piSessionDir: "/tmp/pi-sessions",
   }));
+  chat.addPanel("sessions", buildTuiSessionsPanel({
+    ctx,
+    config: smokeConfig,
+    sessions: [{ sessionKey: "agent:default:main", entries: 2, updatedAt: "2026-06-18T00:00:00.000Z" }],
+  }));
+  chat.addPanel("agents", buildTuiAgentsPanel(smokeConfig, ctx));
+  chat.addPanel("models", buildTuiModelsPanel(smokeConfig, ctx));
   footer.setStatus(`session ${ctx.sessionKey}`);
   return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
 }
@@ -467,6 +589,9 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "help", description: "Show TUI commands" },
     { name: "clear", description: "Clear the visible chat log" },
     { name: "status", description: "Show current TUI/session status" },
+    { name: "sessions", description: "Show known/configured sessions" },
+    { name: "agents", description: "Show configured agents" },
+    { name: "models", description: "Show configured model choices" },
     { name: "exit", description: "Exit the TUI" },
     { name: "quit", description: "Exit the TUI" },
   ], process.cwd()));
@@ -518,7 +643,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /sessions, /agents, /models, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -531,6 +656,25 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
           transcriptDir: paths.transcriptDir,
           piSessionDir: paths.piSessionDir,
         }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/sessions") {
+        chat.addPanel("sessions", buildTuiSessionsPanel({
+          ctx,
+          config: loaded.config,
+          sessions: listTranscriptSessions({ paths }).slice(0, 12),
+        }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/agents") {
+        chat.addPanel("agents", buildTuiAgentsPanel(loaded.config, ctx));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/models") {
+        chat.addPanel("models", buildTuiModelsPanel(loaded.config, ctx));
         tui.requestRender();
         return;
       }
