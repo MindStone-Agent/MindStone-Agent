@@ -198,6 +198,37 @@ if grep -q "Config was changed" <<<"${SELECTOR_OUTPUT}"; then
   exit 1
 fi
 
+STREAM_OUTPUT="$(./scripts/mindstone tui --smoke-stream --width 72)"
+echo "${STREAM_OUTPUT}"
+if ! grep -q "TUI stream smoke exercises the real send path" <<<"${STREAM_OUTPUT}"; then
+  echo "TUI stream smoke output missing stream smoke intro" >&2
+  exit 1
+fi
+if ! grep -q "runner provider-route started" <<<"${STREAM_OUTPUT}"; then
+  echo "TUI stream smoke output missing run_started callback rendering" >&2
+  exit 1
+fi
+if ! grep -q "runner provider-route planned route" <<<"${STREAM_OUTPUT}"; then
+  echo "TUI stream smoke output missing route_planned callback rendering" >&2
+  exit 1
+fi
+if ! grep -q "live text delta" <<<"${STREAM_OUTPUT}"; then
+  echo "TUI stream smoke output missing text_delta callback rendering" >&2
+  exit 1
+fi
+if ! grep -q "tui-smoke: stream sentinel for tui" <<<"${STREAM_OUTPUT}"; then
+  echo "TUI stream smoke output missing streamed assistant text" >&2
+  exit 1
+fi
+if ! grep -q "Observed 4 runner stream events" <<<"${STREAM_OUTPUT}"; then
+  echo "TUI stream smoke output missing event count" >&2
+  exit 1
+fi
+if ! grep -q "stream smoke complete" <<<"${STREAM_OUTPUT}"; then
+  echo "TUI stream smoke output missing completion status" >&2
+  exit 1
+fi
+
 ./scripts/mindstone chat --once "history sentinel for tui" --json >/tmp/mindstone-agent-tui-chat.json
 HISTORY_OUTPUT="$(./scripts/mindstone tui --smoke-history --history-limit 10 --width 72)"
 echo "${HISTORY_OUTPUT}"
@@ -209,7 +240,7 @@ if ! grep -q "tui-smoke: history sentinel for tui" <<<"${HISTORY_OUTPUT}"; then
   echo "TUI history smoke output missing assistant transcript entry" >&2
   exit 1
 fi
-if ! grep -q "Loaded 2 recent transcript" <<<"${HISTORY_OUTPUT}"; then
+if ! grep -q "Loaded 4 recent transcript" <<<"${HISTORY_OUTPUT}"; then
   echo "TUI history smoke output missing loaded history count" >&2
   exit 1
 fi

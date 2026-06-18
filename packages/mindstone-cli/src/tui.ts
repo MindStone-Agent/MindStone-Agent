@@ -703,6 +703,46 @@ function createMindStoneTuiHistorySnapshot(argv: string[], width: number): strin
   return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
 }
 
+async function createMindStoneTuiStreamSmokeSnapshot(argv: string[], width: number): Promise<string> {
+  const paths = runtimePathsFromEnv();
+  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+  if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  const ctx = resolveTuiContext(argv, loaded);
+  const header = new MindStoneHeader(ctx);
+  const chat = new MindStoneChatLog();
+  const footer = new MindStoneFooter();
+  const message = "stream sentinel for tui";
+  const events: AgentRunStreamEvent[] = [];
+  let streamedAssistantText = "";
+
+  chat.addSystem("TUI stream smoke exercises the real send path and onRunnerStreamEvent callback.");
+  chat.addUser(message);
+  const assistant = chat.startAssistant(dim("MindStone is thinking…"));
+
+  const result = await sendTuiTurn({
+    argv,
+    loaded,
+    ctx,
+    message,
+    onRunnerStreamEvent: (event) => {
+      events.push(event);
+      if (event.type === "text_delta") {
+        streamedAssistantText += event.text;
+        assistant.setText(streamedAssistantText);
+        chat.addEvent(`live text delta (${event.text.length} chars)`);
+      } else {
+        chat.addEvent(runnerStreamEventLabel(event));
+      }
+    },
+  });
+
+  if (!streamedAssistantText) assistant.setText(result.assistantEntry.text ?? "");
+  chat.addSystem(`Observed ${events.length} runner stream event${events.length === 1 ? "" : "s"} before turn completion.`);
+  chat.addTurnEvents(result.events, { skipRunnerStreamEvents: true });
+  footer.setStatus(`stream smoke complete • session ${ctx.sessionKey}`);
+  return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
+}
+
 function smokeSelectorConfig() {
   return {
     routing: { mode: "mock" as const, defaultAgentId: "default", defaultModel: "mindstone/mock" },
@@ -777,6 +817,10 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
   }
   if (hasOption(argv, "--smoke-history")) {
     process.stdout.write(`${createMindStoneTuiHistorySnapshot(argv, numberOption(argv, "--width", 80))}\n`);
+    return;
+  }
+  if (hasOption(argv, "--smoke-stream")) {
+    process.stdout.write(`${await createMindStoneTuiStreamSmokeSnapshot(argv, numberOption(argv, "--width", 80))}\n`);
     return;
   }
   if (hasOption(argv, "--smoke")) {

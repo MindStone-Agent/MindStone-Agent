@@ -173,10 +173,10 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [x] Add first in-place assistant update path for TUI turns.
   - TUI now starts a mutable assistant message as “thinking…” and updates it with the final response.
   - Returned turn event entries render as compact event lines.
-  - This is not live token streaming yet.
+  - Later runner-stream wiring upgraded this from final-only replacement to live callback updates.
 - [x] Render `AgentRunner.stream(...)` lifecycle/diagnostic events during TUI turns.
 - [x] Apply completed-response `text_delta` replay events to the mutable assistant message.
-- [ ] Stream/update assistant text and tool/substrate events live from Gateway/runner events.
+- [x] Stream/update assistant text and tool/substrate events live from runner events in the native TUI; interactive TUI consumes `onRunnerStreamEvent` for live text deltas and substrate/route events, with non-interactive `tui --smoke-stream` coverage.
 - [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
 - [x] Add non-mutating `/config` panel for sanitized active runtime config.
 - [x] Add non-mutating `/gateway` panel for configured Gateway surfaces/auth without live probing.
