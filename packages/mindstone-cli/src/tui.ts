@@ -154,6 +154,12 @@ class MindStoneChatLog extends Container {
     this.append(new Markdown(text || muted("(empty tool result)"), 2, 0, markdownTheme));
   }
 
+  addStatusPanel(text: string): void {
+    this.append(new Spacer(1));
+    this.append(new Text(`${gold("◆")} ${bold(gold("status"))}`, 1, 0));
+    this.append(new Markdown(text, 2, 0, markdownTheme));
+  }
+
   addUser(text: string): void {
     this.append(new Spacer(1));
     this.append(new Text(`${gold("◆")} ${bold("you")}`, 1, 0));
@@ -232,6 +238,27 @@ function eventEntryLabel(entry: TranscriptEntry): string | undefined {
   if (text) return text;
   if (metadataEvent) return metadataEvent.replaceAll("_", " ");
   return undefined;
+}
+
+function buildTuiStatusPanel(params: {
+  ctx: TuiCommandContext;
+  configPath: string;
+  historyLimit: number;
+  renderedHistoryCount: number;
+  transcriptDir: string;
+  piSessionDir: string;
+}): string {
+  return [
+    `- agent: \`${params.ctx.agentId}\``,
+    `- session: \`${params.ctx.sessionKey}\``,
+    `- route: \`${params.ctx.routingMode}\``,
+    `- model: \`${params.ctx.model.id}\``,
+    `- provider: \`${params.ctx.model.provider}\``,
+    `- transcript dir: \`${params.transcriptDir}\``,
+    `- pi session dir: \`${params.piSessionDir}\``,
+    `- config: \`${params.configPath}\``,
+    `- loaded history: \`${params.renderedHistoryCount}/${params.historyLimit}\``,
+  ].join("\n");
 }
 
 function appendTranscriptEntryToChatLog(chat: MindStoneChatLog, entry: TranscriptEntry): boolean {
@@ -378,6 +405,14 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   const assistant = chat.startAssistant(dim("MindStone is thinking…"));
   assistant.setText("TUI smoke response with **markdown** and `code`.");
   chat.addEvent("runner stream event smoke");
+  chat.addStatusPanel(buildTuiStatusPanel({
+    ctx,
+    configPath: "/tmp/mindstone/config.json",
+    historyLimit: 40,
+    renderedHistoryCount: 2,
+    transcriptDir: "/tmp/mindstone/transcripts",
+    piSessionDir: "/tmp/pi-sessions",
+  }));
   footer.setStatus(`session ${ctx.sessionKey}`);
   return [...header.render(width), ...chat.render(width), ...footer.render(width)].join("\n");
 }
@@ -488,7 +523,14 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/status") {
-        chat.addSystem(`agent=${ctx.agentId} session=${ctx.sessionKey} route=${ctx.routingMode} model=${ctx.model.id}`);
+        chat.addStatusPanel(buildTuiStatusPanel({
+          ctx,
+          configPath: loaded.path,
+          historyLimit,
+          renderedHistoryCount: renderableCount,
+          transcriptDir: paths.transcriptDir,
+          piSessionDir: paths.piSessionDir,
+        }));
         tui.requestRender();
         return;
       }

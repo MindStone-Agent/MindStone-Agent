@@ -57,6 +57,7 @@
 - [x] Add first styled `mindstone tui` shell using vendored Pi TUI primitives, MindStone gold/diamond theme, chat log, editor, footer/status, slash commands, and routed chat path.
 - [x] Load recent transcript history into `mindstone tui` startup; smoke validates rendering prior user/assistant transcript entries.
 - [x] Add first TUI in-place assistant response update path and event-line rendering for returned turn events.
+- [x] Add first TUI status panel via `/status`, showing agent/session/route/model/provider/config/transcript/runtime details.
 
 ### Completed
 
@@ -145,7 +146,8 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - Returned turn event entries render as compact event lines.
   - This is not live token streaming yet.
 - [ ] Stream/update assistant text and tool/substrate events live from Gateway/runner events.
-- [ ] Add session/agent/model selectors and status overlays.
+- [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
+- [ ] Add session/agent/model selectors and richer status/settings overlays.
 - [ ] Adapt richer current MindStone TUI components and event handlers from `/Users/clint/Projects/MindStone/src/tui/`.
 
 ### Onboarding and identity

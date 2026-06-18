@@ -63,6 +63,14 @@ if ! grep -q "runner stream event smoke" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing event rendering" >&2
   exit 1
 fi
+if ! grep -q "transcript dir" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing status panel" >&2
+  exit 1
+fi
+if ! grep -q "provider:" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing status provider details" >&2
+  exit 1
+fi
 
 ./scripts/mindstone chat --once "history sentinel for tui" --json >/tmp/mindstone-agent-tui-chat.json
 HISTORY_OUTPUT="$(./scripts/mindstone tui --smoke-history --history-limit 10 --width 72)"
