@@ -39,6 +39,7 @@ Implemented now:
   ```bash
   npm run smoke:pi-session-live
   MINDSTONE_PI_SESSION_LIVE=1 npm run smoke:pi-session-live
+  MINDSTONE_PI_SESSION_LIVE=1 MINDSTONE_PI_SESSION_LIVE_COMPACT=1 npm run smoke:pi-session-live
   ```
 
 ## Reference behavior in current MindStone
@@ -103,7 +104,8 @@ Current MindStone embedded runner includes production-grade behavior that should
 
 5. **Compaction validation**
    - `AgentRunner.compact(...)` is wired, but successful `AgentSession.compact(...)` requires isolated auth/model.
-   - Validate only after live prompt validation succeeds.
+   - `smoke:pi-session-live` has a second opt-in compaction branch guarded by `MINDSTONE_PI_SESSION_LIVE_COMPACT=1`.
+   - Validate only after live prompt/stream validation succeeds.
 
 ### Tier 2 — important but not absolute MVP blockers
 
@@ -132,5 +134,5 @@ Current MindStone embedded runner includes production-grade behavior that should
 1. Run gated live prompt/stream validation when Clint intentionally provides isolated auth/model.
 2. Add durable event metadata policy/tests for Pi stream events.
 3. Add the smallest extension/resource-loader parity needed for context pruning or compaction safeguards.
-4. Validate `AgentSession.compact(...)` under isolated auth/model.
+4. Validate `AgentSession.compact(...)` under isolated auth/model with `MINDSTONE_PI_SESSION_LIVE=1 MINDSTONE_PI_SESSION_LIVE_COMPACT=1 npm run smoke:pi-session-live`.
 5. Revisit session lock/repair/resume-cap once live basic execution is proven.

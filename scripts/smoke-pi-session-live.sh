@@ -145,4 +145,34 @@ console.log(JSON.stringify({
 }, null, 2));
 NODE
 
+if [[ "${MINDSTONE_PI_SESSION_LIVE_COMPACT:-0}" == "1" ]]; then
+  echo "== Pi session live compaction probe =="
+  node --input-type=module <<'NODE'
+import { PiSessionAgentRunner } from './packages/mindstone-gateway/dist/index.js';
+
+const runner = new PiSessionAgentRunner({
+  projectRoot: process.env.MINDSTONE_AGENT_ROOT,
+  agentDir: process.env.PI_CODING_AGENT_DIR,
+  sessionDir: process.env.PI_CODING_AGENT_SESSION_DIR,
+  cwd: process.env.MINDSTONE_AGENT_ROOT,
+  defaultModel: process.env.LIVE_MODEL,
+});
+
+const result = await runner.compact({
+  agentId: 'default',
+  sessionKey: process.env.SESSION_KEY,
+  model: { id: process.env.LIVE_MODEL, provider: 'pi-session' },
+  customInstructions: 'MindStone-Agent live probe compaction after successful temporary prompt/stream validation.',
+  runContext: { runId: `live_compact_${Date.now().toString(36)}`, surface: 'smoke-pi-session-live' },
+});
+
+console.log(JSON.stringify(result, null, 2));
+if (!result.available || !result.requested || result.reason !== 'pi_agent_session_compact_completed') {
+  throw new Error(`live compaction did not complete: ${JSON.stringify(result)}`);
+}
+NODE
+else
+  echo "Skipping live Pi session compaction validation. Set MINDSTONE_PI_SESSION_LIVE_COMPACT=1 to opt in after prompt/stream validation."
+fi
+
 echo "Pi session live validation probe completed."
