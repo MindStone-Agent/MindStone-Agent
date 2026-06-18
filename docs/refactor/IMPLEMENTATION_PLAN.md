@@ -116,6 +116,10 @@ The preferred order is:
 - [ ] Create current-Pi adapter extension/module.
 - [ ] Register MindStone commands.
 - [ ] Register memory read/search/status tools.
+- [x] Register read-only Pi adapter recall commands for memory status/search:
+  - `/mindstone-recall-status`
+  - `/mindstone-recall-search <query> [--limit N]`
+  - Smoke validation: `npm run smoke:pi-adapter`
 - [ ] Add identity/context injection at prompt start.
 - [ ] Add Pi transcript archive hook.
 - [ ] Add compaction/session lifecycle handling where Pi supports it.
@@ -173,10 +177,10 @@ The preferred order is:
 ### Candidate commands
 
 - [ ] `/mindstone-setup`
-- [ ] `/mindstone-status`
+- [x] `/mindstone-status` equivalent exists as `/mindstone-agent-status`
 - [ ] `/mindstone-context`
-- [ ] `/mindstone-recall-status`
-- [ ] `/mindstone-recall-search <query>`
+- [x] `/mindstone-recall-status`
+- [x] `/mindstone-recall-search <query>`
 - [ ] `/mindstone-gateway-status`
 - [ ] `/mindstone-channels`
 
