@@ -71,7 +71,15 @@ type PiAgentEvent = {
   level?: string;
 };
 
-type PiSessionEventSummary = {
+export const PI_SESSION_EVENT_CALLBACK_METADATA_KEY = "__mindstonePiSessionEventCallback";
+
+export type PiSessionEventCallbackPayload = {
+  summary: PiSessionEventSummary;
+};
+
+export type PiSessionEventCallback = (payload: PiSessionEventCallbackPayload) => void;
+
+export type PiSessionEventSummary = {
   type: string;
   messageRole?: string;
   messageTextChars?: number;
@@ -281,7 +289,12 @@ export function summarizePiSessionEvent(event: PiAgentEvent): PiSessionEventSumm
   };
 }
 
-export function createPiSessionEventCapture(limit = 200): { capture: PiSessionEventCapture; record: (event: PiAgentEvent) => void } {
+function piSessionEventCallbackFromMetadata(metadata: Record<string, unknown> | undefined): PiSessionEventCallback | undefined {
+  const value = metadata?.[PI_SESSION_EVENT_CALLBACK_METADATA_KEY];
+  return typeof value === "function" ? value as PiSessionEventCallback : undefined;
+}
+
+export function createPiSessionEventCapture(limit = 200): { capture: PiSessionEventCapture; record: (event: PiAgentEvent) => PiSessionEventSummary } {
   const capture: PiSessionEventCapture = { events: [], eventCounts: {}, assistantTexts: [] };
   const rememberAssistantText = (message: PiAgentMessage | undefined): void => {
     if (message?.role !== "assistant") return;
@@ -294,13 +307,15 @@ export function createPiSessionEventCapture(limit = 200): { capture: PiSessionEv
     capture,
     record(event) {
       const type = typeof event.type === "string" ? event.type : "unknown";
+      const summary = summarizePiSessionEvent(event);
       capture.eventCounts[type] = (capture.eventCounts[type] ?? 0) + 1;
-      capture.events.push(summarizePiSessionEvent(event));
+      capture.events.push(summary);
       if (capture.events.length > limit) capture.events.splice(0, capture.events.length - limit);
       rememberAssistantText(event.message);
       if (event.type === "agent_end") {
         rememberAssistantText([...(event.messages ?? [])].reverse().find((message) => message.role === "assistant"));
       }
+      return summary;
     },
   };
 }
@@ -441,7 +456,11 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     });
 
     const { capture, record } = createPiSessionEventCapture();
-    const unsubscribe = session.subscribe?.((event) => record(event));
+    const onEvent = piSessionEventCallbackFromMetadata(request.metadata);
+    const unsubscribe = session.subscribe?.((event) => {
+      const summary = record(event);
+      onEvent?.({ summary });
+    });
 
     try {
       await session.prompt(promptParts.promptText || request.transcriptEntries.at(-1)?.text || "", { source: "rpc" });

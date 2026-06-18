@@ -10,7 +10,13 @@ import { WEBCHAT_UI_HTML } from "./webchat-ui.js";
 
 export { MockMindStoneProvider } from "./mock-provider.js";
 export { PiMindStoneProvider } from "./pi-provider.js";
-export { PiSessionExecutor } from "./pi-session-executor.js";
+export {
+  PI_SESSION_EVENT_CALLBACK_METADATA_KEY,
+  PiSessionExecutor,
+  type PiSessionEventCallback,
+  type PiSessionEventCallbackPayload,
+  type PiSessionEventSummary,
+} from "./pi-session-executor.js";
 export { PiSessionMindStoneProvider, buildPiSessionPromptParts, createPiSessionEventCapture, piSessionFileForKey, summarizePiSessionEvent } from "./pi-session-provider.js";
 export { PiSessionAgentRunner } from "./pi-session-runner.js";
 export { GatewayRunManager } from "./run-manager.js";

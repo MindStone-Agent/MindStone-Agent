@@ -7,7 +7,12 @@ import {
   type AgentRunStreamEvent,
   type MindStoneModelProvider,
 } from "@mindstone-agent/core";
-import { PiSessionExecutor, type PiSessionExecutorOptions } from "./pi-session-executor.js";
+import {
+  PI_SESSION_EVENT_CALLBACK_METADATA_KEY,
+  PiSessionExecutor,
+  type PiSessionEventCallbackPayload,
+  type PiSessionExecutorOptions,
+} from "./pi-session-executor.js";
 
 export type PiSessionAgentRunnerOptions = PiSessionExecutorOptions & {
   provider?: MindStoneModelProvider;
@@ -16,6 +21,39 @@ export type PiSessionAgentRunnerOptions = PiSessionExecutorOptions & {
 type PiSessionStreamDiagnostics = {
   events: unknown[];
 };
+
+type AsyncQueueResult<T> = IteratorResult<T>;
+
+class AsyncEventQueue<T> {
+  readonly #values: T[] = [];
+  readonly #waiters: Array<(result: AsyncQueueResult<T>) => void> = [];
+  #closed = false;
+
+  push(value: T): void {
+    if (this.#closed) return;
+    const waiter = this.#waiters.shift();
+    if (waiter) {
+      waiter({ done: false, value });
+      return;
+    }
+    this.#values.push(value);
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    for (const waiter of this.#waiters.splice(0)) {
+      waiter({ done: true, value: undefined });
+    }
+  }
+
+  next(): Promise<AsyncQueueResult<T>> {
+    const value = this.#values.shift();
+    if (value !== undefined) return Promise.resolve({ done: false, value });
+    if (this.#closed) return Promise.resolve({ done: true, value: undefined });
+    return new Promise((resolve) => this.#waiters.push(resolve));
+  }
+}
 
 function piSessionStreamDiagnosticsFromRaw(raw: unknown): PiSessionStreamDiagnostics | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -82,10 +120,34 @@ export class PiSessionAgentRunner implements AgentRunner {
         model: input.model,
       },
     };
+    const liveEvents = new AsyncEventQueue<unknown>();
+    let didLiveCapture = false;
+    let result: AgentRunResult | undefined;
+    let runError: unknown;
+    const onPiSessionEvent = (payload: PiSessionEventCallbackPayload): void => {
+      didLiveCapture = true;
+      liveEvents.push(payload.summary);
+    };
+    const runPromise = this.run({
+      ...input,
+      metadata: {
+        ...input.metadata,
+        [PI_SESSION_EVENT_CALLBACK_METADATA_KEY]: onPiSessionEvent,
+      },
+      runContext,
+    }).then(
+      (value) => {
+        result = value;
+      },
+      (error) => {
+        runError = error;
+      },
+    ).finally(() => liveEvents.close());
+
     try {
-      const result = await this.run({ ...input, runContext });
-      const diagnostics = piSessionStreamDiagnosticsFromRaw(result.result.raw);
-      for (const event of diagnostics?.events ?? []) {
+      while (true) {
+        const next = await liveEvents.next();
+        if (next.done) break;
         yield {
           type: "substrate_event",
           sequence: sequence++,
@@ -95,11 +157,33 @@ export class PiSessionAgentRunner implements AgentRunner {
           surface: runContext.surface,
           metadata: {
             ...runContext.metadata,
-            diagnosticReplay: true,
+            liveCapture: true,
           },
           substrate: "pi",
-          event,
+          event: next.value,
         };
+      }
+      await runPromise;
+      if (runError) throw runError;
+      if (!result) throw new Error("PiSessionAgentRunner stream completed without run result");
+      const diagnostics = piSessionStreamDiagnosticsFromRaw(result.result.raw);
+      if (!didLiveCapture) {
+        for (const event of diagnostics?.events ?? []) {
+          yield {
+            type: "substrate_event",
+            sequence: sequence++,
+            timestamp: new Date().toISOString(),
+            runnerId: this.id,
+            runId: runContext.runId,
+            surface: runContext.surface,
+            metadata: {
+              ...runContext.metadata,
+              diagnosticReplay: true,
+            },
+            substrate: "pi",
+            event,
+          };
+        }
       }
       if (result.result.text) {
         yield {

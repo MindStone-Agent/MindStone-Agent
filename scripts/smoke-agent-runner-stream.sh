@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createProviderRouteAgentRunner, readTranscriptEntries, runMindStoneChatTurn } from './packages/mindstone-core/dist/index.js';
-import { PiSessionAgentRunner } from './packages/mindstone-gateway/dist/index.js';
+import { PI_SESSION_EVENT_CALLBACK_METADATA_KEY, PiSessionAgentRunner } from './packages/mindstone-gateway/dist/index.js';
 
 const transcriptEntry = {
   id: 'entry-1',
@@ -90,6 +90,33 @@ if (piSessionEvents[5].type !== 'run_completed') throw new Error('pi-session: fi
 if (piSessionEvents.some((event, index) => event.sequence !== index)) throw new Error('pi-session: stream sequence was not monotonic from zero');
 if (piSessionEvents[5].result.runner.id !== 'pi-session') throw new Error('pi-session: completed result runner diagnostics missing');
 
+const liveProvider = {
+  id: 'fake-live-pi-session-provider',
+  listModels() { return [model]; },
+  async completeChat(request) {
+    const callback = request.metadata?.[PI_SESSION_EVENT_CALLBACK_METADATA_KEY];
+    if (typeof callback !== 'function') throw new Error('live Pi session event callback missing');
+    callback({ summary: { type: 'agent_start' } });
+    callback({ summary: { type: 'message_update', assistantStreamEventType: 'text_delta', assistantStreamDeltaChars: 11 } });
+    return {
+      role: 'assistant',
+      text: 'live stream response',
+      model: request.model,
+      raw: {
+        piSession: {
+          events: [{ type: 'should_not_replay_when_live_capture_exists' }],
+        },
+      },
+    };
+  },
+};
+const liveEvents = await collect(new PiSessionAgentRunner({ provider: liveProvider }).stream({ ...baseInput, provider: liveProvider }));
+const liveSubstrateEvents = liveEvents.filter((event) => event.type === 'substrate_event');
+if (liveSubstrateEvents.length !== 2) throw new Error(`expected 2 live substrate events, got ${liveSubstrateEvents.length}`);
+if (!liveSubstrateEvents.every((event) => event.metadata?.liveCapture === true)) throw new Error('live substrate events were not marked liveCapture');
+if (liveSubstrateEvents.some((event) => event.event?.type === 'should_not_replay_when_live_capture_exists')) throw new Error('diagnostic replay was not skipped after live capture');
+if (!liveSubstrateEvents.some((event) => event.event?.assistantStreamEventType === 'text_delta')) throw new Error('live assistant stream event was not yielded');
+
 const runtimeDir = mkdtempSync(join(tmpdir(), 'mindstone-agent-runner-stream-transcript.'));
 process.env.MINDSTONE_AGENT_RUNTIME_DIR = runtimeDir;
 try {
@@ -150,7 +177,7 @@ if (failureEvents.length !== 2) throw new Error(`expected started+failed events,
 if (failureEvents[0].type !== 'run_started' || failureEvents[1].type !== 'run_failed') throw new Error('failure stream did not emit started then failed');
 if (failureEvents[1].error.message !== 'stream failure sentinel') throw new Error('failure stream did not serialize error message');
 
-console.log(JSON.stringify({ ok: true, providerRouteEvents: 3, piSessionEvents: piSessionEvents.length, persistedStreamEvents: 3, failureEvents: 2 }, null, 2));
+console.log(JSON.stringify({ ok: true, providerRouteEvents: 3, piSessionEvents: piSessionEvents.length, livePiSessionEvents: liveEvents.length, persistedStreamEvents: 3, failureEvents: 2 }, null, 2));
 NODE
 
 echo "AgentRunner stream contract smoke test passed."
