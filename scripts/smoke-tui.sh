@@ -83,6 +83,10 @@ if ! grep -q "gateway auth mode" <<<"${OUTPUT}" || ! grep -q "Secret values are 
   echo "TUI smoke output missing sanitized config panel" >&2
   exit 1
 fi
+if ! grep -q "REST chat surfaces" <<<"${OUTPUT}" || ! grep -q "live probe" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing gateway panel" >&2
+  exit 1
+fi
 if ! grep -q "deterministic Pi session file" <<<"${OUTPUT}" || ! grep -q "diagnostic only" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing pi panel" >&2
   exit 1

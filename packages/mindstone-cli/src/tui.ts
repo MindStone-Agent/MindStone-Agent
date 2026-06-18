@@ -383,6 +383,33 @@ function buildTuiTranscriptPanel(params: {
   ].filter((line): line is string => line !== undefined).join("\n");
 }
 
+function buildTuiGatewayPanel(config: ReturnType<typeof loadMindStoneConfig>["config"]): string {
+  const host = config?.gateway?.host ?? "127.0.0.1";
+  const port = config?.gateway?.port ?? 19789;
+  const auth = config?.gateway?.auth ?? { mode: "none" as const };
+  const authSource = auth.mode === "none"
+    ? "none required"
+    : auth.mode === "token"
+      ? [auth.tokenEnv ? `env ${auth.tokenEnv}` : undefined, auth.tokenFile ? `file ${auth.tokenFile}` : undefined].filter(Boolean).join("; ") || "token source not specified"
+      : auth.passwordEnv ? `env ${auth.passwordEnv}` : "password source not specified";
+  return [
+    `- endpoint: \`http://${host}:${port}\``,
+    `- health: \`http://${host}:${port}/health\``,
+    `- status: \`http://${host}:${port}/status\``,
+    `- WebChat shell: \`http://${host}:${port}/webchat\``,
+    `- auth mode: \`${auth.mode}\``,
+    `- auth source: \`${authSource}\``,
+    `- chat completions enabled: \`${config?.gateway?.http?.chatCompletions?.enabled === true}\``,
+    `- responses enabled: \`${config?.gateway?.http?.responses?.enabled === true}\``,
+    `- REST chat surfaces: \`/chat/sessions /chat/history /chat/send /chat/abort\``,
+    `- RPC surfaces: \`/rpc /ws\``,
+    `- OpenAI surfaces: \`/v1/models /v1/chat/completions\``,
+    `- live probe: \`not run\``,
+    "",
+    "Secret values are intentionally not displayed. This panel does not start, stop, or probe the Gateway.",
+  ].join("\n");
+}
+
 function buildTuiConfigPanel(params: {
   config: ReturnType<typeof loadMindStoneConfig>["config"];
   configPath: string;
@@ -970,6 +997,7 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   }));
   const smokePaths = runtimePathsFromEnv();
   chat.addPanel("config", buildTuiConfigPanel({ config: smokeConfig, configPath: "/tmp/mindstone/config.json", paths: smokePaths }));
+  chat.addPanel("gateway", buildTuiGatewayPanel(smokeConfig));
   chat.addPanel("pi", buildTuiPiPanel({ config: smokeConfig, ctx, paths: smokePaths }));
   chat.addPanel("transcript", buildTuiTranscriptPanel({
     ctx,
@@ -1119,6 +1147,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "clear", description: "Clear the visible chat log" },
     { name: "status", description: "Show current TUI/session status" },
     { name: "config", description: "Show sanitized active runtime config" },
+    { name: "gateway", description: "Show configured Gateway surfaces" },
     { name: "pi", description: "Show isolated Pi runtime/session mapping" },
     { name: "transcript", description: "Show active transcript file status" },
     { name: "memory", description: "Show memory/recall index status" },
@@ -1199,7 +1228,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /config, /pi, /transcript, /memory, /context, /handoff, /identity, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /config, /gateway, /pi, /transcript, /memory, /context, /handoff, /identity, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -1217,6 +1246,11 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       }
       if (message === "/config") {
         chat.addPanel("config", buildTuiConfigPanel({ config: loaded.config, configPath: loaded.path, paths }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/gateway") {
+        chat.addPanel("gateway", buildTuiGatewayPanel(loaded.config));
         tui.requestRender();
         return;
       }

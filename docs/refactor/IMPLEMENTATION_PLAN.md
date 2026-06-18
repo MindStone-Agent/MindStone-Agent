@@ -139,6 +139,7 @@ The preferred order is:
 - [x] Add first TUI in-place assistant update path and event-line rendering for returned turn events; live token/event streaming remains pending.
 - [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
 - [x] Add non-mutating `/config` panel for sanitized active runtime config.
+- [x] Add non-mutating `/gateway` panel for configured Gateway surfaces/auth without live probing.
 - [x] Add non-mutating `/pi` panel for isolated Pi runtime/session mapping.
 - [x] Add non-mutating `/transcript` panel for active transcript file status.
 - [x] Add first non-mutating `/sessions`, `/agents`, and `/models` panels.
