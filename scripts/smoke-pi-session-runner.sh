@@ -44,8 +44,8 @@ NODE
 
 node --input-type=module <<'NODE'
 import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
-import { applyPiSessionCompactionSettings, buildMindStonePiExtensionFactories, buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR, PiSessionAgentRunner, piSessionFileForKey, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { applyPiSessionCompactionSettings, buildMindStonePiExtensionFactories, buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR, PiSessionAgentRunner, piSessionFileForKey, repairPiSessionFileTailIfNeeded, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
 const actual = piSessionFileForKey(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions`, process.env.CHAT_SESSION_KEY);
@@ -81,6 +81,19 @@ const staleResult = await withPiSessionFileLock(staleSessionFile, async () => 's
 });
 if (staleResult !== 'stale-cleared') throw new Error('stale cross-process lock was not cleared');
 if (existsSync(staleLockFile)) throw new Error('cross-process lock file was not released');
+
+const repairSessionFile = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/repair-tail-smoke.jsonl`;
+const validHeader = JSON.stringify({ type: 'session', version: 3, id: 'repair-smoke', timestamp: new Date().toISOString(), cwd: process.cwd() });
+const validMessage = JSON.stringify({ type: 'message', id: 'msg-1', parentId: null, timestamp: new Date().toISOString(), message: { role: 'user', content: 'repair sentinel' } });
+writeFileSync(repairSessionFile, `${validHeader}\n${validMessage}\n{"type":"message","id":"partial`);
+const repairResult = repairPiSessionFileTailIfNeeded(repairSessionFile);
+if (!repairResult.repaired || repairResult.reason !== 'trailing_malformed_jsonl') throw new Error(`session tail repair did not run: ${JSON.stringify(repairResult)}`);
+if (!repairResult.backupFile || !existsSync(repairResult.backupFile)) throw new Error('session tail repair backup missing');
+const repairedContent = readFileSync(repairSessionFile, 'utf-8');
+if (repairedContent.includes('partial')) throw new Error('session tail repair did not trim malformed tail');
+if (repairedContent.trim().split('\n').length !== 2) throw new Error('session tail repair did not preserve valid entries');
+const cleanRepairResult = repairPiSessionFileTailIfNeeded(repairSessionFile);
+if (cleanRepairResult.repaired || cleanRepairResult.reason !== 'clean') throw new Error(`clean session file should not repair: ${JSON.stringify(cleanRepairResult)}`);
 
 const { capture, record } = createPiSessionEventCapture(5);
 record({ type: 'agent_start' });

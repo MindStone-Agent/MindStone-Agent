@@ -293,6 +293,17 @@ const DEFAULT_PI_SESSION_LOCK_TIMEOUT_MS = 30_000;
 const DEFAULT_PI_SESSION_LOCK_RETRY_DELAY_MS = 25;
 const DEFAULT_PI_SESSION_LOCK_STALE_MS = 10 * 60_000;
 
+export type PiSessionFileRepairResult = {
+  repaired: boolean;
+  reason: "missing" | "empty" | "no_valid_entries" | "clean" | "trailing_malformed_jsonl";
+  sessionFile: string;
+  backupFile?: string;
+  bytesBefore?: number;
+  bytesAfter?: number;
+  trimmedBytes?: number;
+  validEntries?: number;
+};
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
@@ -325,6 +336,79 @@ function removeStaleLockIfNeeded(lockFile: string, staleMs: number): boolean {
     if (isNodeError(error, "ENOENT")) return true;
     return false;
   }
+}
+
+function parseJsonLine(line: string): boolean {
+  if (!line.trim()) return false;
+  try {
+    JSON.parse(line);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function repairBackupPath(sessionFile: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `${sessionFile}.corrupt-${stamp}.bak`;
+}
+
+/**
+ * Repair only an interrupted trailing JSONL write.
+ *
+ * Pi's SessionManager skips malformed lines while reading, but an interrupted
+ * append can leave a bad tail that future appends keep carrying forward. This
+ * keeps every parseable line through the last valid entry and trims only bytes
+ * after that boundary, preserving a backup of the original file. It does not
+ * rewrite valid history or attempt deeper tree/session repair.
+ */
+export function repairPiSessionFileTailIfNeeded(sessionFile: string): PiSessionFileRepairResult {
+  let content: string;
+  try {
+    content = readFileSync(sessionFile, "utf-8");
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return { repaired: false, reason: "missing", sessionFile };
+    throw error;
+  }
+
+  if (content.length === 0) return { repaired: false, reason: "empty", sessionFile, bytesBefore: 0, bytesAfter: 0, validEntries: 0 };
+
+  let offset = 0;
+  let lastValidEnd = 0;
+  let validEntries = 0;
+  for (const line of content.split("\n")) {
+    const lineStart = offset;
+    const lineEnd = lineStart + line.length;
+    const nextOffset = lineEnd + 1;
+    if (parseJsonLine(line)) {
+      validEntries += 1;
+      lastValidEnd = content.length > lineEnd && content[lineEnd] === "\n" ? nextOffset : lineEnd;
+    }
+    offset = nextOffset;
+  }
+
+  if (validEntries === 0) {
+    return { repaired: false, reason: "no_valid_entries", sessionFile, bytesBefore: content.length, bytesAfter: content.length, validEntries };
+  }
+  if (!content.slice(lastValidEnd).trim()) {
+    return { repaired: false, reason: "clean", sessionFile, bytesBefore: content.length, bytesAfter: content.length, validEntries };
+  }
+
+  const repaired = content.slice(0, lastValidEnd);
+  const backupFile = repairBackupPath(sessionFile);
+  mkdirSync(dirname(backupFile), { recursive: true });
+  writeFileSync(backupFile, content, "utf-8");
+  writeFileSync(sessionFile, repaired, "utf-8");
+  return {
+    repaired: true,
+    reason: "trailing_malformed_jsonl",
+    sessionFile,
+    backupFile,
+    bytesBefore: content.length,
+    bytesAfter: repaired.length,
+    trimmedBytes: content.length - repaired.length,
+    validEntries,
+  };
 }
 
 async function acquirePiSessionCrossProcessLock(
@@ -721,6 +805,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     const sessionFile = piSessionFileForKey(this.#sessionDir, input.sessionKey);
     return withPiSessionFileLock(sessionFile, async () => {
       mkdirSync(dirname(sessionFile), { recursive: true });
+      repairPiSessionFileTailIfNeeded(sessionFile);
       const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
       const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
       applyPiSessionCompactionSettings({ settingsManager: settingsManager as PiSettingsManagerLike, compaction: this.#compactionOptions });
@@ -790,6 +875,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     const sessionFile = piSessionFileForKey(this.#sessionDir, request.sessionKey);
     return withPiSessionFileLock(sessionFile, async () => {
       mkdirSync(dirname(sessionFile), { recursive: true });
+      repairPiSessionFileTailIfNeeded(sessionFile);
       const sessionManager = modules.SessionManager.open(sessionFile, this.#sessionDir, this.#cwd);
       const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
       applyPiSessionCompactionSettings({ settingsManager: settingsManager as PiSettingsManagerLike, compaction: this.#compactionOptions });

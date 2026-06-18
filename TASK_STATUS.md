@@ -51,7 +51,7 @@
 - [x] Add smallest MindStone-owned Pi inline extension-factory parity: context-pruning derived from `contextManagement.mode = "sliding_window"`, affecting live Pi LLM context only and preserving append-only transcript authority.
 - [x] Add session-local Pi native compaction setting parity with `routing.pi.compaction` and a 20k reserve-token floor, applied before pi-session prompt/compact.
 - [x] Use real `PiSessionAgentRunner` construction for CLI/TUI pi-session routes instead of injected-provider runners.
-- [x] Add pi-session file serialization around `AgentSession.prompt(...)` and `AgentSession.compact(...)`, including in-process ordering plus cross-process lockfile/stale-lock safety.
+- [x] Add pi-session file serialization around `AgentSession.prompt(...)` and `AgentSession.compact(...)`, including in-process ordering, cross-process lockfile/stale-lock safety, and pre-open malformed-tail JSONL repair with backup preservation.
 - [x] Add `docs/refactor/PI_SESSION_PARITY.md` tracking MindStone embedded-runner parity tiers and next gaps.
 - [ ] Complete full live authenticated event/stream validation, live-observed durable transcript/source metadata policy, and any necessary full staged compaction-safeguard summary parity for the session-backed Pi runner.
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.

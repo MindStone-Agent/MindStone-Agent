@@ -28,12 +28,14 @@ export {
   applyPiSessionCompactionSettings,
   buildPiSessionResourceLoaderOptions,
   PiSessionExecutor,
+  repairPiSessionFileTailIfNeeded,
   withPiSessionFileLock,
   type PiSessionEventCallback,
   type PiSessionEventCallbackPayload,
   type PiSessionEventSummary,
   type PiSessionExecutorOptions,
   type PiSessionFileLockOptions,
+  type PiSessionFileRepairResult,
   type PiSessionResourceLoaderOptions,
 } from "./pi-session-executor.js";
 export { PiSessionMindStoneProvider, buildPiSessionPromptParts, createPiSessionEventCapture, piSessionFileForKey, summarizePiSessionEvent } from "./pi-session-provider.js";

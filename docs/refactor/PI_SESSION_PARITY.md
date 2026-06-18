@@ -31,6 +31,7 @@ Implemented now:
 - smallest MindStone-owned inline extension-factory parity: a Pi `context` hook derived from MindStone `sliding_window` policy that prunes only live Pi LLM context while preserving MindStone transcript authority
 - session-local Pi native compaction settings derived from `routing.pi.compaction`, with a 20k reserve-token floor, applied before prompt/compact without relying on global Pi state
 - per-session-file serialization around pi-session prompt and compaction operations, combining in-process ordering with a conservative cross-process `.lock` file and stale-lock recovery
+- pre-open Pi session JSONL tail repair for interrupted trailing writes, with `.corrupt-*.bak` backup preservation; this trims malformed tails only and does not rewrite valid history
 - `AgentSession.prompt(...)` path when isolated auth/model config is available
 - bounded sanitized Pi session diagnostics
 - durable transcript boundary sanitizer coverage for runner substrate events and provider diagnostics, proving raw Pi message/args/result payloads do not persist while safe summary key names/counts survive
@@ -117,7 +118,7 @@ Current MindStone embedded runner includes production-grade behavior that should
 
 ### Tier 2 — important but not absolute MVP blockers
 
-- session-file repair beyond the current lockfile/stale-lock safety layer
+- deeper session-file/tree repair beyond the current lockfile/stale-lock and malformed-tail safety layer
 - resume cap / session-store indirection
 - provider-specific stream function wrappers
 - thinking-block sanitization policies
@@ -143,4 +144,4 @@ Current MindStone embedded runner includes production-grade behavior that should
 2. Add durable event metadata policy/tests for Pi stream events.
 3. Decide whether full staged compaction-safeguard summary parity is needed before MVP; minimal native compaction setting parity is already implemented.
 4. Validate `AgentSession.compact(...)` under isolated auth/model with `MINDSTONE_PI_SESSION_LIVE=1 MINDSTONE_PI_SESSION_LIVE_COMPACT=1 npm run smoke:pi-session-live`.
-5. Revisit session repair/resume-cap once live basic execution is proven; basic cross-process lockfile safety is now implemented.
+5. Revisit deeper tree repair/resume-cap once live basic execution is proven; basic cross-process lockfile safety and malformed-tail repair are now implemented.
