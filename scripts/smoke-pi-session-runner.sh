@@ -44,7 +44,7 @@ NODE
 
 node --input-type=module <<'NODE'
 import { createProviderRouteAgentRunner, providerDiagnosticsFromChatResult } from './packages/mindstone-core/dist/index.js';
-import { buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, PiSessionAgentRunner, piSessionFileForKey, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
+import { buildMindStonePiExtensionFactories, buildPiSessionPromptParts, buildPiSessionResourceLoaderOptions, createPiSessionEventCapture, PiSessionAgentRunner, piSessionFileForKey, withPiSessionFileLock } from './packages/mindstone-gateway/dist/index.js';
 import { resolve } from 'node:path';
 const expected = resolve(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions/${Buffer.from(process.env.CHAT_SESSION_KEY, 'utf8').toString('base64url')}.jsonl`);
 const actual = piSessionFileForKey(`${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/pi-sessions`, process.env.CHAT_SESSION_KEY);
@@ -108,6 +108,7 @@ const resourceOptions = buildPiSessionResourceLoaderOptions({
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
+    extensionFactories: [() => undefined],
   },
 });
 if (resourceOptions.cwd !== '/tmp/mindstone-cwd' || resourceOptions.agentDir !== '/tmp/mindstone-agent') throw new Error('resource loader base options missing');
@@ -117,6 +118,30 @@ if (resourceOptions.additionalSkillPaths?.[0] !== '/tmp/skills') throw new Error
 if (resourceOptions.additionalPromptTemplatePaths?.[0] !== '/tmp/prompts') throw new Error('resource loader prompt paths missing');
 if (resourceOptions.additionalThemePaths?.[0] !== '/tmp/themes') throw new Error('resource loader theme paths missing');
 if (!resourceOptions.noExtensions || !resourceOptions.noSkills || !resourceOptions.noPromptTemplates || !resourceOptions.noThemes || !resourceOptions.noContextFiles) throw new Error('resource loader disable flags missing');
+if (!Array.isArray(resourceOptions.extensionFactories) || resourceOptions.extensionFactories.length !== 1) throw new Error('resource loader extension factories missing');
+
+const contextPruningFactories = buildMindStonePiExtensionFactories({
+  contextManagement: { mode: 'sliding_window', ceilingPercent: 2, floorPercent: 1, minRecentMessages: 1 },
+});
+if (contextPruningFactories.length !== 1) throw new Error('sliding-window context policy did not create Pi extension factory');
+if (buildMindStonePiExtensionFactories({ contextManagement: { mode: 'auto_compact' } }).length !== 0) throw new Error('auto-compact policy should not create context-pruning extension');
+if (buildMindStonePiExtensionFactories({ contextManagement: { mode: 'sliding_window' }, noExtensions: true }).length !== 0) throw new Error('noExtensions should suppress MindStone inline factories');
+const contextHandlers = [];
+contextPruningFactories[0]({ on(event, handler) { if (event === 'context') contextHandlers.push(handler); } });
+if (contextHandlers.length !== 1) throw new Error('context pruning factory did not register context handler');
+const bulky = 'x'.repeat(900);
+const prunedContext = await contextHandlers[0]({
+  type: 'context',
+  messages: [
+    { role: 'system', content: 'preserve system context' },
+    { role: 'user', content: bulky },
+    { role: 'assistant', content: bulky },
+    { role: 'user', content: 'preserve latest user' },
+  ],
+}, { model: { contextWindow: 1000 } });
+if (!prunedContext || prunedContext.messages.length >= 4) throw new Error('context pruning extension did not prune live context');
+if (prunedContext.messages[0].role !== 'system') throw new Error('context pruning extension pruned system context');
+if (prunedContext.messages.at(-1)?.content !== 'preserve latest user') throw new Error('context pruning extension pruned latest user message');
 
 const providerDiagnostics = providerDiagnosticsFromChatResult({
   role: 'assistant',

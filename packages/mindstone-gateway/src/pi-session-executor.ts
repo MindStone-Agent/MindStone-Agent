@@ -1,7 +1,8 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { AgentCompactionInput, AgentCompactionResult, MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo } from "@mindstone-agent/core";
+import type { AgentCompactionInput, AgentCompactionResult, ContextManagementPolicy, MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo } from "@mindstone-agent/core";
+import { buildMindStonePiExtensionFactories, type MindStonePiExtensionFactory } from "./pi-context-pruning-extension.js";
 
 export type PiSessionResourceLoaderOptions = {
   additionalExtensionPaths?: string[];
@@ -13,9 +14,13 @@ export type PiSessionResourceLoaderOptions = {
   noPromptTemplates?: boolean;
   noThemes?: boolean;
   noContextFiles?: boolean;
+  /** MindStone-owned Pi inline extension factories. Used for parity with current MindStone's embedded runner. */
+  extensionFactories?: MindStonePiExtensionFactory[];
 };
 
 export type PiSessionExecutorOptions = PiSessionResourceLoaderOptions & {
+  /** MindStone context policy used to derive safe Pi-side inline extension parity. */
+  contextManagement?: ContextManagementPolicy;
   projectRoot?: string;
   agentDir?: string;
   sessionDir?: string;
@@ -211,6 +216,7 @@ export function buildPiSessionResourceLoaderOptions(input: {
     noPromptTemplates: input.options?.noPromptTemplates,
     noThemes: input.options?.noThemes,
     noContextFiles: input.options?.noContextFiles,
+    extensionFactories: input.options?.extensionFactories,
   };
 }
 
@@ -467,6 +473,13 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       noPromptTemplates: options.noPromptTemplates,
       noThemes: options.noThemes,
       noContextFiles: options.noContextFiles,
+      extensionFactories: [
+        ...(options.extensionFactories ?? []),
+        ...buildMindStonePiExtensionFactories({
+          contextManagement: options.contextManagement,
+          noExtensions: options.noExtensions,
+        }),
+      ],
     };
   }
 

@@ -11,6 +11,18 @@ import { WEBCHAT_UI_HTML } from "./webchat-ui.js";
 export { MockMindStoneProvider } from "./mock-provider.js";
 export { PiMindStoneProvider } from "./pi-provider.js";
 export {
+  buildMindStonePiExtensionFactories,
+  createMindStoneContextPruningExtension,
+  type MindStonePiContext,
+  type MindStonePiContextEvent,
+  type MindStonePiContextHandler,
+  type MindStonePiContextMessage,
+  type MindStonePiContextResult,
+  type MindStonePiExtensionApi,
+  type MindStonePiExtensionFactory,
+  type MindStonePiExtensionFactoryOptions,
+} from "./pi-context-pruning-extension.js";
+export {
   PI_SESSION_EVENT_CALLBACK_METADATA_KEY,
   buildPiSessionResourceLoaderOptions,
   PiSessionExecutor,
@@ -250,6 +262,7 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
       sessionDir: paths.piSessionDir,
       cwd: config?.workspace?.root,
       defaultModel: config?.routing?.defaultModel,
+      contextManagement: config?.contextManagement,
       additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
       additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
       additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
@@ -280,6 +293,7 @@ function resolveRunner(config: MindStoneConfig | undefined, provider: MindStoneM
       sessionDir: paths.piSessionDir,
       cwd: config?.workspace?.root,
       defaultModel: config?.routing?.defaultModel,
+      contextManagement: config?.contextManagement,
       additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
       additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
       additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,

@@ -28,6 +28,7 @@ Implemented now:
 - isolated Pi auth/model registry loading from project runtime, not global Pi state
 - `DefaultResourceLoader.appendSystemPrompt` for MindStone system context
 - config-backed Pi `DefaultResourceLoader` resource options: additional extension/skill/prompt/theme paths plus disable flags
+- smallest MindStone-owned inline extension-factory parity: a Pi `context` hook derived from MindStone `sliding_window` policy that prunes only live Pi LLM context while preserving MindStone transcript authority
 - process-local per-session-file serialization around pi-session prompt and compaction operations
 - `AgentSession.prompt(...)` path when isolated auth/model config is available
 - bounded sanitized Pi session diagnostics
@@ -98,8 +99,8 @@ Current MindStone embedded runner includes production-grade behavior that should
 
 3. **Resource loader / extension parity**
    - Config-backed Pi resource loader path/disable options now pass through CLI, TUI, Gateway, `PiSessionMindStoneProvider`, and real `PiSessionAgentRunner` construction.
-   - Still decide whether MindStone-Agent needs embedded extension factories for context pruning/compaction safeguards before live MVP.
-   - If yes, port the smallest compatible extension-factory path from current MindStone, not the whole runner.
+   - A smallest compatible context-pruning inline factory now exists for `contextManagement.mode = "sliding_window"` and is suppressed when Pi extensions are disabled.
+   - Remaining extension-factory gap: compaction safeguard parity, if needed, should still be ported incrementally rather than by copying the whole runner.
 
 4. **Tool behavior boundary**
    - Decide MVP tool set for MindStone-Agent pi-session execution.
@@ -137,6 +138,6 @@ Current MindStone embedded runner includes production-grade behavior that should
 
 1. Run gated live prompt/stream validation when Clint intentionally provides isolated auth/model.
 2. Add durable event metadata policy/tests for Pi stream events.
-3. Add the smallest extension-factory parity needed for context pruning or compaction safeguards, if config-backed Pi resource loader paths are not sufficient.
+3. Decide whether compaction-safeguard inline factory parity is needed before MVP.
 4. Validate `AgentSession.compact(...)` under isolated auth/model with `MINDSTONE_PI_SESSION_LIVE=1 MINDSTONE_PI_SESSION_LIVE_COMPACT=1 npm run smoke:pi-session-live`.
 5. Revisit session lock/repair/resume-cap once live basic execution is proven.
