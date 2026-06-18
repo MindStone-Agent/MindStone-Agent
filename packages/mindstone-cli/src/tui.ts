@@ -425,6 +425,76 @@ function buildTuiEventsPanel(params: { ctx: TuiCommandContext; entries: Transcri
   return lines.join("\n");
 }
 
+function buildTuiRunsPanel(params: { ctx: TuiCommandContext; entries: TranscriptEntry[]; limit?: number }): string {
+  const limit = Math.max(1, Math.floor(params.limit ?? 10));
+  const byRun = new Map<string, {
+    runId: string;
+    firstTimestamp: string;
+    lastTimestamp: string;
+    entries: number;
+    roles: Record<string, number>;
+    eventNames: Set<string>;
+    runnerIds: Set<string>;
+    models: Set<string>;
+  }>();
+  for (const entry of params.entries) {
+    if (!entry.runId) continue;
+    const summary = byRun.get(entry.runId) ?? {
+      runId: entry.runId,
+      firstTimestamp: entry.timestamp,
+      lastTimestamp: entry.timestamp,
+      entries: 0,
+      roles: {},
+      eventNames: new Set<string>(),
+      runnerIds: new Set<string>(),
+      models: new Set<string>(),
+    };
+    summary.entries += 1;
+    summary.roles[entry.role] = (summary.roles[entry.role] ?? 0) + 1;
+    if (entry.timestamp < summary.firstTimestamp) summary.firstTimestamp = entry.timestamp;
+    if (entry.timestamp > summary.lastTimestamp) summary.lastTimestamp = entry.timestamp;
+    const eventName = typeof entry.metadata?.event === "string" ? entry.metadata.event : undefined;
+    if (eventName) summary.eventNames.add(eventName);
+    const runnerId = typeof entry.metadata?.runnerId === "string"
+      ? entry.metadata.runnerId
+      : entry.metadata?.runner && typeof entry.metadata.runner === "object" && typeof (entry.metadata.runner as Record<string, unknown>).id === "string"
+        ? (entry.metadata.runner as Record<string, string>).id
+        : undefined;
+    if (runnerId) summary.runnerIds.add(runnerId);
+    const model = typeof entry.metadata?.model === "string" ? entry.metadata.model : undefined;
+    if (model) summary.models.add(model);
+    byRun.set(entry.runId, summary);
+  }
+  const runs = Array.from(byRun.values())
+    .sort((a, b) => b.lastTimestamp.localeCompare(a.lastTimestamp))
+    .slice(0, limit);
+  const lines = [
+    `- session: \`${params.ctx.sessionKey}\``,
+    `- runs found: \`${byRun.size}\``,
+    `- showing: \`${runs.length}/${limit}\``,
+    "",
+  ];
+  if (runs.length === 0) {
+    lines.push("No run-linked transcript entries found for this session.");
+  } else {
+    lines.push(...runs.map((run) => {
+      const roleCounts = Object.entries(run.roles).map(([role, count]) => `${role}:${count}`).join(" ");
+      const eventPreview = Array.from(run.eventNames).slice(0, 4).join(", ");
+      const parts = [
+        `\`${run.runId}\``,
+        `updated ${run.lastTimestamp}`,
+        `entries \`${run.entries}\``,
+        `roles \`${roleCounts}\``,
+        run.runnerIds.size ? `runner \`${Array.from(run.runnerIds).join(", ")}\`` : undefined,
+        run.models.size ? `model \`${Array.from(run.models).join(", ")}\`` : undefined,
+        eventPreview ? `events ${eventPreview}` : undefined,
+      ].filter(Boolean);
+      return `- ${parts.join(" — ")}`;
+    }));
+  }
+  return lines.join("\n");
+}
+
 type TuiPanelItem = {
   id: string;
   detail?: string;
@@ -751,37 +821,46 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   chat.addPanel("memory", buildTuiMemoryPanel(smokeConfig, smokePaths));
   chat.addPanel("context", buildTuiContextPanel({ config: smokeConfig, ctx, entries: [] }));
   chat.addPanel("handoff", buildTuiHandoffPanel(smokePaths));
-  chat.addPanel("events", buildTuiEventsPanel({
-    ctx,
-    entries: [
-      {
-        id: "event-smoke-1",
-        sessionKey: ctx.sessionKey,
-        agentId: ctx.agentId,
-        role: "event",
-        text: "Runner pi-session emitted pi substrate event.",
-        timestamp: "2026-06-18T00:00:00.000Z",
-        runId: "run_smoke",
-        metadata: {
-          event: "runner_stream_event",
-          streamType: "substrate_event",
-          runnerId: "pi-session",
-          substrate: "pi",
-          payload: { type: "tool_execution_start", toolName: "read", toolCallId: "tool-1" },
-        },
+  const smokeRunEntries: TranscriptEntry[] = [
+    {
+      id: "event-smoke-1",
+      sessionKey: ctx.sessionKey,
+      agentId: ctx.agentId,
+      role: "event",
+      text: "Runner pi-session emitted pi substrate event.",
+      timestamp: "2026-06-18T00:00:00.000Z",
+      runId: "run_smoke",
+      metadata: {
+        event: "runner_stream_event",
+        streamType: "substrate_event",
+        runnerId: "pi-session",
+        substrate: "pi",
+        payload: { type: "tool_execution_start", toolName: "read", toolCallId: "tool-1" },
       },
-      {
-        id: "event-smoke-2",
-        sessionKey: ctx.sessionKey,
-        agentId: ctx.agentId,
-        role: "event",
-        text: "Injected 1 recalled memory chunk(s) into prompt context.",
-        timestamp: "2026-06-18T00:00:01.000Z",
-        runId: "run_smoke",
-        metadata: { event: "memory_recall_injected", hitCount: 1 },
-      },
-    ],
-  }));
+    },
+    {
+      id: "event-smoke-2",
+      sessionKey: ctx.sessionKey,
+      agentId: ctx.agentId,
+      role: "event",
+      text: "Injected 1 recalled memory chunk(s) into prompt context.",
+      timestamp: "2026-06-18T00:00:01.000Z",
+      runId: "run_smoke",
+      metadata: { event: "memory_recall_injected", hitCount: 1 },
+    },
+    {
+      id: "assistant-smoke-1",
+      sessionKey: ctx.sessionKey,
+      agentId: ctx.agentId,
+      role: "assistant",
+      text: "smoke assistant",
+      timestamp: "2026-06-18T00:00:02.000Z",
+      runId: "run_smoke",
+      metadata: { event: "assistant_response", model: "mindstone/mock", runner: { id: "provider-route" } },
+    },
+  ];
+  chat.addPanel("events", buildTuiEventsPanel({ ctx, entries: smokeRunEntries }));
+  chat.addPanel("runs", buildTuiRunsPanel({ ctx, entries: smokeRunEntries }));
   chat.addPanel("doctor", buildTuiDoctorPanel());
   chat.addPanel("sessions", buildTuiSessionsPanel({
     ctx,
@@ -880,6 +959,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "context", description: "Show context window policy and current session estimate" },
     { name: "handoff", description: "Show current compaction handoff status" },
     { name: "events", description: "Show recent transcript/runner events" },
+    { name: "runs", description: "Show recent transcript runs" },
     { name: "doctor", description: "Show compact runtime doctor summary" },
     { name: "sessions", description: "Show known/configured sessions" },
     { name: "session", description: "Switch this TUI session: /session <key>" },
@@ -952,7 +1032,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /handoff, /events, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /handoff, /events, /runs, /doctor, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -991,6 +1071,14 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         chat.addPanel("events", buildTuiEventsPanel({
           ctx,
           entries: readTranscriptEntries(ctx.sessionKey, { limit: Math.max(historyLimit, 80) }),
+        }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/runs") {
+        chat.addPanel("runs", buildTuiRunsPanel({
+          ctx,
+          entries: readTranscriptEntries(ctx.sessionKey, { limit: Math.max(historyLimit, 200) }),
         }));
         tui.requestRender();
         return;

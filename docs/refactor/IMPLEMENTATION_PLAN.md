@@ -147,6 +147,7 @@ The preferred order is:
 - [x] Add non-mutating `/doctor` TUI panel backed by Core doctor report summary.
 - [x] Add non-mutating `/handoff` TUI panel for current compaction handoff status.
 - [x] Add non-mutating `/events` TUI panel for recent transcript/runner events.
+- [x] Add non-mutating `/runs` TUI panel for recent transcript run summaries.
 - [ ] Complete a session-backed Pi runner modeled on current MindStone's embedded Pi runner:
   - [x] isolated Pi `agentDir` and session directory
   - [x] canonical MindStone session key → Pi session file mapping
