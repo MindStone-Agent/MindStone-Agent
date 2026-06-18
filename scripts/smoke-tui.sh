@@ -67,6 +67,10 @@ if ! grep -q "runner provider-route started" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing runner stream event rendering" >&2
   exit 1
 fi
+if ! grep -q "runner provider-route planned route" <<<"${OUTPUT}" || ! grep -q "1 prompt" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing route-planned stream event rendering" >&2
+  exit 1
+fi
 if ! grep -q "runner pi-session pi event" <<<"${OUTPUT}" || ! grep -q "tool read" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing detailed substrate/tool event rendering" >&2
   exit 1

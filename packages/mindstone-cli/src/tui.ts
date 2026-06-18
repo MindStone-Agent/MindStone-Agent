@@ -311,7 +311,12 @@ function substrateEventDetail(event: unknown): string | undefined {
 
 function runnerStreamEventLabel(event: AgentRunStreamEvent): string {
   if (event.type === "run_started") return `runner ${event.runnerId} started`;
-  if (event.type === "route_planned") return `runner ${event.runnerId} planned route`;
+  if (event.type === "route_planned") {
+    const promptEntries = event.plan.promptWindow.promptEntries.length;
+    const prunedEntries = event.plan.promptWindow.prunedEntries.length;
+    const tokensAfter = event.plan.promptWindow.tokensAfter;
+    return `runner ${event.runnerId} planned route: ${promptEntries} prompt entr${promptEntries === 1 ? "y" : "ies"}, ${prunedEntries} pruned, ${tokensAfter} tokens`;
+  }
   if (event.type === "text_delta") return `runner ${event.runnerId} text delta (${event.text.length} chars)`;
   if (event.type === "substrate_event") {
     const detail = substrateEventDetail(event.event);
@@ -546,8 +551,31 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
     input: { agentId: ctx.agentId, sessionKey: ctx.sessionKey, model: ctx.model },
   }));
   chat.addEvent(runnerStreamEventLabel({
-    type: "substrate_event",
+    type: "route_planned",
     sequence: 1,
+    timestamp: "2026-06-18T00:00:00.000Z",
+    runnerId: "provider-route",
+    plan: {
+      agentId: ctx.agentId,
+      sessionKey: ctx.sessionKey,
+      model: ctx.model,
+      messages: [],
+      promptWindow: {
+        policy: { mode: "sliding_window", ceilingPercent: 92, floorPercent: 70, minRecentMessages: 24, preserveTranscript: true },
+        entries: [{ id: "entry-1", timestamp: "2026-06-18T00:00:00.000Z", sessionKey: ctx.sessionKey, agentId: ctx.agentId, role: "user", text: "hello tui" }],
+        promptEntries: [{ id: "entry-1", timestamp: "2026-06-18T00:00:00.000Z", sessionKey: ctx.sessionKey, agentId: ctx.agentId, role: "user", text: "hello tui" }],
+        prunedEntries: [],
+        tokensBefore: 12,
+        tokensAfter: 12,
+        utilizationBeforePercent: 0.01,
+        utilizationAfterPercent: 0.01,
+        pruned: false,
+      },
+    },
+  }));
+  chat.addEvent(runnerStreamEventLabel({
+    type: "substrate_event",
+    sequence: 2,
     timestamp: "2026-06-18T00:00:00.000Z",
     runnerId: "pi-session",
     substrate: "pi",
