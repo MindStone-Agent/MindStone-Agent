@@ -79,6 +79,14 @@ if ! grep -q "provider:" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing status provider details" >&2
   exit 1
 fi
+if ! grep -q "autoRecall" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing memory panel" >&2
+  exit 1
+fi
+if ! grep -q "context window" <<<"${OUTPUT}"; then
+  echo "TUI smoke output missing context panel" >&2
+  exit 1
+fi
 if ! grep -q "sessions" <<<"${OUTPUT}"; then
   echo "TUI smoke output missing sessions panel" >&2
   exit 1

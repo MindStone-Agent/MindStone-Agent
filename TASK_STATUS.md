@@ -63,6 +63,7 @@
 - [x] Emit completed-response `text_delta` replay events from runners and apply them to the mutable TUI assistant message.
 - [x] Add runtime-only TUI switching commands: `/session <key>`, `/agent <id>`, and `/model <id>`.
 - [x] Render richer TUI runner substrate/tool event labels from stream payload metadata.
+- [x] Add non-mutating TUI `/memory` and `/context` panels for recall index and prompt-window status.
 
 ### Completed
 
@@ -159,6 +160,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [x] Add first TUI rendering path for `AgentRunner.stream(...)` lifecycle/diagnostic events.
 - [x] Add completed-response `text_delta` replay path for mutable assistant updates.
 - [x] Render richer runner substrate/tool event labels from stream payload metadata.
+- [x] Add non-mutating `/memory` and `/context` panels for recall index and prompt-window status.
 - [ ] Add richer interactive selector overlays and status/settings overlays.
 - [ ] Adapt richer current MindStone TUI components and event handlers from `/Users/clint/Projects/MindStone/src/tui/`.
 

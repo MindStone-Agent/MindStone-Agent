@@ -2,7 +2,9 @@ import {
   loadMindStoneConfig,
   resolveConfigPath,
   resolveConfiguredSessionKey,
+  getSqliteMemoryIndexStats,
   listTranscriptSessions,
+  planMindStonePromptWindow,
   readTranscriptEntries,
   resolveMindStoneChatModel,
   runMindStoneChatTurn,
@@ -293,6 +295,63 @@ function buildTuiStatusPanel(params: {
     `- config: \`${params.configPath}\``,
     `- loaded history: \`${params.renderedHistoryCount}/${params.historyLimit}\``,
   ].join("\n");
+}
+
+function buildTuiMemoryPanel(config: ReturnType<typeof loadMindStoneConfig>["config"], paths: ReturnType<typeof runtimePathsFromEnv>): string {
+  const stats = getSqliteMemoryIndexStats(paths);
+  return [
+    `- autoRecall: \`${config?.memory?.autoRecall === true ? "enabled" : "disabled"}\``,
+    `- vector store: \`${config?.memory?.vectorStore ?? "memory"}\``,
+    `- embedding provider: \`${config?.memory?.embeddingProvider ?? "not configured"}\``,
+    `- index present: \`${stats.present}\``,
+    `- sources: \`${stats.sources}\``,
+    `- chunks: \`${stats.chunks}\``,
+    `- embedded chunks: \`${stats.embeddedChunks}\``,
+    `- vector backend: \`${stats.vectorBackend}\``,
+    `- sqlite-vec available: \`${stats.sqliteVec.available}\``,
+    stats.sqliteVec.version ? `- sqlite-vec version: \`${stats.sqliteVec.version}\`` : undefined,
+    stats.sqliteVec.error ? `- sqlite-vec note: \`${stats.sqliteVec.error}\`` : undefined,
+    stats.updatedAt ? `- updated: \`${stats.updatedAt}\`` : undefined,
+    stats.error ? `- error: \`${stats.error}\`` : undefined,
+    `- database: \`${stats.databasePath}\``,
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function buildTuiContextPanel(params: {
+  config: ReturnType<typeof loadMindStoneConfig>["config"];
+  ctx: TuiCommandContext;
+  entries: TranscriptEntry[];
+}): string {
+  const planned = planMindStonePromptWindow({
+    entries: params.entries,
+    model: params.ctx.model,
+    config: params.config,
+  });
+  const policy = planned.policy;
+  const policyLines = policy.mode === "sliding_window"
+    ? [
+        `- policy: \`sliding_window\``,
+        `- ceiling/floor: \`${policy.ceilingPercent}% / ${policy.floorPercent}%\``,
+        `- min recent messages: \`${policy.minRecentMessages}\``,
+        `- preserve transcript: \`${policy.preserveTranscript}\``,
+      ]
+    : [
+        `- policy: \`auto_compact\``,
+        `- checkpoint/compact: \`${policy.checkpointWarningPercent}% / ${policy.compactTargetPercent}%\``,
+        `- keep recent tokens: \`${policy.keepRecentTokens}\``,
+        `- emergency auto-handoff: \`${policy.emergencyAutoHandoff}\``,
+      ];
+  return [
+    ...policyLines,
+    `- context window: \`${params.ctx.model.contextWindowTokens ?? 128_000}\` tokens`,
+    `- transcript entries read: \`${params.entries.length}\``,
+    `- prompt entries selected: \`${planned.promptEntries.length}\``,
+    `- pruned entries: \`${planned.prunedEntries.length}\``,
+    `- tokens before/after: \`${planned.tokensBefore} / ${planned.tokensAfter}\``,
+    `- utilization before/after: \`${planned.utilizationBeforePercent.toFixed(1)}% / ${planned.utilizationAfterPercent.toFixed(1)}%\``,
+    `- pruned: \`${planned.pruned}\``,
+    planned.autoCompactEvent ? `- auto-compact event: \`${planned.autoCompactEvent.event}\`` : undefined,
+  ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
 type TuiPanelItem = {
@@ -617,6 +676,8 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
     transcriptDir: "/tmp/mindstone/transcripts",
     piSessionDir: "/tmp/pi-sessions",
   }));
+  chat.addPanel("memory", buildTuiMemoryPanel(smokeConfig, runtimePathsFromEnv()));
+  chat.addPanel("context", buildTuiContextPanel({ config: smokeConfig, ctx, entries: [] }));
   chat.addPanel("sessions", buildTuiSessionsPanel({
     ctx,
     config: smokeConfig,
@@ -710,6 +771,8 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
     { name: "help", description: "Show TUI commands" },
     { name: "clear", description: "Clear the visible chat log" },
     { name: "status", description: "Show current TUI/session status" },
+    { name: "memory", description: "Show memory/recall index status" },
+    { name: "context", description: "Show context window policy and current session estimate" },
     { name: "sessions", description: "Show known/configured sessions" },
     { name: "session", description: "Switch this TUI session: /session <key>" },
     { name: "agents", description: "Show configured agents" },
@@ -781,7 +844,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         return;
       }
       if (message === "/help") {
-        chat.addSystem("Commands: /help, /clear, /status, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
+        chat.addSystem("Commands: /help, /clear, /status, /memory, /context, /sessions, /session <key>, /agents, /agent <id>, /models, /model <id>, /exit. Regular text sends a MindStone turn.");
         tui.requestRender();
         return;
       }
@@ -793,6 +856,20 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
           renderedHistoryCount,
           transcriptDir: paths.transcriptDir,
           piSessionDir: paths.piSessionDir,
+        }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/memory") {
+        chat.addPanel("memory", buildTuiMemoryPanel(loaded.config, paths));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/context") {
+        chat.addPanel("context", buildTuiContextPanel({
+          config: loaded.config,
+          ctx,
+          entries: readTranscriptEntries(ctx.sessionKey),
         }));
         tui.requestRender();
         return;
