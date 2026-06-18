@@ -1,15 +1,18 @@
 import {
+  appendTranscriptEntry,
   createLocalMemoryRecallProvider,
   createMemoryEmbeddingProvider,
   discoverFileMemoryDocuments,
   getSqliteMemoryIndexStats,
-  runMindStoneConfigWizard,
-  runtimePathsFromEnv,
+  listTranscriptSessions,
   loadMindStoneConfig,
   loadMindStoneIdentity,
   resolveConfigPath,
+  runMindStoneConfigWizard,
+  runtimePathsFromEnv,
   sqliteMemoryDatabasePath,
   SqliteMemoryRecallProvider,
+  transcriptPathForSession,
   type MemoryDocument,
   type MemoryHit,
   type MemoryRecallProvider,
@@ -49,7 +52,14 @@ type PiToolDefinition = {
   ): Promise<PiToolResult> | PiToolResult;
 };
 
+type PiSessionShutdownEvent = {
+  type: "session_shutdown";
+  reason: "quit" | "reload" | "new" | "resume" | "fork";
+  targetSessionFile?: string;
+};
+
 type PiExtensionApi = {
+  on(event: "session_shutdown", handler: (event: PiSessionShutdownEvent, ctx: unknown) => Promise<void> | void): void;
   registerCommand(
     name: string,
     command: {
@@ -86,6 +96,14 @@ const MEMORY_READ_PARAMETERS_SCHEMA = {
     id: { type: "string", description: "Memory document id, title, absolute path, or runtime-relative path." },
   },
   required: ["id"],
+  additionalProperties: false,
+};
+
+const TRANSCRIPT_STATUS_PARAMETERS_SCHEMA = {
+  type: "object",
+  properties: {
+    sessionKey: { type: "string", description: "Optional MindStone session key. Defaults to configured default session." },
+  },
   additionalProperties: false,
 };
 
@@ -196,6 +214,14 @@ function channelStatusMessage(): string {
   ].join("\n");
 }
 
+function defaultAgentAndSession() {
+  const { loaded } = loadedRuntimeConfig();
+  const config = loaded.config;
+  const agentId = config?.routing?.defaultAgentId ?? "default";
+  const sessionKey = config?.session?.defaultSessionKey ?? "agent:default:main";
+  return { loaded, config, agentId, sessionKey };
+}
+
 function mindstoneContextMessage(): string {
   const { paths, loaded } = loadedRuntimeConfig();
   const config = loaded.config;
@@ -219,6 +245,61 @@ function mindstoneContextMessage(): string {
     `Context mode: ${config?.contextManagement?.mode ?? "sliding_window"}`,
     identity?.error ? `Identity error: ${identity.error}` : undefined,
   ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function transcriptStatusMessage(sessionKeyInput?: unknown): { text: string; details: Record<string, unknown> } {
+  const paths = runtimePathsFromEnv();
+  const { sessionKey: defaultSessionKey } = defaultAgentAndSession();
+  const sessionKey = typeof sessionKeyInput === "string" && sessionKeyInput.trim() ? sessionKeyInput.trim() : defaultSessionKey;
+  const sessions = listTranscriptSessions({ paths });
+  const current = sessions.find((session) => session.sessionKey === sessionKey);
+  const transcriptPath = transcriptPathForSession(sessionKey, { paths });
+  const text = [
+    "MindStone transcript status",
+    `Session: ${sessionKey}`,
+    `Path: ${transcriptPath}`,
+    `Exists: ${Boolean(current)}`,
+    `Entries: ${current?.entries ?? 0}`,
+    `Bytes: ${current?.bytes ?? 0}`,
+    current?.updatedAt ? `Updated: ${current.updatedAt}` : undefined,
+    `Known sessions: ${sessions.length}`,
+    "Transcript status is diagnostic only. This command does not prune, compact, or rewrite transcript history.",
+  ].filter((line): line is string => Boolean(line)).join("\n");
+  return {
+    text,
+    details: {
+      sessionKey,
+      path: transcriptPath,
+      exists: Boolean(current),
+      entries: current?.entries ?? 0,
+      bytes: current?.bytes ?? 0,
+      updatedAt: current?.updatedAt,
+      sessions: sessions.length,
+    },
+  };
+}
+
+function recordPiAdapterShutdown(event: PiSessionShutdownEvent): void {
+  const { agentId, sessionKey } = defaultAgentAndSession();
+  appendTranscriptEntry({
+    sessionKey,
+    agentId,
+    role: "event",
+    text: `Pi adapter session shutdown observed: ${event.reason}.`,
+    source: {
+      substrate: "pi-adapter",
+      channel: "pi",
+      chatType: "internal",
+      senderId: "extension",
+    },
+    metadata: {
+      event: "pi_adapter_session_shutdown",
+      reason: event.reason,
+      targetSessionFile: event.targetSessionFile,
+      archiveScope: "lifecycle_marker_only",
+      note: "Conservative first-pass archive hook; raw Pi transcript/message archival is not implemented here.",
+    },
+  });
 }
 
 function memoryStatusMessage(): { text: string; details: Record<string, unknown> } {
@@ -377,6 +458,10 @@ async function runConfigWizardCommand(ctx: PiCommandContext): Promise<void> {
 }
 
 export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
+  pi.on("session_shutdown", async (event) => {
+    recordPiAdapterShutdown(event);
+  });
+
   pi.registerTool({
     name: "mindstone_memory_status",
     label: "MindStone Memory Status",
@@ -416,6 +501,19 @@ export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
       const id = typeof params.id === "string" ? params.id.trim() : "";
       if (!id) return textToolResult("id is required", { error: "missing_id" });
       const { text, details } = memoryReadMessage(id);
+      return textToolResult(text, details);
+    },
+  });
+
+  pi.registerTool({
+    name: "mindstone_transcript_status",
+    label: "MindStone Transcript Status",
+    description: "Show read-only MindStone transcript status for the configured/default session.",
+    promptSnippet: "Inspect MindStone transcript file status for a session",
+    promptGuidelines: ["Use mindstone_transcript_status to check transcript continuity without mutating transcript history."],
+    parameters: TRANSCRIPT_STATUS_PARAMETERS_SCHEMA,
+    execute: async (_toolCallId, params) => {
+      const { text, details } = transcriptStatusMessage(params.sessionKey);
       return textToolResult(text, details);
     },
   });
@@ -461,6 +559,18 @@ export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
     handler: async (_args, ctx) => {
       try {
         ctx.ui.notify(channelStatusMessage(), "info");
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("mindstone-transcript-status", {
+    description: "Show read-only MindStone transcript status for the configured/default session",
+    handler: async (args, ctx) => {
+      try {
+        const sessionKey = args.trim() || undefined;
+        ctx.ui.notify(transcriptStatusMessage(sessionKey).text, "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }

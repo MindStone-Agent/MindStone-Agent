@@ -119,6 +119,7 @@ The preferred order is:
   - `mindstone_memory_status`
   - `mindstone_memory_search`
   - `mindstone_memory_read`
+  - `mindstone_transcript_status`
   - `mindstone_memory_read` only returns discovered MindStone memory documents, not arbitrary filesystem paths.
   - Smoke validation: `npm run smoke:pi-adapter`
 - [x] Register read-only Pi adapter recall commands for memory status/search:
@@ -126,7 +127,7 @@ The preferred order is:
   - `/mindstone-recall-search <query> [--limit N]`
   - Smoke validation: `npm run smoke:pi-adapter`
 - [ ] Add identity/context injection at prompt start.
-- [ ] Add Pi transcript archive hook.
+- [x] Add conservative Pi transcript lifecycle marker hook: on `session_shutdown`, the Pi adapter appends a sanitized `pi_adapter_session_shutdown` event to the configured MindStone transcript. Full raw Pi transcript/message archive parity remains pending.
 - [ ] Add compaction/session lifecycle handling where Pi supports it.
 - [x] Add read-only Gateway status command: `/mindstone-gateway-status` reports configured endpoint/auth/surfaces without live probing.
 - [ ] Add smoke validation instructions.
@@ -190,6 +191,7 @@ The preferred order is:
 - [x] `/mindstone-recall-search <query>`
 - [x] `/mindstone-gateway-status`
 - [x] `/mindstone-channels` diagnostic command; reports configured channel keys and honest surface/plugin status without starting listeners or probing networks.
+- [x] `/mindstone-transcript-status` diagnostic command; reports configured/default transcript status without pruning, compacting, or rewriting history.
 
 ### Exit criteria
 

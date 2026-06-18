@@ -37,10 +37,15 @@ Adapter recall sentinel verifies that the MindStone Pi adapter can search local 
 MD
 
 OUTPUT="$(node <<'NODE'
+const { readFileSync, existsSync } = await import('node:fs');
 const mod = await import('./packages/mindstone-pi-adapter/dist/index.js');
 const commands = new Map();
 const tools = new Map();
+const handlers = new Map();
 mod.default({
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
   registerCommand(name, command) {
     commands.set(name, command);
   },
@@ -57,36 +62,49 @@ const ctx = {
     notify(message, kind = 'info') { notifications.push({ kind, message }); },
   },
 };
-for (const name of ['mindstone-agent-status', 'mindstone-status', 'mindstone-context', 'mindstone-gateway-status', 'mindstone-channels', 'mindstone-recall-status', 'mindstone-recall-search', 'mindstone-config', 'mindstone-setup']) {
+for (const name of ['mindstone-agent-status', 'mindstone-status', 'mindstone-context', 'mindstone-gateway-status', 'mindstone-channels', 'mindstone-transcript-status', 'mindstone-recall-status', 'mindstone-recall-search', 'mindstone-config', 'mindstone-setup']) {
   if (!commands.has(name)) throw new Error(`missing command ${name}`);
 }
-for (const name of ['mindstone_memory_status', 'mindstone_memory_search', 'mindstone_memory_read']) {
+for (const name of ['mindstone_memory_status', 'mindstone_memory_search', 'mindstone_memory_read', 'mindstone_transcript_status']) {
   if (!tools.has(name)) throw new Error(`missing tool ${name}`);
 }
+if (!handlers.has('session_shutdown')) throw new Error('missing session_shutdown handler');
 await commands.get('mindstone-agent-status').handler('', ctx);
 await commands.get('mindstone-status').handler('', ctx);
 await commands.get('mindstone-context').handler('', ctx);
 await commands.get('mindstone-gateway-status').handler('', ctx);
 await commands.get('mindstone-channels').handler('', ctx);
+await commands.get('mindstone-transcript-status').handler('', ctx);
 await commands.get('mindstone-recall-status').handler('', ctx);
 await commands.get('mindstone-recall-search').handler('adapter recall sentinel --limit 3', ctx);
 const statusTool = await tools.get('mindstone_memory_status').execute('tool-status', {});
 const searchTool = await tools.get('mindstone_memory_search').execute('tool-search', { query: 'adapter recall sentinel', limit: 3 });
 const readTool = await tools.get('mindstone_memory_read').execute('tool-read', { id: 'memory/reference_adapter_recall_smoke.md' });
 const missingReadTool = await tools.get('mindstone_memory_read').execute('tool-missing-read', { id: '../not-allowed' });
+const transcriptBeforeShutdownTool = await tools.get('mindstone_transcript_status').execute('tool-transcript-before', {});
+await handlers.get('session_shutdown')({ type: 'session_shutdown', reason: 'quit' }, ctx);
+const transcriptAfterShutdownTool = await tools.get('mindstone_transcript_status').execute('tool-transcript-after', {});
+const transcriptPath = transcriptAfterShutdownTool.details.path;
+const transcriptContent = existsSync(transcriptPath) ? readFileSync(transcriptPath, 'utf8') : '';
 console.log(JSON.stringify({
   commands: [...commands.keys()].sort(),
   tools: [...tools.keys()].sort(),
+  handlers: [...handlers.keys()].sort(),
   notifications,
-  toolResults: { statusTool, searchTool, readTool, missingReadTool },
+  toolResults: { statusTool, searchTool, readTool, missingReadTool, transcriptBeforeShutdownTool, transcriptAfterShutdownTool },
+  transcriptContent,
 }, null, 2));
 NODE
 )"
 
 echo "${OUTPUT}"
 
-if ! grep -q 'mindstone-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-context' <<<"${OUTPUT}" || ! grep -q 'mindstone-gateway-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-channels' <<<"${OUTPUT}" || ! grep -q 'mindstone-setup' <<<"${OUTPUT}"; then
-  echo "Pi adapter smoke output missing status/context/gateway/channels/setup commands" >&2
+if ! grep -q 'mindstone-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-context' <<<"${OUTPUT}" || ! grep -q 'mindstone-gateway-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-channels' <<<"${OUTPUT}" || ! grep -q 'mindstone-transcript-status' <<<"${OUTPUT}" || ! grep -q 'mindstone-setup' <<<"${OUTPUT}"; then
+  echo "Pi adapter smoke output missing status/context/gateway/channels/transcript/setup commands" >&2
+  exit 1
+fi
+if ! grep -q 'session_shutdown' <<<"${OUTPUT}"; then
+  echo "Pi adapter smoke output missing session shutdown handler" >&2
   exit 1
 fi
 if ! grep -q 'mindstone-recall-status' <<<"${OUTPUT}"; then
@@ -97,8 +115,8 @@ if ! grep -q 'mindstone-recall-search' <<<"${OUTPUT}"; then
   echo "Pi adapter smoke output missing recall search command" >&2
   exit 1
 fi
-if ! grep -q 'mindstone_memory_status' <<<"${OUTPUT}" || ! grep -q 'mindstone_memory_search' <<<"${OUTPUT}" || ! grep -q 'mindstone_memory_read' <<<"${OUTPUT}"; then
-  echo "Pi adapter smoke output missing memory tool registration" >&2
+if ! grep -q 'mindstone_memory_status' <<<"${OUTPUT}" || ! grep -q 'mindstone_memory_search' <<<"${OUTPUT}" || ! grep -q 'mindstone_memory_read' <<<"${OUTPUT}" || ! grep -q 'mindstone_transcript_status' <<<"${OUTPUT}"; then
+  echo "Pi adapter smoke output missing memory/transcript tool registration" >&2
   exit 1
 fi
 if ! grep -q 'MindStone-Agent runtime isolation' <<<"${OUTPUT}"; then
@@ -115,6 +133,14 @@ if ! grep -q 'MindStone Gateway status' <<<"${OUTPUT}" || ! grep -q 'Live probe:
 fi
 if ! grep -q 'MindStone channel/surface status' <<<"${OUTPUT}" || ! grep -q 'Telegram: not implemented/validated' <<<"${OUTPUT}" || ! grep -q 'diagnostic only' <<<"${OUTPUT}"; then
   echo "Pi adapter channels command did not report honest channel status" >&2
+  exit 1
+fi
+if ! grep -q 'MindStone transcript status' <<<"${OUTPUT}" || ! grep -q 'Transcript status is diagnostic only' <<<"${OUTPUT}"; then
+  echo "Pi adapter transcript status command/tool did not report diagnostic transcript status" >&2
+  exit 1
+fi
+if ! grep -q 'pi_adapter_session_shutdown' <<<"${OUTPUT}" || ! grep -q 'lifecycle_marker_only' <<<"${OUTPUT}"; then
+  echo "Pi adapter session shutdown hook did not append lifecycle marker" >&2
   exit 1
 fi
 if ! grep -q 'MindStone memory status' <<<"${OUTPUT}"; then
