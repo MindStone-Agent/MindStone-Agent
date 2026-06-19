@@ -43,6 +43,23 @@ async function request(path, init, expectedStatus) {
   return body;
 }
 
+const health = await request("/health", undefined, 200);
+if (health.service !== "mindstone-agent-gateway") process.exit(1);
+
+const status = await request("/status", undefined, 200);
+if (status.service !== "mindstone-agent-gateway" || status.ok !== true) process.exit(1);
+
+const invalidInject = await request(
+  "/chat/inject",
+  {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ agentId: "default", role: "invalid", text: "should not persist" }),
+  },
+  400,
+);
+if (!invalidInject.error?.includes("valid role")) process.exit(1);
+
 await request(
   "/chat/inject",
   {
@@ -61,6 +78,17 @@ await request(
   },
   201,
 );
+
+const invalidSend = await request(
+  "/chat/send",
+  {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ agentId: "default", text: "   " }),
+  },
+  400,
+);
+if (!invalidSend.error?.includes("text is required")) process.exit(1);
 
 const send = await request(
   "/chat/send",
@@ -97,6 +125,12 @@ if (history.entries[0].source?.substrate !== "gateway-rest" || history.entries[0
 if (history.entries[2].source?.substrate !== "gateway-rest" || history.entries[2].source?.chatType !== "internal") process.exit(1);
 if (history.entries[3].metadata?.event !== "routing_not_implemented" || history.entries[3].source?.substrate !== "gateway-rest") process.exit(1);
 if (history.entries[4].metadata?.event !== "abort_requested" || history.entries[4].source?.substrate !== "gateway-rest") process.exit(1);
+
+const limitedHistory = await request("/chat/history?limit=2", undefined, 200);
+if (limitedHistory.sessionKey !== sessionKey) process.exit(1);
+if (!Array.isArray(limitedHistory.entries) || limitedHistory.entries.length !== 2) process.exit(1);
+if (limitedHistory.entries[0].metadata?.event !== "routing_not_implemented") process.exit(1);
+if (limitedHistory.entries[1].metadata?.event !== "abort_requested") process.exit(1);
 NODE
 
 echo "Chat history Gateway smoke test passed."

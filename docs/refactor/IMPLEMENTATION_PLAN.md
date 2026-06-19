@@ -233,11 +233,15 @@ The preferred order is:
   - `npm run smoke:ws-rpc` covers `/rpc` WebSocket `chat.inject`, `chat.send`, `chat.abort`, `chat.sessions`, `chat.history`, unknown-method handling, and `/ws` alias history.
 - [x] Preserve OpenAI-compatible `/v1/chat/completions` for configured mock/Pi routing modes, with placeholder fallback when no provider is configured.
 - [x] Preserve non-streaming OpenResponses `/v1/responses` for configured mock/Pi routing modes, with transcript-aware placeholder fallback when no provider is configured.
-- [ ] Add health/status endpoint.
+- [x] Add health/status endpoint.
 - [x] Verify auth behavior and endpoint enable flags for current Gateway HTTP surfaces.
   - `npm run smoke:auth` covers token/password auth for status and OpenResponses.
   - `npm run smoke:gateway-http-surfaces` covers `/v1/models`, `/v1/chat/completions`, and `/v1/responses` enablement gates across disabled/chat-only/responses-only combinations.
-- [ ] Add integration tests around HTTP and WebSocket methods.
+- [x] Add smoke-level integration tests around current HTTP and WebSocket methods.
+  - `npm run smoke:chat` covers `/health`, `/status`, REST chat inject/send/abort/sessions/history, invalid inject/send, and limited history.
+  - `npm run smoke:rpc` covers HTTP RPC chat methods.
+  - `npm run smoke:ws-rpc` covers WebSocket RPC methods and `/ws` alias.
+  - `npm run smoke:openai`, `npm run smoke:router-mock`, and `npm run smoke:gateway-http-surfaces` cover compatible HTTP surfaces.
 
 ### Candidate files
 
@@ -248,7 +252,7 @@ The preferred order is:
 
 ### Exit criteria
 
-- [ ] WebChat can send/history/inject/abort.
+- [x] Gateway/WebChat REST APIs can send/history/inject/abort in smoke validation. Browser WebChat UI smoke covers shell loading and send/history, but not a full manual browser UX pass.
 - [x] OpenAI-compatible HTTP smoke works for scaffold and mock-routed paths.
 - [x] OpenResponses HTTP smoke works for scaffold and mock-routed non-streaming paths.
 - [x] Current Gateway auth failure cases are smoke-tested for status and OpenResponses; deeper endpoint matrix can expand as surfaces mature.

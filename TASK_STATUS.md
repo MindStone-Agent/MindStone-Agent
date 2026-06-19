@@ -127,7 +127,7 @@
 - [x] Added Gateway-native `/chat/sessions`, `/chat/history`, and `/chat/inject` endpoints.
 - [x] Added `/chat/send` placeholder that persists user messages and records routing-not-implemented events.
 - [x] Added `/chat/abort` placeholder that records abort-requested events.
-- [x] Verified chat history/send/abort endpoints with `npm run smoke:chat`.
+- [x] Verified REST Gateway health/status and chat history/inject/send/abort/sessions endpoints, invalid-input handling, and limited history with `npm run smoke:chat`.
 - [x] Added `POST /rpc` bridge for `chat.sessions`, `chat.history`, `chat.inject`, `chat.send`, and `chat.abort`.
 - [x] Verified HTTP RPC bridge with `npm run smoke:rpc`.
 - [x] Added WebSocket RPC transport on `/rpc` and `/ws` using the same method executor.
