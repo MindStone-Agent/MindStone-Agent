@@ -108,7 +108,12 @@ The preferred order is:
 
 ### Exit criteria
 
-- [ ] Wizard runs through at least identity + memory + gateway sections in Pi.
+- [x] Wizard runs through at least identity + memory + gateway sections in Pi adapter automation.
+  - `/mindstone-config gateway --dry-run`, `/mindstone-config memory --dry-run`, `/mindstone-config identity --dry-run`, and `/mindstone-config channels --dry-run` are smoke-validated through the Pi adapter UI shim.
+  - `/mindstone-setup --sections gateway,memory,identity,channels --dry-run` is also smoke-validated.
+  - Config remains byte-identical under dry-run.
+  - Smoke validation: `npm run smoke:pi-config-sections`.
+  - Manual/live Pi UI validation remains a separate pending validation item.
 - [x] Native CLI onboarding/config can run core setup and section reconfiguration.
 - [x] Onboarding can select a profile/write-in purpose, gather interaction preferences, and create identity/user scaffolds from that seed.
   - [x] Profile/write-in selection seeds config and identity/user scaffolds.

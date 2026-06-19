@@ -245,8 +245,9 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [x] Expose section-scoped native config reconfiguration.
   - CLI supports `mindstone config --section NAME`, repeated `--section`, comma-separated `--sections a,b`, and `--dry-run`.
   - Pi adapter `/mindstone-config` and `/mindstone-setup` also accept `<section>`, `--section`, `--sections`, and `--dry-run` arguments.
+  - Automated Pi adapter smoke now runs gateway, memory, identity, and channels wizard sections through the Pi UI shim without mutating config.
   - Invalid section names fail clearly.
-  - Smoke validation: `npm run smoke:config-sections` and `npm run smoke:pi-adapter`.
+  - Smoke validation: `npm run smoke:config-sections`, `npm run smoke:pi-adapter`, and `npm run smoke:pi-config-sections`.
 
 ### Memory and context
 
