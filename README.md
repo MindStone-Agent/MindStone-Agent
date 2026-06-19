@@ -14,6 +14,7 @@ This repository vendors upstream Pi under `vendor/pi` and layers MindStone Core,
 - [Upstream Pi Strategy](docs/upstream/PI_BASE_STRATEGY.md)
 - [Runtime Isolation Model](docs/operations/ISOLATION.md)
 - [Gateway API Reference](docs/gateway/API_REFERENCE.md)
+- [OpenWebUI Setup Prep](docs/gateway/OPENWEBUI.md)
 
 ## Runtime Isolation
 

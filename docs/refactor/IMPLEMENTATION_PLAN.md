@@ -395,7 +395,8 @@ The preferred order is:
 - [ ] Validate non-streaming response.
 - [ ] Validate streaming response.
 - [ ] Validate stable session routing through `user` or configured session key.
-- [ ] Document setup instructions.
+- [x] Document setup/validation-prep instructions without claiming live OpenWebUI validation.
+  - `docs/gateway/OPENWEBUI.md`
 - [ ] Add WebChat setup/config UX for Gateway enablement, auth, session policy, and connection instructions.
 - [ ] Add compatibility shim only if validation shows a concrete gap.
 
