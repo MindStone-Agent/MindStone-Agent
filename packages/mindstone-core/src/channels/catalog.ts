@@ -69,7 +69,7 @@ export function getMindStoneChannelCatalog(config?: MindStoneConfig): MindStoneC
       enabled: true,
       capabilities: { chatTypes: ["direct", "thread"] },
       summary: "Always-on runtime owner for HTTP APIs, WebChat, and future channel listeners.",
-      setup: "Configure gateway host/port/auth, then run mindstone gateway start or the service wrapper when available.",
+      setup: "Configure gateway host/port/auth, then run mindstone gateway start or install the user service with mindstone gateway install.",
       notes: ["Long-running channel listeners belong here", "Status commands do not start or probe listeners"],
     },
     {

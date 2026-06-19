@@ -134,13 +134,37 @@ Without global linking, the workspace package exposes the same bin under `node_m
 
 The package bin bootstraps the same project-local isolation environment as the old script wrappers. Override the config path for safe testing with `MINDSTONE_AGENT_CONFIG=/path/to/config.test.json`.
 
-Run the minimal Gateway server with:
+Manage the local Gateway through the public CLI:
 
 ```bash
-npm run start:gateway
+mindstone gateway status
+mindstone gateway start
+mindstone gateway restart
+mindstone gateway stop
+mindstone gateway logs
+```
+
+For foreground/debug operation:
+
+```bash
+mindstone gateway run
+```
+
+On macOS, user-service management is available through launchd:
+
+```bash
+mindstone gateway install
+mindstone gateway uninstall
+```
+
+Then check health/status:
+
+```bash
 curl http://127.0.0.1:19789/health
 curl http://127.0.0.1:19789/status
 ```
+
+The legacy development path still exists as `npm run start:gateway`, but MVP/product workflows should use `mindstone gateway ...`.
 
 The Gateway exposes the old MindStone/WebChat method-name bridge over both HTTP and WebSocket:
 

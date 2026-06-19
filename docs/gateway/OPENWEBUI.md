@@ -50,10 +50,10 @@ Check isolation paths:
 ./scripts/show-isolation.sh
 ```
 
-Start the Gateway:
+Start the Gateway through the product CLI:
 
 ```bash
-npm run start:gateway
+mindstone gateway start
 ```
 
 Default URL:
@@ -97,11 +97,11 @@ Auth can be configured as `none`, `token`, or `password`. For a local OpenWebUI 
 }
 ```
 
-Then start the Gateway with:
+Then start or restart the Gateway with:
 
 ```bash
 export MINDSTONE_AGENT_GATEWAY_TOKEN='replace-with-a-local-test-token'
-npm run start:gateway
+mindstone gateway restart
 ```
 
 In OpenWebUI, use that token as the API key if it asks for one.

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -43,7 +44,7 @@ import {
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "auth" | "identity" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "auth" | "gateway" | "identity" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;220m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -62,6 +63,8 @@ function usage(): string {
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone auth login <provider> [--dry-run]",
     "                         Connect a subscription/OAuth provider through MindStone's isolated auth flow",
+    "  mindstone gateway [status|run|start|stop|restart|logs|install|uninstall]",
+    "                         Manage the local MindStone Gateway process/service",
     "  mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]",
     "                         Synthesize first-activation identity from onboarding seed",
     "  mindstone skill list   Show built-in MindStone skill surfaces",
@@ -86,7 +89,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "auth" || raw === "identity" || raw === "skill" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "skill" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -858,6 +861,308 @@ function printStatus(): void {
   output.write("\n");
 }
 
+type GatewayManagedState = {
+  pid?: number;
+  running: boolean;
+  dir: string;
+  pidPath: string;
+  logPath: string;
+  scriptPath: string;
+};
+
+function gatewayStatePaths(): { dir: string; pidPath: string; logPath: string; scriptPath: string } {
+  const paths = runtimePathsFromEnv();
+  const dir = join(paths.dataDir, "gateway");
+  return {
+    dir,
+    pidPath: join(dir, "gateway.pid"),
+    logPath: join(dir, "gateway.log"),
+    scriptPath: join(paths.root, "packages/mindstone-gateway/dist/main.js"),
+  };
+}
+
+function readGatewayPid(pidPath: string): number | undefined {
+  if (!existsSync(pidPath)) return undefined;
+  const raw = readFileSync(pidPath, "utf-8").trim();
+  const pid = Number.parseInt(raw, 10);
+  return Number.isFinite(pid) && pid > 0 ? pid : undefined;
+}
+
+function isProcessRunning(pid: number | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "EPERM";
+  }
+}
+
+function getManagedGatewayState(): GatewayManagedState {
+  const state = gatewayStatePaths();
+  const pid = readGatewayPid(state.pidPath);
+  const running = isProcessRunning(pid);
+  if (pid && !running) {
+    try { unlinkSync(state.pidPath); } catch { /* ignore stale cleanup */ }
+  }
+  return { ...state, pid: running ? pid : undefined, running };
+}
+
+async function waitForGatewayHealth(baseUrl: string, timeoutMs = 5000): Promise<{ ok: boolean; detail: string }> {
+  const deadline = Date.now() + timeoutMs;
+  let last: { ok: boolean; detail: string } = { ok: false, detail: "not checked" };
+  while (Date.now() < deadline) {
+    last = await probeGatewayHealth(baseUrl);
+    if (last.ok) return last;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return last;
+}
+
+async function probeGatewayHealth(baseUrl: string): Promise<{ ok: boolean; detail: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
+  try {
+    const response = await fetch(`${baseUrl}/health`, { signal: controller.signal });
+    if (!response.ok) return { ok: false, detail: `HTTP ${response.status}` };
+    const body = await response.json() as { ok?: boolean; service?: string };
+    return { ok: body.ok === true, detail: body.service ? `${body.service} ok=${body.ok === true}` : `ok=${body.ok === true}` };
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function gatewayLaunchdPlist(params: { label: string; cliPath: string; root: string; runtimeDir: string; logPath: string }): string {
+  const escape = (value: string) => value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${escape(params.label)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${escape(process.execPath)}</string>
+    <string>${escape(params.cliPath)}</string>
+    <string>gateway</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key><string>${escape(params.root)}</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${escape(params.logPath)}</string>
+  <key>StandardErrorPath</key><string>${escape(params.logPath)}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MINDSTONE_AGENT_ROOT</key><string>${escape(params.root)}</string>
+    <key>MINDSTONE_AGENT_RUNTIME_DIR</key><string>${escape(params.runtimeDir)}</string>
+    <key>PI_SKIP_VERSION_CHECK</key><string>1</string>
+    <key>PI_OFFLINE</key><string>1</string>
+  </dict>
+</dict>
+</plist>
+`;
+}
+
+function gatewayLaunchdPaths(): { label: string; plistPath: string } {
+  return {
+    label: "com.mindstone-agent.gateway",
+    plistPath: join(homedir(), "Library", "LaunchAgents", "com.mindstone-agent.gateway.plist"),
+  };
+}
+
+function runLaunchctl(args: string[], allowFailure = false): void {
+  const result = spawnSync("launchctl", args, { stdio: allowFailure ? "ignore" : "inherit" });
+  if (!allowFailure && result.status !== 0) throw new Error(`launchctl ${args.join(" ")} failed with status ${result.status}`);
+}
+
+function startManagedGateway(): GatewayManagedState {
+  const state = getManagedGatewayState();
+  if (state.running) return state;
+  if (!existsSync(state.scriptPath)) {
+    throw new Error(`Gateway is not built yet. Run: npm run build:mindstone\nMissing: ${state.scriptPath}`);
+  }
+  mkdirSync(state.dir, { recursive: true, mode: 0o700 });
+  const logFd = openSync(state.logPath, "a", 0o600);
+  try {
+    const child = spawn(process.execPath, [state.scriptPath], {
+      cwd: runtimePathsFromEnv().root,
+      detached: true,
+      env: process.env,
+      stdio: ["ignore", logFd, logFd],
+    });
+    child.unref();
+    writeFileSync(state.pidPath, `${child.pid}\n`, { encoding: "utf-8", mode: 0o600 });
+    return { ...state, pid: child.pid, running: true };
+  } finally {
+    closeSync(logFd);
+  }
+}
+
+async function stopManagedGateway(options: { force?: boolean } = {}): Promise<GatewayManagedState> {
+  const state = getManagedGatewayState();
+  if (!state.pid || !state.running) return state;
+  process.kill(state.pid, options.force ? "SIGKILL" : "SIGTERM");
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (!isProcessRunning(state.pid)) break;
+  }
+  if (isProcessRunning(state.pid)) process.kill(state.pid, "SIGKILL");
+  try { unlinkSync(state.pidPath); } catch { /* ignore */ }
+  return getManagedGatewayState();
+}
+
+async function runGatewayCommand(argv: string[]): Promise<void> {
+  const subcommand = argv[3] ?? "status";
+  const json = hasOption(argv, "--json");
+  const dryRun = hasOption(argv, "--dry-run");
+  const paths = runtimePathsFromEnv();
+  const configured = getMindStoneSystemStatus().gateway;
+  const managed = getManagedGatewayState();
+
+  if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    output.write([
+      gold("🔶 MindStone gateway"),
+      "",
+      "Usage:",
+      "  mindstone gateway status [--json]",
+      "  mindstone gateway run",
+      "  mindstone gateway start",
+      "  mindstone gateway stop [--force]",
+      "  mindstone gateway restart",
+      "  mindstone gateway logs [--lines N]",
+      "  mindstone gateway install [--dry-run]",
+      "  mindstone gateway uninstall [--dry-run]",
+      "",
+      "Notes:",
+      "  start/stop/restart manage a local background Gateway process using isolated runtime state.",
+      "  install/uninstall manage a user launchd service on macOS.",
+    ].join("\n"));
+    output.write("\n");
+    return;
+  }
+
+  if (subcommand === "status") {
+    const live = await probeGatewayHealth(configured.baseUrl);
+    const payload = { configured, managed, live };
+    if (json) {
+      printJson(payload);
+      return;
+    }
+    output.write(`${gold("🔶 MindStone Gateway status")}\n\n`);
+    output.write([
+      `Endpoint: ${configured.baseUrl}`,
+      `Auth: ${configured.auth.mode} (${configured.auth.source})`,
+      `Models API: ${configured.http.modelsEnabled}`,
+      `Chat completions: ${configured.http.chatCompletionsEnabled}`,
+      `Responses: ${configured.http.responsesEnabled}`,
+      `Managed PID: ${managed.pid ?? "none"}`,
+      `Managed running: ${managed.running}`,
+      `PID file: ${managed.pidPath}`,
+      `Log file: ${managed.logPath}`,
+      `Live health: ${live.ok} (${live.detail})`,
+    ].join("\n"));
+    output.write("\n");
+    return;
+  }
+
+  if (subcommand === "run") {
+    if (!existsSync(managed.scriptPath)) throw new Error(`Gateway is not built yet. Run: npm run build:mindstone\nMissing: ${managed.scriptPath}`);
+    const { startGateway } = await import("@mindstone-agent/gateway");
+    const gateway = await startGateway();
+    output.write(`MindStone-Agent Gateway listening at ${gateway.url}\n`);
+    const shutdown = async () => {
+      await gateway.close();
+      process.exit(0);
+    };
+    process.on("SIGINT", () => void shutdown());
+    process.on("SIGTERM", () => void shutdown());
+    await new Promise(() => undefined);
+    return;
+  }
+
+  if (subcommand === "start") {
+    const next = startManagedGateway();
+    const live = await waitForGatewayHealth(configured.baseUrl);
+    output.write(`${gold(next.running ? "Gateway started" : "Gateway start requested")}\nPID: ${next.pid}\nLog: ${next.logPath}\nEndpoint: ${configured.baseUrl}\nLive health: ${live.ok} (${live.detail})\n`);
+    return;
+  }
+
+  if (subcommand === "stop") {
+    const before = getManagedGatewayState();
+    await stopManagedGateway({ force: hasOption(argv, "--force") });
+    output.write(before.running ? `${gold("Gateway stopped")}\nPID: ${before.pid}\n` : "Gateway is not running.\n");
+    return;
+  }
+
+  if (subcommand === "restart") {
+    await stopManagedGateway({ force: hasOption(argv, "--force") });
+    const next = startManagedGateway();
+    const live = await waitForGatewayHealth(configured.baseUrl);
+    output.write(`${gold("Gateway restarted")}\nPID: ${next.pid}\nLog: ${next.logPath}\nEndpoint: ${configured.baseUrl}\nLive health: ${live.ok} (${live.detail})\n`);
+    return;
+  }
+
+  if (subcommand === "logs") {
+    const lines = Number.parseInt(optionValue(argv, "--lines") ?? "80", 10);
+    if (!existsSync(managed.logPath)) {
+      output.write(`No Gateway log file yet: ${managed.logPath}\n`);
+      return;
+    }
+    const text = readFileSync(managed.logPath, "utf-8");
+    output.write(text.split(/\r?\n/).slice(-Math.max(1, lines)).join("\n"));
+    output.write("\n");
+    return;
+  }
+
+  if (subcommand === "install") {
+    const launchd = gatewayLaunchdPaths();
+    const cliPath = join(paths.root, "packages/mindstone-cli/bin/mindstone.js");
+    const plist = gatewayLaunchdPlist({ label: launchd.label, cliPath, root: paths.root, runtimeDir: paths.runtimeDir, logPath: managed.logPath });
+    if (process.platform !== "darwin") throw new Error("Gateway service install currently supports macOS launchd only. Use `mindstone gateway start` for managed background mode.");
+    if (dryRun) {
+      output.write(`${gold("Gateway launchd install dry run")}\nPlist: ${launchd.plistPath}\nLabel: ${launchd.label}\n`);
+      return;
+    }
+    mkdirSync(dirname(launchd.plistPath), { recursive: true, mode: 0o700 });
+    mkdirSync(managed.dir, { recursive: true, mode: 0o700 });
+    writeFileSync(launchd.plistPath, plist, { encoding: "utf-8", mode: 0o600 });
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error("Cannot install launchd service: process uid unavailable.");
+    runLaunchctl(["bootout", `gui/${uid}`, launchd.plistPath], true);
+    runLaunchctl(["bootstrap", `gui/${uid}`, launchd.plistPath]);
+    runLaunchctl(["enable", `gui/${uid}/${launchd.label}`], true);
+    runLaunchctl(["kickstart", "-k", `gui/${uid}/${launchd.label}`], true);
+    output.write(`${gold("Gateway service installed")}\nLabel: ${launchd.label}\nPlist: ${launchd.plistPath}\nLog: ${managed.logPath}\n`);
+    return;
+  }
+
+  if (subcommand === "uninstall") {
+    const launchd = gatewayLaunchdPaths();
+    if (process.platform !== "darwin") throw new Error("Gateway service uninstall currently supports macOS launchd only.");
+    if (dryRun) {
+      output.write(`${gold("Gateway launchd uninstall dry run")}\nPlist: ${launchd.plistPath}\nLabel: ${launchd.label}\n`);
+      return;
+    }
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error("Cannot uninstall launchd service: process uid unavailable.");
+    runLaunchctl(["bootout", `gui/${uid}`, launchd.plistPath], true);
+    if (existsSync(launchd.plistPath)) unlinkSync(launchd.plistPath);
+    output.write(`${gold("Gateway service uninstalled")}\nLabel: ${launchd.label}\nPlist: ${launchd.plistPath}\n`);
+    return;
+  }
+
+  throw new Error(`Unknown gateway command: ${subcommand}`);
+}
+
 function severityIcon(severity: MindStoneDoctorReport["checks"][number]["severity"]): string {
   if (severity === "pass") return "✓";
   if (severity === "warn") return "!";
@@ -1104,6 +1409,10 @@ async function main(): Promise<void> {
   }
   if (command === "auth") {
     await runAuthCommand(process.argv);
+    return;
+  }
+  if (command === "gateway") {
+    await runGatewayCommand(process.argv);
     return;
   }
   if (command === "chat") {

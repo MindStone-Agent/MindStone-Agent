@@ -7,11 +7,30 @@ This document describes the Gateway surface as implemented today. It is intentio
 
 ## Runtime and base URL
 
-Start the isolated Gateway from the MindStone-Agent repo:
+Manage the isolated Gateway through the public MindStone CLI:
 
 ```bash
-npm run start:gateway
+mindstone gateway status
+mindstone gateway start
+mindstone gateway restart
+mindstone gateway stop
+mindstone gateway logs
 ```
+
+For foreground/debug operation:
+
+```bash
+mindstone gateway run
+```
+
+On macOS, user-service management is available through launchd:
+
+```bash
+mindstone gateway install
+mindstone gateway uninstall
+```
+
+The legacy development path remains `npm run start:gateway`, but product/MVP workflows should use `mindstone gateway ...`.
 
 Default base URL:
 

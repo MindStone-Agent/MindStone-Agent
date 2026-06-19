@@ -192,6 +192,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [x] Stream/update assistant text and tool/substrate events live from runner events in the native TUI; interactive TUI consumes `onRunnerStreamEvent` for live text deltas and substrate/route events, with non-interactive `tui --smoke-stream` coverage.
 - [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
 - [x] Add sanitized Gateway HTTP surface status in Core status/doctor/CLI: endpoint, auth mode/source without secrets, models/chat-completions/responses enablement, and route names.
+- [x] Add MVP Gateway CLI management surface: `mindstone gateway status/run/start/stop/restart/logs/install/uninstall`, with isolated runtime PID/log state, live health checks on start/restart, macOS launchd install/uninstall, and `npm run smoke:gateway-cli` coverage.
 - [x] Add non-mutating `/config` panel for sanitized active runtime config.
 - [x] Add non-mutating `/gateway` panel for configured Gateway surfaces/auth without live probing.
 - [x] Add non-mutating `/pi` panel for isolated Pi runtime/session mapping.
@@ -340,6 +341,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - [x] Native `mindstone chat` writes structured `mindstone-cli` / `terminal` source metadata for user and assistant entries.
   - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, non-streaming OpenResponses, routing events, and assistant responses now write structured `TranscriptEntry.source` metadata.
   - [x] Built-in WebChat shell source metadata validates as `gateway-rest` / `webchat` / `internal`.
+  - [x] Gateway runtime is managed through the product CLI (`mindstone gateway ...`) rather than npm scripts for MVP workflows.
   - [ ] Telegram/Pi adapter source metadata still pending final validation.
 
 ### Channels and surfaces
