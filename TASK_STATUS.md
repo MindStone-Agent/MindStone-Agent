@@ -73,7 +73,7 @@
 - [x] Align single-session default with MindStone canonical session key shape: `agent:default:main`, while preserving `mindstone` as a compatibility alias.
 - [x] Add unified session/transcript invariant smoke proving REST, HTTP RPC, WebSocket RPC, OpenAI chat completions, and non-streaming OpenResponses default traffic append to one canonical transcript with distinct source metadata.
 - [x] Add native `mindstone chat` terminal/REPL surface over the canonical session and routed identity/SCRI prompt path.
-- [x] Start `mindstone chat` routing/model setup in-place when placeholder routing would otherwise dead-end; pseudo-TTY smoke validates placeholder → setup → mock chat response.
+- [x] Start `mindstone chat` routing/model setup in-place when placeholder routing would otherwise dead-end; pseudo-TTY smoke validates placeholder → setup → mock chat response, and `npm run smoke:mvp-native` validates fresh isolated runtime → package-bin chat setup → transcript persistence → TUI history continuity.
 - [x] Validate autoRecall/SCRI injection through native `mindstone chat` with `npm run smoke:cli-chat-recall`.
 - [x] Add first styled `mindstone tui` shell using vendored Pi TUI primitives, MindStone gold/diamond theme, chat log, editor, footer/status, slash commands, and routed chat path.
 - [x] Load recent transcript history into `mindstone tui` startup; smoke validates rendering prior user/assistant transcript entries.

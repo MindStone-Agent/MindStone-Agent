@@ -863,7 +863,7 @@ async function configureRouting(
   }
 
   if (mode === "mock") {
-    nextRouting.defaultModel = routing.defaultModel ?? "mindstone/mock";
+    nextRouting.defaultModel = routing.mode === "mock" && routing.defaultModel ? routing.defaultModel : "mindstone/mock";
     nextRouting.mock = { ...routing.mock, responsePrefix: routing.mock?.responsePrefix ?? "Mock response" };
   }
 
