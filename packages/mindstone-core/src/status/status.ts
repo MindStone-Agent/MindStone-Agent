@@ -6,6 +6,7 @@ import { getCurrentHandoffStatus, type CurrentHandoffStatus } from "../lifecycle
 import { getSqliteMemoryIndexStats, type SqliteMemoryIndexStats } from "../memory/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { listTranscriptSessions } from "../transcript/index.js";
+import { getMindStoneGatewayStatus, type MindStoneGatewayStatus } from "./gateway.js";
 import { getPiSessionSafetyStatus, type PiSessionSafetyStatus } from "./pi-session-safety.js";
 import { getMindStoneWebChatStatus, type MindStoneWebChatStatus } from "./webchat.js";
 
@@ -36,6 +37,7 @@ export type MindStoneSystemStatus = {
     entryCount: number;
   };
   handoff: CurrentHandoffStatus;
+  gateway: MindStoneGatewayStatus;
   webchat: MindStoneWebChatStatus;
   memory: {
     sqlite: SqliteMemoryIndexStats;
@@ -84,6 +86,7 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
       entryCount: transcriptSessions.reduce((total, session) => total + session.entries, 0),
     },
     handoff: getCurrentHandoffStatus(paths),
+    gateway: getMindStoneGatewayStatus(loadedConfig.config),
     webchat: getMindStoneWebChatStatus(loadedConfig.config),
     memory: {
       sqlite: getSqliteMemoryIndexStats(paths),

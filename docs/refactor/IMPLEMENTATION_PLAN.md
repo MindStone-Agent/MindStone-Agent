@@ -234,6 +234,7 @@ The preferred order is:
 - [x] Preserve OpenAI-compatible `/v1/chat/completions` for configured mock/Pi routing modes, with placeholder fallback when no provider is configured.
 - [x] Preserve non-streaming OpenResponses `/v1/responses` for configured mock/Pi routing modes, with transcript-aware placeholder fallback when no provider is configured.
 - [x] Add health/status endpoint.
+- [x] Add sanitized Gateway setup visibility to Core status/doctor/CLI status: endpoint, auth mode/source without secret values, compatible HTTP enablement, and route names.
 - [x] Verify auth behavior and endpoint enable flags for current Gateway HTTP surfaces.
   - `npm run smoke:auth` covers token/password auth for status and OpenResponses.
   - `npm run smoke:gateway-http-surfaces` covers `/v1/models`, `/v1/chat/completions`, and `/v1/responses` enablement gates across disabled/chat-only/responses-only combinations.

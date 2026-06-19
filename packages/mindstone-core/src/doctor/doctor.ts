@@ -5,6 +5,7 @@ import { getCurrentHandoffStatus } from "../lifecycle/index.js";
 import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats, maintainSqliteMemoryIndex } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { resolveDefaultSessionKey } from "../routing/session.js";
+import { getMindStoneGatewayStatus } from "../status/gateway.js";
 import { getPiSessionSafetyStatus } from "../status/pi-session-safety.js";
 import { getMindStoneWebChatStatus } from "../status/webchat.js";
 import { loadMindStoneConfig, resolveConfigPath } from "../config/load.js";
@@ -134,6 +135,23 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
   if (sessionMode === "single" && !defaultSessionKey.startsWith("agent:")) {
     check(checks, "warn", "session.sharedDefault", "Single-session default is not canonical MindStone shape", defaultSessionKey);
   }
+
+  const gateway = getMindStoneGatewayStatus(config);
+  check(checks, "pass", "gateway.endpoint", "Gateway endpoint is configured", gateway.baseUrl);
+  check(
+    checks,
+    "pass",
+    "gateway.auth",
+    "Gateway auth configuration is summarized without secrets",
+    `${gateway.auth.mode}; ${gateway.auth.source}`,
+  );
+  check(
+    checks,
+    gateway.http.chatCompletionsEnabled || gateway.http.responsesEnabled ? "pass" : "warn",
+    "gateway.http",
+    "At least one compatible Gateway HTTP API is enabled",
+    `models=${gateway.http.modelsEnabled}, chatCompletions=${gateway.http.chatCompletionsEnabled}, responses=${gateway.http.responsesEnabled}`,
+  );
 
   const webchat = getMindStoneWebChatStatus(config);
   check(checks, "pass", "webchat.shell", "Built-in WebChat shell is available", webchat.url);
@@ -352,7 +370,7 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
     "info",
     "gateway.status",
     "Gateway live status check not run",
-    `Configured endpoint: http://${config?.gateway?.host ?? "127.0.0.1"}:${config?.gateway?.port ?? 19789}`,
+    `Configured endpoint: ${gateway.baseUrl}`,
   );
 
   const summary = summarize(checks);

@@ -79,6 +79,7 @@
 - [x] Add first TUI status panel via `/status`, showing agent/session/route/model/provider/config/transcript/runtime details.
 - [x] Add non-mutating TUI `/config` panel for sanitized active runtime config.
 - [x] Add non-mutating TUI `/gateway` panel for configured Gateway surfaces/auth without live probing.
+- [x] Surface sanitized Gateway endpoint/auth/API enablement in `mindstone status` and `mindstone doctor` without live probing or exposing secrets.
 - [x] Add non-mutating TUI `/pi` panel for isolated Pi runtime/session mapping.
 - [x] Add non-mutating TUI `/transcript` panel for active transcript file status.
 - [x] Add first non-mutating TUI selector panels via `/sessions`, `/agents`, and `/models`.
@@ -186,6 +187,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [x] Apply completed-response `text_delta` replay events to the mutable assistant message.
 - [x] Stream/update assistant text and tool/substrate events live from runner events in the native TUI; interactive TUI consumes `onRunnerStreamEvent` for live text deltas and substrate/route events, with non-interactive `tui --smoke-stream` coverage.
 - [x] Add first `/status` panel with agent/session/route/model/provider/config/transcript/runtime details.
+- [x] Add sanitized Gateway HTTP surface status in Core status/doctor/CLI: endpoint, auth mode/source without secrets, models/chat-completions/responses enablement, and route names.
 - [x] Add non-mutating `/config` panel for sanitized active runtime config.
 - [x] Add non-mutating `/gateway` panel for configured Gateway surfaces/auth without live probing.
 - [x] Add non-mutating `/pi` panel for isolated Pi runtime/session mapping.
