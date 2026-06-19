@@ -109,12 +109,13 @@ Build them with:
 npm run build:mindstone
 ```
 
-Configure or onboard MindStone-Agent through the `mindstone` CLI:
+Configure, onboard, or connect model accounts through the `mindstone` CLI:
 
 ```bash
 mindstone status
 mindstone config
 mindstone onboard
+mindstone auth login openai-codex
 ```
 
 For source checkouts, link the CLI intentionally after install/build:
@@ -129,7 +130,7 @@ Without global linking, the workspace package exposes the same bin under `node_m
 ./node_modules/.bin/mindstone status
 ```
 
-`config` edits selected runtime config sections. `onboard` is the first-run flow: risk acknowledgement, runtime isolation display, QuickStart vs Manual setup, and non-overwriting identity/user scaffold creation. QuickStart applies safe local defaults and asks only for the identity/user seed; Manual walks every core config section. When `pi` routing is selected, the CLI discovers isolated Pi providers, shows provider auth status/method, then presents models only for the selected provider as arrow-key choices.
+`config` edits selected runtime config sections. `onboard` is the first-run flow: risk acknowledgement, runtime isolation display, QuickStart vs Manual setup, optional model/account connection, and non-overwriting identity/user scaffold creation. QuickStart applies safe local defaults while still offering model setup. Manual walks every core config section. When a real model is selected, the CLI discovers isolated Pi providers, shows provider auth status/method, connects subscription/OAuth accounts through MindStone's embedded auth flow, then presents models only for the selected provider as arrow-key choices.
 
 The package bin bootstraps the same project-local isolation environment as the old script wrappers. Override the config path for safe testing with `MINDSTONE_AGENT_CONFIG=/path/to/config.test.json`.
 

@@ -68,6 +68,7 @@
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
 - [x] Add provider-first isolated Pi provider/model discovery to native config/onboarding routing setup.
+- [x] Add MindStone-owned subscription/OAuth account connection path: `mindstone auth login <provider>` and onboarding/config login selections now call embedded Pi OAuth storage against isolated `.runtime/pi-agent/auth.json` instead of instructing users to run Pi and type `/login`.
 - [x] Add default onboarding profile selection with Custom / Write-in support.
 - [x] Align single-session default with MindStone canonical session key shape: `agent:default:main`, while preserving `mindstone` as a compatibility alias.
 - [x] Add unified session/transcript invariant smoke proving REST, HTTP RPC, WebSocket RPC, OpenAI chat completions, and non-streaming OpenResponses default traffic append to one canonical transcript with distinct source metadata.
@@ -221,6 +222,10 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - memory/checkpoint style
   - project/domain context
   - sensitive context/cautions
+- [x] Add beginner-facing model/account setup to QuickStart and connect subscription/OAuth providers through MindStone's embedded auth flow instead of sending the user to Pi.
+  - CLI command: `mindstone auth login <provider>`.
+  - Wizard path: provider login selection calls the same embedded auth handler.
+  - Dry-run/auth smoke: `npm run smoke:auth-login`.
 - [ ] Expand user-preference onboarding later with richer clarifying-question and collaboration-pattern tuning.
 - [x] Add the initial naming/identity emergence phase.
   - Do not force the human to name the agent.
@@ -365,4 +370,5 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 - [ ] Live-test Pi-backed model calls through a session-backed Pi runner with isolated credentials/config.
 - [x] Add first-pass `mindstone doctor` checks for runtime/config/session/identity/memory/routing/provider discovery.
 - [ ] Extend `mindstone doctor` with live provider auth/model-call validation.
-- [ ] Ensure provider setup follows provider → auth method → model, never a flat global model list.
+- [x] Ensure provider setup follows provider → auth method → model, never a flat global model list.
+- [x] Ensure MVP provider setup does not resolve by telling the user to operate Pi directly; MindStone owns OAuth login through `mindstone auth login <provider>` and onboard/config integration.

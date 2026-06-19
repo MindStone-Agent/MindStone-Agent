@@ -63,7 +63,8 @@
     "smoke:pi-session-live": "./scripts/smoke-pi-session-live.sh",
     "smoke:pi-adapter": "./scripts/smoke-pi-adapter.sh",
     "smoke:pi-config-sections": "./scripts/smoke-pi-config-sections.sh",
-    "smoke:core-boundary": "./scripts/smoke-core-boundary.sh"
+    "smoke:core-boundary": "./scripts/smoke-core-boundary.sh",
+    "smoke:auth-login": "./scripts/smoke-auth-login.sh"
   },
   "engines": {
     "node": ">=22.19.0"

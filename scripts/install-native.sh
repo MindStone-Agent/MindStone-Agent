@@ -21,8 +21,8 @@ Run MindStone-Agent with:
 If the bare 'mindstone' command is not on PATH yet, link it intentionally with:
   npm run link:cli
 
-Run isolated Pi directly only for Pi-provider auth/setup:
-  ./scripts/pi-agent
+Connect subscription/OAuth model accounts through MindStone:
+  mindstone auth login openai-codex
 
 Do not run bare 'pi' for this project.
 MSG

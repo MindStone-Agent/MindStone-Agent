@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { pathToFileURL } from "node:url";
 import {
   INTEGRATION_BUILDER_SKILL,
   backfillSqliteMemoryEmbeddings,
@@ -41,7 +43,7 @@ import {
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "identity" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "auth" | "identity" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;214m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -58,6 +60,8 @@ function usage(): string {
     "  mindstone config [--section NAME|--sections a,b] [--dry-run]",
     "                         Configure MindStone-Agent runtime settings or one section",
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
+    "  mindstone auth login <provider> [--dry-run]",
+    "                         Connect a subscription/OAuth provider through MindStone's isolated auth flow",
     "  mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]",
     "                         Synthesize first-activation identity from onboarding seed",
     "  mindstone skill list   Show built-in MindStone skill surfaces",
@@ -82,7 +86,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "identity" || raw === "skill" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "auth" || raw === "identity" || raw === "skill" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -279,21 +283,130 @@ async function discoverPiModels(): Promise<{ models: MindStoneModelInfo[]; provi
   }
 }
 
-function setupProviderAuth(request: MindStoneProviderAuthSetupRequest): string | undefined {
-  const paths = runtimePathsFromEnv();
-  if (request.mode === "login") {
-    return [
-      "Subscription/OAuth login is handled by isolated Pi and cannot be completed inside this terminal wizard yet.",
-      "To finish connecting this account, run this in the MindStone-Agent checkout:",
-      `  ./scripts/pi-agent`,
-      "Then inside Pi, type:",
-      `  /login ${request.providerId}`,
-      "The credentials will be stored in the isolated MindStone-Agent Pi auth file under .runtime/pi-agent/auth.json.",
-      "After login, run `mindstone config --section routing` if you want to re-select or verify the model.",
-    ].join("\n");
+type PiOAuthSelectPrompt = {
+  message: string;
+  options: Array<{ id: string; label: string }>;
+};
+
+type PiAuthStorage = {
+  login(providerId: string, callbacks: {
+    onAuth: (info: { url: string; instructions?: string }) => void;
+    onDeviceCode: (info: { userCode: string; verificationUri: string; intervalSeconds?: number; expiresInSeconds?: number }) => void;
+    onPrompt: (prompt: { message: string; placeholder?: string; allowEmpty?: boolean }) => Promise<string>;
+    onProgress?: (message: string) => void;
+    onSelect: (prompt: PiOAuthSelectPrompt) => Promise<string | undefined>;
+    signal?: AbortSignal;
+  }): Promise<void>;
+};
+
+type PiAuthStorageModule = {
+  AuthStorage: { create(path?: string): PiAuthStorage };
+};
+
+async function importFromProject<T>(projectRoot: string, relativePath: string): Promise<T> {
+  return import(pathToFileURL(join(projectRoot, relativePath)).href) as Promise<T>;
+}
+
+function openAuthUrl(url: string): boolean {
+  if (!url) return false;
+  try {
+    const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+    const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+    const child = spawn(command, args, { detached: true, stdio: "ignore" });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runProviderOAuthLogin(prompter: MindStonePrompter, providerId: string): Promise<string> {
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error("Provider OAuth login requires an interactive terminal. For automated setup, use env-var or API-key auth.");
   }
 
+  const paths = runtimePathsFromEnv();
   const authPath = join(paths.piAgentDir, "auth.json");
+  mkdirSync(dirname(authPath), { recursive: true, mode: 0o700 });
+
+  const { AuthStorage } = await importFromProject<PiAuthStorageModule>(
+    paths.root,
+    "vendor/pi/packages/coding-agent/dist/core/auth-storage.js",
+  );
+  const authStorage = AuthStorage.create(authPath);
+
+  await prompter.note(
+    [
+      `MindStone will connect ${providerId} now using the embedded Pi OAuth provider.`,
+      `Credential target: ${authPath}`,
+      "This does not use your global Pi auth file.",
+    ].join("\n"),
+    "Connect account",
+  );
+
+  await authStorage.login(providerId, {
+    onAuth: (info) => {
+      const opened = openAuthUrl(info.url);
+      output.write(`${bold("OAuth browser login")}\n`);
+      if (opened) output.write("Opened the login URL in your browser.\n");
+      output.write(`${info.instructions ? `${info.instructions}\n` : ""}`);
+      output.write(`${info.url}\n\n`);
+    },
+    onDeviceCode: (info) => {
+      const opened = openAuthUrl(info.verificationUri);
+      output.write(`${bold("OAuth device login")}\n`);
+      if (opened) output.write("Opened the verification URL in your browser.\n");
+      output.write(`Verification URL: ${info.verificationUri}\n`);
+      output.write(`Code: ${bold(info.userCode)}\n`);
+      if (info.expiresInSeconds) output.write(`Expires in: ${info.expiresInSeconds}s\n`);
+      output.write("\n");
+    },
+    onPrompt: async (prompt) => prompter.text({
+      message: prompt.message,
+      placeholder: prompt.placeholder,
+      validate: prompt.allowEmpty ? undefined : (value) => value.trim() ? undefined : "Required",
+    }),
+    onProgress: (message) => {
+      output.write(`${dim(message)}\n`);
+    },
+    onSelect: async (prompt) => {
+      if (prompt.options.length === 0) return undefined;
+      return prompter.select({
+        message: prompt.message,
+        options: prompt.options.map((option) => ({ value: option.id, label: option.label })),
+        initialValue: prompt.options[0]?.id,
+      });
+    },
+  });
+
+  return `Connected ${providerId}. Credentials saved in isolated auth file: ${authPath}`;
+}
+
+async function setupProviderAuth(
+  prompter: MindStonePrompter,
+  request: MindStoneProviderAuthSetupRequest,
+  options: { dryRun?: boolean } = {},
+): Promise<string | undefined> {
+  const paths = runtimePathsFromEnv();
+  const authPath = join(paths.piAgentDir, "auth.json");
+
+  if (request.mode === "login") {
+    if (options.dryRun) {
+      return [
+        `MindStone would start embedded subscription/OAuth login for ${request.providerId}.`,
+        `Credential target: ${authPath}`,
+        "Global Pi auth is not used.",
+      ].join("\n");
+    }
+    return runProviderOAuthLogin(prompter, request.providerId);
+  }
+
+  if (options.dryRun) {
+    return request.mode === "env"
+      ? `MindStone would store ${request.providerId} auth reference in isolated auth.json: $${request.envVar}`
+      : `MindStone would store ${request.providerId} API key in isolated auth.json.`;
+  }
+
   mkdirSync(dirname(authPath), { recursive: true, mode: 0o700 });
   const existing = existsSync(authPath) ? JSON.parse(readFileSync(authPath, "utf-8")) as Record<string, unknown> : {};
   existing[request.providerId] = request.mode === "env"
@@ -869,6 +982,48 @@ async function runIdentityCommand(argv: string[]): Promise<void> {
   if (result.backupPath) output.write(`Backup: ${result.backupPath}\n`);
 }
 
+async function runAuthCommand(argv: string[]): Promise<void> {
+  const subcommand = argv[3] ?? "help";
+  if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    output.write(
+      [
+        gold("🔶 MindStone auth"),
+        "",
+        "Usage:",
+        "  mindstone auth login <provider> [--dry-run]",
+        "",
+        "Examples:",
+        "  mindstone auth login openai-codex",
+        "  mindstone auth login anthropic",
+        "",
+        "Notes:",
+        "  Credentials are stored in MindStone-Agent's isolated .runtime/pi-agent/auth.json.",
+        "  Global Pi auth is not used.",
+      ].join("\n"),
+    );
+    output.write("\n");
+    return;
+  }
+  if (subcommand !== "login") throw new Error(`Unknown auth subcommand: ${subcommand}`);
+
+  const providerId = argv[4];
+  if (!providerId || providerId.startsWith("--")) {
+    throw new Error("Provider is required. Example: mindstone auth login openai-codex");
+  }
+
+  const prompter = makeTerminalPrompter();
+  try {
+    const message = await setupProviderAuth(
+      prompter,
+      { providerId, mode: "login" },
+      { dryRun: hasOption(argv, "--dry-run") },
+    );
+    if (message) await prompter.note(message, hasOption(argv, "--dry-run") ? "Provider auth dry run" : "Provider auth connected");
+  } finally {
+    prompter.close();
+  }
+}
+
 async function main(): Promise<void> {
   const command = parseCommand(process.argv);
   if (command === "help") {
@@ -893,6 +1048,10 @@ async function main(): Promise<void> {
   }
   if (command === "skill") {
     await runSkillCommand(process.argv);
+    return;
+  }
+  if (command === "auth") {
+    await runAuthCommand(process.argv);
     return;
   }
   if (command === "chat") {
@@ -932,7 +1091,7 @@ async function main(): Promise<void> {
         availableModels: discovery.models,
         availableProviders: discovery.providers,
         modelDiscoveryError: discovery.error,
-        setupProviderAuth,
+        setupProviderAuth: (request) => setupProviderAuth(prompter, request),
       });
     } else {
       await runMindStoneConfigWizard(prompter, {
@@ -943,7 +1102,7 @@ async function main(): Promise<void> {
         availableModels: discovery.models,
         availableProviders: discovery.providers,
         modelDiscoveryError: discovery.error,
-        setupProviderAuth,
+        setupProviderAuth: (request) => setupProviderAuth(prompter, request, { dryRun: hasOption(process.argv, "--dry-run") }),
       });
     }
   } finally {

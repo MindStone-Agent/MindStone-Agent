@@ -503,7 +503,7 @@ async function maybeSetupProviderAuth(params: {
       `${params.provider.name} is not connected in this isolated MindStone-Agent runtime yet.`,
       "Credentials will be stored under this project's .runtime directory, not in your global Pi account state.",
       supportsSubscriptionLogin(params.provider.id)
-        ? "For subscription providers, MindStone uses Pi's OAuth login flow."
+        ? "For subscription providers, MindStone starts the OAuth login flow here and stores credentials in this project's isolated runtime."
         : "For API-key providers, you can store an env-var reference or paste a key into the isolated auth file.",
     ].join("\n"),
     "Connect account",
@@ -514,7 +514,7 @@ async function maybeSetupProviderAuth(params: {
     { value: "skip", label: "Skip account connection for now", hint: "you can still choose a model; live calls will fail until auth exists" },
   ];
   if (supportsSubscriptionLogin(params.provider.id)) {
-    authOptions.push({ value: "login", label: "Use subscription/OAuth login", hint: "ChatGPT Plus/Pro, Claude Pro/Max, or Copilot; shows the isolated Pi login step" });
+    authOptions.push({ value: "login", label: "Use subscription/OAuth login", hint: "ChatGPT Plus/Pro, Claude Pro/Max, or Copilot; MindStone connects it here" });
   }
   authOptions.push(
     { value: "env", label: "Use an environment variable", hint: `stores $${defaultProviderEnvVar(params.provider.id)} in isolated auth.json` },
@@ -579,7 +579,7 @@ async function choosePiModel(params: {
       [
         "No isolated Pi providers/models were discovered for this runtime.",
         params.discoveryError ? `Discovery error: ${params.discoveryError}` : undefined,
-        "Use the isolated Pi runtime to login or configure API keys, then rerun this wizard.",
+        "Use `mindstone auth login openai-codex` or this model setup flow to connect an account, then rerun this wizard.",
       ]
         .filter((line): line is string => Boolean(line))
         .join("\n"),
