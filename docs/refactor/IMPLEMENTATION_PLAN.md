@@ -5,7 +5,8 @@
 **Status:** Draft for review  
 **Related PRD:** `PRD.md`  
 **Related design:** `DESIGN.md`  
-**Related architecture:** `ARCHITECTURE.md`
+**Related architecture:** `ARCHITECTURE.md`  
+**Related pack planning:** `AGENT_PACKS.md`
 
 ## 1. Implementation Strategy
 
@@ -20,6 +21,7 @@ The preferred order is:
 5. Restore memory/SCRI/dream-cycle behavior.
 6. Port channels incrementally.
 7. Validate OpenWebUI and package release flows.
+8. Add Agent Packs as a post-MVP productized packaging layer: Dockerized role agents with pack manifests, WebChat/Gateway defaults, persistence, update paths, and optional commercial entitlement controls.
 
 ## 2. Phase 0 — Review and Cut Line
 
@@ -426,7 +428,57 @@ The preferred order is:
 - [ ] Private state remains untracked.
 - [ ] README matches verified behavior.
 
-## 11. Validation Matrix
+## 11. Phase 9 — Agent Packs and Dockerized Role Deployments
+
+Agent Packs are a post-MVP productization layer for shipping ready-to-run, role-specific MindStone agents. See `AGENT_PACKS.md` for the detailed planning draft.
+
+### Tasks
+
+- [ ] Define versioned Agent Pack manifest schema.
+- [ ] Add local pack catalog loader.
+- [ ] Add CLI surfaces:
+  - `mindstone packs list`
+  - `mindstone packs inspect <pack>`
+  - `mindstone packs install <pack>`
+  - `mindstone packs start <pack>`
+  - `mindstone packs open <pack>`
+  - `mindstone packs status <pack>`
+  - `mindstone packs stop <pack>`
+  - `mindstone packs update <pack>`
+  - `mindstone packs export <pack>`
+- [ ] Build first free Dockerized proof pack, likely Research Agent or Software Engineer Lite.
+- [ ] Enable Gateway and WebChat by default for packs.
+- [ ] Persist transcripts, memory, and Gateway state through Docker volumes.
+- [ ] Define role identity seed and memory scaffold import flow.
+- [ ] Keep user/runtime memory separate from pack-provided seed content and pack updates.
+- [ ] Add Docker/pack doctor checks for:
+  - Docker availability
+  - image provenance
+  - required ports
+  - persistence volumes
+  - auth state
+  - Gateway/WebChat health
+  - missing provider configuration
+- [ ] Add safe uninstall/cleanup and backup/export path.
+- [ ] Define paid-pack entitlement model for commercial packs.
+- [ ] Define private registry pull flow for paid packs.
+- [ ] Evaluate Bun-compiled launcher/runtime packaging for installer/orchestration code.
+- [ ] Add signed image/checksum verification where practical.
+- [ ] Ensure paid-pack copy says compiled launchers/private registries/authenticated entitlements protect proprietary pack logic where appropriate, without claiming compilation is absolute IP protection.
+- [ ] Validate no provider credentials, registry tokens, license secrets, or private user state are embedded in images or binaries.
+
+### Exit criteria
+
+- [ ] A free proof pack can be installed, started, opened, stopped, and removed through `mindstone packs ...` commands.
+- [ ] WebChat works against the pack's Gateway route.
+- [ ] Transcript persistence survives container restart.
+- [ ] Memory persistence survives container restart.
+- [ ] Pack identity loads predictably.
+- [ ] Doctor reports pack runtime status clearly.
+- [ ] Public documentation distinguishes available packs from planned packs.
+- [ ] Commercial-pack protection model is documented as layered friction/auth/service-boundary protection, not absolute binary secrecy.
+
+## 12. Validation Matrix
 
 | Area | Automated | Manual | Required for MVP |
 |------|-----------|--------|------------------|
@@ -441,7 +493,7 @@ The preferred order is:
 | Discord/Slack | mocked + probe | live workspace | One required |
 | Signal | limited | live link | Can defer if documented |
 
-## 12. PR Slicing Recommendation
+## 13. PR Slicing Recommendation
 
 1. **PR 1:** Docs and architecture decision record.
 2. **PR 2:** Core contracts and compatibility exports.
@@ -452,8 +504,9 @@ The preferred order is:
 7. **PR 7:** Telegram channel port.
 8. **PR 8:** Discord or Slack channel port.
 9. **PR 9:** OpenWebUI docs/validation and release packaging.
+10. **PR 10:** Agent Pack manifest/catalog, first free Dockerized proof pack, and pack CLI lifecycle commands.
 
-## 13. Dependencies
+## 14. Dependencies
 
 - Current Pi SDK docs and extension APIs.
   - Public docs: `https://pi.dev/docs/latest`
@@ -464,8 +517,10 @@ The preferred order is:
 - Channel test credentials or mocked provider fixtures.
 - Cairn review of substrate boundary.
 - Hearth review of daemon/ops model.
+- Docker Desktop / Docker Engine validation environments for Agent Packs.
+- Future account/licensing/registry infrastructure decision for paid Agent Packs.
 
-## 14. Immediate Next Steps
+## 15. Immediate Next Steps
 
 - [x] Re-center the next engineering slice on MindStone continuity fundamentals:
   - one shared session/transcript across Gateway, WebChat, OpenAI-compatible, Pi adapter, and future channels
@@ -496,3 +551,4 @@ The preferred order is:
 - [ ] Implement full live Pi session event/stream capture into MindStone transcript/source metadata.
 - [ ] Live-test Pi-backed model calls through `AgentSession.prompt(...)` only after isolated auth/model config is intentionally provided.
 - [ ] Add actual substrate compact invocation behind the existing coordination interface only after the session-backed runner can preserve unified transcript authority.
+- [ ] Keep Agent Packs post-MVP, but preserve product architecture space for Dockerized role agents, pack manifests, pack-scoped identity/memory seeds, WebChat/Gateway defaults, entitlement-controlled paid packs, and compiled launcher/orchestration code where appropriate.
