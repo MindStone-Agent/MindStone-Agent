@@ -18,6 +18,7 @@ import {
   type MemoryDocument,
   type MemoryHit,
   type MemoryRecallProvider,
+  type MindStoneConfigWizardSection,
   type MindStonePrompter,
   type MindStoneSelectOption,
   type TranscriptEntry,
@@ -634,13 +635,52 @@ function piPrompter(ctx: PiCommandContext): MindStonePrompter {
   };
 }
 
-async function runConfigWizardCommand(ctx: PiCommandContext): Promise<void> {
+const CONFIG_SECTION_VALUES: MindStoneConfigWizardSection[] = ["all", "workspace", "gateway", "routing", "context", "memory", "identity", "channels"];
+
+function parseConfigWizardSection(value: string): MindStoneConfigWizardSection {
+  if ((CONFIG_SECTION_VALUES as string[]).includes(value)) return value as MindStoneConfigWizardSection;
+  throw new Error(`Invalid config section: ${value}. Expected one of: ${CONFIG_SECTION_VALUES.join(", ")}`);
+}
+
+function parseConfigWizardCommandArgs(args: string): { sections?: MindStoneConfigWizardSection[]; dryRun: boolean } {
+  const parts = args.trim().split(/\s+/g).filter(Boolean);
+  const sections: MindStoneConfigWizardSection[] = [];
+  let dryRun = false;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if ((part === "--section" || part === "-s") && parts[index + 1]) {
+      sections.push(parseConfigWizardSection(parts[index + 1]));
+      index += 1;
+      continue;
+    }
+    if (part === "--sections" && parts[index + 1]) {
+      sections.push(...parts[index + 1].split(",").map((value) => parseConfigWizardSection(value.trim())).filter(Boolean));
+      index += 1;
+      continue;
+    }
+    if (!part.startsWith("--")) {
+      sections.push(parseConfigWizardSection(part));
+      continue;
+    }
+    throw new Error(`Unknown /mindstone-config option: ${part}`);
+  }
+  return { sections: sections.length ? sections : undefined, dryRun };
+}
+
+async function runConfigWizardCommand(args: string, ctx: PiCommandContext): Promise<void> {
   try {
-    const result = await runMindStoneConfigWizard(piPrompter(ctx));
+    const parsed = parseConfigWizardCommandArgs(args);
+    const result = await runMindStoneConfigWizard(piPrompter(ctx), parsed);
     ctx.ui.notify(
       [
         result.wrote ? "MindStone-Agent config updated." : "MindStone-Agent config unchanged.",
         `Path: ${result.path}`,
+        `Requested sections: ${parsed.sections?.length ? parsed.sections.join(", ") : "interactive"}`,
+        `Dry run: ${parsed.dryRun}`,
         `Changed sections: ${result.changedSections.length ? result.changedSections.join(", ") : "none"}`,
       ].join("\n"),
       "info",
@@ -809,12 +849,12 @@ export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
   });
 
   pi.registerCommand("mindstone-config", {
-    description: "Configure MindStone-Agent runtime settings",
-    handler: async (_args, ctx) => runConfigWizardCommand(ctx),
+    description: "Configure MindStone-Agent runtime settings. Optional args: <section>|--section <section>|--sections a,b [--dry-run]",
+    handler: async (args, ctx) => runConfigWizardCommand(args, ctx),
   });
 
   pi.registerCommand("mindstone-setup", {
     description: "Run MindStone-Agent setup/configuration flow",
-    handler: async (_args, ctx) => runConfigWizardCommand(ctx),
+    handler: async (args, ctx) => runConfigWizardCommand(args, ctx),
   });
 }

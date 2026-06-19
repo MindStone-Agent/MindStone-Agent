@@ -95,6 +95,12 @@ await commands.get('mindstone-status').handler('', ctx);
 await commands.get('mindstone-context').handler('', ctx);
 await commands.get('mindstone-gateway-status').handler('', ctx);
 await commands.get('mindstone-channels').handler('', ctx);
+const configPath = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone/config.json`;
+const configBeforeSectionCommand = readFileSync(configPath, 'utf8');
+await commands.get('mindstone-config').handler('channels --dry-run', ctx);
+const configAfterSectionCommand = readFileSync(configPath, 'utf8');
+if (configBeforeSectionCommand !== configAfterSectionCommand) throw new Error('mindstone-config channels --dry-run mutated config');
+await commands.get('mindstone-config').handler('--section bogus --dry-run', ctx);
 await commands.get('mindstone-transcript-status').handler('', ctx);
 await commands.get('mindstone-recall-status').handler('', ctx);
 await commands.get('mindstone-recall-search').handler('adapter recall sentinel --limit 3', ctx);
@@ -199,6 +205,14 @@ if ! grep -q 'MindStone Gateway status' <<<"${OUTPUT}" || ! grep -q 'Live probe:
 fi
 if ! grep -q 'MindStone channel/surface status' <<<"${OUTPUT}" || ! grep -q 'Telegram: not implemented/validated' <<<"${OUTPUT}" || ! grep -q 'diagnostic only' <<<"${OUTPUT}"; then
   echo "Pi adapter channels command did not report honest channel status" >&2
+  exit 1
+fi
+if ! grep -q 'Requested sections: channels' <<<"${OUTPUT}" || ! grep -q 'Dry run: true' <<<"${OUTPUT}" || ! grep -q 'Changed sections: none' <<<"${OUTPUT}"; then
+  echo "Pi adapter config command did not run channel section dry-run" >&2
+  exit 1
+fi
+if ! grep -q 'Invalid config section: bogus' <<<"${OUTPUT}"; then
+  echo "Pi adapter config command did not reject invalid section clearly" >&2
   exit 1
 fi
 if ! grep -q 'MindStone transcript status' <<<"${OUTPUT}" || ! grep -q 'Transcript status is diagnostic only' <<<"${OUTPUT}"; then
