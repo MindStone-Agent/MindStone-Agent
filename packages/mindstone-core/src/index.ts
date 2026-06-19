@@ -7,7 +7,7 @@ export * from "./provider/index.js";
 export * from "./profile/index.js";
 export * from "./memory/index.js";
 export * from "./scri/types.js";
-export * from "./channels/types.js";
+export * from "./channels/index.js";
 export * from "./skills/index.js";
 export * from "./wizard/prompter.js";
 export * from "./wizard/config.js";

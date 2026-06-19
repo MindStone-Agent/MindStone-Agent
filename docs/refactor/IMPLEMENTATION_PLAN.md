@@ -113,7 +113,12 @@ The preferred order is:
 - [x] Onboarding can select a profile/write-in purpose, gather interaction preferences, and create identity/user scaffolds from that seed.
   - [x] Profile/write-in selection seeds config and identity/user scaffolds.
   - [x] Interaction preference gathering seeds config and identity/user scaffolds.
-- [ ] Channel setup section lists available plugins.
+- [x] Channel setup section lists available plugins.
+  - Core now exposes a shared channel/surface catalog for local surfaces, Gateway APIs, external clients, and planned external channel plugins.
+  - Config wizard has a non-mutating `channels` section that lists the catalog and honest implementation/validation state.
+  - CLI surface: `mindstone channels [--json]`.
+  - Pi adapter `/mindstone-channels` uses the same Core catalog.
+  - Smoke validation: `npm run smoke:channel-catalog` and `npm run smoke:pi-adapter`.
 - [ ] Reconfiguration can run by section.
 
 ## 5. Phase 3 — Current-Pi Adapter and Session-Backed Runner MVP

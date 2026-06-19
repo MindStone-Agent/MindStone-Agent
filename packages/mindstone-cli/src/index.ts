@@ -10,8 +10,10 @@ import {
   buildIntegrationBuilderBrief,
   formatConfigSummary,
   formatIntegrationBuilderSkillMarkdown,
+  formatMindStoneChannelCatalog,
   formatMindStoneConfigHeader,
   getCurrentHandoffStatus,
+  getMindStoneChannelCatalog,
   getMindStoneDoctorReport,
   getMindStoneSystemStatus,
   getSqliteMemoryIndexStats,
@@ -38,7 +40,7 @@ import {
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "identity" | "skill" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "identity" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;214m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -59,6 +61,8 @@ function usage(): string {
     "  mindstone skill list   Show built-in MindStone skill surfaces",
     "  mindstone skill integration-builder [--name NAME] [--kind KIND] [--goal TEXT] [--json]",
     "                         Build an integration/channel/tool implementation brief",
+    "  mindstone channels [--json]",
+    "                         Show channel/surface catalog without starting listeners",
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
     "  mindstone memory backfill [--embed] [--force] [--maintain] [--dedupe-text] [--json]  Index memory/transcripts and optionally maintain/embed chunks",
@@ -76,7 +80,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "identity" || raw === "skill" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "identity" || raw === "skill" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -624,6 +628,22 @@ async function runChatCommand(argv: string[]): Promise<void> {
   }
 }
 
+function printChannels(json = false): void {
+  const paths = runtimePathsFromEnv();
+  const configPath = resolveConfigPath(process.env, paths);
+  const loaded = loadMindStoneConfig(configPath);
+  if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  const catalog = getMindStoneChannelCatalog(loaded.config);
+  if (json) {
+    output.write(`${JSON.stringify({ configPath, ...catalog }, null, 2)}\n`);
+    return;
+  }
+  output.write(`${gold("🔶 MindStone channels")}\n\n`);
+  output.write(`Config: ${configPath}\n`);
+  output.write(formatMindStoneChannelCatalog(loaded.config));
+  output.write("\n");
+}
+
 function printStatus(): void {
   const paths = runtimePathsFromEnv();
   const configPath = resolveConfigPath();
@@ -829,6 +849,10 @@ async function main(): Promise<void> {
   }
   if (command === "status") {
     printStatus();
+    return;
+  }
+  if (command === "channels") {
+    printChannels(hasOption(process.argv, "--json"));
     return;
   }
   if (command === "memory") {

@@ -3,6 +3,7 @@ import {
   createLocalMemoryRecallProvider,
   createMemoryEmbeddingProvider,
   discoverFileMemoryDocuments,
+  formatMindStoneChannelCatalog,
   getSqliteMemoryIndexStats,
   listTranscriptSessions,
   loadMindStoneConfig,
@@ -232,31 +233,13 @@ function gatewayStatusMessage(): string {
 function channelStatusMessage(): string {
   const { loaded } = loadedRuntimeConfig();
   const config = loaded.config;
-  const gateway = config?.gateway;
-  const host = gateway?.host ?? "127.0.0.1";
-  const port = gateway?.port ?? 19789;
-  const configuredChannels = Object.keys(config?.channels ?? {}).sort();
   return [
     "MindStone channel/surface status",
     `Config: ${loaded.path}`,
-    `Configured channel keys: ${configuredChannels.length ? configuredChannels.join(", ") : "none"}`,
     `Default session policy: ${config?.session?.mode ?? "single"}`,
     `Default session key: ${config?.session?.defaultSessionKey ?? "agent:default:main"}`,
     "",
-    "Built-in/local surfaces:",
-    `- Pi adapter: active extension/control surface when loaded by Pi; not a production listener`,
-    `- Native CLI/TUI: available through scripts/mindstone chat|tui`,
-    `- Gateway endpoint: http://${host}:${port}`,
-    `- WebChat shell: /webchat (Gateway-hosted; setup polish pending)`,
-    `- OpenAI-compatible HTTP: /v1/chat/completions enabled=${gateway?.http?.chatCompletions?.enabled ?? true}`,
-    `- OpenResponses HTTP: /v1/responses enabled=${gateway?.http?.responses?.enabled ?? false}`,
-    "",
-    "External channel plugins:",
-    "- Telegram: not implemented/validated in MindStone-Agent yet",
-    "- OpenWebUI: not validated yet; expected to use OpenAI-compatible Gateway surface",
-    "- Signal/Discord/Slack: conceptually planned from MindStone lineage; not implemented here yet",
-    "",
-    "This command is diagnostic only. It does not start listeners, probe networks, mutate config, or expose secrets.",
+    formatMindStoneChannelCatalog(config),
   ].join("\n");
 }
 

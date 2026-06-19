@@ -236,6 +236,12 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - Core now exposes a deterministic Integration Builder brief/workflow generator and Agent-Skills-compatible markdown emitter.
   - CLI surface: `mindstone skill list` and `mindstone skill integration-builder [--name NAME] [--kind KIND] [--goal TEXT] [--json|--emit-skill-md]`.
   - Smoke validation: `npm run smoke:integration-builder-skill`.
+- [x] Add shared channel/surface catalog and non-mutating channel setup visibility.
+  - Core lists local surfaces, Gateway APIs, external clients, and planned external channel plugins with honest implementation/validation status.
+  - Config wizard `channels` section lists available plugins/surfaces without mutating config, starting listeners, probing networks, or requesting secrets.
+  - CLI surface: `mindstone channels [--json]`.
+  - Pi adapter `/mindstone-channels` now reuses the Core catalog.
+  - Smoke validation: `npm run smoke:channel-catalog` and `npm run smoke:pi-adapter`.
 
 ### Memory and context
 

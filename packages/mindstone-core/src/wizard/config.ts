@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { formatMindStoneChannelCatalog } from "../channels/index.js";
 import { resolveContextManagementPolicy, type ContextManagementMode } from "../context/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { loadMindStoneConfig, resolveConfigPath, resolvePathRelativeToConfig } from "../config/load.js";
@@ -33,7 +34,8 @@ export type MindStoneConfigWizardSection =
   | "routing"
   | "context"
   | "memory"
-  | "identity";
+  | "identity"
+  | "channels";
 
 export type MindStoneOnboardingMode = "quickstart" | "manual";
 
@@ -80,13 +82,14 @@ const TITLE = String.raw`
 `;
 
 const SECTION_OPTIONS: Array<MindStoneSelectOption<MindStoneConfigWizardSection>> = [
-  { value: "all", label: "All core sections", hint: "workspace, gateway, routing, context, memory, identity" },
+  { value: "all", label: "All core sections", hint: "workspace, gateway, routing, context, memory, identity, channels" },
   { value: "workspace", label: "Workspace", hint: "project root / working directory" },
   { value: "gateway", label: "Gateway", hint: "host, port, auth, HTTP surfaces" },
   { value: "routing", label: "Routing / provider", hint: "placeholder, mock, or session-backed Pi" },
   { value: "context", label: "Context management", hint: "sliding-window or auto-compact policy" },
   { value: "memory", label: "Memory", hint: "autoRecall, vector store, embedding provider" },
   { value: "identity", label: "Identity / user", hint: "default agent identity and user paths" },
+  { value: "channels", label: "Channels / surfaces", hint: "list available plugins and setup status; diagnostic only for now" },
 ];
 
 function asPositivePort(value: string, fallback: number): number {
@@ -113,7 +116,7 @@ function trimOrUndefined(value: string | undefined): string | undefined {
 }
 
 function sectionList(selection: MindStoneConfigWizardSection): MindStoneConfigWizardSection[] {
-  if (selection === "all") return ["workspace", "gateway", "routing", "context", "memory", "identity"];
+  if (selection === "all") return ["workspace", "gateway", "routing", "context", "memory", "identity", "channels"];
   return [selection];
 }
 
@@ -1052,6 +1055,19 @@ async function configureIdentity(config: MindStoneConfig, prompter: MindStonePro
   };
 }
 
+async function configureChannels(config: MindStoneConfig, prompter: MindStonePrompter): Promise<MindStoneConfig> {
+  await prompter.note(formatMindStoneChannelCatalog(config), "Channel/plugin catalog");
+  await prompter.note(
+    [
+      "Channel setup is diagnostic-only in this MVP step.",
+      "The catalog lists local surfaces, Gateway APIs, planned external channel plugins, and honest validation state.",
+      "No listeners are started, no networks are probed, no config is mutated, and no secrets are requested here.",
+    ].join("\n"),
+    "Channel setup status",
+  );
+  return config;
+}
+
 async function configureSection(
   section: MindStoneConfigWizardSection,
   config: MindStoneConfig,
@@ -1071,6 +1087,8 @@ async function configureSection(
       return configureMemory(config, prompter);
     case "identity":
       return configureIdentity(config, prompter);
+    case "channels":
+      return configureChannels(config, prompter);
     case "all":
       return config;
   }
@@ -1682,7 +1700,7 @@ export async function runMindStoneOnboardingWizard(
       configPath,
       showHeader: false,
       showIntro: false,
-      sections: ["workspace", "gateway", "routing", "context", "memory", "identity"],
+      sections: ["workspace", "gateway", "routing", "context", "memory", "identity", "channels"],
     });
     const profiledConfig = applyOnboardingIdentity(
       applyOnboardingPreferences(applySelectedProfile(configResult.config, selectedProfile), selectedPreferences),
