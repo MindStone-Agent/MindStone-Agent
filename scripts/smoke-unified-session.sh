@@ -32,8 +32,11 @@ python3 - <<'PY'
 import json, os, pathlib
 config_path = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
 config = json.loads(config_path.read_text())
-config.setdefault("gateway", {}).setdefault("http", {}).setdefault("chatCompletions", {})["enabled"] = True
-config.setdefault("gateway", {})["auth"] = {"mode": "none"}
+gateway = config.setdefault("gateway", {})
+http = gateway.setdefault("http", {})
+http.setdefault("chatCompletions", {})["enabled"] = True
+http.setdefault("responses", {})["enabled"] = True
+gateway["auth"] = {"mode": "none"}
 config.setdefault("session", {})["mode"] = "single"
 config["session"]["defaultSessionKey"] = "agent:default:main"
 config.setdefault("routing", {})["mode"] = "placeholder"
@@ -135,6 +138,24 @@ const openai = await request(
 );
 if (openai.mindstone?.sessionKey !== canonicalSessionKey) process.exit(1);
 if (openai.mindstone?.entries?.[0]?.source?.substrate !== "openai") process.exit(1);
+if (openai.mindstone?.entries?.[0]?.source?.channel !== "openai-chat-completions") process.exit(1);
+
+const responses = await request(
+  "/v1/responses",
+  {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "mindstone/default",
+      metadata: { agentId: "default" },
+      input: "responses default continuity",
+    }),
+  },
+  501,
+);
+if (responses.mindstone?.sessionKey !== canonicalSessionKey) process.exit(1);
+if (responses.mindstone?.entries?.[0]?.source?.substrate !== "openai") process.exit(1);
+if (responses.mindstone?.entries?.[0]?.source?.channel !== "openai-responses") process.exit(1);
 
 const aliasInject = await request(
   "/chat/inject",
@@ -150,15 +171,15 @@ if (aliasInject.entry?.sessionKey !== canonicalSessionKey) process.exit(1);
 const sessions = await request("/chat/sessions", undefined, 200);
 if (!Array.isArray(sessions.sessions) || sessions.sessions.length !== 1) process.exit(1);
 if (sessions.sessions[0].sessionKey !== canonicalSessionKey) process.exit(1);
-if (sessions.sessions[0].entries !== 9) process.exit(1);
+if (sessions.sessions[0].entries !== 11) process.exit(1);
 
 const history = await request("/chat/history", undefined, 200);
 if (history.sessionKey !== canonicalSessionKey) process.exit(1);
-if (!Array.isArray(history.entries) || history.entries.length !== 9) process.exit(1);
+if (!Array.isArray(history.entries) || history.entries.length !== 11) process.exit(1);
 
 const aliasHistory = await request(`/chat/history?sessionKey=${encodeURIComponent(legacyAlias)}`, undefined, 200);
 if (aliasHistory.sessionKey !== canonicalSessionKey) process.exit(1);
-if (!Array.isArray(aliasHistory.entries) || aliasHistory.entries.length !== 9) process.exit(1);
+if (!Array.isArray(aliasHistory.entries) || aliasHistory.entries.length !== 11) process.exit(1);
 
 const texts = new Set(history.entries.map((entry) => entry.text));
 for (const expected of [
@@ -166,6 +187,7 @@ for (const expected of [
   "rpc default continuity",
   "ws default continuity",
   "openai default continuity",
+  "responses default continuity",
   "legacy alias continuity",
 ]) {
   if (!texts.has(expected)) process.exit(1);
@@ -178,10 +200,19 @@ const substrates = history.entries.reduce((counts, entry) => {
 }, {});
 if ((substrates["gateway-rest"] ?? 0) < 3) process.exit(1);
 if ((substrates["gateway-rpc"] ?? 0) < 4) process.exit(1);
-if ((substrates.openai ?? 0) < 2) process.exit(1);
+if ((substrates.openai ?? 0) < 4) process.exit(1);
+
+const openAiChannels = history.entries.reduce((counts, entry) => {
+  if (entry.source?.substrate !== "openai") return counts;
+  const channel = entry.source?.channel ?? "missing";
+  counts[channel] = (counts[channel] ?? 0) + 1;
+  return counts;
+}, {});
+if ((openAiChannels["openai-chat-completions"] ?? 0) < 2) process.exit(1);
+if ((openAiChannels["openai-responses"] ?? 0) < 2) process.exit(1);
 
 const routingEvents = history.entries.filter((entry) => entry.metadata?.event === "routing_not_implemented");
-if (routingEvents.length !== 4) process.exit(1);
+if (routingEvents.length !== 5) process.exit(1);
 NODE
 
 echo "Unified session/transcript invariant smoke test passed."
