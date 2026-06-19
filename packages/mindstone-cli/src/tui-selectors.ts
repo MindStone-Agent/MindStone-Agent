@@ -17,8 +17,10 @@ import {
 
 const reset = "\x1b[0m";
 const ansi = (code: string) => (text: string) => `${code}${text}${reset}`;
-const gold = ansi("\x1b[38;5;214m");
-const muted = ansi("\x1b[38;5;244m");
+const gold = ansi("\x1b[38;5;220m");
+const indigo = ansi("\x1b[38;5;69m");
+const muted = ansi("\x1b[38;5;246m");
+const slate = ansi("\x1b[38;5;240m");
 const dim = ansi("\x1b[2m");
 const bold = ansi("\x1b[1m");
 
@@ -26,7 +28,7 @@ export const selectListTheme: SelectListTheme = {
   selectedPrefix: gold,
   selectedText: (text) => bold(gold(text)),
   description: muted,
-  scrollInfo: dim,
+  scrollInfo: indigo,
   noMatch: muted,
 };
 
@@ -86,7 +88,7 @@ export class MindStoneSelectOverlay implements Component {
       truncateToWidth(`${gold("◆")} ${bold(gold(this.title))}`, width),
       truncateToWidth(muted(this.hint), width),
       `${filterLabel}${inputLines[0] ?? ""}`,
-      truncateToWidth(muted("─".repeat(Math.max(0, width))), width),
+      truncateToWidth(slate("─".repeat(Math.max(0, width))), width),
       ...this.selectList.render(width),
     ];
   }

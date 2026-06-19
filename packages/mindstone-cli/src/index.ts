@@ -45,7 +45,7 @@ import { runTuiCommand } from "./tui.js";
 
 type Command = "chat" | "tui" | "config" | "onboard" | "auth" | "identity" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
 
-const gold = (text: string) => `\x1b[38;5;214m${text}\x1b[0m`;
+const gold = (text: string) => `\x1b[38;5;220m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
 const bold = (text: string) => `\x1b[1m${text}\x1b[0m`;
 

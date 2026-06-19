@@ -59,29 +59,32 @@ import {
 
 const reset = "\x1b[0m";
 const ansi = (code: string) => (text: string) => `${code}${text}${reset}`;
-const gold = ansi("\x1b[38;5;214m");
-const amber = ansi("\x1b[38;5;222m");
-const muted = ansi("\x1b[38;5;244m");
+const gold = ansi("\x1b[38;5;220m");
+const yellow = ansi("\x1b[38;5;221m");
+const amber = ansi("\x1b[38;5;178m");
+const indigo = ansi("\x1b[38;5;69m");
+const violet = ansi("\x1b[38;5;99m");
+const muted = ansi("\x1b[38;5;246m");
+const slate = ansi("\x1b[38;5;240m");
 const dim = ansi("\x1b[2m");
 const red = ansi("\x1b[38;5;203m");
-const green = ansi("\x1b[38;5;114m");
 const bold = ansi("\x1b[1m");
 
 const editorTheme: EditorTheme = {
-  borderColor: muted,
+  borderColor: slate,
   selectList: selectListTheme,
 };
 
 const markdownTheme: MarkdownTheme = {
   heading: (text) => bold(gold(text)),
-  link: green,
+  link: indigo,
   linkUrl: dim,
-  code: amber,
-  codeBlock: amber,
-  codeBlockBorder: muted,
+  code: yellow,
+  codeBlock: yellow,
+  codeBlockBorder: slate,
   quote: muted,
-  quoteBorder: muted,
-  hr: muted,
+  quoteBorder: slate,
+  hr: slate,
   listBullet: gold,
   bold,
   italic: (text) => `\x1b[3m${text}${reset}`,
@@ -135,12 +138,12 @@ class MindStoneHeader implements Component {
   constructor(private readonly ctx: TuiCommandContext) {}
 
   render(width: number): string[] {
-    const title = `${gold("◆")} ${bold(gold("MindStone-Agent"))} ${muted("TUI")}`;
-    const detail = muted(`agent ${this.ctx.agentId} • ${this.ctx.routingMode} • ${this.ctx.model.id}`);
+    const title = `${gold("◆")} ${bold(gold("MindStone-Agent"))} ${violet("TUI")}`;
+    const detail = muted(`agent ${this.ctx.agentId} • ${indigo(this.ctx.routingMode)} • ${this.ctx.model.id}`);
     return [
       truncateToWidth(title, width),
       truncateToWidth(detail, width),
-      truncateToWidth(muted("─".repeat(Math.max(0, width))), width),
+      truncateToWidth(slate("─".repeat(Math.max(0, width))), width),
     ];
   }
 
@@ -156,7 +159,7 @@ class MindStoneFooter implements Component {
 
   render(width: number): string[] {
     return [
-      truncateToWidth(muted("─".repeat(Math.max(0, width))), width),
+      truncateToWidth(slate("─".repeat(Math.max(0, width))), width),
       truncateToWidth(`${gold("◆")} ${muted(this.status)} ${dim("• Enter send • Ctrl-P commands • /help • /clear • /exit")}`, width),
     ];
   }
@@ -203,7 +206,7 @@ class MindStoneChatLog extends Container {
 
   addTool(text: string): void {
     this.append(new Spacer(1));
-    this.append(new Text(`${amber("◇")} ${bold("tool")}`, 1, 0));
+    this.append(new Text(`${violet("◇")} ${bold("tool")}`, 1, 0));
     this.append(new Markdown(text || muted("(empty tool result)"), 2, 0, markdownTheme));
   }
 
@@ -219,7 +222,7 @@ class MindStoneChatLog extends Container {
 
   addUser(text: string): void {
     this.append(new Spacer(1));
-    this.append(new Text(`${gold("◆")} ${bold("you")}`, 1, 0));
+    this.append(new Text(`${indigo("◆")} ${bold("you")}`, 1, 0));
     this.append(new Markdown(text, 2, 0, markdownTheme));
   }
 
