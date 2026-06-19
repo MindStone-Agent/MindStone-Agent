@@ -57,7 +57,7 @@ export function getMindStoneChannelCatalog(config?: MindStoneConfig): MindStoneC
       enabled: true,
       capabilities: { chatTypes: ["direct"], nativeCommands: true },
       summary: "Local terminal chat and styled TUI over the canonical MindStone session.",
-      setup: "Use scripts/mindstone chat or scripts/mindstone tui.",
+      setup: "Use mindstone chat or mindstone tui.",
       notes: ["MVP interaction surface", "Not a network listener"],
     },
     {

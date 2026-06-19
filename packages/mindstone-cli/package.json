@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "mindstone": "dist/index.js"
+    "mindstone": "bin/mindstone.js"
   },
   "scripts": {
     "build": "tsc -b"

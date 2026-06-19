@@ -4,9 +4,13 @@
   "private": true,
   "type": "module",
   "description": "MindStone proper rebuild on a vendored current Pi base with isolated runtime state.",
+  "bin": {
+    "mindstone": "packages/mindstone-cli/bin/mindstone.js"
+  },
   "scripts": {
     "show:isolation": "./scripts/show-isolation.sh",
     "install:native": "./scripts/install-native.sh",
+    "link:cli": "./scripts/link-cli.sh",
     "build:pi": "./scripts/build-pi-base.sh",
     "pi": "./scripts/pi-agent",
     "docker:build": "docker build -t mindstone-agent:local .",
@@ -16,6 +20,7 @@
     "start:gateway": "./scripts/start-gateway.sh",
     "mindstone": "./scripts/mindstone",
     "smoke:native": "./scripts/smoke-native.sh",
+    "smoke:cli-bin": "./scripts/smoke-cli-bin.sh",
     "smoke:docker": "./scripts/smoke-docker.sh",
     "init:runtime": "./scripts/init-runtime.sh",
     "smoke:auth": "./scripts/smoke-gateway-auth.sh",

@@ -85,23 +85,29 @@ Build them with:
 npm run build:mindstone
 ```
 
-Configure or onboard MindStone-Agent through the native CLI wrapper:
+Configure or onboard MindStone-Agent through the `mindstone` CLI:
 
 ```bash
-./scripts/mindstone status
-./scripts/mindstone config
-./scripts/mindstone onboard
+mindstone status
+mindstone config
+mindstone onboard
 ```
 
-`config` edits selected runtime config sections. `onboard` is the first-run flow: risk acknowledgement, runtime isolation display, QuickStart vs Manual setup, and non-overwriting identity/user scaffold creation. QuickStart applies safe local defaults and asks only for the identity/user seed; Manual walks every core config section. When `pi` routing is selected, the CLI discovers isolated Pi providers, shows provider auth status/method, then presents models only for the selected provider as arrow-key choices.
+For source checkouts, link the CLI intentionally after install/build:
 
-The workspace package also exposes a `mindstone` bin under `node_modules/.bin` after `npm install`:
+```bash
+npm run link:cli
+```
+
+Without global linking, the workspace package exposes the same bin under `node_modules/.bin` after `npm install`:
 
 ```bash
 ./node_modules/.bin/mindstone status
 ```
 
-The CLI uses the same project-local isolation environment as the other scripts. Override the config path for safe testing with `MINDSTONE_AGENT_CONFIG=/path/to/config.test.json`.
+`config` edits selected runtime config sections. `onboard` is the first-run flow: risk acknowledgement, runtime isolation display, QuickStart vs Manual setup, and non-overwriting identity/user scaffold creation. QuickStart applies safe local defaults and asks only for the identity/user seed; Manual walks every core config section. When `pi` routing is selected, the CLI discovers isolated Pi providers, shows provider auth status/method, then presents models only for the selected provider as arrow-key choices.
+
+The package bin bootstraps the same project-local isolation environment as the old script wrappers. Override the config path for safe testing with `MINDSTONE_AGENT_CONFIG=/path/to/config.test.json`.
 
 Run the minimal Gateway server with:
 
