@@ -582,6 +582,51 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
   throw new Error(`Unknown memory command: ${subcommand}\n\n${usage()}`);
 }
 
+function isChatRunnableRoutingMode(mode: string): mode is "mock" | "pi-session" | "pi" {
+  return mode === "mock" || mode === "pi-session" || mode === "pi";
+}
+
+function chatRoutingRequiredMessage(mode = "placeholder"): string {
+  if (mode === "placeholder") {
+    return "MindStone chat is still in transcript-only setup mode. Start interactive `mindstone chat` from a TTY to choose an answer mode, or configure routing with `mindstone config --section routing`.";
+  }
+  return `MindStone chat requires routing.mode to be mock, pi-session, or pi. Current mode is ${mode}.`;
+}
+
+async function ensureChatRoutingConfigured(argv: string[], loaded: ReturnType<typeof loadMindStoneConfig>): Promise<ReturnType<typeof loadMindStoneConfig>> {
+  const config = loaded.config;
+  if (!config) return loaded;
+  const routingMode = config.routing?.mode ?? "placeholder";
+  if (isChatRunnableRoutingMode(routingMode)) return loaded;
+  if (routingMode !== "placeholder") return loaded;
+
+  output.write([
+    "MindStone chat needs an answer mode before it can start an interactive chat surface.",
+    "Let's choose one now.",
+    "",
+  ].join("\n"));
+
+  const prompter = makeTerminalPrompter();
+  try {
+    const discovery = await discoverPiModels();
+    await runMindStoneConfigWizard(prompter, {
+      configPath: optionValue(argv, "--config") ?? loaded.path,
+      sections: ["routing"],
+      showHeader: false,
+      availableModels: discovery.models,
+      availableProviders: discovery.providers,
+      modelDiscoveryError: discovery.error,
+      setupProviderAuth: (request) => setupProviderAuth(prompter, request),
+    });
+  } finally {
+    prompter.close();
+  }
+
+  const nextLoaded = loadMindStoneConfig(loaded.path);
+  if (nextLoaded.error) throw new Error(`Config error after chat setup: ${nextLoaded.error}`);
+  return nextLoaded;
+}
+
 function resolveChatProvider(config: ReturnType<typeof loadMindStoneConfig>["config"]): MockMindStoneProvider | PiMindStoneProvider | PiSessionMindStoneProvider {
   const mode = config?.routing?.mode ?? "placeholder";
   const paths = runtimePathsFromEnv();
@@ -613,7 +658,7 @@ function resolveChatProvider(config: ReturnType<typeof loadMindStoneConfig>["con
       defaultModel: config?.routing?.defaultModel,
     });
   }
-  throw new Error("MindStone chat requires routing.mode to be mock, pi-session, or pi. Current mode is placeholder; run `mindstone config` or edit config.json first.");
+  throw new Error(chatRoutingRequiredMessage(mode));
 }
 
 function resolveChatRunner(config: ReturnType<typeof loadMindStoneConfig>["config"], provider: MockMindStoneProvider | PiMindStoneProvider | PiSessionMindStoneProvider): AgentRunner | undefined {
@@ -647,10 +692,10 @@ async function runOneChatTurn(params: {
   loaded: ReturnType<typeof loadMindStoneConfig>;
 }): Promise<Awaited<ReturnType<typeof runMindStoneChatTurn>>> {
   const config = params.loaded.config;
-  if (!config) throw new Error(`Config not found. Run ./scripts/init-runtime.sh or mindstone onboard first. Expected: ${params.loaded.path}`);
+  if (!config) throw new Error(`Config not found. Run mindstone onboard first. Expected: ${params.loaded.path}`);
   const mode = config.routing?.mode ?? "placeholder";
-  if (mode !== "mock" && mode !== "pi-session" && mode !== "pi") {
-    throw new Error("MindStone chat requires routing.mode to be mock, pi-session, or pi. Current mode is placeholder; run `mindstone config` or edit config.json first.");
+  if (!isChatRunnableRoutingMode(mode)) {
+    throw new Error(chatRoutingRequiredMessage(mode));
   }
   const agentId = optionValue(params.argv, "--agent") ?? config.routing?.defaultAgentId ?? "default";
   const sessionKey = resolveConfiguredSessionKey(config, {
@@ -691,7 +736,7 @@ async function runOneChatTurn(params: {
 
 async function runChatCommand(argv: string[]): Promise<void> {
   const paths = runtimePathsFromEnv();
-  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+  let loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
   if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
   const once = optionValue(argv, "--once") ?? optionValue(argv, "--message");
   const json = hasOption(argv, "--json");
@@ -706,9 +751,16 @@ async function runChatCommand(argv: string[]): Promise<void> {
     throw new Error("Interactive chat requires a TTY. Use `mindstone chat --once \"message\"` for non-interactive use.");
   }
 
-  output.write(`${gold("🔶 MindStone chat")} ${dim("(/exit to quit)")}\n`);
+  loaded = await ensureChatRoutingConfigured(argv, loaded);
   const config = loaded.config;
-  const agentId = optionValue(argv, "--agent") ?? config?.routing?.defaultAgentId ?? "default";
+  if (!config) throw new Error(`Config not found. Run mindstone onboard first. Expected: ${loaded.path}`);
+  const routingMode = config.routing?.mode ?? "placeholder";
+  if (!isChatRunnableRoutingMode(routingMode)) {
+    throw new Error("MindStone chat is still in transcript-only setup mode. Choose a real model or mock model before opening interactive chat.");
+  }
+
+  output.write(`${gold("🔶 MindStone chat")} ${dim("(/exit to quit)")}\n`);
+  const agentId = optionValue(argv, "--agent") ?? config.routing?.defaultAgentId ?? "default";
   const sessionKey = config
     ? resolveConfiguredSessionKey(config, {
         agentId,

@@ -20,6 +20,48 @@ echo "== CLI chat smoke test =="
 npm run build:mindstone
 ./scripts/init-runtime.sh >/tmp/mindstone-agent-cli-chat-init.log
 
+set +e
+PLACEHOLDER_OUTPUT="$(./scripts/mindstone chat --once "hello before routing" 2>&1)"
+PLACEHOLDER_STATUS=$?
+set -e
+if [[ "${PLACEHOLDER_STATUS}" -eq 0 ]]; then
+  echo "Expected placeholder chat --once to fail before routing is configured" >&2
+  exit 1
+fi
+if [[ "${PLACEHOLDER_OUTPUT}" != *'interactive `mindstone chat`'* ]]; then
+  echo "Expected placeholder chat message to point at interactive MindStone chat setup" >&2
+  echo "${PLACEHOLDER_OUTPUT}" >&2
+  exit 1
+fi
+if [[ "${PLACEHOLDER_OUTPUT}" == *"edit config.json"* ]] || [[ "${PLACEHOLDER_OUTPUT}" == *'run `mindstone config`'* ]]; then
+  echo "Placeholder chat message regressed to config-edit/run-config dead-end" >&2
+  echo "${PLACEHOLDER_OUTPUT}" >&2
+  exit 1
+fi
+
+expect <<'EXPECT'
+set timeout 30
+spawn -noecho ./scripts/mindstone chat
+expect "MindStone chat needs an answer mode"
+expect "How should MindStone answer messages?"
+send "j"
+sleep 0.1
+send "j"
+sleep 0.1
+send "\r"
+expect "Model setup options"
+send "\r"
+expect "Write config"
+send "\r"
+expect "MindStone chat"
+expect "you>"
+send "hello interactive setup\r"
+expect "mindstone>"
+expect "Mock response: hello interactive setup"
+send "/exit\r"
+expect eof
+EXPECT
+
 node <<'NODE'
 const { mkdirSync, readFileSync, writeFileSync } = require("node:fs");
 const runtime = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone`;
