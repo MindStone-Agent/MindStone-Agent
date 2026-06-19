@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   loadMindStoneConfig,
   resolveConfigPath,
@@ -446,7 +447,7 @@ function resolveTuiProvider(config: ReturnType<typeof loadMindStoneConfig>["conf
       defaultModel: config?.routing?.defaultModel,
     });
   }
-  throw new Error("MindStone TUI requires routing.mode to be mock, pi-session, or pi. Current mode is placeholder; run `mindstone config` first.");
+  throw new Error("MindStone TUI is still in transcript-only setup mode. Choose a real model or mock model before sending messages.");
 }
 
 function resolveTuiRunner(config: ReturnType<typeof loadMindStoneConfig>["config"], provider: MockMindStoneProvider | PiMindStoneProvider | PiSessionMindStoneProvider): AgentRunner | undefined {
@@ -510,12 +511,41 @@ async function sendTuiTurn(params: {
   });
 }
 
+function isTuiRunnableRoutingMode(mode: string): mode is TuiCommandContext["routingMode"] {
+  return mode === "mock" || mode === "pi-session" || mode === "pi";
+}
+
+function ensureTuiRoutingConfigured(argv: string[], loaded: ReturnType<typeof loadMindStoneConfig>): ReturnType<typeof loadMindStoneConfig> {
+  const config = loaded.config;
+  if (!config) return loaded;
+  const routingMode = config.routing?.mode ?? "placeholder";
+  if (isTuiRunnableRoutingMode(routingMode)) return loaded;
+  if (routingMode !== "placeholder") return loaded;
+
+  process.stdout.write([
+    "MindStone TUI needs an answer mode before it can start an interactive chat surface.",
+    "Let's choose one now.",
+    "",
+  ].join("\n"));
+
+  const childArgs = [process.argv[1], "config", "--section", "routing", "--config", loaded.path];
+  const result = spawnSync(process.execPath, childArgs, { stdio: "inherit", env: process.env });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error("MindStone TUI setup did not complete.");
+  }
+
+  const nextLoaded = loadMindStoneConfig(loaded.path);
+  if (nextLoaded.error) throw new Error(`Config error after TUI setup: ${nextLoaded.error}`);
+  return nextLoaded;
+}
+
 function resolveTuiContext(argv: string[], loaded: ReturnType<typeof loadMindStoneConfig>): TuiCommandContext {
   const config = loaded.config;
   if (!config) throw new Error(`Config not found. Run ./scripts/init-runtime.sh or mindstone onboard first. Expected: ${loaded.path}`);
   const routingMode = config.routing?.mode ?? "placeholder";
-  if (routingMode !== "mock" && routingMode !== "pi-session" && routingMode !== "pi") {
-    throw new Error("MindStone TUI requires routing.mode to be mock, pi-session, or pi. Current mode is placeholder; run `mindstone config` first.");
+  if (!isTuiRunnableRoutingMode(routingMode)) {
+    throw new Error("MindStone TUI is still in transcript-only setup mode. Choose a real model or mock model before opening interactive chat.");
   }
   const agentId = optionValue(argv, "--agent") ?? config.routing?.defaultAgentId ?? "default";
   const sessionKey = resolveConfiguredSessionKey(config, {
@@ -836,8 +866,9 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
   }
 
   const paths = runtimePathsFromEnv();
-  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+  let loaded = loadMindStoneConfig(optionValue(argv, "--config") ?? resolveConfigPath(process.env, paths));
   if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  loaded = ensureTuiRoutingConfigured(argv, loaded);
   const ctx = resolveTuiContext(argv, loaded);
 
   const terminal = new ProcessTerminal();

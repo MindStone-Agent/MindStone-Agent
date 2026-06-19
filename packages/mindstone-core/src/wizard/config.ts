@@ -841,7 +841,7 @@ async function configureRouting(
 ): Promise<MindStoneConfig> {
   const paths = runtimePathsFromEnv();
   const routing = config.routing ?? {};
-  const mode = await prompter.select<NonNullable<MindStoneRoutingConfig["mode"]>>({
+  let mode = await prompter.select<NonNullable<MindStoneRoutingConfig["mode"]>>({
     message: "How should MindStone answer messages?",
     options: [
       { value: "pi-session", label: "Connect a real model", hint: "recommended; choose OpenAI/Codex, Claude, Gemini, etc. through isolated Pi" },
@@ -869,7 +869,7 @@ async function configureRouting(
 
   if (mode === "pi" || mode === "pi-session") {
     nextRouting.pi = { ...routing.pi, agentDir: routing.pi?.agentDir ?? paths.piAgentDir };
-    nextRouting.defaultModel = await choosePiModel({
+    const selectedModel = await choosePiModel({
       prompter,
       current: routing.defaultModel,
       availableModels: options.availableModels,
@@ -877,6 +877,17 @@ async function configureRouting(
       discoveryError: options.modelDiscoveryError,
       setupProviderAuth: options.setupProviderAuth,
     });
+    if (selectedModel) {
+      nextRouting.defaultModel = selectedModel;
+    } else {
+      await prompter.note(
+        "No model was selected, so MindStone will stay in transcript-only setup mode for now.",
+        "Model setup skipped",
+      );
+      mode = "placeholder";
+      nextRouting.mode = "placeholder";
+      nextRouting.defaultModel = undefined;
+    }
   }
 
   const advanced = await prompter.select<"done" | "advanced">({

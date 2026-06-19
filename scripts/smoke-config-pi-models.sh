@@ -144,3 +144,47 @@ if (config.routing?.pi?.compaction?.safeguardFallback !== true) throw new Error(
 
 console.log(`config pi-session safety smoke passed: ${result.path}`);
 TS
+
+MINDSTONE_AGENT_ROOT="$ROOT" MINDSTONE_AGENT_CONFIG="$TMP_DIR/no-model-config.json" npx tsx <<'TS'
+import { readFileSync } from "node:fs";
+import { runMindStoneConfigWizard, type MindStonePrompter, type MindStoneSelectOption } from "./packages/mindstone-core/src/index.ts";
+
+const selects = ["pi-session", "done"];
+const confirms = [true];
+let noteText = "";
+
+const prompter: MindStonePrompter = {
+  note: async (message) => { noteText += `${message}\n`; },
+  confirm: async () => {
+    const next = confirms.shift();
+    if (next === undefined) throw new Error("Unexpected confirm prompt");
+    return next;
+  },
+  select: async <T extends string>({ options }: { message: string; options: Array<MindStoneSelectOption<T>>; initialValue?: T }): Promise<T> => {
+    const next = selects.shift();
+    if (next === undefined) throw new Error("Unexpected select prompt");
+    const found = options.find((option) => option.value === next);
+    if (!found) throw new Error(`Selection not available: ${next}; options=${options.map((option) => option.value).join(",")}`);
+    return found.value;
+  },
+  text: async () => {
+    throw new Error("Unexpected text prompt; no-model fallback should not ask advanced Pi text prompts");
+  },
+};
+
+const result = await runMindStoneConfigWizard(prompter, {
+  sections: ["routing"],
+  availableModels: [],
+  availableProviders: [],
+  modelDiscoveryError: "smoke discovery unavailable",
+});
+if (!result.wrote) throw new Error("Wizard did not write no-model config");
+if (selects.length || confirms.length) throw new Error("No-model prompt queues were not fully consumed");
+if (!noteText.includes("No model was selected")) throw new Error(`Expected no-model setup note, got: ${noteText}`);
+
+const config = JSON.parse(readFileSync(result.path, "utf-8")) as any;
+if (config.routing?.mode !== "placeholder") throw new Error(`Expected placeholder fallback when no model selected, got ${config.routing?.mode}`);
+if (config.routing?.defaultModel !== undefined) throw new Error("Expected no defaultModel when no model selected");
+
+console.log(`config no-model fallback smoke passed: ${result.path}`);
+TS
