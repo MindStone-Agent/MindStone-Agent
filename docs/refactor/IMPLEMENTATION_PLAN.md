@@ -83,7 +83,11 @@ The preferred order is:
 - [x] Add command for section reconfiguration in Pi adapter: `/mindstone-config` runs the shared config wizard.
 - [x] Add default onboarding profiles with write-in option.
 - [x] Add `Integration Builder` as an initial onboarding profile.
-- [ ] Add reusable `Integration Builder` skill behavior.
+- [x] Add reusable `Integration Builder` skill behavior.
+  - Core exposes a deterministic Integration Builder brief/workflow generator for APIs, webhooks, channels, tools, and automations.
+  - CLI surface: `mindstone skill list` and `mindstone skill integration-builder [--name NAME] [--kind KIND] [--goal TEXT] [--json|--emit-skill-md]`.
+  - `--emit-skill-md` emits an Agent-Skills-compatible `SKILL.md` body for future Pi skill packaging/loading.
+  - Smoke validation: `npm run smoke:integration-builder-skill`.
 - [x] Add initial “getting to know the user” onboarding phase for preferences, boundaries, style, memory/checkpoint style, and project/domain context.
 - [ ] Expand preference onboarding with richer collaboration-pattern and clarifying-question tuning.
 - [x] Add initial naming/identity emergence phase without forcing human-assigned names.

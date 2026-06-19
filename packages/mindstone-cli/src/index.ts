@@ -4,9 +4,12 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
+  INTEGRATION_BUILDER_SKILL,
   backfillSqliteMemoryEmbeddings,
   backfillSqliteMemoryIndex,
+  buildIntegrationBuilderBrief,
   formatConfigSummary,
+  formatIntegrationBuilderSkillMarkdown,
   formatMindStoneConfigHeader,
   getCurrentHandoffStatus,
   getMindStoneDoctorReport,
@@ -29,12 +32,13 @@ import {
   type MindStoneProviderAuthSetupRequest,
   type MindStoneProviderInfo,
   type MindStonePrompter,
+  type IntegrationBuilderKind,
   type MindStoneSelectOption,
 } from "@mindstone-agent/core";
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "identity" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "identity" | "skill" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;214m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -52,6 +56,9 @@ function usage(): string {
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]",
     "                         Synthesize first-activation identity from onboarding seed",
+    "  mindstone skill list   Show built-in MindStone skill surfaces",
+    "  mindstone skill integration-builder [--name NAME] [--kind KIND] [--goal TEXT] [--json]",
+    "                         Build an integration/channel/tool implementation brief",
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
     "  mindstone memory backfill [--embed] [--force] [--maintain] [--dedupe-text] [--json]  Index memory/transcripts and optionally maintain/embed chunks",
@@ -69,7 +76,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "identity" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "identity" || raw === "skill" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -332,6 +339,16 @@ function optionValue(argv: string[], name: string): string | undefined {
   if (index < 0) return undefined;
   const value = argv[index + 1];
   return value && !value.startsWith("--") ? value : undefined;
+}
+
+function optionValues(argv: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] !== name) continue;
+    const value = argv[index + 1];
+    if (value && !value.startsWith("--")) values.push(value);
+  }
+  return values;
 }
 
 function hasOption(argv: string[], name: string): boolean {
@@ -673,6 +690,51 @@ function printDoctor(report: MindStoneDoctorReport): void {
   output.write("\n");
 }
 
+function parseIntegrationBuilderKind(value: string | undefined): IntegrationBuilderKind | undefined {
+  if (!value) return undefined;
+  if (value === "api" || value === "webhook" || value === "channel" || value === "tool" || value === "automation" || value === "unknown") return value;
+  throw new Error(`Invalid integration kind: ${value}`);
+}
+
+async function runSkillCommand(argv: string[]): Promise<void> {
+  const subcommand = argv[3] ?? "list";
+  const json = hasOption(argv, "--json");
+  if (subcommand === "list") {
+    const skills = [INTEGRATION_BUILDER_SKILL];
+    if (json) {
+      output.write(`${JSON.stringify(skills, null, 2)}\n`);
+      return;
+    }
+    output.write(`${gold("🔶 MindStone skills")}\n\n`);
+    for (const skill of skills) {
+      output.write(`${bold(skill.id)} — ${skill.description}\n`);
+      output.write(`${dim(`outputs: ${skill.outputs.join(", ")}`)}\n\n`);
+    }
+    return;
+  }
+  if (subcommand !== "integration-builder") throw new Error(`Unknown skill subcommand: ${subcommand}`);
+
+  if (hasOption(argv, "--emit-skill-md")) {
+    output.write(formatIntegrationBuilderSkillMarkdown());
+    output.write("\n");
+    return;
+  }
+
+  const brief = buildIntegrationBuilderBrief({
+    name: optionValue(argv, "--name"),
+    kind: parseIntegrationBuilderKind(optionValue(argv, "--kind")),
+    goal: optionValue(argv, "--goal"),
+    auth: optionValue(argv, "--auth"),
+    surface: optionValue(argv, "--surface"),
+    constraints: optionValues(argv, "--constraint"),
+  });
+  if (json) {
+    output.write(`${JSON.stringify(brief, null, 2)}\n`);
+    return;
+  }
+  output.write(brief.markdown);
+}
+
 async function runIdentityCommand(argv: string[]): Promise<void> {
   const subcommand = argv[3] ?? "help";
   if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
@@ -775,6 +837,10 @@ async function main(): Promise<void> {
   }
   if (command === "identity") {
     await runIdentityCommand(process.argv);
+    return;
+  }
+  if (command === "skill") {
+    await runSkillCommand(process.argv);
     return;
   }
   if (command === "chat") {

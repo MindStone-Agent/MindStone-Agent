@@ -230,9 +230,12 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - `mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]` synthesizes a first-activation working identity from onboarding profile/preferences/identity seed.
   - The command is auditable and conservative: it writes a backup for pending scaffolds and refuses to overwrite non-pending identities unless forced.
   - Smoke validation: `npm run smoke:identity-activation`.
-- [ ] Build the initial `Integration Builder` skill surface.
+- [x] Build the initial `Integration Builder` skill surface.
   - [x] Add Integration Builder as an onboarding profile.
-  - [ ] Add reusable Integration Builder skill behavior for creating/configuring integrations/channels/tools.
+  - [x] Add reusable Integration Builder skill behavior for creating/configuring integrations/channels/tools.
+  - Core now exposes a deterministic Integration Builder brief/workflow generator and Agent-Skills-compatible markdown emitter.
+  - CLI surface: `mindstone skill list` and `mindstone skill integration-builder [--name NAME] [--kind KIND] [--goal TEXT] [--json|--emit-skill-md]`.
+  - Smoke validation: `npm run smoke:integration-builder-skill`.
 
 ### Memory and context
 
