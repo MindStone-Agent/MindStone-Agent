@@ -31,6 +31,7 @@ import {
   type AgentRunner,
   type MindStoneDoctorReport,
   type MindStoneModelInfo,
+  type MindStoneConfigWizardSection,
   type MindStoneProviderAuthSetupRequest,
   type MindStoneProviderInfo,
   type MindStonePrompter,
@@ -54,7 +55,8 @@ function usage(): string {
     "  mindstone chat         Start native terminal chat over the canonical MindStone session",
     "  mindstone chat --once \"message\"  Send one chat turn and print the assistant response",
     "  mindstone tui          Start styled MindStone-Agent TUI over the canonical MindStone session",
-    "  mindstone config       Configure MindStone-Agent runtime settings",
+    "  mindstone config [--section NAME|--sections a,b] [--dry-run]",
+    "                         Configure MindStone-Agent runtime settings or one section",
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
     "  mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]",
     "                         Synthesize first-activation identity from onboarding seed",
@@ -755,6 +757,25 @@ async function runSkillCommand(argv: string[]): Promise<void> {
   output.write(brief.markdown);
 }
 
+const CONFIG_SECTION_VALUES: MindStoneConfigWizardSection[] = ["all", "workspace", "gateway", "routing", "context", "memory", "identity", "channels"];
+
+function parseConfigWizardSection(value: string): MindStoneConfigWizardSection {
+  if ((CONFIG_SECTION_VALUES as string[]).includes(value)) return value as MindStoneConfigWizardSection;
+  throw new Error(`Invalid config section: ${value}. Expected one of: ${CONFIG_SECTION_VALUES.join(", ")}`);
+}
+
+function parseConfigWizardSections(argv: string[]): MindStoneConfigWizardSection[] | undefined {
+  const sections = [
+    ...optionValues(argv, "--section"),
+    ...optionValues(argv, "-s"),
+    ...optionValues(argv, "--sections").flatMap((value) => value.split(",")),
+  ]
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map(parseConfigWizardSection);
+  return sections.length ? sections : undefined;
+}
+
 async function runIdentityCommand(argv: string[]): Promise<void> {
   const subcommand = argv[3] ?? "help";
   if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
@@ -908,6 +929,9 @@ async function main(): Promise<void> {
       });
     } else {
       await runMindStoneConfigWizard(prompter, {
+        configPath: optionValue(process.argv, "--config"),
+        sections: parseConfigWizardSections(process.argv),
+        dryRun: hasOption(process.argv, "--dry-run"),
         showHeader: false,
         availableModels: discovery.models,
         availableProviders: discovery.providers,

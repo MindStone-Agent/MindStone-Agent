@@ -119,7 +119,11 @@ The preferred order is:
   - CLI surface: `mindstone channels [--json]`.
   - Pi adapter `/mindstone-channels` uses the same Core catalog.
   - Smoke validation: `npm run smoke:channel-catalog` and `npm run smoke:pi-adapter`.
-- [ ] Reconfiguration can run by section.
+- [x] Reconfiguration can run by section.
+  - CLI supports `mindstone config --section NAME`, repeated `--section`, and comma-separated `--sections a,b`.
+  - `--dry-run` runs a section without writing, useful for diagnostic sections such as `channels`.
+  - Invalid section names fail clearly.
+  - Smoke validation: `npm run smoke:config-sections`.
 
 ## 5. Phase 3 — Current-Pi Adapter and Session-Backed Runner MVP
 

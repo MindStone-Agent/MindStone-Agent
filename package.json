@@ -34,6 +34,7 @@
     "smoke:channel-catalog": "./scripts/smoke-channel-catalog.sh",
     "smoke:pi-provider-config": "./scripts/smoke-pi-provider-config.sh",
     "smoke:config-wizard": "./scripts/smoke-config-wizard.sh",
+    "smoke:config-sections": "./scripts/smoke-config-sections.sh",
     "smoke:onboard": "./scripts/smoke-onboard.sh",
     "smoke:config-pi-models": "./scripts/smoke-config-pi-models.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",

@@ -242,6 +242,10 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
   - CLI surface: `mindstone channels [--json]`.
   - Pi adapter `/mindstone-channels` now reuses the Core catalog.
   - Smoke validation: `npm run smoke:channel-catalog` and `npm run smoke:pi-adapter`.
+- [x] Expose section-scoped native config reconfiguration.
+  - CLI supports `mindstone config --section NAME`, repeated `--section`, comma-separated `--sections a,b`, and `--dry-run`.
+  - Invalid section names fail clearly.
+  - Smoke validation: `npm run smoke:config-sections`.
 
 ### Memory and context
 
