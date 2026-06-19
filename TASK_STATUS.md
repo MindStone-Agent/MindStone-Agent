@@ -9,7 +9,7 @@
 |------|--------|-------|
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
-| Docs | Drafted | Refactor and operations docs present |
+| Docs | Drafted | Refactor, operations, and current Gateway API reference docs present |
 | Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with profile selection and provider-first isolated Pi model selection, native CLI chat, context-management policy + sliding-window selector, router/provider abstraction, transcript store, file + SQLite memory index/backfill/status, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, canonical unified session key, OpenAI chat completions, and non-streaming OpenResponses compatibility build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
@@ -122,6 +122,7 @@
 - [x] Added non-streaming OpenResponses-compatible `/v1/responses`: persists string/array input to the canonical transcript, returns clear scaffold errors without a provider, and routes through `AgentRunner` when mock/Pi routing is configured.
 - [x] Added Gateway HTTP surface enablement smoke for `/v1/models`, `/v1/chat/completions`, and `/v1/responses` disabled/chat-only/responses-only combinations.
 - [x] Verified OpenAI/OpenResponses-compatible skeleton, routed mock paths, endpoint enablement gates, and auth coverage with `npm run smoke:openai`, `npm run smoke:router-mock`, `npm run smoke:gateway-http-surfaces`, and `npm run smoke:auth`.
+- [x] Added current Gateway API reference documentation for REST chat, RPC/WebSocket, OpenAI-compatible chat completions, non-streaming OpenResponses, auth, enablement gates, routing modes, session/source metadata, validation commands, and current non-goals.
 - [x] Added file-backed JSONL transcript store.
 - [x] Verified append/read/list transcript behavior with `npm run smoke:transcripts`.
 - [x] Added transcript aggregate counts to `/status`.

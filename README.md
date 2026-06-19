@@ -13,6 +13,7 @@ This repository vendors upstream Pi under `vendor/pi` and layers MindStone Core,
 - [Implementation Plan](docs/refactor/IMPLEMENTATION_PLAN.md)
 - [Upstream Pi Strategy](docs/upstream/PI_BASE_STRATEGY.md)
 - [Runtime Isolation Model](docs/operations/ISOLATION.md)
+- [Gateway API Reference](docs/gateway/API_REFERENCE.md)
 
 ## Runtime Isolation
 

@@ -238,6 +238,8 @@ The preferred order is:
 - [x] Verify auth behavior and endpoint enable flags for current Gateway HTTP surfaces.
   - `npm run smoke:auth` covers token/password auth for status and OpenResponses.
   - `npm run smoke:gateway-http-surfaces` covers `/v1/models`, `/v1/chat/completions`, and `/v1/responses` enablement gates across disabled/chat-only/responses-only combinations.
+- [x] Document current Gateway API reference for REST chat, RPC/WebSocket, OpenAI-compatible chat completions, non-streaming OpenResponses, auth, enablement gates, routing modes, session/source metadata, validation commands, and current non-goals.
+  - `docs/gateway/API_REFERENCE.md`
 - [x] Add smoke-level integration tests around current HTTP and WebSocket methods.
   - `npm run smoke:chat` covers `/health`, `/status`, REST chat inject/send/abort/sessions/history, invalid inject/send, and limited history.
   - `npm run smoke:rpc` covers HTTP RPC chat methods.
