@@ -114,12 +114,13 @@
 - [x] Added non-destructive runtime initializer for config and placeholder identity/user files.
 - [x] Verified `/status` reports initialized default agent metadata.
 - [x] Added Gateway auth enforcement for non-health endpoints.
-- [x] Verified Gateway auth modes `none`, `token`, and `password`.
+- [x] Verified Gateway auth modes `none`, `token`, and `password`; OpenResponses endpoint now has auth smoke coverage for token/password modes.
 - [x] Added OpenAI-compatible `/v1/models` skeleton.
 - [x] Added explicit `501 not_implemented` `/v1/chat/completions` skeleton.
 - [x] Made `/v1/chat/completions` transcript-aware: compatible input messages are persisted before the not-implemented response.
 - [x] Added non-streaming OpenResponses-compatible `/v1/responses`: persists string/array input to the canonical transcript, returns clear scaffold errors without a provider, and routes through `AgentRunner` when mock/Pi routing is configured.
-- [x] Verified OpenAI/OpenResponses-compatible skeleton and routed mock paths with `npm run smoke:openai` and `npm run smoke:router-mock`.
+- [x] Added Gateway HTTP surface enablement smoke for `/v1/models`, `/v1/chat/completions`, and `/v1/responses` disabled/chat-only/responses-only combinations.
+- [x] Verified OpenAI/OpenResponses-compatible skeleton, routed mock paths, endpoint enablement gates, and auth coverage with `npm run smoke:openai`, `npm run smoke:router-mock`, `npm run smoke:gateway-http-surfaces`, and `npm run smoke:auth`.
 - [x] Added file-backed JSONL transcript store.
 - [x] Verified append/read/list transcript behavior with `npm run smoke:transcripts`.
 - [x] Added transcript aggregate counts to `/status`.

@@ -19,6 +19,7 @@
     "smoke:docker": "./scripts/smoke-docker.sh",
     "init:runtime": "./scripts/init-runtime.sh",
     "smoke:auth": "./scripts/smoke-gateway-auth.sh",
+    "smoke:gateway-http-surfaces": "./scripts/smoke-gateway-http-surfaces.sh",
     "smoke:openai": "./scripts/smoke-openai.sh",
     "smoke:transcripts": "./scripts/smoke-transcripts.sh",
     "smoke:chat": "./scripts/smoke-chat-history.sh",

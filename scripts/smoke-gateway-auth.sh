@@ -45,6 +45,10 @@ elif mode == "password":
     }
 else:
     raise SystemExit(f"unsupported auth mode: {mode}")
+gateway = config.setdefault("gateway", {})
+http = gateway.setdefault("http", {})
+http.setdefault("chatCompletions", {})["enabled"] = True
+http.setdefault("responses", {})["enabled"] = True
 config_path.write_text(json.dumps(config, indent=2) + "\n")
 print(config_path)
 PY
@@ -85,6 +89,16 @@ await expect("/status", undefined, 401);
 await expect("/status", { headers: { authorization: "Bearer wrong" } }, 401);
 await expect("/status", { headers: { authorization: `Bearer ${token}` } }, 200);
 await expect("/status", { headers: { "x-mindstone-token": token } }, 200);
+await expect("/v1/responses", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ model: "mindstone/default", input: "token auth should block this without credentials" }),
+}, 401);
+await expect("/v1/responses", {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+  body: JSON.stringify({ model: "mindstone/default", input: "token auth authorized responses" }),
+}, 501);
 NODE
 stop_gateway
 
@@ -109,6 +123,16 @@ await expect("/status", undefined, 401);
 await expect("/status", { headers: { authorization: "Basic " + Buffer.from("mindstone:wrong").toString("base64") } }, 401);
 await expect("/status", { headers: { authorization: `Basic ${basic}` } }, 200);
 await expect("/status", { headers: { "x-mindstone-password": password } }, 200);
+await expect("/v1/responses", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ model: "mindstone/default", input: "password auth should block this without credentials" }),
+}, 401);
+await expect("/v1/responses", {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: `Basic ${basic}` },
+  body: JSON.stringify({ model: "mindstone/default", input: "password auth authorized responses" }),
+}, 501);
 NODE
 stop_gateway
 
