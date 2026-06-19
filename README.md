@@ -44,9 +44,33 @@ Preferred update method is git subtree, documented in `docs/upstream/PI_BASE_STR
 
 ## Native Setup
 
+### Curl installer
+
+For a normal user install from the public repository:
+
 ```bash
-./scripts/install-native.sh
-npm run init:runtime
+curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install.sh | bash
+mindstone onboard
+```
+
+Custom install directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install.sh | \
+  bash -s -- --dir "$HOME/Projects/MindStone-Agent"
+```
+
+By default the installer clones/updates the repo under `~/.mindstone-agent/MindStone-Agent`, runs `npm install`, builds the vendored Pi base, initializes isolated runtime directories, and runs `npm link` so `mindstone` is on PATH. Use `--no-link` to skip global linking and run `./node_modules/.bin/mindstone` from the checkout instead.
+
+### Clone-from-source install
+
+```bash
+git clone https://github.com/MindStone-Agent/MindStone-Agent.git
+cd MindStone-Agent
+npm install
+npm run install:native
+npm run link:cli
+mindstone onboard
 ```
 
 This builds the vendored Pi base and initializes isolated project-local config/session/data directories without overwriting existing runtime files.

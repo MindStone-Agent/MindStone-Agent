@@ -21,6 +21,7 @@
     "mindstone": "./scripts/mindstone",
     "smoke:native": "./scripts/smoke-native.sh",
     "smoke:cli-bin": "./scripts/smoke-cli-bin.sh",
+    "smoke:install-script": "./scripts/smoke-install-script.sh",
     "smoke:docker": "./scripts/smoke-docker.sh",
     "init:runtime": "./scripts/init-runtime.sh",
     "smoke:auth": "./scripts/smoke-gateway-auth.sh",
