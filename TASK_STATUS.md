@@ -131,7 +131,7 @@
 - [x] Added `POST /rpc` bridge for `chat.sessions`, `chat.history`, `chat.inject`, `chat.send`, and `chat.abort`.
 - [x] Verified HTTP RPC bridge with `npm run smoke:rpc`.
 - [x] Added WebSocket RPC transport on `/rpc` and `/ws` using the same method executor.
-- [x] Verified WebSocket RPC bridge with `npm run smoke:ws-rpc`.
+- [x] Verified WebSocket RPC bridge with `npm run smoke:ws-rpc`; coverage includes `/rpc`, `/ws`, `chat.inject`, `chat.send`, `chat.abort`, `chat.sessions`, `chat.history`, and unknown-method handling.
 - [x] Added Gateway run-manager abstraction and wired `/chat/abort` / RPC `chat.abort` through it.
 - [x] Added Core `buildPromptWindow()` sliding-window selector.
 - [x] Added Gateway prompt-window build/prune event path for `/chat/send`, RPC/WS `chat.send`, and `/v1/chat/completions`.

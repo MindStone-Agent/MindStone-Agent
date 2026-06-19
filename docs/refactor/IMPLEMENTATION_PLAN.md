@@ -226,10 +226,11 @@ The preferred order is:
 
 ### Tasks
 
-- [ ] Preserve or refactor WebSocket `chat.history`.
-- [ ] Preserve or refactor WebSocket `chat.send`.
-- [ ] Preserve or refactor WebSocket `chat.abort`.
-- [ ] Preserve or refactor WebSocket `chat.inject`.
+- [x] Preserve or refactor WebSocket `chat.history`.
+- [x] Preserve or refactor WebSocket `chat.send`.
+- [x] Preserve or refactor WebSocket `chat.abort`.
+- [x] Preserve or refactor WebSocket `chat.inject`.
+  - `npm run smoke:ws-rpc` covers `/rpc` WebSocket `chat.inject`, `chat.send`, `chat.abort`, `chat.sessions`, `chat.history`, unknown-method handling, and `/ws` alias history.
 - [x] Preserve OpenAI-compatible `/v1/chat/completions` for configured mock/Pi routing modes, with placeholder fallback when no provider is configured.
 - [x] Preserve non-streaming OpenResponses `/v1/responses` for configured mock/Pi routing modes, with transcript-aware placeholder fallback when no provider is configured.
 - [ ] Add health/status endpoint.
