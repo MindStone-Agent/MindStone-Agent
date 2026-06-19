@@ -10,7 +10,7 @@
 | Repo foundation | In progress | Upstream Pi base installed under `vendor/pi` |
 | Isolation | Verified initial | Native and Docker paths isolate Pi config/sessions/data from host/global Pi |
 | Docs | Drafted | Refactor and operations docs present |
-| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with profile selection and provider-first isolated Pi model selection, native CLI chat, context-management policy + sliding-window selector, router/provider abstraction, transcript store, file + SQLite memory index/backfill/status, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, canonical unified session key, and OpenAI skeleton build successfully |
+| Core/Gateway | Scaffolded | Core contracts, config/identity loaders, config/onboarding wizard with profile selection and provider-first isolated Pi model selection, native CLI chat, context-management policy + sliding-window selector, router/provider abstraction, transcript store, file + SQLite memory index/backfill/status, REST/RPC/WebSocket chat endpoints, run-manager abstraction, runtime initializer, Gateway auth, health/status endpoints, canonical unified session key, OpenAI chat completions, and non-streaming OpenResponses compatibility build successfully |
 | Native install | Scaffolded | Builds vendored Pi base; daemon install not added yet |
 | Docker install | Verified initial | Docker image builds Pi + overlay packages and uses project-specific volumes |
 
@@ -118,7 +118,8 @@
 - [x] Added OpenAI-compatible `/v1/models` skeleton.
 - [x] Added explicit `501 not_implemented` `/v1/chat/completions` skeleton.
 - [x] Made `/v1/chat/completions` transcript-aware: compatible input messages are persisted before the not-implemented response.
-- [x] Verified OpenAI-compatible skeleton with `npm run smoke:openai`.
+- [x] Added non-streaming OpenResponses-compatible `/v1/responses`: persists string/array input to the canonical transcript, returns clear scaffold errors without a provider, and routes through `AgentRunner` when mock/Pi routing is configured.
+- [x] Verified OpenAI/OpenResponses-compatible skeleton and routed mock paths with `npm run smoke:openai` and `npm run smoke:router-mock`.
 - [x] Added file-backed JSONL transcript store.
 - [x] Verified append/read/list transcript behavior with `npm run smoke:transcripts`.
 - [x] Added transcript aggregate counts to `/status`.
@@ -319,14 +320,14 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
     ```
 - [ ] Ensure Telegram, WebChat, OpenWebUI, Pi adapter, native CLI chat, and future channels can route into the same session/transcript by default.
   - [x] Native `mindstone chat` uses the configured canonical session by default and was validated with `npm run smoke:cli-chat`.
-  - [x] Gateway REST chat, HTTP RPC chat, WebSocket RPC chat, and OpenAI chat completions use the configured shared default when `sessionKey` is omitted.
+  - [x] Gateway REST chat, HTTP RPC chat, WebSocket RPC chat, OpenAI chat completions, and non-streaming OpenResponses use the configured shared default when `sessionKey` is omitted.
   - [x] `mindstone` legacy alias canonicalizes to `agent:default:main` for compatibility.
   - [x] Verified with `npm run smoke:unified-session`.
   - [x] Built-in WebChat shell validates omitted session key → `agent:default:main` and mock-routed assistant response via `npm run smoke:webchat-ui`.
   - [ ] Telegram/OpenWebUI/Pi adapter final validation still pending.
 - [ ] Preserve channel/source metadata inside the unified transcript without splitting memory continuity.
   - [x] Native `mindstone chat` writes structured `mindstone-cli` / `terminal` source metadata for user and assistant entries.
-  - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, routing events, and assistant responses now write structured `TranscriptEntry.source` metadata.
+  - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, non-streaming OpenResponses, routing events, and assistant responses now write structured `TranscriptEntry.source` metadata.
   - [x] Built-in WebChat shell source metadata validates as `gateway-rest` / `webchat` / `internal`.
   - [ ] Telegram/Pi adapter source metadata still pending final validation.
 

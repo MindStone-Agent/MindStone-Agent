@@ -130,6 +130,14 @@ function isChatCompletionsEnabled(config: MindStoneConfig | undefined): boolean 
   return config?.gateway?.http?.chatCompletions?.enabled === true;
 }
 
+function isOpenResponsesEnabled(config: MindStoneConfig | undefined): boolean {
+  return config?.gateway?.http?.responses?.enabled === true;
+}
+
+function isOpenAiModelListEnabled(config: MindStoneConfig | undefined): boolean {
+  return isChatCompletionsEnabled(config) || isOpenResponsesEnabled(config);
+}
+
 function numberFromMetadata(metadata: Record<string, unknown> | undefined, key: string): number | undefined {
   const value = metadata?.[key];
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
@@ -467,7 +475,7 @@ function transcriptTextFromOpenAiContent(content: unknown): string | undefined {
         if (typeof part === "string") return part;
         if (typeof part !== "object" || part === null) return undefined;
         const record = part as Record<string, unknown>;
-        if (record.type === "text" && typeof record.text === "string") return record.text;
+        if ((record.type === "text" || record.type === "input_text" || record.type === "output_text") && typeof record.text === "string") return record.text;
         return undefined;
       })
       .filter((part): part is string => Boolean(part));
@@ -479,6 +487,37 @@ function transcriptTextFromOpenAiContent(content: unknown): string | undefined {
 function openAiRoleToTranscriptRole(role: unknown): TranscriptRole {
   if (role === "system" || role === "assistant" || role === "tool") return role;
   return "user";
+}
+
+type OpenResponsesTranscriptInput = {
+  role: TranscriptRole;
+  text?: string;
+  content: unknown;
+  metadata: Record<string, unknown>;
+};
+
+function openResponsesInputToTranscriptInputs(input: unknown): OpenResponsesTranscriptInput[] {
+  if (typeof input === "string") {
+    return [{ role: "user", text: input, content: input, metadata: { inputIndex: 0, originalType: "string" } }];
+  }
+  if (!Array.isArray(input)) return [];
+  return input.map((item, index) => {
+    if (typeof item === "string") {
+      return { role: "user", text: item, content: item, metadata: { inputIndex: index, originalType: "string" } };
+    }
+    const record = typeof item === "object" && item !== null ? item as Record<string, unknown> : {};
+    const content = record.content ?? record.input ?? record.text;
+    return {
+      role: openAiRoleToTranscriptRole(record.role),
+      text: transcriptTextFromOpenAiContent(content) ?? (typeof record.text === "string" ? record.text : undefined),
+      content,
+      metadata: {
+        inputIndex: index,
+        originalType: record.type,
+        originalRole: record.role,
+      },
+    };
+  });
 }
 
 async function readJsonBody(req: IncomingMessage, maxBytes = 1024 * 1024): Promise<unknown> {
@@ -1382,11 +1421,132 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 503, openAiError(loadedConfig.error, "config_error", "config_error"));
       return;
     }
-    if (!isChatCompletionsEnabled(loadedConfig.config)) {
-      sendJson(res, 404, openAiError("OpenAI-compatible chat completions are disabled", "disabled", "disabled"));
+    if (!isOpenAiModelListEnabled(loadedConfig.config)) {
+      sendJson(res, 404, openAiError("OpenAI-compatible HTTP surfaces are disabled", "disabled", "disabled"));
       return;
     }
     sendJson(res, 200, openAiModels(loadedConfig.config));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/v1/responses") {
+    const loadedConfig = loadGatewayConfig();
+    if (loadedConfig.error) {
+      sendJson(res, 503, openAiError(loadedConfig.error, "config_error", "config_error"));
+      return;
+    }
+    if (!isOpenResponsesEnabled(loadedConfig.config)) {
+      sendJson(res, 404, openAiError("OpenResponses-compatible HTTP is disabled", "disabled", "disabled"));
+      return;
+    }
+
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      sendJson(res, 400, openAiError(error instanceof Error ? error.message : String(error), "invalid_request_error", "invalid_json"));
+      return;
+    }
+
+    const input = body as Record<string, unknown>;
+    const responseInputs = openResponsesInputToTranscriptInputs(input.input);
+    if (responseInputs.length === 0 || responseInputs.every((entry) => !entry.text?.trim())) {
+      sendJson(res, 400, openAiError("input must be a non-empty string or array", "invalid_request_error", "invalid_input"));
+      return;
+    }
+
+    const metadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
+    const model = typeof input.model === "string" ? input.model : "mindstone/default";
+    const agentId = typeof metadata.agentId === "string" ? metadata.agentId : "default";
+    const sessionKey = gatewaySessionKey({
+      config: loadedConfig.config,
+      explicitSessionKey: metadata.sessionKey,
+      agentId,
+      substrate: "openai",
+      channel: "openai-responses",
+      chatType: "internal",
+      senderId: typeof input.user === "string" ? input.user : model,
+    });
+    const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-responses", chatType: "internal", senderId: typeof input.user === "string" ? input.user : model });
+    const persistedEntries = responseInputs.map((entry) => appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: entry.role,
+      text: entry.text,
+      content: entry.content,
+      source,
+      metadata: {
+        source: "openai-responses",
+        model,
+        ...entry.metadata,
+      },
+    }));
+
+    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    if (routed.routed && routed.status === 200) {
+      const routedBody = routed.body as { entry?: TranscriptEntry; identityContext?: unknown; promptWindow?: unknown; runId?: string };
+      const outputText = routedBody.entry?.text ?? "";
+      sendJson(res, 200, {
+        id: `resp_${routedBody.runId ?? Date.now().toString(36)}`,
+        object: "response",
+        created_at: Math.floor(Date.now() / 1000),
+        status: "completed",
+        model,
+        output: [
+          {
+            id: `msg_${routedBody.entry?.id ?? Date.now().toString(36)}`,
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: outputText }],
+          },
+        ],
+        output_text: outputText,
+        mindstone: {
+          persisted: true,
+          sessionKey,
+          identityContext: routedBody.identityContext,
+          promptWindow: routedBody.promptWindow,
+          entries: [...persistedEntries, routedBody.entry].filter(Boolean),
+        },
+      });
+      return;
+    }
+    if (routed.routed) {
+      sendJson(res, routed.status, openAiError("MindStone routing failed", "routing_error", "routing_error"));
+      return;
+    }
+
+    const promptWindow = maybeRecordPromptWindowEvent({ sessionKey, agentId, config: loadedConfig.config, metadata });
+    const eventEntry = appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "event",
+      text: "OpenResponses-compatible responses are not connected to MindStone routing yet.",
+      source,
+      metadata: { event: "routing_not_implemented", source: "openai-responses", model },
+    });
+
+    sendJson(res, 501, {
+      ...openAiError(
+        "OpenResponses-compatible responses are scaffolded but not connected to MindStone routing yet",
+        "not_implemented",
+        "not_implemented",
+      ),
+      mindstone: {
+        persisted: true,
+        sessionKey,
+        promptWindow: {
+          mode: promptWindow.policy.mode,
+          pruned: promptWindow.pruned,
+          tokensBefore: promptWindow.tokensBefore,
+          tokensAfter: promptWindow.tokensAfter,
+          promptEntries: promptWindow.promptEntries.length,
+          prunedEntries: promptWindow.prunedEntries.length,
+          autoCompact: promptWindow.autoCompactEvent,
+        },
+        entries: [...persistedEntries, eventEntry],
+      },
+    });
     return;
   }
 

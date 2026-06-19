@@ -49,7 +49,7 @@ const telegram = catalog.entries.find((entry) => entry.id === "telegram");
 if (!telegram?.configured) throw new Error("Telegram not marked configured");
 if (telegram.status !== "not_implemented") throw new Error(`Unexpected telegram status: ${telegram?.status}`);
 const responses = catalog.entries.find((entry) => entry.id === "openresponses");
-if (responses?.status !== "not_validated") throw new Error(`Unexpected OpenResponses status: ${responses?.status}`);
+if (responses?.status !== "available" || responses.enabled !== true) throw new Error(`Unexpected OpenResponses status: ${responses?.status}`);
 const formatted = formatMindStoneChannelCatalog(loaded);
 if (!formatted.includes("Telegram: not implemented/validated yet")) throw new Error("Formatted catalog missing Telegram honest status");
 if (!formatted.includes("diagnostic only")) throw new Error("Formatted catalog missing diagnostic-only warning");

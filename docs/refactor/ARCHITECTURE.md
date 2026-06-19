@@ -497,19 +497,23 @@ Pi agent run proceeds
 Pi transcript archived/indexed at lifecycle boundary
 ```
 
-### 8.2 OpenWebUI prompt
+### 8.2 OpenAI-compatible / OpenResponses prompt
 
 ```text
-OpenWebUI sends POST /v1/chat/completions
+Compatible client sends POST /v1/chat/completions or POST /v1/responses
   ▼
 Gateway authenticates
   ▼
-Gateway resolves agent/session from model/user/header
+Gateway resolves agent/session from model/user/metadata
   ▼
-AgentRunner executes with Core SCRI
+Gateway persists compatible input into the canonical transcript
   ▼
-Gateway returns OpenAI-compatible response or SSE stream
+AgentRunner executes with Core SCRI when routing is configured
+  ▼
+Gateway returns OpenAI-compatible chat completion or non-streaming OpenResponses-style response
 ```
+
+OpenResponses support is currently smoke-validated for non-streaming string/array input and routed mock responses. Full Responses API parity and streaming remain pending.
 
 ### 8.3 Telegram inbound
 

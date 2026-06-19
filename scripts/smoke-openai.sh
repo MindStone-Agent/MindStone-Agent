@@ -32,7 +32,9 @@ config_path = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindsto
 config = json.loads(config_path.read_text())
 gateway = config.setdefault("gateway", {})
 gateway["auth"] = {"mode": "none"}
-gateway.setdefault("http", {}).setdefault("chatCompletions", {})["enabled"] = True
+http = gateway.setdefault("http", {})
+http.setdefault("chatCompletions", {})["enabled"] = True
+http.setdefault("responses", {})["enabled"] = True
 config.setdefault("agents", {}).setdefault("default", {})["defaultModel"] = "mindstone/default"
 config_path.write_text(json.dumps(config, indent=2) + "\n")
 print(config_path)
@@ -74,14 +76,31 @@ await expect(
   501,
   (body) => body.error?.code === "not_implemented" && body.mindstone?.persisted === true && body.mindstone?.entries?.length === 3,
 );
+await expect(
+  "/v1/responses",
+  {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "mindstone/default",
+      metadata: { agentId: "default" },
+      input: "hello responses",
+    }),
+  },
+  501,
+  (body) => body.error?.code === "not_implemented" && body.mindstone?.persisted === true && body.mindstone?.entries?.length === 2,
+);
 const history = await expect("/chat/history", undefined, 200);
 if (history.sessionKey !== sessionKey) process.exit(1);
-if (!Array.isArray(history.entries) || history.entries.length !== 3) process.exit(1);
+if (!Array.isArray(history.entries) || history.entries.length !== 5) process.exit(1);
 if (history.entries[0].role !== "system") process.exit(1);
 if (history.entries[0].source?.substrate !== "openai" || history.entries[0].source?.channel !== "openai-chat-completions") process.exit(1);
 if (history.entries[1].text !== "hello") process.exit(1);
 if (history.entries[1].source?.substrate !== "openai") process.exit(1);
 if (history.entries[2].metadata?.event !== "routing_not_implemented" || history.entries[2].source?.substrate !== "openai") process.exit(1);
+if (history.entries[3].text !== "hello responses") process.exit(1);
+if (history.entries[3].source?.substrate !== "openai" || history.entries[3].source?.channel !== "openai-responses") process.exit(1);
+if (history.entries[4].metadata?.event !== "routing_not_implemented" || history.entries[4].metadata?.source !== "openai-responses") process.exit(1);
 NODE
 
 echo "OpenAI-compatible Gateway smoke test passed."

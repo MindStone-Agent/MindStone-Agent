@@ -231,7 +231,7 @@ The preferred order is:
 - [ ] Preserve or refactor WebSocket `chat.abort`.
 - [ ] Preserve or refactor WebSocket `chat.inject`.
 - [x] Preserve OpenAI-compatible `/v1/chat/completions` for configured mock/Pi routing modes, with placeholder fallback when no provider is configured.
-- [ ] Preserve OpenResponses `/v1/responses`.
+- [x] Preserve non-streaming OpenResponses `/v1/responses` for configured mock/Pi routing modes, with transcript-aware placeholder fallback when no provider is configured.
 - [ ] Add health/status endpoint.
 - [ ] Verify auth behavior and endpoint enable flags.
 - [ ] Add integration tests around HTTP and WebSocket methods.
@@ -246,8 +246,8 @@ The preferred order is:
 ### Exit criteria
 
 - [ ] WebChat can send/history/inject/abort.
-- [ ] OpenAI-compatible HTTP works with curl.
-- [ ] OpenResponses HTTP works with curl.
+- [x] OpenAI-compatible HTTP smoke works for scaffold and mock-routed paths.
+- [x] OpenResponses HTTP smoke works for scaffold and mock-routed non-streaming paths.
 - [ ] Auth failure cases are tested.
 
 ## 7. Phase 5 — Memory, SCRI, and Dream Cycle
@@ -376,7 +376,7 @@ The preferred order is:
   - [x] Canonical single-session default is `agent:default:main`, matching MindStone's `agent:<agentId>:<mainKey>` shape.
   - [x] Legacy `mindstone` session key alias canonicalizes to `agent:default:main`.
   - [x] Gateway REST chat, HTTP RPC chat, WebSocket RPC chat, and OpenAI chat completions default to the configured shared session when `sessionKey` is omitted.
-  - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, routing events, and assistant responses preserve structured transcript source metadata.
+  - [x] Gateway REST chat, RPC chat, OpenAI-compatible chat completions, non-streaming OpenResponses, routing events, and assistant responses preserve structured transcript source metadata.
   - [x] Verified by `npm run smoke:unified-session`.
   - [ ] OpenWebUI, Telegram, WebChat UI, native CLI chat, and Pi adapter validation through the session-backed Pi runner still pending.
 - [ ] Enable Gateway OpenAI-compatible endpoint in local config.
