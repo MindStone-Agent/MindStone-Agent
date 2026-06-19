@@ -43,6 +43,7 @@
     "smoke:config-wizard": "./scripts/smoke-config-wizard.sh",
     "smoke:config-sections": "./scripts/smoke-config-sections.sh",
     "smoke:onboard": "./scripts/smoke-onboard.sh",
+    "smoke:onboard-model-setup": "./scripts/smoke-onboard-model-setup.sh",
     "smoke:config-pi-models": "./scripts/smoke-config-pi-models.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",
     "smoke:auto-recall": "./scripts/smoke-auto-recall.sh",

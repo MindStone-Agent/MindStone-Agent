@@ -498,20 +498,31 @@ async function maybeSetupProviderAuth(params: {
 }): Promise<void> {
   if (params.provider.authStatus?.configured || !params.setupProviderAuth) return;
 
+  await params.prompter.note(
+    [
+      `${params.provider.name} is not connected in this isolated MindStone-Agent runtime yet.`,
+      "Credentials will be stored under this project's .runtime directory, not in your global Pi account state.",
+      supportsSubscriptionLogin(params.provider.id)
+        ? "For subscription providers, MindStone uses Pi's OAuth login flow."
+        : "For API-key providers, you can store an env-var reference or paste a key into the isolated auth file.",
+    ].join("\n"),
+    "Connect account",
+  );
+
   type AuthChoice = "skip" | "login" | "env" | "api_key";
   const authOptions: Array<MindStoneSelectOption<AuthChoice>> = [
-    { value: "skip", label: "Skip auth for now", hint: "model can be selected, live calls will fail until auth exists" },
+    { value: "skip", label: "Skip account connection for now", hint: "you can still choose a model; live calls will fail until auth exists" },
   ];
   if (supportsSubscriptionLogin(params.provider.id)) {
-    authOptions.push({ value: "login", label: "Use subscription/OAuth login", hint: "opens through isolated Pi /login" });
+    authOptions.push({ value: "login", label: "Use subscription/OAuth login", hint: "ChatGPT Plus/Pro, Claude Pro/Max, or Copilot; shows the isolated Pi login step" });
   }
   authOptions.push(
-    { value: "env", label: "Use environment variable reference", hint: `store $${defaultProviderEnvVar(params.provider.id)} in isolated auth.json` },
-    { value: "api_key", label: "Enter API key now", hint: "stored in isolated auth.json" },
+    { value: "env", label: "Use an environment variable", hint: `stores $${defaultProviderEnvVar(params.provider.id)} in isolated auth.json` },
+    { value: "api_key", label: "Paste an API key now", hint: "stored in isolated auth.json with 0600-style permissions" },
   );
 
   const choice = await params.prompter.select<AuthChoice>({
-    message: `${params.provider.name} authentication`,
+    message: `How do you want to connect ${params.provider.name}?`,
     options: authOptions,
     initialValue: supportsSubscriptionLogin(params.provider.id) ? "login" : "env",
   });
@@ -587,7 +598,7 @@ async function choosePiModel(params: {
   const currentProvider = params.current?.includes("/") ? params.current.split("/")[0] : undefined;
   const initialProvider: ProviderChoice = currentProvider && providers.some((provider) => provider.id === currentProvider) ? `provider:${currentProvider}` : params.current ? "current" : "unset";
   const providerChoice = await params.prompter.select<ProviderChoice>({
-    message: "Provider",
+    message: "Choose model provider / account",
     options: providerOptions,
     initialValue: initialProvider,
   });
@@ -599,10 +610,10 @@ async function choosePiModel(params: {
   if (provider?.authStatus && !provider.authStatus.configured) {
     await params.prompter.note(
       [
-        `${provider.name} is not configured in this isolated runtime.`,
+        `${provider.name} is not connected yet.`,
         `Supported setup: ${providerAuthMethod(provider.id)}.`,
       ].join("\n"),
-      "Provider auth",
+      "Model account",
     );
     await maybeSetupProviderAuth({ prompter: params.prompter, provider, setupProviderAuth: params.setupProviderAuth });
   }
@@ -641,7 +652,7 @@ async function choosePiModel(params: {
   let modelOptions = buildModelOptions(shortList, providerModels.length <= 25);
   let initialModel: ModelChoice = params.current && providerModels.some((model) => model.id === params.current) ? `model:${params.current}` : modelOptions[0].value;
   let modelChoice = await params.prompter.select<ModelChoice>({
-    message: `${provider?.name ?? providerId} model`,
+    message: `Choose ${provider?.name ?? providerId} model`,
     options: modelOptions,
     initialValue: initialModel,
   });
@@ -750,6 +761,79 @@ async function configurePiSessionSafety(
   };
 }
 
+async function configureOnboardingModel(
+  config: MindStoneConfig,
+  prompter: MindStonePrompter,
+  options: MindStoneConfigWizardOptions = {},
+): Promise<MindStoneConfig> {
+  await prompter.note(
+    [
+      "MindStone needs a model before chat/TUI can produce real answers.",
+      "The recommended path is a real model through isolated Pi AgentSession. That keeps Pi's harness behavior while storing credentials under this project's .runtime directory.",
+      "If you use ChatGPT Plus/Pro, choose the OpenAI Codex provider when the provider list appears.",
+    ].join("\n"),
+    "Connect a model",
+  );
+
+  type ModelSetupChoice = "connect" | "mock" | "skip";
+  const choice = await prompter.select<ModelSetupChoice>({
+    message: "Do you want to connect a model now?",
+    options: [
+      { value: "connect", label: "Yes — choose provider and model", hint: "recommended; OpenAI/Codex, Claude, Gemini, OpenRouter, etc." },
+      { value: "mock", label: "Use a local mock model for now", hint: "good for testing the UI, but not useful for real answers" },
+      { value: "skip", label: "Skip model setup for now", hint: "MindStone will save transcripts but chat will not produce real model answers" },
+    ],
+    initialValue: config.routing?.mode === "mock" ? "mock" : config.routing?.mode === "pi-session" || config.routing?.mode === "pi" ? "connect" : "connect",
+  });
+
+  if (choice === "skip") return config;
+
+  if (choice === "mock") {
+    return {
+      ...config,
+      routing: {
+        ...config.routing,
+        mode: "mock",
+        defaultAgentId: config.routing?.defaultAgentId ?? "default",
+        defaultModel: config.routing?.defaultModel ?? "mindstone/mock",
+        mock: { ...config.routing?.mock, responsePrefix: config.routing?.mock?.responsePrefix ?? "Mock response" },
+      },
+    };
+  }
+
+  const paths = runtimePathsFromEnv();
+  const defaultModel = await choosePiModel({
+    prompter,
+    current: config.routing?.defaultModel,
+    availableModels: options.availableModels,
+    availableProviders: options.availableProviders,
+    discoveryError: options.modelDiscoveryError,
+    setupProviderAuth: options.setupProviderAuth,
+  });
+
+  if (!defaultModel) {
+    await prompter.note(
+      [
+        "No model was selected, so MindStone will stay in transcript-only setup mode for now.",
+        "Run `mindstone config --section routing` later to connect a model.",
+      ].join("\n"),
+      "Model setup skipped",
+    );
+    return config;
+  }
+
+  return {
+    ...config,
+    routing: {
+      ...config.routing,
+      mode: "pi-session",
+      defaultAgentId: config.routing?.defaultAgentId ?? "default",
+      defaultModel,
+      pi: { ...config.routing?.pi, agentDir: config.routing?.pi?.agentDir ?? paths.piAgentDir },
+    },
+  };
+}
+
 async function configureRouting(
   config: MindStoneConfig,
   prompter: MindStonePrompter,
@@ -758,14 +842,14 @@ async function configureRouting(
   const paths = runtimePathsFromEnv();
   const routing = config.routing ?? {};
   const mode = await prompter.select<NonNullable<MindStoneRoutingConfig["mode"]>>({
-    message: "Provider mode",
+    message: "How should MindStone answer messages?",
     options: [
-      { value: "placeholder", label: "No model yet", hint: "safe setup mode; record transcripts only" },
-      { value: "mock", label: "Mock test model", hint: "deterministic local responses for testing" },
-      { value: "pi-session", label: "Pi AgentSession", hint: "session-backed Pi runner; preserves Pi harness features" },
-      { value: "pi", label: "Pi raw provider scaffold", hint: "advanced/fallback; bypasses AgentSession" },
+      { value: "pi-session", label: "Connect a real model", hint: "recommended; choose OpenAI/Codex, Claude, Gemini, etc. through isolated Pi" },
+      { value: "placeholder", label: "Not yet — save transcripts only", hint: "safe setup mode; no model calls" },
+      { value: "mock", label: "Use a mock test model", hint: "deterministic local responses for testing the UI" },
+      { value: "pi", label: "Advanced: raw Pi provider fallback", hint: "bypasses AgentSession; not recommended for normal use" },
     ],
-    initialValue: routing.mode ?? "placeholder",
+    initialValue: routing.mode && routing.mode !== "placeholder" ? routing.mode : "pi-session",
   });
 
   const nextRouting: MindStoneRoutingConfig = {
@@ -796,10 +880,10 @@ async function configureRouting(
   }
 
   const advanced = await prompter.select<"done" | "advanced">({
-    message: "Routing setup",
+    message: "Model setup options",
     options: [
-      { value: "done", label: "Done", hint: "use these routing settings" },
-      { value: "advanced", label: "Advanced routing options", hint: "agent id, Pi runtime path, mock label/prefix" },
+      { value: "done", label: "Done", hint: "use these model settings" },
+      { value: "advanced", label: "Advanced options", hint: "agent id, Pi runtime path, mock label/prefix" },
     ],
     initialValue: "done",
   });
@@ -1335,18 +1419,30 @@ async function chooseOnboardingPreferences(
     : undefined;
 
   const memoryStyle = await prompter.select<MindStoneMemoryStyle>({
-    message: "Memory/checkpoint style",
+    message: "How should MindStone remember things?",
     options: [
-      { value: "propose_checkpoint_memories", label: "Propose checkpoint memories", hint: "suggest durable memories during checkpoints" },
-      { value: "minimal", label: "Minimal", hint: "remember only clearly durable project/user facts" },
-      { value: "ask_each_time", label: "Ask each time", hint: "confirm before treating anything as memory-worthy" },
+      { value: "propose_checkpoint_memories", label: "Suggest memories at checkpoints", hint: "recommended; MindStone proposes what seems worth remembering and you approve it" },
+      { value: "minimal", label: "Remember very little", hint: "only clearly durable project/user facts" },
+      { value: "ask_each_time", label: "Ask before every memory", hint: "confirm before treating anything as memory-worthy" },
     ],
     initialValue: current?.memoryStyle ?? "propose_checkpoint_memories",
   });
 
+  await prompter.note(
+    [
+      "The next prompt is a plain text field, not an arrow-key menu.",
+      "Write one or two sentences about what you are using MindStone for right now.",
+      "Examples:",
+      "- Building a TypeScript agent framework with Pi and Gateway surfaces.",
+      "- Personal research assistant for climate-policy papers; prefer concise summaries.",
+      "- Security engineering work; do not change infrastructure without approval.",
+      "You can leave it blank and add it later.",
+    ].join("\n"),
+    "Work context help",
+  );
   const projectContext = markdownEscape(await prompter.text({
-    message: "Project/domain context",
-    placeholder: current?.projectContext ?? "active projects, domain, collaboration context, important constraints...",
+    message: "What are you working on? (optional)",
+    placeholder: current?.projectContext ?? "one or two sentences about the project/domain and important constraints",
     initialValue: current?.projectContext ?? "",
   }));
 
@@ -1524,16 +1620,24 @@ async function createOnboardingIdentityFiles(params: {
   await params.prompter.note(preferenceLines.join("\n"), "User preference seed");
   await params.prompter.note(identityLines.join("\n"), "Identity emergence seed");
 
+  await params.prompter.note(
+    [
+      "The next two text prompts seed the first IDENTITY.md and USER.md files.",
+      "Keep them short. You can edit the files later.",
+      "If you are not sure, write the immediate job you want the agent to help with first.",
+    ].join("\n"),
+    "First activation seed",
+  );
   const purpose = markdownEscape(
     await params.prompter.text({
-      message: `What should this ${profile?.label ?? "MindStone agent"} help with first?`,
-      placeholder: profileDefinition?.purposeSeed ?? "software engineering, research, operations, personal assistant...",
+      message: `First job for this ${profile?.label ?? "MindStone agent"} (optional)`,
+      placeholder: profileDefinition?.purposeSeed ?? "example: help build a TypeScript agent framework on Pi",
     }),
   );
   const userContext = markdownEscape(
     await params.prompter.text({
-      message: "Important user/project context for first activation",
-      placeholder: "preferences, boundaries, project facts, collaboration style...",
+      message: "Anything important it should know before the first chat? (optional)",
+      placeholder: "example: prefer direct answers; ask before destructive changes; current project is...",
     }),
   );
 
@@ -1648,6 +1752,18 @@ export async function runMindStoneOnboardingWizard(
     "Runtime isolation",
   );
 
+  await prompter.note(
+    [
+      "Onboarding will walk through four things:",
+      "1. What kind of agent you want.",
+      "2. How you prefer it to work with you.",
+      "3. Whether to connect a model/account now.",
+      "4. A first identity/user-context scaffold.",
+      "Arrow-key menus are choices. Text prompts are optional notes you can leave blank unless marked otherwise.",
+    ].join("\n"),
+    "Onboarding workflow",
+  );
+
   const loadedForProfile = loadMindStoneConfig(configPath);
   if (loadedForProfile.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loadedForProfile.error}`);
   const selectedProfile = await chooseOnboardingProfile(loadedForProfile.config ?? {}, prompter);
@@ -1657,10 +1773,10 @@ export async function runMindStoneOnboardingWizard(
   const mode =
     options.onboardingMode ??
     (await prompter.select<MindStoneOnboardingMode>({
-      message: "Onboarding mode",
+      message: "Setup depth",
       options: [
-        { value: "quickstart", label: "QuickStart", hint: "safe local defaults; only ask identity/user seed" },
-        { value: "manual", label: "Manual", hint: "configure workspace, gateway, routing, context, memory, and identity paths" },
+        { value: "quickstart", label: "Recommended setup", hint: "safe defaults, model connection, then identity/user seed" },
+        { value: "manual", label: "Advanced setup", hint: "edit workspace, Gateway, model routing, context, memory, identity paths, and channels" },
       ],
       initialValue: "quickstart",
     }));
@@ -1670,9 +1786,10 @@ export async function runMindStoneOnboardingWizard(
     const loaded = loadMindStoneConfig(configPath);
     if (loaded.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loaded.error}`);
     const before = loaded.config ?? {};
-    const after = withDefaultOnboardingConfig(
+    const defaulted = withDefaultOnboardingConfig(
       applyOnboardingIdentity(applyOnboardingPreferences(applySelectedProfile(before, selectedProfile), selectedPreferences), selectedIdentity),
     );
+    const after = await configureOnboardingModel(defaulted, prompter, options);
     await prompter.note(formatConfigSummary(after), loaded.exists ? "QuickStart existing/defaulted config" : "QuickStart config");
     const issues = validateMindStoneConfig(after);
     if (issues.length > 0) {

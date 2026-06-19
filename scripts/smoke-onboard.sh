@@ -28,6 +28,7 @@ const selects = [
   "none",
   "defer",
   "quickstart",
+  "skip",
 ];
 const confirms = [true, true];
 

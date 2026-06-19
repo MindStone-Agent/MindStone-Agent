@@ -283,12 +283,13 @@ function setupProviderAuth(request: MindStoneProviderAuthSetupRequest): string |
   const paths = runtimePathsFromEnv();
   if (request.mode === "login") {
     return [
-      "Subscription/OAuth login is handled by isolated Pi.",
-      "After this wizard, run:",
+      "Subscription/OAuth login is handled by isolated Pi and cannot be completed inside this terminal wizard yet.",
+      "To finish connecting this account, run this in the MindStone-Agent checkout:",
       `  ./scripts/pi-agent`,
-      "Then inside Pi:",
+      "Then inside Pi, type:",
       `  /login ${request.providerId}`,
-      "This will store OAuth credentials in the isolated MindStone-Agent Pi auth file.",
+      "The credentials will be stored in the isolated MindStone-Agent Pi auth file under .runtime/pi-agent/auth.json.",
+      "After login, run `mindstone config --section routing` if you want to re-select or verify the model.",
     ].join("\n");
   }
 
