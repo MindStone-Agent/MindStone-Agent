@@ -1,52 +1,90 @@
 # MindStone-Agent
 
-MindStone-Agent is the rebuild track for MindStone proper on the current Pi base.
+🔶 **Persistent AI agents with identity, memory, recall, and shared continuity across surfaces.**
 
-This repository vendors upstream Pi under `vendor/pi` and layers MindStone Core, Gateway, adapters, memory/SCRI, and channel integrations around it.
+MindStone-Agent is a local-first agent harness for building AI collaborators that keep their identity, history, working context, and accumulated judgment across sessions. It combines a native CLI/TUI, a local Gateway, structured memory, append-only transcripts, Auto Recall, context management, and Pi-backed model execution inside an isolated runtime.
 
-## Documentation
+MindStone-Agent is not just a chat wrapper. It is a continuity substrate: the transcript is authoritative history, the prompt is a managed working set, and memory is a layered system rather than a single retrieval feature.
 
-- [Refactor PRD](docs/refactor/PRD.md)
-- [Refactor Design](docs/refactor/DESIGN.md)
-- [Refactor Architecture](docs/refactor/ARCHITECTURE.md)
-- [Context Management](docs/refactor/CONTEXT_MANAGEMENT.md)
-- [Implementation Plan](docs/refactor/IMPLEMENTATION_PLAN.md)
-- [Upstream Pi Strategy](docs/upstream/PI_BASE_STRATEGY.md)
-- [Runtime Isolation Model](docs/operations/ISOLATION.md)
-- [Gateway API Reference](docs/gateway/API_REFERENCE.md)
-- [OpenWebUI Setup Prep](docs/gateway/OPENWEBUI.md)
+## Why MindStone-Agent exists
 
-## Runtime Isolation
+Most AI agent sessions start over. Context windows fill, summaries flatten the work, and the next session has to infer what mattered from a lossy snapshot. Retrieval helps, but retrieval alone does not create continuity.
 
-Do not run bare `pi` for this project. Use:
+MindStone-Agent is designed for agents that should become better collaborators over time:
 
-```bash
-./scripts/pi-agent
-```
+- know their role and operating rules;
+- remember the human or organization they work with;
+- preserve an append-only record of what happened;
+- promote durable decisions and lessons into structured memory;
+- automatically recall relevant prior context before inference;
+- manage live context without deleting history;
+- expose Gateway, WebChat, CLI, TUI, and API surfaces over the same continuity substrate.
 
-MindStone-Agent uses project-local runtime state under `.runtime/` and does not share `~/.pi/agent` with Slate/MS4PI or the user's global Pi install.
+## Core ideas
 
-Check isolation paths with:
+### Layered continuity
 
-```bash
-./scripts/show-isolation.sh
-```
+MindStone-Agent treats memory as multiple cooperating layers:
 
-## Upstream Pi Base
+1. **Identity and standing context** — `IDENTITY.md`, `USER.md`, agent profile, and role/project rules.
+2. **Authoritative history** — append-only JSONL transcripts with source metadata.
+3. **Structured memory** — curated memory files, journals, `LOG.md`, and a memory index.
+4. **Auto Recall** — automatic pre-inference recall from memory and transcript sources.
+5. **Live context management** — sliding-window prompt selection and compaction-aware handoff paths.
+6. **Gateway and surfaces** — CLI, TUI, WebChat, REST, RPC, WebSocket, OpenAI-compatible, and OpenResponses-compatible APIs.
+7. **Checkpoint and handoff discipline** — durable continuity across compaction, interruption, and session restart.
 
-Upstream Pi is tracked under:
+### Auto Recall
+
+Auto Recall is not the agent deciding to run a search. It is an automatic continuity step between the user prompt and model inference. The current prompt, task, role, project, and channel become retrieval cues; relevant memory/transcript chunks are ranked and injected into the model’s working context before the model answers.
+
+Manual memory search can still exist, but Auto Recall is the substrate bringing the relevant past forward before the turn begins.
+
+### Authoritative transcripts
+
+The transcript is history. The prompt is a working set.
+
+MindStone-Agent can prune, summarize, compact, or rebuild the live prompt, but those operations must not silently rewrite or delete the append-only transcript. This keeps recovery, audit, and re-indexing possible.
+
+## Current status
+
+MindStone-Agent is in active development and is close to MVP validation. The non-live native MVP path is implemented and smoke-tested:
 
 ```text
-vendor/pi
+fresh isolated runtime
+→ package-bin mindstone chat
+→ in-place routing setup
+→ transcript persistence
+→ TUI history continuity
 ```
 
-Preferred update method is git subtree, documented in `docs/upstream/PI_BASE_STRATEGY.md`.
+Verified areas include:
 
-## Native Setup
+- isolated runtime under `.runtime/`, separate from global `~/.pi/agent`;
+- native `mindstone` CLI;
+- onboarding/config/auth flows;
+- `mindstone chat` and styled `mindstone tui`;
+- Gateway management through `mindstone gateway ...`;
+- REST chat, HTTP RPC, WebSocket RPC, OpenAI-compatible chat completions, and non-streaming OpenResponses-compatible endpoints;
+- built-in WebChat shell;
+- canonical shared session key `agent:default:main`;
+- append-only transcript store with source metadata;
+- file-backed memory, journals, LOG, SQLite indexing, embedding backfill, recall ranking, and maintenance commands;
+- Pi adapter commands/tools/hooks for Pi-side use;
+- Pi `AgentSession` / `SessionManager` execution path scaffolded for live model use;
+- non-live smoke suite and native MVP spine validation.
 
-### Curl installer
+Remaining MVP proof gates are live authenticated Pi-session validation and live compaction validation with isolated credentials.
 
-For a normal user install from the public repository:
+## Media and demos
+
+- YouTube channel: <https://www.youtube.com/@MindStoneAgent>
+- Videos playlist: <https://www.youtube.com/playlist?list=PLFgIjBvcsqPrZPVf5AIH0gBQXUvvk4gkG>
+- First video: <https://www.youtube.com/watch?v=kMPmOvRrg2c>
+
+## Quick start
+
+### Install from the public repository
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install.sh | bash
@@ -60,9 +98,9 @@ curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/mai
   bash -s -- --dir "$HOME/Projects/MindStone-Agent"
 ```
 
-By default the installer clones/updates the repo under `~/.mindstone-agent/MindStone-Agent`, runs `npm install`, builds the vendored Pi base, initializes isolated runtime directories, and runs `npm link` so `mindstone` is on PATH. Use `--no-link` to skip global linking and run `./node_modules/.bin/mindstone` from the checkout instead.
+The installer clones or updates the repository, installs dependencies, builds the vendored Pi base, initializes isolated runtime directories, and links the `mindstone` CLI onto your PATH unless `--no-link` is used.
 
-### Clone-from-source install
+### Install from source
 
 ```bash
 git clone https://github.com/MindStone-Agent/MindStone-Agent.git
@@ -73,68 +111,137 @@ npm run link:cli
 mindstone onboard
 ```
 
-This builds the vendored Pi base and initializes isolated project-local config/session/data directories without overwriting existing runtime files.
-
-## Docker Setup
-
-Build and validate the isolated Pi runtime:
-
-```bash
-docker compose build
-docker compose run --rm mindstone-agent-pi --version
-```
-
-Run the Gateway inside the container:
-
-```bash
-docker compose run --rm --entrypoint ./scripts/start-gateway.sh mindstone-agent-pi
-```
-
-Docker uses MindStone-Agent-specific named volumes. It must not mount host `~/.pi/agent`.
-
-## MindStone Overlay Packages
-
-MindStone-owned packages live outside the vendored Pi tree:
-
-```text
-packages/mindstone-core
-packages/mindstone-gateway
-packages/mindstone-pi-adapter
-packages/mindstone-cli
-```
-
-Build them with:
-
-```bash
-npm run build:mindstone
-```
-
-Configure, onboard, or connect model accounts through the `mindstone` CLI:
-
-```bash
-mindstone status
-mindstone config
-mindstone onboard
-mindstone auth login openai-codex
-```
-
-For source checkouts, link the CLI intentionally after install/build:
-
-```bash
-npm run link:cli
-```
-
-Without global linking, the workspace package exposes the same bin under `node_modules/.bin` after `npm install`:
+For an unlinked checkout, use:
 
 ```bash
 ./node_modules/.bin/mindstone status
 ```
 
-`config` edits selected runtime config sections. `onboard` is the first-run flow: risk acknowledgement, runtime isolation display, QuickStart vs Manual setup, optional model/account connection, and non-overwriting identity/user scaffold creation. QuickStart applies safe local defaults while still offering model setup. Manual walks every core config section. When a real model is selected, the CLI discovers isolated Pi providers, shows provider auth status/method, connects subscription/OAuth accounts through MindStone's embedded auth flow, then presents models only for the selected provider as arrow-key choices.
+## First run
 
-The package bin bootstraps the same project-local isolation environment as the old script wrappers. Override the config path for safe testing with `MINDSTONE_AGENT_CONFIG=/path/to/config.test.json`.
+The recommended first-run flow is:
 
-Manage the local Gateway through the public CLI:
+```bash
+mindstone onboard
+```
+
+Onboarding walks through:
+
+- risk notice and runtime isolation;
+- QuickStart vs manual setup;
+- provider-first model/account setup;
+- optional embedded OAuth login through isolated Pi auth;
+- profile selection;
+- collaboration preferences;
+- memory/checkpoint preferences;
+- initial identity/user scaffold creation.
+
+You can reconfigure later without rerunning the full flow:
+
+```bash
+mindstone config
+mindstone config --section routing
+mindstone config --sections gateway,memory
+```
+
+Connect a provider account through MindStone’s isolated auth path:
+
+```bash
+mindstone auth login openai-codex
+```
+
+MindStone-Agent does not require or use your global Pi auth directory for its normal runtime. Credentials are stored under the project/runtime isolation path.
+
+## Runtime isolation
+
+MindStone-Agent keeps runtime state isolated from global Pi and from other MindStone-family agents.
+
+Default local paths:
+
+```text
+.runtime/pi-agent      # isolated Pi agent config/auth/packages
+.runtime/pi-sessions   # isolated Pi session files
+.runtime/mindstone     # MindStone config, transcripts, memory, vectors, agents
+```
+
+Check the active isolation paths with:
+
+```bash
+mindstone status
+./scripts/show-isolation.sh
+```
+
+For development, use the project wrapper instead of bare global Pi:
+
+```bash
+./scripts/pi-agent
+```
+
+## CLI commands
+
+```bash
+mindstone chat
+mindstone chat --once "hello"
+mindstone tui
+mindstone status
+mindstone doctor
+mindstone onboard
+mindstone config
+mindstone auth login openai-codex
+mindstone channels
+mindstone identity activate
+mindstone memory status
+mindstone memory backfill --embed
+mindstone memory maintain
+```
+
+The CLI is designed to avoid setup dead-ends. If `mindstone chat` or `mindstone tui` starts while routing is still unconfigured, it can launch model/routing setup in place.
+
+## Native chat and TUI
+
+Start a terminal chat over the canonical MindStone session:
+
+```bash
+mindstone chat
+```
+
+Send one turn and print the result:
+
+```bash
+mindstone chat --once "What do you remember about this project?"
+```
+
+Start the styled TUI:
+
+```bash
+mindstone tui
+```
+
+The TUI includes transcript history, live assistant updates, runner/substrate event lines, and read-only panels such as:
+
+```text
+/status
+/config
+/gateway
+/pi
+/transcript
+/memory
+/context
+/doctor
+/handoff
+/identity
+/events
+/runs
+/sessions
+/agents
+/models
+```
+
+## Gateway
+
+MindStone-Agent includes a local Gateway for WebChat and API surfaces.
+
+Manage it through the CLI:
 
 ```bash
 mindstone gateway status
@@ -142,11 +249,6 @@ mindstone gateway start
 mindstone gateway restart
 mindstone gateway stop
 mindstone gateway logs
-```
-
-For foreground/debug operation:
-
-```bash
 mindstone gateway run
 ```
 
@@ -157,24 +259,39 @@ mindstone gateway install
 mindstone gateway uninstall
 ```
 
-Then check health/status:
+Default endpoint:
+
+```text
+http://127.0.0.1:19789
+```
+
+Health/status:
 
 ```bash
 curl http://127.0.0.1:19789/health
 curl http://127.0.0.1:19789/status
 ```
 
-The legacy development path still exists as `npm run start:gateway`, but MVP/product workflows should use `mindstone gateway ...`.
-
-The Gateway exposes the old MindStone/WebChat method-name bridge over both HTTP and WebSocket:
+The Gateway supports:
 
 ```text
+GET  /health
+GET  /status
+GET  /webchat
+GET  /chat/sessions
+GET  /chat/history
+POST /chat/inject
+POST /chat/send
+POST /chat/abort
 POST /rpc
 WS   /rpc
 WS   /ws
+GET  /v1/models
+POST /v1/chat/completions
+POST /v1/responses
 ```
 
-Current RPC methods:
+RPC method names:
 
 ```text
 chat.sessions
@@ -184,40 +301,92 @@ chat.send
 chat.abort
 ```
 
-The Gateway also serves a thin built-in MindStone WebChat shell:
+Gateway authentication supports `none`, `token`, and `password`. `/health` remains unauthenticated for liveness checks; other endpoints enforce the configured auth mode.
+
+See:
 
 ```text
-GET /webchat
+docs/gateway/API_REFERENCE.md
+docs/gateway/OPENWEBUI.md
 ```
 
-The page is a native MindStone surface over the Gateway WebChat REST endpoints, not OpenWebUI. Leave the session key blank in the UI to use the canonical shared default:
+## Built-in WebChat
+
+The Gateway serves a thin built-in WebChat shell:
+
+```text
+http://127.0.0.1:19789/webchat
+```
+
+Leave the session key blank to use the canonical default:
 
 ```text
 agent:default:main
 ```
 
-When routing is configured, WebChat sends through the same provider path as other Gateway surfaces and appends assistant responses to the canonical transcript. Routed calls now inject the configured agent `IDENTITY.md` and `USER.md` as standing system context before transcript/SCRI context. `npm run smoke:webchat-ui` validates the built-in shell plus a mock-routed assistant response with identity context and `gateway-rest` / `webchat` / `internal` source metadata.
+WebChat is a native MindStone Gateway surface. It uses the same configured routing, identity context, memory recall, and append-only transcript path as CLI/TUI/Gateway calls.
 
-The static UI shell is served without auth so a browser can load it directly; configured Gateway auth still applies to transcript/status/chat API calls from the page. `mindstone status` reports the WebChat URL, default session key, and source metadata, and `mindstone doctor` checks WebChat shell/session readiness.
+## Sessions and transcripts
 
-The default MindStone-Agent Gateway port is `19789` to avoid colliding with existing MindStone/Pi services that may use `18789`.
-
-Gateway authentication is configured in the isolated MindStone config file. `/health` remains unauthenticated for liveness checks. Other endpoints enforce the configured auth mode:
+MindStone-Agent defaults to a single shared session:
 
 ```json
 {
-  "gateway": {
-    "auth": {
-      "mode": "token",
-      "tokenEnv": "MINDSTONE_AGENT_GATEWAY_TOKEN"
-    }
+  "session": {
+    "mode": "single",
+    "defaultSessionKey": "agent:default:main"
   }
 }
 ```
 
-Supported initial modes are `none`, `token`, and `password`. Tokens are accepted via `Authorization: Bearer <token>` or `X-MindStone-Token`. Password mode accepts HTTP Basic auth or `X-MindStone-Password`.
+The legacy alias `mindstone` canonicalizes to `agent:default:main` for compatibility.
 
-MindStone-Agent context management is configured independently from Gateway auth/API flags. MindStone proper defaults to sliding-window pruning, while Pi/Claude-style auto-compaction remains available as a selectable policy:
+Supported surfaces append to the same canonical transcript by default while preserving source metadata, so the agent can maintain one continuity stream across CLI, TUI, Gateway, WebChat, OpenAI-compatible clients, and future channels.
+
+## Memory and recall
+
+MindStone-Agent initializes a MindStone-style memory substrate:
+
+```text
+LOG.md
+memory/MEMORY.md
+memory/
+journals/
+vectors/memory.sqlite
+transcripts/
+```
+
+Useful commands:
+
+```bash
+mindstone memory status
+mindstone memory backfill
+mindstone memory backfill --embed
+mindstone memory backfill --maintain --dedupe-text
+mindstone memory maintain
+mindstone memory maintain --dry-run
+```
+
+Memory features currently include:
+
+- file-backed memory docs and journals;
+- LOG and MEMORY index discovery;
+- SQLite chunk indexing;
+- OpenAI-compatible embedding provider interface;
+- local Ollama default such as `ollama:nomic-embed-text`;
+- embedding-backed recall with JS cosine fallback;
+- lexical fallback when embeddings/vector support are unavailable;
+- source-aware ranking and deduplication;
+- status/doctor/TUI visibility;
+- maintenance for stale/orphaned/duplicate/bloated index state.
+
+Native sqlite-vec nearest-neighbor search is planned when the extension is available and packaged. Until then, MindStone-Agent reports the active backend as `sqlite-vec`, `js-cosine`, or `lexical` depending on local capability.
+
+## Context management
+
+MindStone-Agent separates live prompt management from authoritative history.
+
+Default mode:
 
 ```json
 {
@@ -231,7 +400,7 @@ MindStone-Agent context management is configured independently from Gateway auth
 }
 ```
 
-Alternative auto-compact mode:
+Optional auto-compact mode:
 
 ```json
 {
@@ -245,39 +414,40 @@ Alternative auto-compact mode:
 }
 ```
 
-Routing is selectable. The safe default is `placeholder`, which persists transcript entries and returns explicit not-implemented responses. `mock` enables deterministic local routing for tests. `pi` uses the isolated vendored Pi model registry/provider stack when isolated auth/model config is present. The native CLI can discover isolated Pi provider/model metadata, guide provider-first selection, and write the selected model into `routing.defaultModel`.
+Sliding-window pruning affects the live prompt only. The append-only transcript remains the source of truth.
 
-```json
-{
-  "routing": {
-    "mode": "placeholder",
-    "defaultAgentId": "default",
-    "defaultModel": "mindstone/default"
-  }
-}
-```
+## Routing and models
 
-Mock router smoke config:
+Routing modes:
+
+- `placeholder` — safe default; persists transcript entries and returns explicit setup/not-configured responses.
+- `mock` — deterministic local responses for testing.
+- `pi-session` — session-backed Pi `AgentSession` / `SessionManager` execution with isolated Pi auth/config.
+- `pi` — lower-level Pi provider compatibility path.
+
+Example mock routing:
 
 ```json
 {
   "routing": {
     "mode": "mock",
+    "defaultAgentId": "default",
     "defaultModel": "mindstone/mock",
     "mock": {
-      "responsePrefix": "router-smoke"
+      "responsePrefix": "Mock response"
     }
   }
 }
 ```
 
-Pi-backed router config should point at isolated Pi state, not global `~/.pi/agent`:
+Example Pi-session routing:
 
 ```json
 {
   "routing": {
-    "mode": "pi",
-    "defaultModel": "openai-codex/gpt-5.5",
+    "mode": "pi-session",
+    "defaultAgentId": "default",
+    "defaultModel": "openai-codex/openai-codex/gpt-5.4-mini",
     "pi": {
       "agentDir": ".runtime/pi-agent"
     }
@@ -285,50 +455,132 @@ Pi-backed router config should point at isolated Pi state, not global `~/.pi/age
 }
 ```
 
-The Gateway also has an initial OpenAI-compatible skeleton gated by config:
+Use the config/onboarding flow to choose provider → auth method → model rather than editing this by hand:
 
-```json
-{
-  "gateway": {
-    "http": {
-      "chatCompletions": {
-        "enabled": true
-      }
-    }
-  }
-}
+```bash
+mindstone config --section routing
 ```
 
-Currently verified:
+## Pi adapter
 
-- `GET /v1/models` returns configured MindStone model metadata.
-- `POST /v1/chat/completions` persists compatible input messages to the transcript store, records a routing-not-implemented event, and returns a structured `501 not_implemented` error until real MindStone routing is connected.
+MindStone-Agent includes a Pi adapter package for Pi-side commands, tools, and lifecycle hooks.
 
-## Status
+Current Pi adapter command surface includes:
 
-Initial foundation in progress. Not production-ready.
+```text
+/mindstone-setup
+/mindstone-config
+/mindstone-status
+/mindstone-agent-status
+/mindstone-context
+/mindstone-gateway-status
+/mindstone-channels
+/mindstone-transcript-status
+/mindstone-recall-status
+/mindstone-recall-search <query> [--limit N]
+```
 
-Verified so far:
+Read-only tools include memory status/search/read and transcript status. Lifecycle hooks append conservative sanitized marker events; they do not persist raw private Pi summaries/details/messages.
 
-- Runtime initializer creates missing isolated config/identity/user placeholders without overwriting existing files.
-- Gateway auth enforcement supports verified `none`, `token`, and `password` modes.
-- OpenAI-compatible Gateway skeleton exposes verified `/v1/models` and explicit-not-implemented `/v1/chat/completions` behavior.
-- File-backed JSONL transcript storage under the isolated transcript directory supports append/read/list and reports aggregate counts in `/status`.
-- Core context-management supports selectable `auto_compact` and `sliding_window` modes.
-- Sliding-window prompt selection is implemented and smoke-tested; Gateway send/completions paths record `context_window_pruned` transcript events when pruning occurs.
-- Router/provider abstraction is implemented with safe `placeholder`, test `mock`, and isolated Pi-backed provider modes. Mock routing is smoke-tested end-to-end; Pi provider config discovery is smoke-tested without live credential use.
-- Gateway-native chat primitives are verified:
-  - `GET /chat/sessions`
-  - `GET /chat/history?sessionKey=...`
-  - `POST /chat/inject`
-  - `POST /chat/send` persists the user message and returns explicit `501 not_implemented` until routing exists
-  - `POST /chat/abort` records an abort event through the Gateway run-manager abstraction and reports no active run until routing starts real runs
-  - `POST /rpc` supports old-style Gateway method names: `chat.sessions`, `chat.history`, `chat.inject`, `chat.send`, and `chat.abort`
-  - WebSocket RPC on `/rpc` and `/ws` uses the same method executor as HTTP `POST /rpc`
-- Native isolated Pi wrapper starts and reports `0.79.4`.
-- Native MindStone overlay packages build.
-- Native Gateway `/health` responds on `19789`.
-- Docker image builds vendored Pi and MindStone overlay packages.
-- Docker isolated Pi wrapper starts and reports `0.79.4`.
-- Docker Gateway `/health` and `/status` respond inside the container.
-- Native and Docker Pi package registration discover `/mindstone-agent-status` through RPC `get_commands`.
+## Skills and channels
+
+List available channel/surface status without starting listeners:
+
+```bash
+mindstone channels
+```
+
+List built-in skill surfaces:
+
+```bash
+mindstone skill list
+```
+
+Generate an Integration Builder brief:
+
+```bash
+mindstone skill integration-builder \
+  --name "Telegram incident notifier" \
+  --kind channel \
+  --goal "Send approved incident summaries to an allowlisted Telegram chat"
+```
+
+External channel setup flows such as Telegram/Discord/Slack/Signal are planned; the current catalog is intentionally non-mutating and honest about validation status.
+
+## Docker
+
+Build and validate the isolated runtime:
+
+```bash
+docker compose build
+docker compose run --rm mindstone-agent-pi --version
+```
+
+Run the Gateway inside the container:
+
+```bash
+docker compose run --rm --entrypoint ./scripts/start-gateway.sh mindstone-agent-pi
+```
+
+Docker uses MindStone-Agent-specific named volumes and must not mount host `~/.pi/agent`.
+
+## Development and validation
+
+Build MindStone packages:
+
+```bash
+npm run build:mindstone
+```
+
+Common smoke tests:
+
+```bash
+npm run smoke:mvp-native
+npm run smoke:gateway-cli
+npm run smoke:webchat-ui
+npm run smoke:unified-session
+npm run smoke:cli-chat
+npm run smoke:cli-chat-recall
+npm run smoke:tui
+npm run smoke:doctor
+npm run smoke:memory-backfill
+npm run smoke:pi-session-runner
+```
+
+Live Pi-session validation is opt-in and uses isolated credentials only:
+
+```bash
+MINDSTONE_PI_SESSION_LIVE=1 \
+MINDSTONE_PI_SESSION_LIVE_MODEL='openai-codex/openai-codex/gpt-5.4-mini' \
+  npm run smoke:pi-session-live
+```
+
+Live compaction validation is a second opt-in step:
+
+```bash
+MINDSTONE_PI_SESSION_LIVE=1 \
+MINDSTONE_PI_SESSION_LIVE_COMPACT=1 \
+MINDSTONE_PI_SESSION_LIVE_MODEL='openai-codex/openai-codex/gpt-5.4-mini' \
+  npm run smoke:pi-session-live
+```
+
+Do not run live validation unless you intentionally want to use configured model credentials.
+
+## Documentation
+
+Current operational docs:
+
+- [Runtime Isolation Model](docs/operations/ISOLATION.md)
+- [Gateway API Reference](docs/gateway/API_REFERENCE.md)
+- [OpenWebUI Setup Prep](docs/gateway/OPENWEBUI.md)
+- [Upstream Pi Strategy](docs/upstream/PI_BASE_STRATEGY.md)
+
+Additional design and planning notes live under `docs/`.
+
+## License
+
+See [LICENSE](LICENSE).
+
+---
+
+Built by Clint Bodungen and the MindStone agents.
