@@ -9,6 +9,7 @@ import { listTranscriptSessions } from "../transcript/index.js";
 import { discoverMindStonePersonas, personasDirFromConfig, resolveMindStonePersona } from "../persona/index.js";
 import { discoverMindStoneSkills, skillsDirFromConfig } from "../skills/index.js";
 import { discoverMindStoneKnowledgebases, knowledgebasesDirFromConfig } from "../knowledgebase/index.js";
+import { getConnectorVisibilityStatuses, type ConnectorVisibilityStatus } from "../channels/index.js";
 import { resolveConfiguredSessionKey } from "../routing/session.js";
 import { getMindStoneGatewayStatus, type MindStoneGatewayStatus } from "./gateway.js";
 import { getPiSessionSafetyStatus, type PiSessionSafetyStatus } from "./pi-session-safety.js";
@@ -75,6 +76,7 @@ export type MindStoneSystemStatus = {
     brokenCount: number;
     entryCount: number;
   };
+  connectors: ConnectorVisibilityStatus[];
 };
 
 function summarizeAgents(loadedConfig: LoadedMindStoneConfig): MindStoneAgentStatus[] {
@@ -165,5 +167,6 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
         entryCount: knowledgebases.reduce((total, kb) => total + kb.entryCount, 0),
       };
     })(),
+    connectors: getConnectorVisibilityStatuses(loadedConfig.config, { env, paths }),
   };
 }

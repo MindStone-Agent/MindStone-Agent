@@ -980,12 +980,16 @@ function printChannels(json = false): void {
   output.write("\n");
 }
 
-function printStatus(): void {
+function printStatus(json = false): void {
   const paths = runtimePathsFromEnv();
   const configPath = resolveConfigPath();
   const loaded = loadMindStoneConfig(configPath);
   const handoff = getCurrentHandoffStatus(paths);
   const status = getMindStoneSystemStatus();
+  if (json) {
+    output.write(`${JSON.stringify(status, null, 2)}\n`);
+    return;
+  }
   output.write(`${gold("🔶 MindStone-Agent status")}\n\n`);
   output.write(
     [
@@ -1019,6 +1023,14 @@ function printStatus(): void {
       `Pi-session safeguard fallback: ${status.piSessionSafety.compaction.safeguardFallback}`,
       `Personas: ${status.personas.count} discovered${status.personas.brokenCount ? ` (${status.personas.brokenCount} broken)` : ""} at ${status.personas.dir}`,
       `Persona active: ${status.personas.resolvedForDefaultSession ? `${status.personas.resolvedForDefaultSession.personaId} (${status.personas.resolvedForDefaultSession.reason})` : "none"}${status.personas.routeRules ? ` · ${status.personas.routeRules} route rule(s)` : ""}`,
+      `Skills: ${status.skills.builtinCount} builtin · ${status.skills.installedCount} installed · ${status.skills.draftCount} draft${status.skills.brokenCount ? ` · ${status.skills.brokenCount} broken` : ""}`,
+      `Knowledgebases: ${status.knowledgebases.count} (${status.knowledgebases.indexedCount} indexed, ${status.knowledgebases.entryCount} entries)${status.knowledgebases.brokenCount ? ` · ${status.knowledgebases.brokenCount} broken` : ""}`,
+      ...(status.connectors.length
+        ? status.connectors.map(
+            (connector) =>
+              `Connector ${connector.connectorId}: ${connector.runtime.state}${connector.runtime.lastError ? ` (${connector.runtime.lastError})` : ""} · credential ${connector.credential.configured ? (connector.credential.present ? `present via ${connector.credential.source}` : `MISSING (${connector.credential.error})`) : "none"} · queue p${connector.queue.pending}/d${connector.queue.delivered}/x${connector.queue.dead}`,
+          )
+        : ["Connectors: none configured"]),
       loaded.config ? "" : undefined,
       loaded.config ? formatConfigSummary(loaded.config) : undefined,
     ]
@@ -1875,7 +1887,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "status") {
-    printStatus();
+    printStatus(hasOption(process.argv, "--json"));
     return;
   }
   if (command === "channels") {

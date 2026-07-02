@@ -96,5 +96,11 @@ good: say the word and the sprint's commits push.
   routing authority are fully provable with mocks (and were). Optional: repeat
   item 5 through `POST /agents/<id>/runs` on a running gateway to feel the
   mesh surface.
-- _(Connectors #16–#22 will add per-service live legs — bot tokens, OAuth —
+- **#16 Connector framework:** no external live leg (the loopback reference
+  connector is deliberately local). Optional 2-min feel-check with a live
+  provider configured: start the gateway with `channels.loopback` enabled,
+  append `{"messageId":"x1","text":"hello","senderId":"<you>","chatType":"direct"}`
+  to `<dataDir>/connectors/loopback/inbox.jsonl`, and watch a real model reply
+  land in `outbox.jsonl`.
+- _(Connectors #17–#22 will add per-service live legs — bot tokens, OAuth —
   as they ship.)_

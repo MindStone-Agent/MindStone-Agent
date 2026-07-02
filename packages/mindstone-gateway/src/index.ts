@@ -54,6 +54,8 @@ export {
 export { PiSessionMindStoneProvider, buildPiSessionPromptParts, createPiSessionEventCapture, piSessionFileForKey, summarizePiSessionEvent } from "./pi-session-provider.js";
 export { PiSessionAgentRunner } from "./pi-session-runner.js";
 export { GatewayRunManager } from "./run-manager.js";
+export { LOOPBACK_CONNECTOR } from "./connectors/loopback.js";
+import "./connectors/loopback.js";
 import {
   loadRoutePersonaContextById,
   resolveRoutePersonaContext,
@@ -68,6 +70,22 @@ import {
   recallScopeForMemoryScope,
   scopeFromRequest,
   scopedSessionKey,
+  ConnectorDeliveryQueue,
+  configuredConnectorIds,
+  connectorAccessPolicyFromChannelConfig,
+  connectorCredentialRefFromChannelConfig,
+  connectorSessionKey,
+  connectorTranscriptSource,
+  connectorTriggerPolicyFromChannelConfig,
+  evaluateConnectorAccess,
+  getConnector,
+  readConnectorRuntimeStatus,
+  resolveConnectorCredential,
+  shouldTriggerConnectorReply,
+  writeConnectorRuntimeStatus,
+  type ConnectorContext,
+  type ConnectorInboundHandle,
+  type ConnectorInboundMessage,
   getMindStoneSystemStatus,
   listTranscriptSessions,
   loadMindStoneConfig,
@@ -1809,6 +1827,182 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   sendJson(res, 404, { ok: false, error: "not found" });
 }
 
+// ---------------------------------------------------------------------------
+// Connector runtime (issue #16): starts configured connectors' inbound
+// listeners, pipes allowed+triggered messages through the standard route path,
+// and delivers replies via the persistent per-connector queue. Every failure
+// is isolated into the connector's runtime status — a broken connector never
+// crashes the Gateway.
+// ---------------------------------------------------------------------------
+
+type RunningConnector = {
+  connectorId: string;
+  handle: ConnectorInboundHandle;
+  inboundCount: number;
+  deniedCount: number;
+};
+
+const runningConnectors = new Map<string, RunningConnector>();
+
+async function handleConnectorInbound(params: {
+  connectorId: string;
+  ctx: ConnectorContext;
+  message: ConnectorInboundMessage;
+  running: RunningConnector;
+}): Promise<void> {
+  const { connectorId, ctx, message, running } = params;
+  running.inboundCount += 1;
+  const channelConfig = ctx.channelConfig;
+
+  const access = evaluateConnectorAccess(connectorAccessPolicyFromChannelConfig(channelConfig), message);
+  if (!access.allowed) {
+    running.deniedCount += 1;
+    writeConnectorRuntimeStatus({
+      connectorId,
+      state: "running",
+      inboundCount: running.inboundCount,
+      deniedCount: running.deniedCount,
+      updatedAt: new Date().toISOString(),
+    });
+    return;
+  }
+
+  const trigger = shouldTriggerConnectorReply(connectorTriggerPolicyFromChannelConfig(channelConfig), message);
+  const agentId = ctx.config?.routing?.defaultAgentId ?? "default";
+  const sessionKey = connectorSessionKey({ config: ctx.config, connectorId, agentId, message });
+  const source = connectorTranscriptSource({ connectorId, message });
+
+  appendTranscriptEntry({
+    sessionKey,
+    agentId,
+    role: "user",
+    text: trigger.text || message.text,
+    source,
+    metadata: {
+      event: "user_message",
+      connector: connectorId,
+      messageId: message.messageId,
+      threadId: message.threadId,
+      triggered: trigger.respond,
+      triggerReason: trigger.reason,
+    },
+  });
+  writeConnectorRuntimeStatus({
+    connectorId,
+    state: "running",
+    inboundCount: running.inboundCount,
+    deniedCount: running.deniedCount,
+    updatedAt: new Date().toISOString(),
+  });
+  if (!trigger.respond) return;
+
+  const loadedConfig = loadGatewayConfig();
+  const routed = await runConfiguredRoute({
+    sessionKey,
+    agentId,
+    config: loadedConfig.config,
+    configPath: loadedConfig.path,
+    metadata: { connector: connectorId },
+  });
+  if (!routed.routed) return;
+  const body = routed.body as { entry?: { text?: string } } | undefined;
+  const replyText = body?.entry?.text;
+  if (!replyText?.trim()) return;
+
+  const queue = new ConnectorDeliveryQueue(connectorId);
+  queue.enqueue(
+    { text: replyText, chatId: message.chatId, threadId: message.threadId, inReplyToMessageId: message.messageId },
+    { now: new Date().toISOString() },
+  );
+  const connector = getConnector(connectorId);
+  if (!connector) return;
+  await queue.drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() });
+}
+
+export async function startConfiguredConnectors(): Promise<void> {
+  const loadedConfig = loadGatewayConfig();
+  const channels = (loadedConfig.config?.channels ?? {}) as Record<string, Record<string, unknown>>;
+  for (const connectorId of configuredConnectorIds(loadedConfig.config)) {
+    const connector = getConnector(connectorId);
+    if (!connector) {
+      writeConnectorRuntimeStatus({
+        connectorId,
+        state: "error",
+        lastError: `no registered connector implementation for "${connectorId}"`,
+        updatedAt: new Date().toISOString(),
+      });
+      continue;
+    }
+    try {
+      const channelConfig = channels[connectorId] ?? {};
+      const ref = connectorCredentialRefFromChannelConfig(channelConfig);
+      let credential: string | undefined;
+      if (ref) {
+        const resolved = resolveConnectorCredential(ref);
+        if (!resolved.present) {
+          writeConnectorRuntimeStatus({
+            connectorId,
+            state: "error",
+            lastError: `credential unresolved: ${resolved.error}`,
+            updatedAt: new Date().toISOString(),
+          });
+          continue;
+        }
+        credential = resolved.value;
+      }
+      const ctx: ConnectorContext = { config: loadedConfig.config, channelConfig, credential };
+      const running: RunningConnector = { connectorId, handle: { stop: () => undefined }, inboundCount: 0, deniedCount: 0 };
+      running.handle = await connector.startInbound(ctx, (message) =>
+        handleConnectorInbound({ connectorId, ctx, message, running }).catch((error) => {
+          writeConnectorRuntimeStatus({
+            connectorId,
+            state: "running",
+            lastError: `inbound handling failed: ${error instanceof Error ? error.message : String(error)}`,
+            inboundCount: running.inboundCount,
+            deniedCount: running.deniedCount,
+            updatedAt: new Date().toISOString(),
+          });
+        }),
+      );
+      runningConnectors.set(connectorId, running);
+      writeConnectorRuntimeStatus({
+        connectorId,
+        state: "running",
+        startedAt: new Date().toISOString(),
+        inboundCount: 0,
+        deniedCount: 0,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      writeConnectorRuntimeStatus({
+        connectorId,
+        state: "error",
+        lastError: error instanceof Error ? error.message : String(error),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+  }
+}
+
+export async function stopConfiguredConnectors(): Promise<void> {
+  for (const [connectorId, running] of runningConnectors) {
+    try {
+      await running.handle.stop();
+      const previous = readConnectorRuntimeStatus(connectorId);
+      writeConnectorRuntimeStatus({
+        ...previous,
+        connectorId,
+        state: "stopped",
+        stoppedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    } catch {
+      // stopping best-effort; status keeps the last known state
+    }
+  }
+  runningConnectors.clear();
+}
+
 export async function startGateway(options: GatewayOptions = {}): Promise<{ close(): Promise<void>; url: string }> {
   const host = options.host ?? process.env.MINDSTONE_AGENT_GATEWAY_HOST ?? "127.0.0.1";
   const port = options.port ?? Number(process.env.MINDSTONE_AGENT_GATEWAY_PORT ?? "19789");
@@ -1827,8 +2021,14 @@ export async function startGateway(options: GatewayOptions = {}): Promise<{ clos
       resolve();
     });
   });
+  // Connector failures are isolated into per-connector runtime status; the
+  // HTTP surface is up regardless.
+  await startConfiguredConnectors().catch(() => undefined);
   return {
     url: `http://${host}:${port}`,
-    close: () => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
+    close: async () => {
+      await stopConfiguredConnectors();
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+    },
   };
 }

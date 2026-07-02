@@ -8,6 +8,7 @@ import { resolveDefaultSessionKey } from "../routing/session.js";
 import { discoverMindStonePersonas, loadMindStonePersona, personasDirFromConfig } from "../persona/index.js";
 import { discoverMindStoneSkills, skillsDirFromConfig } from "../skills/index.js";
 import { discoverMindStoneKnowledgebases, knowledgebasesDirFromConfig } from "../knowledgebase/index.js";
+import { getConnectorVisibilityStatuses } from "../channels/index.js";
 import { getIsolatedModelsStatus } from "../provider/local-models.js";
 import { getMindStoneGatewayStatus } from "../status/gateway.js";
 import { getPiSessionSafetyStatus } from "../status/pi-session-safety.js";
@@ -435,6 +436,33 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
       ? `${skills.length} skills, ${brokenSkills.length} broken: ${brokenSkills.map((skill) => skill.id).join(", ")}`
       : `${skills.length} skills at ${skillsDir}${draftSkills.length ? ` (${draftSkills.length} draft(s) pending install)` : ""}`,
   );
+
+  const connectorStatuses = getConnectorVisibilityStatuses(config, { paths });
+  if (connectorStatuses.length === 0) {
+    check(checks, "info", "connectors.catalog", "No channel connectors configured", "configure config.channels.<id> to enable one");
+  } else {
+    const troubled = connectorStatuses.filter(
+      (status) => status.runtime.state === "error" || (status.credential.configured && !status.credential.present),
+    );
+    const deadLetters = connectorStatuses.filter((status) => status.queue.dead > 0);
+    check(
+      checks,
+      troubled.length > 0 || deadLetters.length > 0 ? "warn" : "pass",
+      "connectors.catalog",
+      "Channel connectors healthy",
+      [
+        `${connectorStatuses.length} configured`,
+        ...(troubled.length
+          ? [
+              `troubled: ${troubled
+                .map((status) => `${status.connectorId} (${status.runtime.state === "error" ? status.runtime.lastError : status.credential.error})`)
+                .join("; ")}`,
+            ]
+          : []),
+        ...(deadLetters.length ? [`dead-letters: ${deadLetters.map((status) => `${status.connectorId}=${status.queue.dead}`).join(", ")}`] : []),
+      ].join(" · "),
+    );
+  }
 
   const knowledgebasesDir = knowledgebasesDirFromConfig(config, paths);
   const knowledgebases = discoverMindStoneKnowledgebases(knowledgebasesDir);
