@@ -6,6 +6,7 @@ export * from "./context/index.js";
 export * from "./persona/index.js";
 export * from "./workflow/index.js";
 export * from "./knowledgebase/index.js";
+export * from "./app-engine/index.js";
 export * from "./provider/index.js";
 export * from "./profile/index.js";
 export * from "./memory/index.js";

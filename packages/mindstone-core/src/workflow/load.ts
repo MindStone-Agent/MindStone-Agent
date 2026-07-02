@@ -189,8 +189,12 @@ export function runMindStoneWorkflow(params: {
   config: MindStoneConfig | undefined;
   paths?: MindStoneRuntimePaths;
   turn: WorkflowTurnInput;
+  /** Deterministically force this workflow (App Engine request routing) — bypasses selection. */
+  workflowId?: string;
 }): MindStoneWorkflowOutcome | undefined {
-  const selected = resolveMindStoneWorkflowId({ config: params.config, paths: params.paths, turn: params.turn });
+  const selected = params.workflowId
+    ? { workflowId: params.workflowId, reason: "forced:request" }
+    : resolveMindStoneWorkflowId({ config: params.config, paths: params.paths, turn: params.turn });
   if (!selected) return undefined;
   const workflowsDir = workflowsDirFromConfig(params.config, params.paths);
   const events: MindStoneWorkflowEvent[] = [];

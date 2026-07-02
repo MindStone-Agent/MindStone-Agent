@@ -1,5 +1,6 @@
 import { estimatePromptTokens } from "../context/index.js";
 import type { TranscriptEntry } from "../transcript/index.js";
+import { scopeMatchesRecallFilter } from "../app-engine/types.js";
 import type {
   MemoryDocument,
   MemoryHit,
@@ -15,6 +16,13 @@ export type MemoryRecallInput = {
   entries: TranscriptEntry[];
   provider?: MemoryRecallProvider;
   config?: MemoryRecallConfig;
+  /**
+   * App Engine / Agent Mesh recall scope filter. Scoped documents (metadata.scope)
+   * are recalled only when their scope matches this filter exactly; unscoped
+   * documents remain globally eligible. Absent filter = companion mode: scoped
+   * documents never surface.
+   */
+  scope?: Record<string, string>;
 };
 
 const DEFAULT_MAX_RESULTS = 8;
@@ -123,7 +131,14 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
   const minScore = input.config?.minScore ?? DEFAULT_MIN_SCORE;
   const maxPromptTokens = input.config?.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS;
   const rawHits = await provider.search({ text: query, limit: Math.max(limit * 3, limit), agentId: input.agentId });
-  const thresholdHits = rawHits.filter((hit) => hit.score >= minScore);
+  const scopeRejected: Array<{ id: string; chunkId: string; reason: string }> = [];
+  const scopedHits = rawHits.filter((hit) => {
+    const documentScope = hit.metadata?.scope as Record<string, unknown> | undefined;
+    if (scopeMatchesRecallFilter(documentScope, input.scope)) return true;
+    scopeRejected.push({ id: hit.id, chunkId: hit.chunkId, reason: "scope_mismatch" });
+    return false;
+  });
+  const thresholdHits = scopedHits.filter((hit) => hit.score >= minScore);
   const ranked = rankMemoryHitsWithScri(thresholdHits, {
     activeEntries: input.entries,
     dedupAgainstActiveContext: input.config?.dedupAgainstActiveContext,
@@ -139,7 +154,7 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
         rawHitCount: rawHits.length,
         rankedHitCount: ranked.hits.length,
         selectedHitCount: 0,
-        rejected: ranked.rejected,
+        rejected: [...scopeRejected, ...ranked.rejected],
       },
     };
   }
@@ -154,7 +169,7 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
       rawHitCount: rawHits.length,
       rankedHitCount: ranked.hits.length,
       selectedHitCount: prompt.hits.length,
-      rejected: ranked.rejected,
+      rejected: [...scopeRejected, ...ranked.rejected],
     },
   };
 }

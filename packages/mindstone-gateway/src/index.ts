@@ -65,6 +65,9 @@ import {
   decideGatewayAuth,
   discoverFileMemoryDocuments,
   discoverKnowledgebaseRecallDocuments,
+  recallScopeForMemoryScope,
+  scopeFromRequest,
+  scopedSessionKey,
   getMindStoneSystemStatus,
   listTranscriptSessions,
   loadMindStoneConfig,
@@ -665,6 +668,12 @@ async function runConfiguredRoute(input: {
   config: MindStoneConfig | undefined;
   configPath?: string;
   metadata?: Record<string, unknown>;
+  /** App Engine / Agent Mesh scope — enforced on memory recall for this run. */
+  scope?: Record<string, string>;
+  /** Recall filter override when the memory scope is broader than the run scope. */
+  recallScope?: Record<string, string>;
+  /** Deterministic request-level routing: forced persona wins over workflow decisions; forced workflow bypasses selection. */
+  route?: { personaId?: string; workflowId?: string };
 }): Promise<{
   routed: boolean;
   status: number;
@@ -694,6 +703,7 @@ async function runConfiguredRoute(input: {
 
   const workflowOutcome = runMindStoneWorkflow({
     config: input.config,
+    workflowId: input.route?.workflowId,
     turn: {
       sessionKey: input.sessionKey,
       sourceChannel: source?.channel,
@@ -725,7 +735,13 @@ async function runConfiguredRoute(input: {
         model,
         provider,
         identityContext: loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
-        personaContext: (workflowOutcome?.decision?.personaId
+        personaContext: (input.route?.personaId
+          ? loadRoutePersonaContextById({
+              config: input.config,
+              personaId: input.route.personaId,
+              reason: "forced:request",
+            })
+          : workflowOutcome?.decision?.personaId
           ? loadRoutePersonaContextById({
               config: input.config,
               personaId: workflowOutcome.decision.personaId,
@@ -754,6 +770,7 @@ async function runConfiguredRoute(input: {
                 ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
               ]),
           config: input.config?.memory?.recall,
+          scope: input.recallScope ?? input.scope,
         },
         signal: run.abortController.signal,
         metadata: input.metadata,
@@ -878,6 +895,7 @@ async function runConfiguredRoute(input: {
         model: model.id,
         usage: route.result.usage,
         runner: route.runner,
+        ...(input.scope ? { scope: input.scope } : {}),
         providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
       },
     });
@@ -1323,6 +1341,81 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       ok: true,
       sessionKey,
       entries: readTranscriptEntries(sessionKey, Number.isFinite(limit) ? { limit } : {}),
+    });
+    return;
+  }
+
+  // App Engine / Agent Mesh: agent-scoped run route on the SHARED gateway (issue #14) —
+  // one daemon serves many logically isolated agents; no per-agent gateway required.
+  const agentRunsMatch = req.method === "POST" ? /^\/agents\/([^/]+)\/runs$/.exec(url.pathname) : null;
+  if (agentRunsMatch) {
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    const input = body as Record<string, unknown>;
+    const agentId = decodeURIComponent(agentRunsMatch[1]);
+    const text = typeof input.input === "string" ? input.input : typeof input.text === "string" ? input.text : "";
+    if (!text.trim()) {
+      sendJson(res, 400, { ok: false, error: "input is required" });
+      return;
+    }
+    const memoryScopeRaw = typeof input.memoryScope === "string" ? input.memoryScope : "agent";
+    if (!["app", "tenant", "user", "agent", "none"].includes(memoryScopeRaw)) {
+      sendJson(res, 400, { ok: false, error: `Invalid memoryScope: ${memoryScopeRaw} (expected app | tenant | user | agent | none)` });
+      return;
+    }
+    const memoryScope = memoryScopeRaw as "app" | "tenant" | "user" | "agent" | "none";
+    const scope = scopeFromRequest({
+      appId: stringParam(input.appId),
+      tenantId: stringParam(input.tenantId),
+      userId: stringParam(input.userId),
+      agentId,
+    });
+    const sessionKey = stringParam(input.sessionKey)?.trim() || scopedSessionKey(scope);
+    const recallScope = recallScopeForMemoryScope(scope, memoryScope);
+    const loadedConfig = loadGatewayConfig();
+    const config = memoryScope === "none" && loadedConfig.config?.memory?.autoRecall
+      ? { ...loadedConfig.config, memory: { ...loadedConfig.config.memory, autoRecall: false } }
+      : loadedConfig.config;
+    const metadata = typeof input.metadata === "object" && input.metadata !== null ? (input.metadata as Record<string, unknown>) : undefined;
+    const source = gatewayTranscriptSource({ substrate: "gateway-app-engine", channel: "api", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
+    const userEntry = appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "user",
+      text,
+      source,
+      metadata: { ...(metadata ?? {}), event: "user_message", appEngine: true, memoryScope, scope },
+    });
+    const personaId = stringParam(input.personaId);
+    const workflowId = stringParam(input.workflowId);
+    const routed = await runConfiguredRoute({
+      sessionKey,
+      agentId,
+      config,
+      configPath: loadedConfig.path,
+      metadata: { ...(metadata ?? {}), appEngine: true, memoryScope },
+      scope: scope as Record<string, string>,
+      recallScope: recallScope as Record<string, string> | undefined,
+      route: personaId || workflowId ? { personaId, workflowId } : undefined,
+    });
+    if (routed.routed) {
+      sendJson(res, routed.status, { persisted: true, scope, memoryScope, sessionKey, userEntry, ...(routed.body as Record<string, unknown>) });
+      return;
+    }
+    sendJson(res, 501, {
+      ok: false,
+      error: "No routable provider configured for App Engine runs (routing.mode placeholder)",
+      code: "not_implemented",
+      persisted: true,
+      scope,
+      memoryScope,
+      sessionKey,
+      entries: [userEntry],
     });
     return;
   }

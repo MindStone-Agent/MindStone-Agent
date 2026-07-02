@@ -47,6 +47,12 @@ export type MindStoneChatTurnInput = {
   runnerStream?: MindStoneRunnerStreamTranscriptOptions;
   onRunnerStreamEvent?: (event: AgentRunStreamEvent) => void;
   signal?: AbortSignal;
+  /** App Engine / Agent Mesh scope — stamped on transcript entries and enforced on memory recall. */
+  scope?: Record<string, string>;
+  /** Recall filter override when the memory scope is broader than the full run scope (defaults to `scope`). */
+  recallScope?: Record<string, string>;
+  /** Deterministic request-level routing: forced persona wins over workflow decisions and config rules; forced workflow bypasses selection. */
+  route?: { personaId?: string; workflowId?: string };
 };
 
 export type MindStoneChatTurnResult = {
@@ -81,6 +87,8 @@ export type MindStoneChatTurnResult = {
     query: string;
     hitCount: number;
     promptTokens: number;
+    hits: Array<{ id: string; title?: string; score: number }>;
+    rejectedCount?: number;
   };
   runner: Awaited<ReturnType<AgentRunner["run"]>>["runner"];
   runnerStream?: {
@@ -374,6 +382,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     metadata: {
       event: "user_message",
       source: input.source?.substrate ?? "mindstone-chat",
+      ...(input.scope ? { scope: input.scope } : {}),
       ...input.metadata,
     },
   });
@@ -397,6 +406,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
 
   const workflowOutcome = runMindStoneWorkflow({
     config: input.config,
+    workflowId: input.route?.workflowId,
     turn: {
       sessionKey: input.sessionKey,
       sourceChannel: input.source?.channel,
@@ -404,7 +414,14 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       messageText: [...entries].reverse().find((entry) => entry.role === "user")?.text,
     },
   });
-  const personaResolution = workflowOutcome?.decision?.personaId
+  // Deterministic routing authority (App Engine): request > workflow decision > config rules/active.
+  const personaResolution = input.route?.personaId
+    ? loadRoutePersonaContextById({
+        config: input.config,
+        personaId: input.route.personaId,
+        reason: "forced:request",
+      })
+    : workflowOutcome?.decision?.personaId
     ? loadRoutePersonaContextById({
         config: input.config,
         personaId: workflowOutcome.decision.personaId,
@@ -449,6 +466,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
               ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
             ]),
         config: input.config?.memory?.recall,
+        scope: input.recallScope ?? input.scope,
       },
       signal: input.signal,
       metadata: input.metadata,
@@ -579,6 +597,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       usage: route.result.usage,
       runner: route.runner,
       providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
+      ...(input.scope ? { scope: input.scope } : {}),
     },
   });
 
@@ -619,6 +638,8 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
           query: route.memoryRecall.query,
           hitCount: route.memoryRecall.hits.length,
           promptTokens: route.memoryRecall.promptTokens,
+          hits: route.memoryRecall.hits.map((hit) => ({ id: hit.id, title: hit.title, score: hit.score })),
+          rejectedCount: route.memoryRecall.diagnostics?.rejected.length,
         }
       : undefined,
     runner: route.runner,

@@ -50,6 +50,8 @@ export type MindStoneRouteInput = {
     enabled?: boolean;
     provider?: MemoryRecallProvider;
     config?: MemoryRecallConfig;
+    /** App Engine / Agent Mesh scope filter — scoped documents recall only at their exact scope. */
+    scope?: Record<string, string>;
   };
   signal?: AbortSignal;
   metadata?: Record<string, unknown>;
@@ -176,6 +178,7 @@ export async function planMindStoneRoute(input: MindStoneRouteInput): Promise<Mi
         entries: input.entries,
         provider: input.memoryRecall.provider,
         config: input.memoryRecall.config,
+        scope: input.memoryRecall.scope,
       })
     : undefined;
   return buildMindStoneRoutePlan({ ...input, memoryRecall });
