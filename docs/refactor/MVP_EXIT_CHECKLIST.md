@@ -52,9 +52,9 @@ Remaining MVP proof gates are below.
 
 ### Required
 
-- [ ] Park sensitive context routing as post-MVP design unless it directly blocks MVP safety.
-- [ ] Do not add Agent Packs, channels, entitlement, or advanced sensitive-routing implementation to MVP scope.
-- [ ] Treat Synapse/Aegis/Lux operational drift as out of scope for MindStone-Agent MVP; Cairn/Hearth own that track.
+- [x] Park sensitive context routing as post-MVP design unless it directly blocks MVP safety.
+- [x] Do not add Agent Packs, channels, entitlement, or advanced sensitive-routing implementation to MVP scope.
+- [x] Treat Synapse/Aegis/Lux operational drift as out of scope for MindStone-Agent MVP; Cairn/Hearth own that track.
 
 ### Current parked artifact
 
@@ -79,10 +79,10 @@ npm run build:mindstone
 
 ### Pass criteria
 
-- [ ] Build succeeds.
-- [ ] Dirty working tree is understood and intentionally scoped.
-- [ ] No generated/runtime/private state is staged.
-- [ ] Sensitive-routing docs, if present, are either committed as design or left explicitly uncommitted.
+- [x] Build succeeds.
+- [x] Dirty working tree is understood and intentionally scoped.
+- [x] No generated/runtime/private state is staged.
+- [x] Sensitive-routing docs, if present, are either committed as design or left explicitly uncommitted.
 
 ### Notes
 
@@ -111,10 +111,10 @@ npm run smoke:identity-formation
 
 ### Pass criteria addendum
 
-- [ ] `mindstone reset` requires typed destructive confirmation and can preserve isolated Pi auth/models.
-- [ ] Fresh onboarding can start from reset runtime.
-- [ ] First real chat turn begins identity formation and asks about the human, not only the agent/name/task.
-- [ ] Default TUI view does not show low-level runner/Pi event spam; diagnostic events remain available under `/events`.
+- [x] `mindstone reset` requires typed destructive confirmation and can preserve isolated Pi auth/models.
+- [x] Fresh onboarding can start from reset runtime.
+- [x] First real chat turn begins identity formation and asks about the human, not only the agent/name/task.
+- [x] Default TUI view does not show low-level runner/Pi event spam; diagnostic events remain available under `/events`.
 
 
 ### Required core/native smokes
@@ -170,9 +170,9 @@ npm run smoke:pi-config-sections
 
 ### Pass criteria
 
-- [ ] All required non-live smokes pass.
-- [ ] Any skipped smoke is documented with reason and does not invalidate MVP claims.
-- [ ] No smoke mutates global Pi auth/config/session state.
+- [x] All required non-live smokes pass.
+- [x] Any skipped smoke is documented with reason and does not invalidate MVP claims.
+- [x] No smoke mutates global Pi auth/config/session state.
 
 ---
 
@@ -226,13 +226,13 @@ Required model lanes:
 ### Pass criteria
 
 - [ ] Isolated `auth.json` exists for auth-backed providers when applicable.
-- [ ] Isolated `models.json` exists or live probe reports the exact missing prerequisite.
-- [ ] `mindstone status`/`doctor` show sanitized auth/model status.
-- [ ] No global Pi auth path is used.
-- [ ] Onboarding exposes a clear local-model path.
-- [ ] Onboarding exposes a clear Ollama Cloud path.
-- [ ] At least one local or OpenAI-compatible model route is smoke-tested from fresh runtime, or a documented environmental prerequisite blocks it.
-- [ ] Ollama Cloud route is smoke-tested or explicitly marked pending with setup instructions before MVP can be called final.
+- [x] Isolated `models.json` exists or live probe reports the exact missing prerequisite.
+- [x] `mindstone status`/`doctor` show sanitized auth/model status.
+- [x] No global Pi auth path is used.
+- [x] Onboarding exposes a clear local-model path.
+- [x] Onboarding exposes a clear Ollama Cloud path.
+- [x] At least one local or OpenAI-compatible model route is smoke-tested from fresh runtime, or a documented environmental prerequisite blocks it.
+- [x] Ollama Cloud route is smoke-tested or explicitly marked pending with setup instructions before MVP can be called final.
 
 ---
 
@@ -266,12 +266,12 @@ npm run smoke:context-window
 
 ### Pass criteria
 
-- [ ] Vectorization smoke passes with embedded chunks > 0.
-- [ ] Recall smoke records `memory_recall_injected` and includes expected hit metadata.
-- [ ] CLI chat recall smoke proves recalled memory reaches a chat turn.
-- [ ] Sliding-window smoke records `context_window_pruned`.
-- [ ] Transcript still contains pruned source entries after sliding-window pruning.
-- [ ] README/TASK_STATUS distinguish vectorization/recall/sliding-window smoke-tested from any unvalidated production/local-model combinations.
+- [x] Vectorization smoke passes with embedded chunks > 0.
+- [x] Recall smoke records `memory_recall_injected` and includes expected hit metadata.
+- [x] CLI chat recall smoke proves recalled memory reaches a chat turn.
+- [x] Sliding-window smoke records `context_window_pruned`.
+- [x] Transcript still contains pruned source entries after sliding-window pruning.
+- [x] README/TASK_STATUS distinguish vectorization/recall/sliding-window smoke-tested from any unvalidated production/local-model combinations.
 
 ---
 
@@ -428,14 +428,14 @@ npm run smoke:mvp-native
 
 ### Pass criteria
 
-- [ ] Install path succeeds.
-- [ ] CLI link/bin path works.
-- [ ] Onboarding creates identity/user scaffolds.
-- [ ] Onboarding activates a first working identity or explicitly guides the first-activation path.
-- [ ] First TUI/chat turn begins identity formation.
-- [ ] Routing setup avoids placeholder dead-end.
-- [ ] Auth login path uses isolated runtime auth.
-- [ ] `mindstone chat` and `mindstone tui` can start from fresh runtime path.
+- [x] Install path succeeds.
+- [x] CLI link/bin path works.
+- [x] Onboarding creates identity/user scaffolds.
+- [x] Onboarding activates a first working identity or explicitly guides the first-activation path.
+- [x] First TUI/chat turn begins identity formation.
+- [x] Routing setup avoids placeholder dead-end.
+- [x] Auth login path uses isolated runtime auth.
+- [x] `mindstone chat` and `mindstone tui` can start from fresh runtime path.
 
 ---
 
@@ -472,9 +472,9 @@ If OpenWebUI is not validated:
 
 ### Pass criteria
 
-- [ ] No overclaims.
-- [ ] Public docs distinguish implemented, smoke-tested, live-validated, and pending.
-- [ ] MVP install/use path is clear.
+- [x] No overclaims.
+- [x] Public docs distinguish implemented, smoke-tested, live-validated, and pending.
+- [x] MVP install/use path is clear.
 
 ---
 
@@ -482,12 +482,12 @@ If OpenWebUI is not validated:
 
 ### Required
 
-- [ ] `npm run build:mindstone` passes.
-- [ ] Required smoke suite passes or documented deferrals exist.
-- [ ] README is current.
-- [ ] TASK_STATUS is current.
-- [ ] No private runtime/auth/session/vector files staged.
-- [ ] Git status is clean except intentionally untracked local artifacts.
+- [x] `npm run build:mindstone` passes.
+- [x] Required smoke suite passes or documented deferrals exist.
+- [x] README is current.
+- [x] TASK_STATUS is current.
+- [x] No private runtime/auth/session/vector files staged.
+- [x] Git status is clean except intentionally untracked local artifacts.
 - [ ] Tag/commit decision made by Clint.
 
 ### Optional but useful
@@ -551,6 +551,21 @@ Observed notes:
 - `smoke:agent-runner-stream` passed provider-route/pi-session stream contract checks.
 - `smoke:gateway-runner-stream` passed mock Gateway runner stream transcript persistence.
 - `smoke:unified-session` passed canonical transcript/session convergence, including expected placeholder/not-implemented events for unconfigured route surfaces.
+
+### 2026-07-01 — Fable/Cairn marathon: full non-live suite + fresh E2E + model-lane coverage
+
+Tree @ `ad90f76d` (local main). Evidence receipts on issues #2–#6 and #10; QA (Slate) confirmed #2/#3/#10.
+
+**Gate status:** 0 ✅ · 1 ✅ · 2 ✅ (49/49 — every `smoke:*` except `smoke:docker` [needs Docker daemon] and `smoke:pi-session-live` [live-gated]) · 3 ✅ (local + Ollama Cloud lanes shipped, issue #3; isolated auth.json still empty — no auth-backed provider connected yet) · 4 ✅ (embedding proof uses mock embed model over the real provider-HTTP + SQLite path; vector backend js-cosine) · **5 DEFERRED** (live prompt/stream — Clint runs it, exact commands on issue #7) · **6 DEFERRED** (live compaction — issue #8, after Gate 5) · 7 deferred (OpenWebUI stays setup-prep) · 8 ✅ (pty E2E: reset typed-confirmation, complete onboarding from scratch, in-flow identity activation proven on disk, TUI turn + `/quit` clean exit; human-keyboard spot-check residual) · 9 ✅ (this claim pass) · 10 ✅ except tag/commit decision (Clint).
+
+**Standing claim:**
+
+```text
+MindStone-Agent is MVP-shaped and smoke-proven end-to-end (49/49 non-live suite,
+pty-verified fresh E2E, live-validated local/OpenAI-compatible model route against
+a live local endpoint). MVP-proven awaits live authenticated Pi-session
+prompt/stream (+ compaction) validation — deferred to Clint with documented steps.
+```
 
 ## Immediate next command sequence
 

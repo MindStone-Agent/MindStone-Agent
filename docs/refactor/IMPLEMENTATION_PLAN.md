@@ -2,10 +2,22 @@
 
 **Project:** MindStone
 **Date:** 2026-06-16
-**Status:** Draft for review
+**Status:** Draft for review — see status addendum below for validated state as of 2026-07-01
 **Related PRD:** `PRD.md`
 **Related design:** `DESIGN.md`
 **Related architecture:** `ARCHITECTURE.md`
+
+## Status addendum — 2026-07-01 claim pass
+
+Authoritative validated state lives in `MVP_EXIT_CHECKLIST.md` (see its 2026-07-01
+validation-log entry) and `TASK_STATUS.md`. Summary against this plan, using the
+claim taxonomy (implemented / smoke-tested / live-validated / pending / post-MVP):
+
+- Core/Gateway/CLI/TUI/onboarding/memory/recall/sliding-window phases: **implemented + smoke-tested** (full non-live suite 49/49, 2026-07-01).
+- Fresh install -> onboard -> identity activation -> TUI `/quit`: **live-validated** in a real terminal (pty), 2026-07-01.
+- Local model + Ollama Cloud onboarding lanes: **implemented + smoke-tested**; local/OpenAI-compatible route **live-validated** against a live local endpoint (`smoke:local-route`); Ollama Cloud chat **pending** (needs ollama.com key).
+- Live authenticated Pi-session prompt/stream + compaction: **pending — deferred to Clint** (issues #7/#8, exact commands documented).
+- Sensitive context routing, Agent Packs, external channel listeners, native sqlite-vec ANN, raw Pi transcript archive parity: **post-MVP** (unchanged).
 **Related pack planning:** `AGENT_PACKS.md`
 **Related sensitive-routing design:** `SENSITIVE_CONTEXT_ROUTING.md`
 **Related app-engine/runtime modes design:** `APP_ENGINE_RUNTIME_MODES.md`

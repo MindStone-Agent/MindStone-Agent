@@ -1,7 +1,16 @@
 # MindStone-Agent Task Status
 
-**Last Updated:** 2026-06-19
-**Status:** Rebuilding foundation around upstream Pi base
+**Last Updated:** 2026-07-01
+**Status:** MVP-shaped and smoke-proven; live Pi-session validation deferred to Clint (issues #7/#8)
+
+## 2026-07-01 marathon summary (Fable/Cairn, Slate QA)
+
+- Full non-live smoke suite: **49/49 PASS** (every `smoke:*` except `smoke:docker` — needs Docker daemon — and `smoke:pi-session-live` — live-gated). Receipt: issue #4.
+- Continuity proof suite (memory/backfill/maintenance/embedding/auto-recall/chat-recall/SCRI/sliding-window/context-window): all green; embedding proven with a mock embed model over the real provider-HTTP + SQLite path; vector backend `js-cosine`. Receipt: issue #5.
+- Local model (Ollama / LM Studio / OpenAI-compatible) + Ollama Cloud setup lanes shipped (`ad90f76d`, issue #3, QA-closed): isolated `models.json` providers riding pi-session; `smoke:local-route` live-validates the route against a local OpenAI-compatible endpoint from fresh runtime. Docs: `docs/operations/LOCAL_MODELS.md`.
+- Fresh install/onboard/TUI E2E: **pty-verified PASS** — reset typed confirmation, complete onboarding from scratch, in-flow identity activation (proven on disk), TUI turn + `/quit` clean exit. Receipt: issue #6.
+- Live authenticated Pi-session prompt/stream + compaction: **deferred to Clint** with exact commands (issues #7/#8). Isolated `auth.json` currently empty — no credentials were present at any point.
+- Claim reconciliation pass executed across README / this file / MVP_EXIT_CHECKLIST / IMPLEMENTATION_PLAN (issue #9).
 
 ## Quick Status
 
@@ -64,7 +73,7 @@
 - [x] Add first-pass Pi adapter `before_agent_start` prompt-context injection for configured `IDENTITY.md`/`USER.md` and ephemeral Core memory recall when `memory.autoRecall` is enabled; verified without live model calls.
 - [x] Add conservative first-activation identity synthesis via `mindstone identity activate`: derives a working identity from onboarding profile/preferences/identity seed, supports dry-run/JSON, backs up pending scaffolds, and refuses to overwrite non-pending identity without `--force`.
 - [x] Add `npm run smoke:core-boundary` to verify `mindstone-core` compiles independently and does not import Gateway/CLI/Pi adapter or Pi-specific packages directly.
-- [ ] Complete full live authenticated event/stream validation, live-observed durable metadata allowlist refinements if needed, and any necessary full staged compaction-safeguard summary parity for the session-backed Pi runner.
+- [ ] Complete full live authenticated event/stream validation, live-observed durable metadata allowlist refinements if needed, and any necessary full staged compaction-safeguard summary parity for the session-backed Pi runner. **(Deferred to Clint — issues #7/#8, exact commands documented there; 2026-07-01.)**
 - [x] Add native `mindstone config` / `mindstone onboard` CLI surface.
 - [x] Replace placeholder-only onboarding with risk notice, full config flow, and identity/user scaffold creation.
 - [x] Add provider-first isolated Pi provider/model discovery to native config/onboarding routing setup.
@@ -161,13 +170,13 @@
 - [x] Extract `PiSessionExecutor` as the shared AgentSession execution layer under the runner/provider wrapper.
 - [x] Add lifecycle-only `AgentRunner.stream(...)` scaffold and post-run bounded `pi-session` diagnostic replay as stream `substrate_event`s.
 - [x] Add `observability.runnerStream.persistTranscriptEvents` gate for selected stream event transcript persistence.
-- [ ] Live-test Pi-backed model calls through the session-backed runner with isolated credentials/config using `MINDSTONE_PI_SESSION_LIVE=1 npm run smoke:pi-session-live`; after that succeeds, live-test compaction with `MINDSTONE_PI_SESSION_LIVE_COMPACT=1`.
+- [ ] Live-test Pi-backed model calls through the session-backed runner with isolated credentials/config using `MINDSTONE_PI_SESSION_LIVE=1 npm run smoke:pi-session-live`; after that succeeds, live-test compaction with `MINDSTONE_PI_SESSION_LIVE_COMPACT=1`. **(Deferred to Clint — issues #7/#8; 2026-07-01.)**
 - [ ] Decide whether full staged compaction-safeguard summary parity is required before MVP; context-pruning inline factory parity, native compaction setting parity, optional fallback-only safeguard parity, and in-memory resume-cap parity are now implemented.
 - [ ] Finish auto-compact runtime policy for compatible substrates as a secondary/fallback path behind sliding-window/SCRI.
   - Primary continuity premise: one shared append-only JSONL session/transcript across channels; pruning/compaction affect only live prompt/session context.
   - Next decision: use a session-backed Pi runner/provider with SDK `AgentSession.compact()` or a Pi-extension control bridge with `ctx.compact()`, only if it preserves unified transcript authority.
   - If that path is too large or threatens session authority, defer actual compaction invocation and implement native sqlite-vec packaging/loading or channel/session validation next.
-- [ ] Ask Cairn for review when available.
+- [x] Ask Cairn for review when available. **(Cairn picked up the marathon 2026-07-01 and reviewed/extended this work directly.)**
 
 ## Core MVP Remaining
 
@@ -370,7 +379,7 @@ This is the current functional backlog for making MindStone-Agent feel like Mind
 
 ### Provider/routing validation
 
-- [ ] Live-test Pi-backed model calls through a session-backed Pi runner with isolated credentials/config.
+- [ ] Live-test Pi-backed model calls through a session-backed Pi runner with isolated credentials/config. **(Deferred to Clint — issues #7/#8; 2026-07-01.)**
 - [x] Add first-pass `mindstone doctor` checks for runtime/config/session/identity/memory/routing/provider discovery.
 - [ ] Extend `mindstone doctor` with live provider auth/model-call validation.
 - [x] Ensure provider setup follows provider → auth method → model, never a flat global model list.

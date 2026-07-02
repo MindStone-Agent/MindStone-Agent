@@ -48,33 +48,33 @@ MindStone-Agent can prune, summarize, compact, or rebuild the live prompt, but t
 
 ## Current status
 
-MindStone-Agent is in active development and is close to MVP validation. The non-live native MVP path is implemented and smoke-tested:
+MindStone-Agent is in active development and is close to MVP validation. Claim taxonomy used throughout: **implemented** (code exists), **smoke-tested** (proven by the non-live smoke suite), **live-validated** (proven against a real endpoint/terminal), **pending** (not yet proven).
 
-```text
-fresh isolated runtime
-→ package-bin mindstone chat
-→ in-place routing setup
-→ transcript persistence
-→ TUI history continuity
-```
-
-Verified areas include:
+**Smoke-tested (full non-live suite, 49/49 green on 2026-07-01):**
 
 - isolated runtime under `.runtime/`, separate from global `~/.pi/agent`;
-- native `mindstone` CLI;
-- onboarding/config/auth flows;
-- `mindstone chat` and styled `mindstone tui`;
+- native `mindstone` CLI, onboarding/config/auth flows, `mindstone chat`, styled `mindstone tui`;
 - Gateway management through `mindstone gateway ...`;
 - REST chat, HTTP RPC, WebSocket RPC, OpenAI-compatible chat completions, and non-streaming OpenResponses-compatible endpoints;
-- built-in WebChat shell;
-- canonical shared session key `agent:default:main`;
-- append-only transcript store with source metadata;
-- file-backed memory, journals, LOG, SQLite indexing, embedding backfill, recall ranking, and maintenance commands;
+- built-in WebChat shell; canonical shared session key `agent:default:main`; append-only transcript store with source metadata;
+- continuity proof suite: file-backed memory, journals, LOG, SQLite indexing/backfill/maintenance, embedding vectorization (mock embed model over the real provider-HTTP + SQLite path), auto-recall injection, CLI chat recall, SCRI ranking/dedup, sliding-window pruning with transcript preservation;
+- local model (Ollama / LM Studio / OpenAI-compatible) and Ollama Cloud setup lanes (`docs/operations/LOCAL_MODELS.md`);
 - Pi adapter commands/tools/hooks for Pi-side use;
-- Pi `AgentSession` / `SessionManager` execution path scaffolded for live model use;
-- non-live smoke suite and native MVP spine validation.
+- Pi `AgentSession` / `SessionManager` execution path (non-live).
 
-Remaining MVP proof gates are live authenticated Pi-session validation and live compaction validation with isolated credentials.
+**Live-validated (2026-07-01):**
+
+- fresh install/onboard/TUI E2E in a real terminal (pty): `mindstone reset --keep-pi-auth` typed confirmation → complete onboarding from scratch with in-flow identity activation → TUI turn → `/quit` clean exit;
+- local/OpenAI-compatible model route end-to-end: fresh runtime → isolated `models.json` provider → pi-session `AgentSession` → live local HTTP endpoint → response in the canonical transcript (`smoke:local-route`);
+- Ollama local probe (real Ollama daemon model listing) and Ollama Cloud model listing (`https://ollama.com/v1/models`).
+
+**Pending (documented, not claimed):**
+
+- live authenticated Pi-session prompt/stream validation (issue #7 — exact steps documented);
+- live compaction validation (issue #8 — after #7);
+- Ollama Cloud live chat (needs an ollama.com API key — steps in `docs/operations/LOCAL_MODELS.md`);
+- native `sqlite-vec` nearest-neighbor backend (current fallback: `js-cosine`);
+- human-at-keyboard TUI `/quit` spot-check (pty-verified already).
 
 ## Media and demos
 
