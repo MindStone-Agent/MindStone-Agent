@@ -126,6 +126,7 @@ Start here:
 
 ```text
 docs/refactor/FABLE_5_MARATHON_RUNBOOK.md
+docs/refactor/FABLE_5_PRODUCT_WISHLIST.md
 docs/refactor/MVP_EXIT_CHECKLIST.md
 TASK_STATUS.md
 ```
@@ -143,14 +144,15 @@ docs/refactor/PI_SESSION_PARITY.md
 docs/refactor/AGENT_PACKS.md
 docs/refactor/SENSITIVE_CONTEXT_ROUTING.md
 docs/refactor/APP_ENGINE_RUNTIME_MODES.md
+docs/refactor/FABLE_5_PRODUCT_WISHLIST.md
 docs/gateway/API_REFERENCE.md
 docs/gateway/OPENWEBUI.md
 docs/operations/ISOLATION.md
 ```
 
-## What Slate has implemented recently
+## What Slate implemented and committed recently
 
-Recent uncommitted or locally dirty work includes:
+Recent committed local work includes:
 
 - `mindstone reset` with typed confirmation and `--keep-pi-auth`;
 - page-style onboarding UX;
@@ -165,9 +167,10 @@ Recent uncommitted or locally dirty work includes:
 - MVP exit checklist expanded for local/Ollama Cloud/vectorization/recall/sliding-window/live validation;
 - Sensitive Context Routing design doc;
 - App Engine / multi-agent runtime modes design doc;
-- Fable 5 marathon runbook.
+- Fable 5 marathon runbook;
+- Fable 5 product wishlist.
 
-Known dirty tree around handoff time:
+Historical dirty tree around the original handoff time, before Slate committed the first two Fable-prep commits:
 
 ```text
  D .runtime/README.md
@@ -389,6 +392,22 @@ Recommended order:
 #12 Deterministic workflow router MVP
 #13 Skill Builder and Knowledgebase v1 scaffolds
 #14 App Engine Mode and Agent Mesh logical isolation scaffold
+#15 MindStone Console polished Web UI
+#16 Channel connector framework hardening
+#17 Telegram connector MVP
+#18 Slack connector MVP
+#19 Discord connector MVP
+#20 Microsoft Teams connector design and MVP path
+#21 Email connector MVP with draft/send approval
+#22 Calendar and task connectors
+#23 Document/file/productivity connectors and KB ingestion
+#24 Approval Center / Productivity Inbox
+#25 Observability and evaluation dashboard
+#26 Backup, export, and import
+#27 Deployment polish and operations readiness
+#28 Pack registry and marketplace design
+#29 Scheduler and recurring jobs
+#30 Voice, mobile, and notification surfaces
 ```
 
 ## Where Fable can safely be ambitious
@@ -399,8 +418,17 @@ If Fable can implement beyond the minimum MVP, prioritize in this sequence:
 2. Deterministic workflow router.
 3. Skill Builder v1 using existing Integration Builder as seed.
 4. Knowledgebase catalog/search/citation v1.
-5. App Engine Mode `mindstone.run(...)` service scaffold.
-6. Agent Mesh logical isolation by `agentId`/tenant/session scope.
+5. MindStone Console Web UI.
+6. Telegram connector.
+7. Slack connector.
+8. Email connector design/MVP.
+9. Calendar/tasks connectors.
+10. Observability/evals.
+11. Backup/export/import.
+12. Deployment polish.
+13. App Engine Mode `mindstone.run(...)` service scaffold.
+14. Agent Mesh logical isolation by `agentId`/tenant/session scope.
+15. Pack registry/marketplace.
 
 Do not start by creating multiple Gateway daemons per agent. Start with logical isolation in one runtime.
 
@@ -410,7 +438,7 @@ Do not start by creating multiple Gateway daemons per agent. Start with logical 
 - Live authenticated `AgentSession.compact(...)` not yet validated.
 - Native `sqlite-vec` ANN unavailable locally; JS cosine/vectorization path exists.
 - OpenWebUI not live-validated.
-- Telegram/Discord/Slack/Signal listeners/setup not implemented in this rebuild.
+- Telegram/Discord/Slack/Teams/email/calendar/task listeners/setup not implemented in this rebuild.
 - Full raw Pi transcript/message archive parity not implemented.
 - Local/Ollama Cloud setup/validation not yet proven.
 - GitHub Issues were empty before seeding the marathon issues.

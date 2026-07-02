@@ -11,6 +11,7 @@
 **Related app-engine/runtime modes design:** `APP_ENGINE_RUNTIME_MODES.md`
 **Related MVP exit checklist:** `MVP_EXIT_CHECKLIST.md`
 **Related execution runbook:** `FABLE_5_MARATHON_RUNBOOK.md`
+**Related Fable product wishlist:** `FABLE_5_PRODUCT_WISHLIST.md`
 **Related Cairn/Fable handover:** `CAIRN_FABLE_HANDOVER.md`
 
 ## 1. Implementation Strategy

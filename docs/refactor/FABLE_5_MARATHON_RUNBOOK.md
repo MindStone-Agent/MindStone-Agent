@@ -34,6 +34,22 @@ A focused Fable/Cairn marathon issue queue was seeded on 2026-07-01:
 #12 Deterministic workflow router MVP
 #13 Skill Builder and Knowledgebase v1 scaffolds
 #14 App Engine Mode and Agent Mesh logical isolation scaffold
+#15 MindStone Console polished Web UI
+#16 Channel connector framework hardening
+#17 Telegram connector MVP
+#18 Slack connector MVP
+#19 Discord connector MVP
+#20 Microsoft Teams connector design and MVP path
+#21 Email connector MVP with draft/send approval
+#22 Calendar and task connectors
+#23 Document/file/productivity connectors and KB ingestion
+#24 Approval Center / Productivity Inbox
+#25 Observability and evaluation dashboard
+#26 Backup, export, and import
+#27 Deployment polish and operations readiness
+#28 Pack registry and marketplace design
+#29 Scheduler and recurring jobs
+#30 Voice, mobile, and notification surfaces
 ```
 
 The GitHub issue queue is now the execution queue; the docs remain the deep source of truth.
@@ -43,6 +59,7 @@ Primary planning files:
 ```text
 TASK_STATUS.md
 docs/refactor/MVP_EXIT_CHECKLIST.md
+docs/refactor/FABLE_5_PRODUCT_WISHLIST.md
 docs/refactor/PRD.md
 docs/refactor/DESIGN.md
 docs/refactor/IMPLEMENTATION_PLAN.md
