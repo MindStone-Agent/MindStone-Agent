@@ -1,12 +1,17 @@
 # Implementation Plan: MindStone Core Rebuild on Current Pi
 
-**Project:** MindStone  
-**Date:** 2026-06-16  
-**Status:** Draft for review  
-**Related PRD:** `PRD.md`  
-**Related design:** `DESIGN.md`  
-**Related architecture:** `ARCHITECTURE.md`  
+**Project:** MindStone
+**Date:** 2026-06-16
+**Status:** Draft for review
+**Related PRD:** `PRD.md`
+**Related design:** `DESIGN.md`
+**Related architecture:** `ARCHITECTURE.md`
 **Related pack planning:** `AGENT_PACKS.md`
+**Related sensitive-routing design:** `SENSITIVE_CONTEXT_ROUTING.md`
+**Related app-engine/runtime modes design:** `APP_ENGINE_RUNTIME_MODES.md`
+**Related MVP exit checklist:** `MVP_EXIT_CHECKLIST.md`
+**Related execution runbook:** `FABLE_5_MARATHON_RUNBOOK.md`
+**Related Cairn/Fable handover:** `CAIRN_FABLE_HANDOVER.md`
 
 ## 1. Implementation Strategy
 
@@ -54,6 +59,7 @@ The preferred order is:
 - [x] Define context-management policy config for selectable `auto_compact` vs `sliding_window` modes.
 - [x] Define runtime context-window pruning contracts and tests.
 - [ ] Define config service interface and migration boundary.
+- [ ] Define first-pass sensitive context routing contracts: source labels, route clearance, taint metadata, declassification artifact shape, and fail-closed policy decisions. See `SENSITIVE_CONTEXT_ROUTING.md`.
 - [x] Add dependency direction smoke check: `npm run smoke:core-boundary` builds `packages/mindstone-core` alone and fails if Core imports Gateway/CLI/Pi adapter or Pi-specific packages directly.
 - [ ] Add unit tests for pure Core helpers.
 
@@ -549,6 +555,7 @@ Agent Packs are a post-MVP productization layer for shipping ready-to-run, role-
 - [x] Add non-mutating TUI `/handoff` panel.
 - [ ] Stream/update assistant/tool events live from runner/Gateway events.
 - [ ] Implement full live Pi session event/stream capture into MindStone transcript/source metadata.
+- [ ] Drive the remaining MVP proof gates from `docs/refactor/MVP_EXIT_CHECKLIST.md`, with live isolated Pi-session prompt/stream validation as the primary MVP-proven gate.
 - [ ] Live-test Pi-backed model calls through `AgentSession.prompt(...)` only after isolated auth/model config is intentionally provided.
 - [ ] Add actual substrate compact invocation behind the existing coordination interface only after the session-backed runner can preserve unified transcript authority.
 - [ ] Keep Agent Packs post-MVP, but preserve product architecture space for Dockerized role agents, pack manifests, pack-scoped identity/memory seeds, WebChat/Gateway defaults, entitlement-controlled paid packs, and compiled launcher/orchestration code where appropriate.

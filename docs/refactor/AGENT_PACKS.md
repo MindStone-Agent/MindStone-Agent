@@ -1,4 +1,4 @@
-# Agent Packs: Dockerized Role Agents and Commercial Pack Delivery
+# Agent Packs and Persona Packs: Dockerized Role Agents, Reusable Personas, and Commercial Pack Delivery
 
 **Project:** MindStone Agent Harness  
 **Status:** Planning draft  
@@ -8,6 +8,8 @@
 ## 1. Summary
 
 MindStone Agent Packs are planned ready-to-run Dockerized deployments of prebuilt MindStone agents for specific jobs.
+
+Persona Packs are planned reusable persona packages that can attach to compatible agents. A Persona Pack can bundle or reference a `PERSONA.md`, skills, workflows, knowledgebases, tools, and safety rules without necessarily shipping an entire Dockerized agent runtime.
 
 Examples:
 
@@ -24,31 +26,34 @@ The product goal is simple:
 install → open web chat → start working with a role-specific MindStone agent
 ```
 
-The pack should hide substrate complexity from the user. A pack should include the harness runtime, role identity, safe defaults, memory scaffold, Gateway, WebChat, persistence, and guided setup so the user does not have to understand Pi, context management, transcripts, Docker networking, Gateway auth, or MindStone internals before seeing value.
+The pack should hide substrate complexity from the user. An Agent Pack should include the harness runtime, role identity, default persona stack, safe defaults, memory scaffold, optional knowledgebase seeds, Gateway, WebChat, persistence, and guided setup so the user does not have to understand Pi, context management, transcripts, Docker networking, Gateway auth, personas, KB indexing, or MindStone internals before seeing value.
 
 ## 2. Product naming
 
-Preferred public name:
+Preferred public names:
 
 ```text
 MindStone Agent Packs
+MindStone Persona Packs
 ```
 
-Short name:
+Short names:
 
 ```text
 Agent Packs
+Persona Packs
 ```
 
-Avoid using “modules” as the primary public term. “Modules” sounds like plugins/components. “Starter packs” is friendly but may sound toy-like. “Agent Packs” is clearer and productizable.
+Avoid using “modules” as the primary public term. “Modules” sounds like plugins/components. “Starter packs” is friendly but may sound toy-like. “Agent Packs” is clearer for complete deployments; “Persona Packs” is clearer for reusable role/domain overlays.
 
 ## 3. Product model
 
-Agent Packs should be a catalog layered on top of the MindStone Agent Harness.
+Agent Packs and Persona Packs should be catalog layers on top of the MindStone Agent Harness.
 
 ```text
 MindStone Agent Harness — platform/runtime
 MindStone Agent Packs — ready-to-run role deployments
+MindStone Persona Packs — reusable role/domain overlays
 MindStone for Claude Code / MindStone for Pi — continuity layers
 Synapse — agent communication/review plane
 Cortex — future component
@@ -58,7 +63,8 @@ Planned commercial model:
 
 - Basic starter packs can be free entry points.
 - Specialized, maintained, or professional packs may be paid.
-- Paid value should come from role design, curation, specialized workflows, packaged tools, updates, support, and operational polish — not only from hidden prompts.
+- Persona Packs may be free, paid, or enterprise-specific.
+- Paid value should come from role/persona design, curation, specialized workflows, packaged tools, maintained knowledgebases, updates, support, and operational polish — not only from hidden prompts.
 
 ## 4. Target user experience
 
@@ -102,7 +108,10 @@ Each Agent Pack should include:
 - pack manifest
 - role identity seed
 - user-facing role description
+- default persona stack or persona references
 - default memory scaffold
+- optional curated knowledgebase seeds or KB connectors
+- default skills and workflows
 - default tools/policies
 - Gateway configuration
 - WebChat enabled by default
@@ -142,7 +151,11 @@ Draft manifest shape:
   "agent": {
     "profile": "cyber-threat-intelligence",
     "identitySeed": "pack://cti/identity.md",
-    "memorySeed": "pack://cti/memory/"
+    "memorySeed": "pack://cti/memory/",
+    "personas": ["pack://cti/personas/cti-analyst"],
+    "skills": ["pack://cti/skills/source-triage"],
+    "workflows": ["pack://cti/workflows/daily-intel-pull"],
+    "knowledgebases": ["pack://cti/kb/ot-threat-references"]
   },
   "security": {
     "defaultToolPolicy": "read-mostly",
@@ -172,6 +185,8 @@ mindstone-pack-<id>/
     runtime/
     transcripts/
     memory/
+    knowledgebases/
+    personas/
     gateway-state/
 ```
 
@@ -263,12 +278,16 @@ Possible paid/professional packs:
 - Penetration Tester Pro
 - Marketing/Content Ops Pro
 - Industry-specific analysts
-- Packs with maintained connectors, premium workflows, or advanced memory/knowledge assets
+- Persona Packs for specialized roles or operating modes
+- Packs with maintained connectors, premium workflows, curated personas, or advanced memory/knowledgebase assets
 
 Paid pack value should include:
 
 - maintained role prompts/identity
+- curated personas and persona-builder quality
 - workflow quality
+- curated skills
+- curated knowledgebases and refresh policy
 - curated tools/connectors
 - update cadence
 - support
@@ -281,8 +300,10 @@ Paid pack value should include:
 ### Phase A — Pack schema and catalog
 
 - Define pack manifest schema.
+- Define persona pack manifest schema.
 - Add pack catalog loader.
 - Add `mindstone packs list` and `mindstone packs inspect`.
+- Add future `mindstone personas list/install/inspect` shape or include persona-pack support under `mindstone packs`.
 - Add catalog tests.
 
 ### Phase B — Local free pack prototype
@@ -294,12 +315,15 @@ Paid pack value should include:
 - Add `mindstone packs install/start/open/status/stop` for local pack.
 - Add doctor checks.
 
-### Phase C — Role identity and memory seeding
+### Phase C — Role identity, persona, memory, and KB seeding
 
 - Define role identity seed format.
+- Define persona artifact format around `PERSONA.md` plus metadata and references.
 - Define memory scaffold import flow.
+- Define knowledgebase seed/import/index flow.
+- Define skill/workflow reference import flow.
 - Ensure seeded content is tracked as pack source metadata.
-- Ensure user/runtime memory remains separate from pack updates.
+- Ensure user/runtime memory, user KBs, and user-modified personas remain separate from pack updates.
 
 ### Phase D — Auth and entitlement design
 
@@ -341,6 +365,8 @@ Before claiming an Agent Pack is available:
 - Gateway health/status passes.
 - Transcript persistence verified across restart.
 - Memory persistence verified across restart.
+- Knowledgebase seeds/indexes are installed or explicitly skipped with status.
+- Persona activation loads correctly.
 - Pack identity loads correctly.
 - No secrets in image layers.
 - Docker ports/binds are documented.
@@ -356,7 +382,9 @@ Before claiming an Agent Pack is available:
 - Which pack should be the first paid/pro pack?
 - Should pack-specific proprietary logic run locally, server-side, or hybrid?
 - How much of the base harness remains source-available versus compiled in paid distributions?
-- How will pack updates merge with user-modified identity/memory scaffolds?
+- How will pack updates merge with user-modified identity/memory/persona/KB scaffolds?
+- Should Persona Packs be distributed through the same catalog/entitlement system as Agent Packs or through a lighter registry?
+- How should Persona Packs declare compatibility with agents, skills, workflows, and KB schemas?
 - What is the support boundary for third-party Docker/OS issues?
 
 ## 13. Non-goals for the first pass
@@ -366,4 +394,4 @@ Before claiming an Agent Pack is available:
 - Do not ship privileged containers by default.
 - Do not make users edit Docker Compose manually as the primary setup path.
 - Do not embed provider credentials or license secrets in images.
-- Do not make pack updates overwrite user memory/transcripts.
+- Do not make pack updates overwrite user memory/transcripts/personas/knowledgebases.

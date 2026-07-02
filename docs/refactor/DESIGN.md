@@ -1,10 +1,11 @@
 # Design: MindStone Core Rebuild on Current Pi
 
-**Project:** MindStone  
-**Date:** 2026-06-16  
-**Status:** Draft for review  
-**Related PRD:** `PRD.md`  
+**Project:** MindStone
+**Date:** 2026-06-16
+**Status:** Draft for review
+**Related PRD:** `PRD.md`
 **Related architecture:** `ARCHITECTURE.md`
+**Related sensitive-routing design:** `SENSITIVE_CONTEXT_ROUTING.md`
 
 ## 1. Design Thesis
 
@@ -43,13 +44,14 @@ This gives MindStone a clean path forward while preserving the features users ac
 ┌─────────────────────────────────────────────────────────────┐
 │                      MindStone Core                          │
 │ identity | config | transcript | routing | SCRI | memory      │
+│ knowledgebases | skills | workflows | personas                │
 │ channel contract | wizard contract | provider abstraction      │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                         Storage                              │
-│ workspace files | journals/docs/wiki | vectors | sessions      │
-│ channel state | secrets by env/token file/keychain where used   │
+│ workspace files | journals/docs/wiki | knowledgebases | vectors│
+│ sessions | personas | channel state | secrets by env/token refs │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -64,10 +66,14 @@ Core responsibilities:
 - identity model and workspace layout
 - config schema and migration primitives
 - memory source abstractions
+- knowledgebase source/catalog/index abstractions
 - vector recall interfaces
 - SCRI context selection/injection
 - transcript model and session key semantics
 - channel plugin contract
+- skill definitions, skill-builder contracts, and skill loading metadata
+- workflow definitions, workflow-builder contracts, and workflow execution metadata
+- persona definitions, persona-builder contracts, and persona activation metadata
 - wizard/prompter contract
 - shared security policy logic
 - route resolution and delivery context semantics
@@ -167,6 +173,229 @@ Sliding-window pruning must never delete transcript entries. It only changes wha
 
 Dream-cycle behavior should run at compaction/session/pruning boundaries and should be callable manually for backfill and recovery.
 
+### 3.6 Knowledgebases
+
+Knowledgebases should be a separate continuity/reference layer from memories and journals.
+
+A **structured memory** is something the agent should remember as durable operational knowledge, preference, lesson, design decision, correction, or project fact.
+
+A **journal** is narrative experiential continuity: what unfolded, what mattered, and what texture should be preserved.
+
+A **knowledgebase** is supplemental reference material provided by the user or a pack: documents, URLs, manuals, policies, standards, code docs, case libraries, threat reports, product docs, or domain corpora. It is knowledge the agent can consult, not lived agent experience.
+
+This distinction matters:
+
+```text
+memory shapes future judgment
+journals preserve experience
+knowledgebases provide reference material
+```
+
+Knowledgebase ingestion should preserve source metadata:
+
+- KB id/name/version;
+- source URI/path;
+- document title/type;
+- source timestamp and refresh policy;
+- chunking/index status;
+- sensitivity labels;
+- owner/pack/persona reference;
+- citation metadata;
+- summaries at document and KB level.
+
+There are several possible integration modes:
+
+1. **Dedicated KB vector index** — KB chunks live in a separate index; the agent searches KBs manually or through tools when needed.
+2. **Summary/index vectorization** — KB summaries and an index-of-indexes are available to Auto Recall, while full KB chunks stay in a dedicated KB store.
+3. **Unified recall substrate** — KB chunks participate in Auto Recall alongside memory/transcripts, useful for tightly scoped SME agents.
+4. **Configurable hybrid** — users/personas choose per-KB behavior.
+
+Recommended default:
+
+```text
+Use KB summaries/pointers in Auto Recall.
+Keep full KB chunks in a dedicated KB index.
+Let the agent deliberately search KBs when the summary/pointer indicates relevance.
+```
+
+Reasoning:
+
+- prevents large reference corpora from drowning out lived memory and transcript recall;
+- keeps source semantics clear;
+- supports large document collections;
+- allows SME agents/personas to opt into stronger KB integration;
+- keeps user choice open.
+
+Skills and workflows can declare KB dependencies:
+
+```text
+workflow incident-response-triage requires KBs: nist-800-61, org-ir-runbook
+skill ot-threat-analysis uses KBs: cisa-ics-advisories, dragos-threat-groups
+```
+
+Open design space remains around whether KB summary records should be indexed into the same SQLite memory store as memories/transcripts or into a separate catalog table. The design invariant is more important than the first storage choice:
+
+```text
+A knowledgebase hit must be labeled as reference material, not memory.
+```
+
+### 3.7 Skills and Workflow Builders
+
+MindStone-Agent should treat skills and workflows as durable, inspectable agent capability artifacts.
+
+A **skill** is a reusable capability package: instructions, triggers, constraints, examples, validation steps, and optional tool/workflow references. Skills are useful when the agent repeatedly performs a recognizable task and should stop re-deriving the same procedure every time.
+
+A **workflow** is a reusable multi-step process: ordered or conditional steps, inputs, outputs, tools, routes, approval gates, loops/retries, failure handling, and validation criteria. Workflows are useful when the agent needs to execute a recurring process rather than only remember how to do a task.
+
+The relationship:
+
+```text
+skills teach the agent how to do a class of work
+workflows organize repeated multi-step execution
+skills can call workflows
+workflows can call skills
+```
+
+MindStone should ship a default **Skill Builder** skill. The Skill Builder helps the agent create new skills when:
+
+- the user explicitly asks for a skill;
+- the agent notices repetitive work and proposes one;
+- a workflow needs a reusable capability that does not yet exist.
+
+MindStone should also ship or support a **Workflow Builder** capability. The Workflow Builder helps the agent create process artifacts when:
+
+- the user describes a repeatable procedure;
+- the agent notices repeated multi-step work;
+- a recurring task needs approval gates, retries, loops, or validation;
+- an integration, channel process, checkpoint ritual, incident-response procedure, or TestFlight-style workflow should become reusable.
+
+Workflows are not new as a concept; loops are one popular expression of an older workflow/harness pattern. MindStone should avoid treating “loops” as magic. The product should expose workflows as durable, user-editable process definitions that may include loop/retry conditions where useful.
+
+Skill/workflow creation should follow approval discipline:
+
+```text
+observe or receive request
+→ draft skill/workflow artifact
+→ explain trigger/scope/safety gates
+→ ask approval unless policy explicitly allows auto-write
+→ write/version artifact
+→ index/discover/load where supported
+→ record transcript/LOG event
+```
+
+Recommended artifact locations:
+
+```text
+skills/
+  <skill-id>/SKILL.md
+  <skill-id>/metadata.json
+
+workflows/
+  <workflow-id>.workflow.json
+  <workflow-id>.md
+```
+
+A skill artifact should include:
+
+- id/name/version;
+- description;
+- when to use;
+- when not to use;
+- required inputs;
+- procedure/instructions;
+- safety/approval rules;
+- validation checklist;
+- related workflows/tools;
+- examples.
+
+A workflow artifact should include:
+
+- id/name/version;
+- description;
+- trigger conditions;
+- inputs/outputs;
+- step graph or ordered steps;
+- tool/route requirements;
+- skill references;
+- approval gates;
+- loop/retry conditions;
+- failure handling;
+- validation and completion criteria;
+- transcript/event reporting policy.
+
+The existing Integration Builder is an initial built-in skill example. It should not be treated as the whole skill system.
+
+### 3.8 Personas and Persona Packs
+
+A persona is an identity supplement package. It should not overwrite the agent’s core identity. It temporarily or permanently layers role/domain behavior, skills, workflows, knowledgebases, tools, and safety rules onto an agent.
+
+Personas are likely to be a major MindStone differentiator alongside Layered Continuity Architecture.
+
+The conceptual model:
+
+```text
+core agent identity = who the agent is
+persona = a scoped capability/role overlay
+agent pack = deployable runtime + default agent/persona stack
+persona pack = reusable persona package that can attach to compatible agents
+```
+
+A persona can be:
+
+- **permanent** — always active for this agent;
+- **profile-scoped** — active because the agent is a CTI agent, software engineer, coach, etc.;
+- **session-scoped** — active for the current session;
+- **task-scoped** — active for a specific workflow or request;
+- **on-demand** — activated by user request or workflow need.
+
+Recommended artifact layout:
+
+```text
+personas/
+  <persona-id>/
+    PERSONA.md
+    metadata.json
+    skills.json
+    workflows.json
+    knowledgebases.json
+    safety.md
+```
+
+`PERSONA.md` should describe:
+
+- purpose and scope;
+- behavioral stance;
+- expertise/domain boundaries;
+- when to activate;
+- when not to activate;
+- relationship to core identity;
+- safety and disclosure constraints;
+- required skills/workflows/KBs;
+- optional skills/workflows/KBs;
+- route/model preferences if any.
+
+Persona Builder should let a user or agent:
+
+1. define persona purpose and scope;
+2. pick existing skills;
+3. pick existing workflows;
+4. pick existing knowledgebases;
+5. invoke Skill Builder / Workflow Builder / Knowledgebase ingestion just-in-time if needed;
+6. define activation policy;
+7. define safety boundaries;
+8. preview the persona overlay;
+9. approve and install.
+
+Persona activation should be visible in transcript/status surfaces:
+
+```text
+persona_activated
+persona_deactivated
+persona_scope_changed
+```
+
+Core prompt assembly should treat persona context as an explicit layer with precedence rules. A persona may supplement the agent’s identity, but it should not silently contradict core identity, user safety rules, or active higher-priority policy.
+
 ## 4. Onboarding and Settings UX
 
 The current MindStone wizard already uses a `WizardPrompter` concept. The rebuild should formalize that as a Core interface and implement adapters for Pi and any future CLI/web UI.
@@ -194,9 +423,12 @@ The wizard should remain sectioned:
 - gateway/auth
 - channels
 - memory/SCRI
+- knowledgebases
 - identity
 - behavior/style
 - skills
+- workflows
+- personas
 - daemon/service install
 
 Each section should be re-runnable independently.
@@ -266,6 +498,10 @@ Recommended logical storage:
       memory/
       journals/
       docs/
+      knowledgebases/
+      skills/
+      workflows/
+      personas/
       transcripts/
       vectors/
   sessions/
@@ -291,8 +527,9 @@ Security defaults:
 - Token values are not logged.
 - Config migrations preserve secrets without printing them.
 - Private memory, transcripts, vector DBs, and local config are ignored by git.
+- Sensitive context routing should prevent raw sensitive sources from reaching routes without clearance, and should use a declassification bridge before derived sensitive output crosses back to lower-trust/default routes. See `SENSITIVE_CONTEXT_ROUTING.md`.
 
-The system should fail closed: invalid auth, invalid config, or unsafe channel policy should block startup or emit a prominent warning depending on severity.
+The system should fail closed: invalid auth, invalid config, unsafe channel policy, or unsafe sensitive-route policy should block startup or emit a prominent warning depending on severity.
 
 ## 9. Migration Strategy
 
@@ -328,6 +565,18 @@ Rationale: the existing channel plugin model is valuable; the problem is couplin
 
 Rationale: the existing Gateway endpoint is already aligned with how OpenWebUI usually integrates custom backends; bespoke work should wait for validation evidence.
 
+### Decision: Skills and workflows are durable artifacts, not hidden prompt tricks
+
+Rationale: users and agents need to inspect, approve, edit, version, and audit reusable capabilities. A skill or workflow should not silently become active just because the model improvised it once in conversation.
+
+### Decision: Knowledgebases are reference sources, not memories
+
+Rationale: documents, URLs, and domain corpora are supplemental knowledge. They should preserve source/citation semantics and should not be confused with the agent’s lived transcript, structured memories, journals, or checkpoints.
+
+### Decision: Personas are identity supplements, not identity replacements
+
+Rationale: personas can package powerful role/domain behavior, skills, workflows, and KBs, but the core persistent identity must remain coherent. Persona activation should be scoped, auditable, and reversible unless deliberately configured as permanent.
+
 ## 11. Open Questions
 
 1. Should Core be a separate package inside the repo or a clean internal module boundary first?
@@ -336,6 +585,13 @@ Rationale: the existing Gateway endpoint is already aligned with how OpenWebUI u
 4. Should LanceDB remain the primary vector backend, or should sqlite-vec/local alternatives be supported in Core from the start?
 5. Which channel defines MVP after Telegram: Discord or Slack?
 6. Should OpenResponses be positioned as primary and Chat Completions as legacy-compatible, or should both remain equal public surfaces?
+7. What artifact schema should Skill Builder use for local skills, Pi-compatible skills, and future Agent Packs?
+8. What artifact schema should Workflow Builder use for loops, gated procedures, recurring jobs, and TestFlight-style workflows?
+9. Which skills/workflows may be auto-enabled by policy, and which require explicit approval before activation?
+10. Should KB chunks live in a dedicated vector DB, a shared vector DB with source-kind filtering, or a hybrid summary-pointer model by default?
+11. How should KB refresh, citation, and source invalidation interact with Auto Recall?
+12. What are the precedence rules among core identity, permanent persona, task persona, workflow instructions, user instruction, and safety policy?
+13. How should Persona Packs be distributed independently from full Agent Packs?
 
 ## 12. Review Plan
 

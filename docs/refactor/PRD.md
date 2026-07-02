@@ -28,7 +28,11 @@ Current Pi provides a cleaner SDK and extension model, but a Pi extension alone 
 5. Preserve WebChat and OpenWebUI-compatible access through Gateway WebSocket and OpenAI/OpenResponses-style HTTP endpoints.
 6. Establish a clean architecture that separates MindStone Core, Gateway daemon, channel plugins, memory backends, and substrate adapters.
 7. Make Pi a supported substrate without making MindStone depend exclusively on Pi.
-8. Reduce legacy/OpenClaw coupling and make future adapters easier to build.
+8. Provide a skill-builder system so agents can create reusable skills for repeated tasks, either when the user asks or when the agent notices a recurring pattern and proposes one.
+9. Provide a workflow-builder system so users and agents can create reusable multi-step workflows; workflows and skills should be able to call, compose, and reinforce each other.
+10. Provide a knowledgebase system separate from memories and journals so users can attach documents, URLs, references, and domain corpora as supplemental agent knowledge.
+11. Provide persona packages that supplement an agent’s identity with curated skills, workflows, knowledgebases, and behavior/context overlays; personas may be permanent or on-demand.
+12. Reduce legacy/OpenClaw coupling and make future adapters easier to build.
 
 ## 4. Non-Goals
 
@@ -189,7 +193,68 @@ Acceptance criteria:
 - Local file permissions for secrets are validated where possible.
 - Public docs/examples avoid private state and real tokens.
 
-### 7.9 Installation and Operations
+### 7.9 Skill Builder System
+
+**Requirement:** Provide a default skill-builder capability that lets agents create reusable skills for repeated tasks.
+
+Acceptance criteria:
+
+- MindStone ships a default Skill Builder skill available to configured agents unless disabled.
+- A user can ask the agent to build a skill for a recurring task.
+- An agent can notice repetitive work, propose that a skill should be created, and ask for approval before writing or installing it.
+- Generated skills have a stable artifact format, metadata, instructions, usage triggers, safety notes, and validation steps.
+- Skills can be stored as local files, indexed for discovery, surfaced in status/TUI/doctor views, and loaded into the appropriate substrate where supported.
+- Skills can call or reference workflows where policy allows.
+- Skill creation should preserve approval discipline: a proposed skill is drafted first, then written/enabled only after user approval or configured policy.
+- The existing Integration Builder skill is treated as an initial built-in skill example, not as the entire skill-builder system.
+
+### 7.10 Workflow Builder System
+
+**Requirement:** Provide a workflow-builder capability that lets users and agents create reusable multi-step workflows.
+
+Acceptance criteria:
+
+- A user can ask the agent to build a workflow from natural-language direction.
+- An agent can propose a workflow when it observes repeated multi-step work.
+- Workflows can represent loops, checklists, recurring jobs, gated procedures, handoff/checkpoint sequences, integrations, and harness-style process flows.
+- Workflows have a durable artifact format with steps, inputs, outputs, tools/routes, approval gates, retry/loop conditions, failure handling, and validation criteria.
+- Workflows can call skills, and skills can call workflows, while preserving clear boundaries and avoiding hidden side effects.
+- Workflows are inspectable, editable, versionable, and auditable before activation.
+- Workflow execution should record transcript events and status so the agent and user know what ran, what failed, and what requires approval.
+- TestFlight-style workflows are a design reference; MindStone-Agent should make workflow creation user- and agent-accessible rather than assuming humans hand-author all process definitions.
+
+### 7.11 Knowledgebase System
+
+**Requirement:** Provide a knowledgebase system separate from memories and journals for user-supplied documents, URLs, reference material, and domain corpora.
+
+Acceptance criteria:
+
+- Users can create named knowledgebases from local documents, folders, URLs, pasted text, and future connectors.
+- Knowledgebases are distinct from structured memory and narrative journals: they are supplemental reference sources, not the agent’s lived experience or durable behavioral memory.
+- Knowledgebase ingestion records source metadata, provenance, refresh policy, chunking/index status, and sensitivity labels where configured.
+- Knowledgebases can be vectorized into a dedicated KB index, summarized into an index-of-indexes, or integrated into the general recall substrate according to user/agent configuration.
+- Agents can manually search knowledgebases when needed and can cite or reference source documents without pretending the content is remembered experience.
+- Auto Recall can optionally use KB summaries/pointers rather than every KB chunk, especially for broad corpora.
+- SME agents and persona packs can configure stronger KB integration when domain reference material should be central to the agent’s work.
+- Skills and workflows can reference required or optional knowledgebases.
+- Knowledgebase refresh/reindex status is visible in status/TUI/doctor surfaces.
+
+### 7.12 Persona and Persona Pack System
+
+**Requirement:** Provide personas as packaged, reusable identity supplements that can bundle or reference skills, workflows, knowledgebases, and behavior/context overlays.
+
+Acceptance criteria:
+
+- A persona is not a replacement for the agent’s core identity. It supplements identity for a role, domain, operating mode, or temporary stance.
+- Personas can be permanent, session-scoped, task-scoped, or on-demand depending on configuration.
+- A persona has a self-contained folder with a `PERSONA.md` descriptor and metadata.
+- A persona can reference skills, workflows, knowledgebases, tools, safety rules, and route/model preferences.
+- Persona Builder supports picking existing skills/workflows/KBs and invoking the respective builders just-in-time when an artifact does not exist.
+- Persona activation/deactivation is visible and auditable in transcript/status surfaces.
+- Persona Packs are a product/package layer for curated role/domain personas, and may be bundled with Agent Packs or distributed independently.
+- Persona packages should be a major MindStone differentiator alongside Layered Continuity Architecture.
+
+### 7.13 Installation and Operations
 
 **Requirement:** Provide reliable install/update and daemon operation paths.
 
@@ -197,7 +262,7 @@ Acceptance criteria:
 
 - Install flow works for local dev and packaged distribution.
 - Gateway daemon can run under launchd on macOS and systemd user services on Linux.
-- Health/status commands report Gateway, channel, memory, provider, and configuration state.
+- Health/status commands report Gateway, channel, memory, provider, skills, workflows, knowledgebases, personas, and configuration state.
 - Update flow can migrate config safely and report legacy config warnings.
 - Logs and diagnostics are accessible without exposing secrets.
 
@@ -255,6 +320,13 @@ Acceptance criteria:
 
 - Implement/port vector backend, backfill, auto recall, dream-cycle hooks, and journal/doc memory.
 
+### M4.5 — Skills, workflows, knowledgebases, and personas
+
+- Provide default Skill Builder and Workflow Builder designs and artifact contracts.
+- Provide Knowledgebase and Persona/Persona Pack designs and artifact contracts.
+- Keep implementation post-MVP unless required for the initial user experience.
+- Promote the existing Integration Builder skill as an initial built-in skill example.
+
 ### M5 — Channel MVPs
 
 - Port Telegram first.
@@ -272,6 +344,9 @@ Acceptance criteria:
 - At least Telegram and one workspace channel, Discord or Slack, work through the Gateway daemon.
 - SCRI recall injects relevant memories from both Markdown and transcript vectors.
 - Dream-cycle/compaction behavior preserves continuity across a forced compaction or session reset.
+- Users and agents can create or propose reusable skills/workflows for repeated work without hand-authoring every artifact from scratch.
+- Users can attach and manage knowledgebases as supplemental reference sources distinct from memory and journals.
+- Personas can package identity supplements with skills, workflows, and KBs for reusable roles/domains.
 - No private identity files, transcripts, vectors, or tokens are committed.
 - Cairn/Hearth review finds no major blocker in substrate boundaries or daemon operations.
 
@@ -283,6 +358,9 @@ Acceptance criteria:
 4. **Memory fidelity:** Rewriting recall pipelines risks reducing SCRI to generic RAG unless explicitly protected.
 5. **OpenWebUI compatibility:** Existing OpenAI-compatible endpoint is likely sufficient, but must be live-tested against OpenWebUI.
 6. **Multi-agent fleet semantics:** Fleet identity isolation must be retained in Core schema and session routing.
+7. **Skill/workflow overreach:** Agent-generated skills and workflows can create hidden automation risk unless approval, audit, versioning, and safety gates are explicit.
+8. **Knowledgebase ambiguity:** If KBs are collapsed into memory or transcript vectors without clear source semantics, agents may confuse reference material with lived experience or durable user/project memory.
+9. **Persona drift:** Personas can be powerful but may blur identity boundaries unless activation scope, precedence, and auditability are explicit.
 
 ## 12. Review Checklist
 
