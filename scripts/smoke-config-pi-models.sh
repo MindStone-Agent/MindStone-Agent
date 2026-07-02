@@ -149,7 +149,7 @@ MINDSTONE_AGENT_ROOT="$ROOT" MINDSTONE_AGENT_CONFIG="$TMP_DIR/no-model-config.js
 import { readFileSync } from "node:fs";
 import { runMindStoneConfigWizard, type MindStonePrompter, type MindStoneSelectOption } from "./packages/mindstone-core/src/index.ts";
 
-const selects = ["pi-session", "done"];
+const selects = ["pi-session", "skip", "done"];
 const confirms = [true];
 let noteText = "";
 
@@ -187,4 +187,100 @@ if (config.routing?.mode !== "placeholder") throw new Error(`Expected placeholde
 if (config.routing?.defaultModel !== undefined) throw new Error("Expected no defaultModel when no model selected");
 
 console.log(`config no-model fallback smoke passed: ${result.path}`);
+TS
+
+MINDSTONE_AGENT_ROOT="$ROOT" TMP_AGENT_DIR="$TMP_DIR/pi-agent" npx tsx <<'TS'
+import assert from "node:assert/strict";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  getIsolatedModelsStatus,
+  isolatedModelsPath,
+  readIsolatedModelsConfig,
+  upsertIsolatedProvider,
+} from "./packages/mindstone-core/src/index.ts";
+import { PiMindStoneProvider } from "./packages/mindstone-gateway/src/pi-provider.ts";
+
+const agentDir = process.env.TMP_AGENT_DIR!;
+
+// Fresh dir: no models.json yet.
+const initial = readIsolatedModelsConfig(agentDir);
+assert.equal(initial.exists, false);
+assert.deepEqual(initial.config.providers, {});
+
+// Register a local Ollama-style provider with two models.
+const first = upsertIsolatedProvider(agentDir, "ollama", {
+  name: "Ollama (local)",
+  baseUrl: "http://localhost:11434/v1",
+  api: "openai-completions",
+  apiKey: "ollama",
+  models: [{ id: "llama3.1:8b" }, { id: "qwen3:14b" }],
+});
+assert.equal(first.wrote, true);
+assert.equal(first.modelCount, 2);
+
+// Upsert again with one overlapping + one new model: merged, no duplicates, fields preserved.
+const second = upsertIsolatedProvider(agentDir, "ollama", {
+  models: [{ id: "qwen3:14b", contextWindow: 32768 }, { id: "gemma3:27b" }],
+});
+assert.equal(second.modelCount, 3, "expected merged model list without duplicates");
+const merged = readIsolatedModelsConfig(agentDir);
+const ollama = merged.config.providers.ollama;
+assert.equal(ollama.baseUrl, "http://localhost:11434/v1", "existing fields preserved on partial upsert");
+assert.equal(ollama.apiKey, "ollama");
+assert.equal(ollama.models?.find((m) => m.id === "qwen3:14b")?.contextWindow, 32768, "overlapping model updated in place");
+
+// Register LM Studio with a distinctive literal key and Ollama Cloud with an env-var reference.
+upsertIsolatedProvider(agentDir, "lmstudio", {
+  name: "LM Studio (local)",
+  baseUrl: "http://localhost:1234/v1",
+  api: "openai-completions",
+  apiKey: "sk-lmstudio-secret-smoke",
+  models: [{ id: "qwen2.5-coder-14b" }],
+});
+upsertIsolatedProvider(agentDir, "ollama-cloud", {
+  name: "Ollama Cloud",
+  baseUrl: "https://ollama.com/v1",
+  api: "openai-completions",
+  apiKey: "$OLLAMA_API_KEY",
+  models: [{ id: "gpt-oss:120b" }],
+});
+
+// File permissions are owner-only (the file may hold key material).
+const mode = statSync(isolatedModelsPath(agentDir)).mode & 0o777;
+assert.equal(mode, 0o600, `expected models.json mode 600, got ${mode.toString(8)}`);
+
+// Sanitized status: classifies auth without leaking key material.
+const status = getIsolatedModelsStatus(agentDir);
+assert.equal(status.providers.length, 3);
+const statusJson = JSON.stringify(status);
+assert.ok(!statusJson.includes("sk-lmstudio-secret-smoke"), "status must not leak literal keys");
+assert.ok(!statusJson.includes("$OLLAMA_API_KEY"), "status must not include raw apiKey template values");
+assert.equal(status.providers.find((p) => p.providerId === "lmstudio")!.auth, "models.json key (stored)");
+assert.equal(status.providers.find((p) => p.providerId === "ollama-cloud")!.auth, "env: OLLAMA_API_KEY");
+
+// Pi ModelRegistry picks the custom providers up from the isolated agent dir.
+process.env.OLLAMA_API_KEY = "smoke-test-cloud-key";
+const provider = new PiMindStoneProvider({ agentDir });
+const providers = await provider.listProviders();
+const piOllama = providers.find((p) => p.id === "ollama");
+assert.ok(piOllama, "expected ollama provider in Pi registry discovery");
+assert.equal(piOllama.authStatus?.configured, true, "models.json apiKey should make the provider available");
+assert.equal(piOllama.modelCount, 3);
+assert.ok(providers.some((p) => p.id === "ollama-cloud"), "expected ollama-cloud provider in Pi registry discovery");
+const models = await provider.listModels();
+assert.ok(models.some((m) => m.id === "ollama/llama3.1:8b"), "expected ollama/llama3.1:8b in registry models");
+const available = await provider.listAvailableModels();
+assert.ok(available.some((m) => m.id === "ollama/gemma3:27b"), "keyed local provider models should be available");
+assert.ok(available.some((m) => m.id === "ollama-cloud/gpt-oss:120b"), "env-keyed cloud provider should be available when the variable is set");
+
+// A malformed models.json is surfaced and never overwritten.
+writeFileSync(isolatedModelsPath(agentDir), "{ not json", "utf-8");
+const broken = readIsolatedModelsConfig(agentDir);
+assert.ok(broken.error, "expected parse error surfaced");
+const refused = upsertIsolatedProvider(agentDir, "ollama", { models: [{ id: "x" }] });
+assert.equal(refused.wrote, false, "upsert must refuse to clobber an unparseable models.json");
+assert.ok(refused.error);
+assert.equal(readFileSync(isolatedModelsPath(agentDir), "utf-8"), "{ not json", "original file preserved");
+
+console.log(`isolated models.json custom provider smoke passed: ${agentDir}`);
 TS

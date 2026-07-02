@@ -41,6 +41,7 @@ const selects = [
   "custom", // identity direction
   "custom", // setup depth
   "custom", // model setup
+  "skip", // model source fallback when no providers are discovered
 ];
 const confirms = [true, true, true];
 

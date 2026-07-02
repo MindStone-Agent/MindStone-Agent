@@ -20,6 +20,12 @@ import type {
 } from "../config/types.js";
 import type { MindStoneModelInfo, MindStoneProviderInfo } from "../provider/index.js";
 import {
+  LOCAL_PROVIDER_PRESETS,
+  probeOpenAiCompatibleModels,
+  upsertIsolatedProvider,
+  type LocalProviderPreset,
+} from "../provider/local-models.js";
+import {
   BUILT_IN_MINDSTONE_PROFILES,
   getBuiltInMindStoneProfile,
   isBuiltInMindStoneProfileId,
@@ -558,6 +564,210 @@ async function maybeSetupProviderAuth(params: {
   if (message) await params.prompter.note(message, "Provider auth saved");
 }
 
+type CustomProviderSetupParams = {
+  prompter: MindStonePrompter;
+  agentDir: string;
+  dryRun?: boolean;
+};
+
+async function finishCustomProviderRegistration(params: CustomProviderSetupParams & {
+  preset: LocalProviderPreset;
+  baseUrl: string;
+  /** Value written to models.json (may be a "$ENV_VAR" reference). */
+  apiKey?: string;
+  /** Resolved key used only for the live endpoint probe. */
+  probeApiKey?: string;
+  manualModelHint: string;
+}): Promise<string | undefined> {
+  const { prompter, preset } = params;
+  const progress = prompter.progress?.(`Checking ${params.baseUrl} for available models...`);
+  const probe = await probeOpenAiCompatibleModels({ baseUrl: params.baseUrl, apiKey: params.probeApiKey });
+  progress?.stop(probe.ok ? `Found ${probe.models.length} models at ${probe.baseUrl}` : `Could not list models: ${probe.error}`);
+
+  let selectedModelId: string | undefined;
+  let registeredModels: Array<{ id: string }> = [];
+
+  if (probe.ok) {
+    type ModelPick = `model:${string}` | "manual" | "cancel";
+    const shortList = probe.models.slice(0, 30);
+    const pick = await prompter.select<ModelPick>({
+      message: `Choose ${preset.name} model`,
+      options: [
+        ...shortList.map((model) => ({ value: `model:${model.id}` as ModelPick, label: model.id })),
+        { value: "manual", label: "Enter model id manually", hint: "advanced" },
+        { value: "cancel", label: "Cancel", hint: "return without registering this provider" },
+      ],
+      initialValue: `model:${shortList[0].id}`,
+    });
+    if (pick === "cancel") return undefined;
+    if (pick !== "manual") selectedModelId = pick.replace(/^model:/, "");
+    registeredModels = probe.models;
+  } else {
+    const proceed = await prompter.select<"manual" | "cancel">({
+      message: `The endpoint could not be reached or listed no models. Register ${preset.name} anyway?`,
+      options: [
+        { value: "manual", label: "Yes — enter a model id manually", hint: "the endpoint just needs to be running by chat time" },
+        { value: "cancel", label: "No — cancel this setup", hint: probe.error },
+      ],
+      initialValue: "cancel",
+    });
+    if (proceed === "cancel") return undefined;
+  }
+
+  if (!selectedModelId) {
+    selectedModelId = trimOrUndefined(await prompter.text({
+      message: "Model id",
+      placeholder: params.manualModelHint,
+    }));
+    if (!selectedModelId) return undefined;
+    if (!registeredModels.some((model) => model.id === selectedModelId)) {
+      registeredModels = [...registeredModels, { id: selectedModelId }];
+    }
+  }
+
+  const result = upsertIsolatedProvider(
+    params.agentDir,
+    preset.providerId,
+    {
+      name: preset.name,
+      baseUrl: params.baseUrl,
+      api: preset.api,
+      ...(params.apiKey ? { apiKey: params.apiKey } : {}),
+      models: registeredModels.map((model) => ({ id: model.id })),
+    },
+    { dryRun: params.dryRun },
+  );
+  if (result.error) {
+    await prompter.note(
+      [
+        `Could not update the isolated models.json: ${result.error}`,
+        `File: ${result.path}`,
+        "Fix or remove that file, then rerun this setup.",
+      ].join("\n"),
+      "Provider registration failed",
+    );
+    return undefined;
+  }
+
+  await prompter.note(
+    [
+      params.dryRun
+        ? `Dry-run: would register ${preset.name} (${result.modelCount} models) in ${result.path}.`
+        : `Registered ${preset.name} with ${result.modelCount} models in this project's isolated models.json.`,
+      `Provider file: ${result.path}`,
+      "No global Pi config or auth state is used.",
+    ].join("\n"),
+    "Provider registered",
+  );
+  return `${preset.providerId}/${selectedModelId}`;
+}
+
+async function setupLocalModelProvider(params: CustomProviderSetupParams): Promise<string | undefined> {
+  const { prompter } = params;
+  type LocalKind = "ollama" | "lmstudio" | "openai-compatible" | "cancel";
+  const kind = await prompter.select<LocalKind>({
+    message: "Which local model server do you use?",
+    options: [
+      { value: "ollama", label: "Ollama", hint: "default http://localhost:11434/v1" },
+      { value: "lmstudio", label: "LM Studio", hint: "default http://localhost:1234/v1" },
+      { value: "openai-compatible", label: "Other OpenAI-compatible server", hint: "vLLM, llama.cpp server, LiteLLM, ..." },
+      { value: "cancel", label: "Back", hint: "return without local model setup" },
+    ],
+    initialValue: "ollama",
+  });
+  if (kind === "cancel") return undefined;
+  const preset = LOCAL_PROVIDER_PRESETS[kind];
+
+  const baseUrl = trimOrUndefined(await prompter.text({
+    message: "Model server base URL (OpenAI-compatible)",
+    initialValue: preset.baseUrl,
+  })) ?? preset.baseUrl;
+  const apiKey = trimOrUndefined(await prompter.text({
+    message: "API key (most local servers ignore this; keep the default unless yours requires one)",
+    initialValue: preset.placeholderApiKey,
+  })) ?? preset.placeholderApiKey;
+
+  return finishCustomProviderRegistration({
+    ...params,
+    preset,
+    baseUrl,
+    apiKey,
+    probeApiKey: apiKey,
+    manualModelHint: "model id as served, e.g. llama3.1:8b",
+  });
+}
+
+async function setupOllamaCloudProvider(params: CustomProviderSetupParams): Promise<string | undefined> {
+  const { prompter } = params;
+  const preset = LOCAL_PROVIDER_PRESETS["ollama-cloud"];
+
+  await prompter.note(
+    [
+      "Ollama Cloud runs large open models on ollama.com datacenter hardware.",
+      "You need an ollama.com account and an API key from https://ollama.com/settings/keys.",
+      "The key is stored only in this project's isolated runtime, never in global Pi state.",
+    ].join("\n"),
+    "Ollama Cloud",
+  );
+
+  type KeyChoice = "env" | "api_key" | "skip" | "cancel";
+  const keyChoice = await prompter.select<KeyChoice>({
+    message: "How do you want to provide the Ollama Cloud API key?",
+    options: [
+      { value: "env", label: "Use an environment variable", hint: "stores a $VAR reference in isolated models.json" },
+      { value: "api_key", label: "Paste an API key now", hint: "stored in isolated models.json with 0600 permissions" },
+      { value: "skip", label: "Configure the key later", hint: "the provider is registered but unavailable until a key exists" },
+      { value: "cancel", label: "Back", hint: "return without Ollama Cloud setup" },
+    ],
+    initialValue: "env",
+  });
+  if (keyChoice === "cancel") return undefined;
+
+  let apiKey: string | undefined;
+  let probeApiKey: string | undefined;
+  if (keyChoice === "env") {
+    const envVar = trimOrUndefined(await prompter.text({
+      message: "API key environment variable",
+      initialValue: "OLLAMA_API_KEY",
+    })) ?? "OLLAMA_API_KEY";
+    apiKey = `$${envVar}`;
+    probeApiKey = process.env[envVar];
+    if (!probeApiKey) {
+      await prompter.note(
+        `$${envVar} is not set in this shell, so the live model listing may fail. The reference is still saved and used once the variable exists.`,
+        "Environment variable not set",
+      );
+    }
+  } else if (keyChoice === "api_key") {
+    probeApiKey = trimOrUndefined(await prompter.text({
+      message: "Ollama Cloud API key",
+      placeholder: "paste API key",
+      sensitive: true,
+    }));
+    if (!probeApiKey) return undefined;
+    apiKey = probeApiKey;
+  } else {
+    await prompter.note(
+      "Without a key the provider stays unavailable to routing. Rerun `mindstone config --section routing` after you have one.",
+      "Key skipped",
+    );
+  }
+
+  const baseUrl = trimOrUndefined(await prompter.text({
+    message: "Ollama Cloud base URL",
+    initialValue: preset.baseUrl,
+  })) ?? preset.baseUrl;
+
+  return finishCustomProviderRegistration({
+    ...params,
+    preset,
+    baseUrl,
+    apiKey,
+    probeApiKey,
+    manualModelHint: "cloud model id, e.g. gpt-oss:120b",
+  });
+}
+
 async function choosePiModel(params: {
   prompter: MindStonePrompter;
   current?: string;
@@ -565,6 +775,8 @@ async function choosePiModel(params: {
   availableProviders?: MindStoneProviderInfo[];
   discoveryError?: string;
   setupProviderAuth?: MindStoneConfigWizardOptions["setupProviderAuth"];
+  agentDir?: string;
+  dryRun?: boolean;
 }): Promise<string | undefined> {
   const allModels = params.availableModels ?? [];
   const providersFromModels: MindStoneProviderInfo[] = [...new Set(allModels.map((model) => model.provider))].map((provider) => ({
@@ -577,36 +789,67 @@ async function choosePiModel(params: {
     .filter((provider) => provider.modelCount > 0)
     .sort((a, b) => favoriteProviderScore(a) - favoriteProviderScore(b) || a.name.localeCompare(b.name));
 
+  const setupParams: CustomProviderSetupParams = {
+    prompter: params.prompter,
+    agentDir: params.agentDir ?? runtimePathsFromEnv().piAgentDir,
+    dryRun: params.dryRun,
+  };
+
   if (providers.length === 0) {
     await params.prompter.note(
       [
         "No isolated Pi providers/models were discovered for this runtime.",
         params.discoveryError ? `Discovery error: ${params.discoveryError}` : undefined,
-        "Use `mindstone auth login openai-codex` or this model setup flow to connect an account, then rerun this wizard.",
+        "You can still register a local model server or Ollama Cloud below, or use `mindstone auth login openai-codex` for a subscription account and rerun this wizard.",
       ]
         .filter((line): line is string => Boolean(line))
         .join("\n"),
       "Pi provider discovery",
     );
-    return undefined;
+    const fallback = await params.prompter.select<"local" | "ollama_cloud" | "skip">({
+      message: "Set up a model source now?",
+      options: [
+        { value: "local", label: "Local model (Ollama / LM Studio / OpenAI-compatible)", hint: "registers a provider in this project's isolated models.json" },
+        { value: "ollama_cloud", label: "Ollama Cloud", hint: "hosted open models via ollama.com; needs an ollama.com API key" },
+        { value: "skip", label: "Skip for now" },
+      ],
+      initialValue: "local",
+    });
+    if (fallback === "skip") return undefined;
+    return fallback === "local" ? setupLocalModelProvider(setupParams) : setupOllamaCloudProvider(setupParams);
   }
 
-  type ProviderChoice = "unset" | "current" | `provider:${string}`;
+  type ProviderChoice = "unset" | "current" | "setup:local" | "setup:ollama-cloud" | `provider:${string}`;
   const providerOptions: Array<MindStoneSelectOption<ProviderChoice>> = [{ value: "unset", label: "Leave unset", hint: "use Pi/provider default" }];
   if (params.current) providerOptions.push({ value: "current", label: `Keep current: ${params.current}` });
   for (const provider of providers) {
     providerOptions.push({ value: `provider:${provider.id}`, label: provider.name, hint: providerHint(provider) });
   }
+  providerOptions.push(
+    { value: "setup:local", label: "Local model (Ollama / LM Studio / OpenAI-compatible)", hint: "registers a provider in this project's isolated models.json" },
+    { value: "setup:ollama-cloud", label: "Ollama Cloud", hint: "hosted open models via ollama.com; needs an ollama.com API key" },
+  );
 
   const currentProvider = params.current?.includes("/") ? params.current.split("/")[0] : undefined;
   const initialProvider: ProviderChoice = currentProvider && providers.some((provider) => provider.id === currentProvider) ? `provider:${currentProvider}` : params.current ? "current" : "unset";
-  const providerChoice = await params.prompter.select<ProviderChoice>({
-    message: "Choose model provider / account",
-    options: providerOptions,
-    initialValue: initialProvider,
-  });
-  if (providerChoice === "unset") return undefined;
-  if (providerChoice === "current") return params.current;
+  let providerChoice: ProviderChoice;
+  for (;;) {
+    providerChoice = await params.prompter.select<ProviderChoice>({
+      message: "Choose model provider / account",
+      options: providerOptions,
+      initialValue: initialProvider,
+    });
+    if (providerChoice === "unset") return undefined;
+    if (providerChoice === "current") return params.current;
+    if (providerChoice === "setup:local" || providerChoice === "setup:ollama-cloud") {
+      const registered = providerChoice === "setup:local"
+        ? await setupLocalModelProvider(setupParams)
+        : await setupOllamaCloudProvider(setupParams);
+      if (registered) return registered;
+      continue;
+    }
+    break;
+  }
 
   const providerId = providerChoice.replace(/^provider:/, "");
   const provider = providers.find((entry) => entry.id === providerId);
@@ -778,11 +1021,13 @@ async function configureOnboardingModel(
     "Connect a model",
   );
 
-  type ModelSetupChoice = "connect" | "mock" | "skip" | "custom";
+  type ModelSetupChoice = "connect" | "local" | "ollama_cloud" | "mock" | "skip" | "custom";
   let choice = await prompter.select<ModelSetupChoice>({
     message: "Do you want to connect a model now?",
     options: [
       { value: "connect", label: "Yes — choose provider and model", hint: "recommended; OpenAI/Codex, Claude, Gemini, OpenRouter, etc." },
+      { value: "local", label: "Use a local model (Ollama / LM Studio / OpenAI-compatible)", hint: "no cloud account needed; models run on your machine or LAN" },
+      { value: "ollama_cloud", label: "Use Ollama Cloud", hint: "hosted open models via ollama.com; needs an ollama.com API key" },
       { value: "mock", label: "Use a local mock model for now", hint: "good for testing the UI, but not useful for real answers" },
       { value: "skip", label: "Skip model setup for now", hint: "MindStone will save transcripts but chat will not produce real model answers" },
       { value: "custom", label: "Custom / Write-in", hint: "describe model/account setup needs" },
@@ -812,6 +1057,35 @@ async function configureOnboardingModel(
 
   if (choice === "skip") return nextConfig;
 
+  if (choice === "local" || choice === "ollama_cloud") {
+    const paths = runtimePathsFromEnv();
+    const agentDir = nextConfig.routing?.pi?.agentDir ?? paths.piAgentDir;
+    const setupParams: CustomProviderSetupParams = { prompter, agentDir, dryRun: options.dryRun };
+    const registeredModel = choice === "local"
+      ? await setupLocalModelProvider(setupParams)
+      : await setupOllamaCloudProvider(setupParams);
+    if (!registeredModel) {
+      await prompter.note(
+        [
+          "No model was selected, so MindStone will stay in transcript-only setup mode for now.",
+          "Run `mindstone config --section routing` later to connect a model.",
+        ].join("\n"),
+        "Model setup skipped",
+      );
+      return nextConfig;
+    }
+    return {
+      ...nextConfig,
+      routing: {
+        ...nextConfig.routing,
+        mode: "pi-session",
+        defaultAgentId: nextConfig.routing?.defaultAgentId ?? "default",
+        defaultModel: registeredModel,
+        pi: { ...nextConfig.routing?.pi, agentDir },
+      },
+    };
+  }
+
   if (choice === "mock") {
     return {
       ...nextConfig,
@@ -833,6 +1107,8 @@ async function configureOnboardingModel(
     availableProviders: options.availableProviders,
     discoveryError: options.modelDiscoveryError,
     setupProviderAuth: options.setupProviderAuth,
+    agentDir: nextConfig.routing?.pi?.agentDir ?? paths.piAgentDir,
+    dryRun: options.dryRun,
   });
 
   if (!defaultModel) {
@@ -900,6 +1176,8 @@ async function configureRouting(
       availableProviders: options.availableProviders,
       discoveryError: options.modelDiscoveryError,
       setupProviderAuth: options.setupProviderAuth,
+      agentDir: nextRouting.pi.agentDir,
+      dryRun: options.dryRun,
     });
     if (selectedModel) {
       nextRouting.defaultModel = selectedModel;

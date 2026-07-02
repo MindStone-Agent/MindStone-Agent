@@ -5,6 +5,7 @@ import { getCurrentHandoffStatus } from "../lifecycle/index.js";
 import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats, maintainSqliteMemoryIndex } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { resolveDefaultSessionKey } from "../routing/session.js";
+import { getIsolatedModelsStatus } from "../provider/local-models.js";
 import { getMindStoneGatewayStatus } from "../status/gateway.js";
 import { getPiSessionSafetyStatus } from "../status/pi-session-safety.js";
 import { getMindStoneWebChatStatus } from "../status/webchat.js";
@@ -363,6 +364,29 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
     );
   } else {
     check(checks, "info", "provider.discovery", "Provider/model discovery not run");
+  }
+
+  const isolatedModels = getIsolatedModelsStatus(paths.piAgentDir);
+  if (isolatedModels.error) {
+    check(checks, "warn", "provider.customModels", "Isolated models.json parses", isolatedModels.error);
+  } else if (isolatedModels.providers.length > 0) {
+    for (const provider of isolatedModels.providers) {
+      check(
+        checks,
+        "pass",
+        `provider.custom.${provider.providerId}`,
+        `Custom provider ${provider.name ?? provider.providerId} is registered in isolated models.json`,
+        `${provider.baseUrl ?? "no baseUrl"} · ${provider.modelCount} models · auth: ${provider.auth}`,
+      );
+    }
+  } else {
+    check(
+      checks,
+      "info",
+      "provider.customModels",
+      "No custom local/cloud providers in isolated models.json",
+      "use onboarding or `mindstone config --section routing` to register Ollama/LM Studio/Ollama Cloud",
+    );
   }
 
   check(
