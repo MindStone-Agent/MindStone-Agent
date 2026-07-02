@@ -56,8 +56,10 @@ export { PiSessionAgentRunner } from "./pi-session-runner.js";
 export { GatewayRunManager } from "./run-manager.js";
 export { LOOPBACK_CONNECTOR } from "./connectors/loopback.js";
 export { TELEGRAM_CONNECTOR, telegramUpdateToInbound } from "./connectors/telegram.js";
+export { SLACK_CONNECTOR, slackEventToInbound } from "./connectors/slack.js";
 import "./connectors/loopback.js";
 import "./connectors/telegram.js";
+import "./connectors/slack.js";
 import {
   loadRoutePersonaContextById,
   resolveRoutePersonaContext,
@@ -1915,7 +1917,13 @@ async function handleConnectorInbound(params: {
 
   const queue = new ConnectorDeliveryQueue(connectorId);
   queue.enqueue(
-    { text: replyText, chatId: message.chatId, threadId: message.threadId, inReplyToMessageId: message.messageId },
+    {
+      text: replyText,
+      chatId: message.chatId,
+      threadId: message.threadId,
+      inReplyToMessageId: message.messageId,
+      metadata: { chatType: message.chatType ?? "direct" },
+    },
     { now: new Date().toISOString() },
   );
   const connector = getConnector(connectorId);

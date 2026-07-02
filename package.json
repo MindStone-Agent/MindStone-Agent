@@ -77,7 +77,8 @@
     "smoke:pi-config-sections": "./scripts/smoke-pi-config-sections.sh",
     "smoke:core-boundary": "./scripts/smoke-core-boundary.sh",
     "smoke:auth-login": "./scripts/smoke-auth-login.sh",
-    "smoke:telegram": "./scripts/smoke-telegram.sh"
+    "smoke:telegram": "./scripts/smoke-telegram.sh",
+    "smoke:slack": "./scripts/smoke-slack.sh"
   },
   "engines": {
     "node": ">=22.19.0"

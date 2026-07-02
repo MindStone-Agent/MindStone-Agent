@@ -116,5 +116,23 @@ good: say the word and the sprint's commits push.
   `running` with the delivery queue draining; a message from a
   non-allowlisted account gets NO reply (fail closed). Upgrades #17 from
   smoke-tested (local stub Bot API) to live-validated.
-- _(Connectors #18–#22 will add per-service live legs — bot tokens, OAuth —
-  as they ship.)_
+- **#18 Slack (live leg, ~10 min, needs a Slack app):** create an app at
+  api.slack.com → enable **Socket Mode** (app-level token with
+  `connections:write`) → bot token scopes `chat:write`, `app_mentions:read`,
+  `im:history`, `im:read` → subscribe to `app_mention` + `message.im` events →
+  install to workspace.
+
+  ```bash
+  export MINDSTONE_SLACK_BOT_TOKEN='xoxb-…'
+  export MINDSTONE_SLACK_APP_TOKEN='xapp-…'
+  # channels.slack = { enabled, tokenEnv: "MINDSTONE_SLACK_BOT_TOKEN",
+  #   appTokenEnv: "MINDSTONE_SLACK_APP_TOKEN",
+  #   allowedSenders: ["<your member id, e.g. U012ABC>"] }
+  ./scripts/mindstone gateway run
+  ```
+
+  **Pass:** DM the bot → real reply; @mention it in a channel → reply lands
+  *in a thread* on your message; a non-allowlisted member gets nothing.
+  Upgrades #18 from smoke-tested (local stub Web API + Socket Mode) to
+  live-validated.
+- _(Connectors #19–#22 will add per-service live legs as they ship.)_
