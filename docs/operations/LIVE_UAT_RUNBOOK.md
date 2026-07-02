@@ -102,5 +102,19 @@ good: say the word and the sprint's commits push.
   append `{"messageId":"x1","text":"hello","senderId":"<you>","chatType":"direct"}`
   to `<dataDir>/connectors/loopback/inbox.jsonl`, and watch a real model reply
   land in `outbox.jsonl`.
-- _(Connectors #17–#22 will add per-service live legs — bot tokens, OAuth —
+- **#17 Telegram (live leg, ~5 min, needs a bot token from @BotFather):**
+
+  ```bash
+  export MINDSTONE_TELEGRAM_TOKEN='<token from @BotFather>'
+  # configure: channels.telegram = { enabled, tokenEnv: "MINDSTONE_TELEGRAM_TOKEN",
+  #   allowedSenders: ["<your numeric Telegram user id>"] }   (or run the setup wizard)
+  ./scripts/mindstone gateway run
+  ```
+
+  Then DM the bot from your allowlisted account. **Pass:** a real reply
+  arrives in Telegram; `mindstone status --json` shows the connector
+  `running` with the delivery queue draining; a message from a
+  non-allowlisted account gets NO reply (fail closed). Upgrades #17 from
+  smoke-tested (local stub Bot API) to live-validated.
+- _(Connectors #18–#22 will add per-service live legs — bot tokens, OAuth —
   as they ship.)_

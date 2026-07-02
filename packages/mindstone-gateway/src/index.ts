@@ -55,7 +55,9 @@ export { PiSessionMindStoneProvider, buildPiSessionPromptParts, createPiSessionE
 export { PiSessionAgentRunner } from "./pi-session-runner.js";
 export { GatewayRunManager } from "./run-manager.js";
 export { LOOPBACK_CONNECTOR } from "./connectors/loopback.js";
+export { TELEGRAM_CONNECTOR, telegramUpdateToInbound } from "./connectors/telegram.js";
 import "./connectors/loopback.js";
+import "./connectors/telegram.js";
 import {
   loadRoutePersonaContextById,
   resolveRoutePersonaContext,
@@ -1840,6 +1842,8 @@ type RunningConnector = {
   handle: ConnectorInboundHandle;
   inboundCount: number;
   deniedCount: number;
+  /** Periodic re-drain so queued deliveries retry without waiting for new inbound traffic. */
+  drainTimer?: ReturnType<typeof setInterval>;
 };
 
 const runningConnectors = new Map<string, RunningConnector>();
@@ -1965,6 +1969,13 @@ export async function startConfiguredConnectors(): Promise<void> {
         }),
       );
       runningConnectors.set(connectorId, running);
+      const drainMs = typeof channelConfig.queueDrainMs === "number" && channelConfig.queueDrainMs > 0 ? channelConfig.queueDrainMs : 5000;
+      running.drainTimer = setInterval(() => {
+        const queue = new ConnectorDeliveryQueue(connectorId);
+        if (queue.pending().length === 0) return;
+        void queue.drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() }).catch(() => undefined);
+      }, drainMs);
+      running.drainTimer.unref?.();
       writeConnectorRuntimeStatus({
         connectorId,
         state: "running",
@@ -1987,6 +1998,7 @@ export async function startConfiguredConnectors(): Promise<void> {
 export async function stopConfiguredConnectors(): Promise<void> {
   for (const [connectorId, running] of runningConnectors) {
     try {
+      if (running.drainTimer) clearInterval(running.drainTimer);
       await running.handle.stop();
       const previous = readConnectorRuntimeStatus(connectorId);
       writeConnectorRuntimeStatus({
