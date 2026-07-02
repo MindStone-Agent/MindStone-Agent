@@ -66,6 +66,15 @@ export type MindStoneConnector = {
   id: ChannelId;
   meta: ChannelMeta;
   capabilities: ChannelCapabilities;
+  /**
+   * Send-policy default (issue #21). Connectors whose outbound has real-world
+   * consequences (email) declare "approval_required": routed replies become
+   * durable ProposedActions needing an explicit human decision instead of
+   * enqueueing directly. Absent = "auto" (the chat-connector norm). Config may
+   * override per channel via channels.<id>.sendPolicy — an explicit policy act
+   * that status/doctor surfaces loudly.
+   */
+  defaultSendPolicy?: "auto" | "approval_required";
   /** Setup wizard adapter. */
   setup?: ConnectorSetupAdapter;
   /**

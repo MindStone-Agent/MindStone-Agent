@@ -178,7 +178,12 @@ push_msg '{"message":{"id":"103","channel_id":"C0OPS","guild_id":"G1","author":{
 wait_for_sent 2
 test "$(sent_count)" -eq 2
 grep -q '"channel_id":"C0OPS"' <<<"$(curl -s "${STUB_URL}/_test/sent")"
-sleep 0.5
+# Denial count lands async on the inbound handler — POLL, don't sleep-and-hope
+# (a fixed 0.5s budget flaked under regression-sweep CPU load, 2026-07-02).
+for _ in $(seq 1 20); do
+  grep -q '"deniedCount": 1' "${RUNTIME_DATA}/connectors/discord/status.json" 2>/dev/null && break
+  sleep 0.25
+done
 grep -q '"deniedCount": 1' "${RUNTIME_DATA}/connectors/discord/status.json"
 
 # Heartbeat loop is alive (hello interval is 400ms; we've waited > that).

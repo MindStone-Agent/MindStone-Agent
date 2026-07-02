@@ -153,4 +153,30 @@ good: say the word and the sprint's commits push.
   non-allowlisted user → nothing. The bot connects with least-privilege
   intents only (no member/presence reads). Upgrades #19 from smoke-tested
   (local stub REST + gateway WS) to live-validated.
-- _(Connectors #20–#22 will add per-service live legs as they ship.)_
+- **#21 Email/Gmail (live leg, ~20 min, needs a Google Cloud project):**
+  create OAuth client credentials (Desktop type) in a Google Cloud project
+  with the Gmail API enabled → run a one-time consent flow for
+  `gmail.modify` scope to obtain a **refresh token** (e.g. via Google's
+  OAuth playground with your own client, or a scratch script) → export the
+  three refs.
+
+  ```bash
+  export MINDSTONE_GMAIL_REFRESH_TOKEN='<refresh token>'
+  export MINDSTONE_GMAIL_CLIENT_ID='<client id>'
+  export MINDSTONE_GMAIL_CLIENT_SECRET='<client secret>'
+  # channels.email = { enabled, tokenEnv: "MINDSTONE_GMAIL_REFRESH_TOKEN",
+  #   clientIdEnv: "MINDSTONE_GMAIL_CLIENT_ID",
+  #   clientSecretEnv: "MINDSTONE_GMAIL_CLIENT_SECRET",
+  #   allowedSenders: ["<your address>"],
+  #   query: "is:unread newer_than:1d" }
+  ./scripts/mindstone gateway run
+  ```
+
+  **Pass:** email the connected mailbox from an allowlisted address → a
+  PENDING draft appears in `mindstone approvals list` and **nothing is
+  sent**; `approvals show <id>` prints the draft; `approvals approve <id>`
+  → a real threaded reply (Re: subject, correct recipient) lands in your
+  inbox; `approvals reject` on a second email → archived, nothing sent; a
+  non-allowlisted sender → nothing (deniedCount rises). Upgrades #21 from
+  smoke-tested (local stub Gmail API + OAuth endpoint) to live-validated.
+- _(Connectors #20/#22 will add per-service live legs as they ship.)_

@@ -58,10 +58,20 @@ export { LOOPBACK_CONNECTOR } from "./connectors/loopback.js";
 export { TELEGRAM_CONNECTOR, telegramUpdateToInbound } from "./connectors/telegram.js";
 export { SLACK_CONNECTOR, slackEventToInbound } from "./connectors/slack.js";
 export { DISCORD_CONNECTOR, DISCORD_LEAST_PRIVILEGE_INTENTS, discordMessageToInbound } from "./connectors/discord.js";
+export {
+  EMAIL_CONNECTOR,
+  GmailProvider,
+  buildReplyMime,
+  gmailMessageBody,
+  gmailMessageToInbound,
+  parseEmailAddress,
+  threadDigestFromMessages,
+} from "./connectors/email.js";
 import "./connectors/loopback.js";
 import "./connectors/telegram.js";
 import "./connectors/slack.js";
 import "./connectors/discord.js";
+import "./connectors/email.js";
 import {
   loadRoutePersonaContextById,
   resolveRoutePersonaContext,
@@ -76,9 +86,12 @@ import {
   recallScopeForMemoryScope,
   scopeFromRequest,
   scopedSessionKey,
+  ApprovalStore,
   ConnectorDeliveryQueue,
   configuredConnectorIds,
   connectorAccessPolicyFromChannelConfig,
+  extractMemoryProposal,
+  resolveConnectorSendPolicy,
   connectorCredentialRefFromChannelConfig,
   connectorSessionKey,
   connectorTranscriptSource,
@@ -1887,6 +1900,9 @@ async function handleConnectorInbound(params: {
     text: trigger.text || message.text,
     source,
     metadata: {
+      // connector-native metadata first (e.g. email subject, sensitiveSource
+      // marker) so pipeline fields below always win on collision
+      ...(message.metadata ?? {}),
       event: "user_message",
       connector: connectorId,
       messageId: message.messageId,
@@ -1914,21 +1930,73 @@ async function handleConnectorInbound(params: {
   });
   if (!routed.routed) return;
   const body = routed.body as { entry?: { text?: string } } | undefined;
-  const replyText = body?.entry?.text;
-  if (!replyText?.trim()) return;
+  const rawReplyText = body?.entry?.text;
+  if (!rawReplyText?.trim()) return;
+
+  // Memory-proposal extraction (issue #21): a routed reply may carry one
+  // fenced mindstone-memory-proposal block. It is stripped from the reply and
+  // becomes a pending memory_write ProposedAction — connector-derived memory
+  // (untrusted input, prompt-injection surface) is proposed, never written.
+  const extracted = extractMemoryProposal(rawReplyText);
+  const replyText = extracted.text;
+  const approvals = new ApprovalStore();
+  if (extracted.proposal) {
+    const proposal = approvals.propose({
+      kind: "memory_write",
+      connectorId,
+      sessionKey,
+      agentId,
+      createdAt: new Date().toISOString(),
+      summary: `memory write proposal from ${connectorId}: ${extracted.proposal.path}`,
+      memory: extracted.proposal,
+    });
+    appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "event",
+      text: `approval proposed: memory_write ${proposal.id} (${extracted.proposal.path})`,
+      source,
+      metadata: { event: "approval_proposed", approvalId: proposal.id, kind: "memory_write", connector: connectorId },
+    });
+  }
+  if (!replyText.trim()) return; // the reply was only a proposal block
+
+  const outbound = {
+    text: replyText,
+    chatId: message.chatId,
+    threadId: message.threadId,
+    inReplyToMessageId: message.messageId,
+    metadata: { chatType: message.chatType ?? "direct" },
+  };
+  const connector = getConnector(connectorId);
+
+  // Send policy (issue #21): approval_required diverts the reply into the
+  // durable ProposedAction store — an explicit human approve enqueues it onto
+  // the normal delivery queue; nothing sends without a decision.
+  const sendPolicy = resolveConnectorSendPolicy({ connectorDefault: connector?.defaultSendPolicy, channelConfig });
+  if (sendPolicy === "approval_required") {
+    const proposal = approvals.propose({
+      kind: "connector_send",
+      connectorId,
+      sessionKey,
+      agentId,
+      createdAt: new Date().toISOString(),
+      summary: `send via ${connectorId} to ${message.chatId ?? "(unknown chat)"}: ${replyText.slice(0, 80)}${replyText.length > 80 ? "…" : ""}`,
+      send: outbound,
+    });
+    appendTranscriptEntry({
+      sessionKey,
+      agentId,
+      role: "event",
+      text: `approval proposed: connector_send ${proposal.id} via ${connectorId} (draft held, not sent)`,
+      source,
+      metadata: { event: "approval_proposed", approvalId: proposal.id, kind: "connector_send", connector: connectorId },
+    });
+    return;
+  }
 
   const queue = new ConnectorDeliveryQueue(connectorId);
-  queue.enqueue(
-    {
-      text: replyText,
-      chatId: message.chatId,
-      threadId: message.threadId,
-      inReplyToMessageId: message.messageId,
-      metadata: { chatType: message.chatType ?? "direct" },
-    },
-    { now: new Date().toISOString() },
-  );
-  const connector = getConnector(connectorId);
+  queue.enqueue(outbound, { now: new Date().toISOString() });
   if (!connector) return;
   await queue.drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() });
 }

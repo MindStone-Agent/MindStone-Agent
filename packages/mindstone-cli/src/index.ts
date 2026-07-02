@@ -7,6 +7,9 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { pathToFileURL } from "node:url";
 import {
+  ApprovalStore,
+  ConnectorDeliveryQueue,
+  sanitizeMemoryProposalPath,
   backfillSqliteMemoryEmbeddings,
   backfillSqliteMemoryIndex,
   buildIntegrationBuilderBrief,
@@ -41,6 +44,7 @@ import {
   probeMemoryEmbeddingProvider,
   resolveConfigPath,
   resolveConfiguredSessionKey,
+  resolveDefaultSessionKey,
   resolveMindStoneChatModel,
   runMindStoneChatTurn,
   runMindStoneConfigWizard,
@@ -60,7 +64,7 @@ import {
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "persona" | "skill" | "kb" | "channels" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "persona" | "skill" | "kb" | "channels" | "approvals" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;220m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -96,6 +100,7 @@ function usage(): string {
     "  mindstone persona     List/activate/deactivate persona overlays (list | status | activate <id> | deactivate)",
     "  mindstone channels [--json]",
     "                         Show channel/surface catalog without starting listeners",
+    "  mindstone approvals   Proposed-action approvals (list [--all] | show <id> | approve <id> [--yes] | reject <id> [--note TEXT])",
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
     "  mindstone memory backfill [--embed] [--force] [--maintain] [--dedupe-text] [--json]  Index memory/transcripts and optionally maintain/embed chunks",
@@ -113,7 +118,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "persona" || raw === "skill" || raw === "kb" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "persona" || raw === "skill" || raw === "kb" || raw === "channels" || raw === "approvals" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -1880,6 +1885,150 @@ async function runPersonaCommand(argv: string[]): Promise<void> {
   throw new Error(`Unknown persona subcommand: ${sub} (expected list | status | activate <id> | deactivate)`);
 }
 
+// ---------------------------------------------------------------------------
+// Approvals (issue #21): the human decision surface over the durable
+// ProposedAction store. Approving a connector_send enqueues the draft onto the
+// connector's delivery queue (a running Gateway drains it within seconds; a
+// stopped one on next start). Approving a memory_write applies the proposed
+// file into the memory directory. Every decision appends an audit transcript
+// event. #24 grows a UI + wider action taxonomy on this same surface.
+// ---------------------------------------------------------------------------
+
+function appendApprovalAuditEvent(action: { id: string; kind: string; connectorId: string; sessionKey?: string; agentId?: string }, decision: string, detail: string): void {
+  const fallbackSessionKey = () => resolveDefaultSessionKey(loadMindStoneConfig(resolveConfigPath()).config, action.agentId ?? "default");
+  appendTranscriptEntry({
+    sessionKey: action.sessionKey ?? fallbackSessionKey(),
+    agentId: action.agentId ?? "default",
+    role: "event",
+    text: `approval ${decision}: ${action.kind} ${action.id} — ${detail}`,
+    metadata: { event: "approval_decided", approvalId: action.id, kind: action.kind, decision, connector: action.connectorId },
+  });
+}
+
+async function runApprovalsCommand(argv: string[]): Promise<void> {
+  const subcommand = argv[3] ?? "list";
+  const store = new ApprovalStore();
+
+  if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    output.write(
+      [
+        gold("🔶 MindStone approvals"),
+        "",
+        "Usage:",
+        "  mindstone approvals list [--all] [--json]   Pending proposed actions (--all includes decided)",
+        "  mindstone approvals show <id>               Full record incl. the draft text",
+        "  mindstone approvals approve <id> [--yes]    Approve: connector_send enqueues for delivery; memory_write applies the file",
+        "  mindstone approvals reject <id> [--note TEXT]",
+        "",
+        "Notes:",
+        "  Nothing sends without an explicit approve. Decisions are immutable and",
+        "  auditable (durable record + approval_decided transcript event).",
+      ].join("\n"),
+    );
+    output.write("\n");
+    return;
+  }
+
+  if (subcommand === "list") {
+    const all = hasOption(argv, "--all");
+    const actions = all ? store.list() : store.pending();
+    if (hasOption(argv, "--json")) {
+      output.write(`${JSON.stringify(actions, null, 2)}\n`);
+      return;
+    }
+    if (!actions.length) {
+      output.write(`${gold("No " + (all ? "" : "pending ") + "proposed actions.")}\n`);
+      return;
+    }
+    for (const action of actions) {
+      output.write(`${gold(action.id.slice(0, 8))} [${action.status}] ${action.kind} via ${action.connectorId} — ${action.summary}\n`);
+    }
+    return;
+  }
+
+  const id = argv[4];
+  if (!id || id.startsWith("--")) throw new Error(`approvals ${subcommand} requires an action id (see: mindstone approvals list)`);
+  const action = store.get(id);
+  if (!action) throw new Error(`no proposed action matches id "${id}"`);
+
+  if (subcommand === "show") {
+    output.write(`${gold(action.id)}\n`);
+    output.write(`Status: ${action.status}\n`);
+    output.write(`Kind: ${action.kind}\n`);
+    output.write(`Connector: ${action.connectorId}\n`);
+    output.write(`Created: ${action.createdAt ?? "unknown"}\n`);
+    output.write(`Summary: ${action.summary}\n`);
+    if (action.send) {
+      output.write(`Reply to: message ${action.send.inReplyToMessageId ?? "?"} in chat ${action.send.chatId ?? "?"}\n`);
+      output.write(`--- draft ---\n${action.send.text}\n--- end draft ---\n`);
+    }
+    if (action.memory) {
+      output.write(`Memory path: ${action.memory.path}\n`);
+      output.write(`--- content ---\n${action.memory.content}\n--- end content ---\n`);
+    }
+    if (action.status !== "pending") {
+      output.write(`Decided: ${action.decidedAt ?? "?"} by ${action.decidedBy ?? "?"}${action.decisionNote ? ` — ${action.decisionNote}` : ""}\n`);
+    }
+    return;
+  }
+
+  if (subcommand === "approve") {
+    if (action.status !== "pending") throw new Error(`action ${action.id} is already ${action.status}`);
+    if (!hasOption(argv, "--yes")) {
+      if (!input.isTTY || !output.isTTY) throw new Error("Refusing non-interactive approve without --yes");
+      const prompter = makeTerminalPrompter();
+      try {
+        const preview = action.send?.text ?? action.memory?.content ?? "";
+        await prompter.note(`${action.summary}\n\n${preview}`, `Approve ${action.kind}?`);
+        const accepted = await prompter.confirm({ message: "Approve this action now?", initialValue: false });
+        if (!accepted) {
+          output.write("Approval cancelled — the action stays pending.\n");
+          return;
+        }
+      } finally {
+        prompter.close();
+      }
+    }
+    const decidedBy = process.env.USER ?? "cli";
+    if (action.kind === "connector_send" && action.send) {
+      store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
+      const queue = new ConnectorDeliveryQueue(action.connectorId);
+      queue.enqueue(action.send, { now: new Date().toISOString() });
+      appendApprovalAuditEvent(action, "approved", `enqueued for delivery via ${action.connectorId}`);
+      output.write(`${gold("Approved")} — draft enqueued for delivery via ${action.connectorId}.\n`);
+      output.write("A running Gateway delivers it within seconds; a stopped one on next start.\n");
+      return;
+    }
+    if (action.kind === "memory_write" && action.memory) {
+      const safePath = sanitizeMemoryProposalPath(action.memory.path);
+      if (!safePath) throw new Error(`memory proposal path "${action.memory.path}" is not a safe relative path`);
+      const paths = runtimePathsFromEnv();
+      const target = join(paths.memoryDir, safePath);
+      if (existsSync(target) && !hasOption(argv, "--force")) {
+        throw new Error(`memory file already exists: ${target} (re-run with --force to overwrite)`);
+      }
+      store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, action.memory.content.endsWith("\n") ? action.memory.content : `${action.memory.content}\n`);
+      appendApprovalAuditEvent(action, "approved", `memory file written: ${safePath}`);
+      output.write(`${gold("Approved")} — memory file written: ${target}\n`);
+      return;
+    }
+    throw new Error(`action ${action.id} has kind "${action.kind}" but no matching payload; refusing to approve`);
+  }
+
+  if (subcommand === "reject") {
+    if (action.status !== "pending") throw new Error(`action ${action.id} is already ${action.status}`);
+    const note = optionValue(argv, "--note");
+    store.decide(action.id, { status: "rejected", decidedBy: process.env.USER ?? "cli", note, now: new Date().toISOString() });
+    appendApprovalAuditEvent(action, "rejected", note ?? "no note");
+    output.write(`${gold("Rejected")} — ${action.kind} ${action.id.slice(0, 8)} archived with its payload (nothing sent/written).\n`);
+    return;
+  }
+
+  throw new Error(`Unknown approvals subcommand: ${subcommand} (expected list | show <id> | approve <id> | reject <id>)`);
+}
+
 async function main(): Promise<void> {
   const command = parseCommand(process.argv);
   if (command === "help") {
@@ -1892,6 +2041,10 @@ async function main(): Promise<void> {
   }
   if (command === "channels") {
     printChannels(hasOption(process.argv, "--json"));
+    return;
+  }
+  if (command === "approvals") {
+    await runApprovalsCommand(process.argv);
     return;
   }
   if (command === "memory") {
@@ -1984,6 +2137,13 @@ async function main(): Promise<void> {
     prompter.close();
   }
 }
+
+// Piped consumers (grep -q, head) may close stdout early — exit quietly on
+// EPIPE instead of stack-tracing (surfaced by the #21 smoke's grep -q).
+output.on("error", (error: NodeJS.ErrnoException) => {
+  if (error.code === "EPIPE") process.exit(0);
+  throw error;
+});
 
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));

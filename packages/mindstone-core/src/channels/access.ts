@@ -12,6 +12,13 @@ export type ConnectorAccessPolicy = {
   allowedChats?: string[];
   /** Paired sender ids (populated by an explicit pairing/approval step). */
   pairedSenders?: string[];
+  /**
+   * Sender domains allowed to interact (issue #21 contact/domain trust rules —
+   * email-shaped sender ids). A sender whose id ends in `@<domain>` is
+   * allowed. Empty/missing grants nothing; there is no "*" form (allowing all
+   * domains is allowedSenders: ["*"], an explicit opt-in).
+   */
+  allowedSenderDomains?: string[];
 };
 
 export type ConnectorAccessDecision = {
@@ -27,7 +34,17 @@ export function connectorAccessPolicyFromChannelConfig(channelConfig: Record<str
     allowedSenders: list(record.allowedSenders),
     allowedChats: list(record.allowedChats),
     pairedSenders: list(record.pairedSenders),
+    allowedSenderDomains: list(record.allowedSenderDomains),
   };
+}
+
+function senderDomainAllowed(policy: ConnectorAccessPolicy, sender: string | undefined): boolean {
+  if (!sender || !policy.allowedSenderDomains?.length) return false;
+  const at = sender.lastIndexOf("@");
+  if (at < 0) return false;
+  const domain = sender.slice(at + 1).toLowerCase();
+  if (!domain) return false;
+  return policy.allowedSenderDomains.some((allowed) => allowed.toLowerCase() === domain);
 }
 
 export function evaluateConnectorAccess(policy: ConnectorAccessPolicy, message: ConnectorInboundMessage): ConnectorAccessDecision {
@@ -37,9 +54,10 @@ export function evaluateConnectorAccess(policy: ConnectorAccessPolicy, message: 
   const senderAllowed =
     (sender && policy.pairedSenders?.includes(sender)) ||
     policy.allowedSenders?.includes("*") ||
-    (sender ? policy.allowedSenders?.includes(sender) : false);
+    (sender ? policy.allowedSenders?.includes(sender) : false) ||
+    senderDomainAllowed(policy, sender);
   if (!senderAllowed) {
-    return { allowed: false, reason: sender ? `sender ${sender} is not allowlisted or paired` : "message has no senderId; access fails closed" };
+    return { allowed: false, reason: sender ? `sender ${sender} is not allowlisted, paired, or domain-trusted` : "message has no senderId; access fails closed" };
   }
 
   if (policy.allowedChats?.length) {

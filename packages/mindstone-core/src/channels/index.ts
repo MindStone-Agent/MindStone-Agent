@@ -6,3 +6,4 @@ export * from "./access.js";
 export * from "./session.js";
 export * from "./queue.js";
 export * from "./runtime-status.js";
+export * from "./approval.js";

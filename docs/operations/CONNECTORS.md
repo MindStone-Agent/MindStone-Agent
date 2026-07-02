@@ -17,6 +17,7 @@ Slack, Discord, email, …) implements, plus the **loopback** reference connecto
 | Source metadata | `connectorTranscriptSource` → `substrate: connector:<id>`, channel/chatType/sender on every transcript entry |
 | Mention/trigger behavior | `shouldTriggerConnectorReply`: DMs always; group/channel needs mention or `triggerPrefix` (which strips) unless `respondWithoutMention` |
 | Delivery queue | `ConnectorDeliveryQueue` — persistent per-connector JSON queue, retry to `maxAttempts` then dead-letter with the error kept; survives Gateway restarts |
+| Send policy / approvals (#21) | `defaultSendPolicy: "approval_required"` on the contract diverts routed replies into the durable `ApprovalStore` (ProposedAction) instead of the queue; `mindstone approvals approve` enqueues, `reject` archives — both auditable via `approval_proposed`/`approval_decided` transcript events. Chat connectors stay `auto`; config `sendPolicy` overrides explicitly |
 | Status/doctor/TUI visibility | per-connector `status.json` (state/lastError/inbound/denied counts) written by the Gateway runtime, read anywhere; `getConnectorVisibilityStatuses` consolidates credential-presence (masked) + runtime + queue depth into `mindstone status [--json]` and the `connectors.catalog` doctor check |
 | Tests/smokes | `npm run smoke:connector` |
 

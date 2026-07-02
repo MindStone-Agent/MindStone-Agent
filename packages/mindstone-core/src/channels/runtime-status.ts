@@ -2,9 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { MindStoneConfig } from "../config/types.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
-import { configuredConnectorIds } from "./connector.js";
+import { configuredConnectorIds, getConnector } from "./connector.js";
 import { connectorCredentialRefFromChannelConfig, resolveConnectorCredential } from "./credentials.js";
 import { ConnectorDeliveryQueue, connectorDataDir, type ConnectorQueueStatus } from "./queue.js";
+import { resolveConnectorSendPolicy, type ConnectorSendPolicy } from "./approval.js";
 
 /**
  * Connector runtime status (issue #16): the Gateway connector runtime WRITES
@@ -55,6 +56,8 @@ export type ConnectorVisibilityStatus = {
   configured: boolean;
   enabled: boolean;
   credential: { configured: boolean; present: boolean; source?: "env" | "file"; error?: string; warning?: string };
+  /** Effective send policy (issue #21) — WARNS when an approval-default connector is overridden to auto. */
+  sendPolicy?: { effective: ConnectorSendPolicy; overridden: boolean; warning?: string };
   runtime: ConnectorRuntimeStatusFile;
   queue: ConnectorQueueStatus;
 };
@@ -72,6 +75,8 @@ export function getConnectorVisibilityStatuses(
       const channelConfig = channels[connectorId] ?? {};
       const ref = connectorCredentialRefFromChannelConfig(channelConfig);
       const resolved = ref ? resolveConnectorCredential(ref, options) : undefined;
+      const connectorDefault = getConnector(connectorId)?.defaultSendPolicy;
+      const effective = resolveConnectorSendPolicy({ connectorDefault, channelConfig });
       return {
         connectorId,
         configured: true,
@@ -82,6 +87,14 @@ export function getConnectorVisibilityStatuses(
           source: resolved?.present === true ? resolved.source : undefined,
           error: resolved && !resolved.present ? resolved.error : undefined,
           warning: resolved?.present === true ? resolved.warning : undefined,
+        },
+        sendPolicy: {
+          effective,
+          overridden: effective !== (connectorDefault ?? "auto"),
+          warning:
+            connectorDefault === "approval_required" && effective === "auto"
+              ? "sendPolicy OVERRIDDEN to auto — outbound sends WITHOUT approval (explicit config policy)"
+              : undefined,
         },
         runtime: readConnectorRuntimeStatus(connectorId, options.paths),
         queue: new ConnectorDeliveryQueue(connectorId, { paths: options.paths }).status(),
