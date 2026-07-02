@@ -7,6 +7,8 @@ import { getSqliteMemoryIndexStats, type SqliteMemoryIndexStats } from "../memor
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { listTranscriptSessions } from "../transcript/index.js";
 import { discoverMindStonePersonas, personasDirFromConfig, resolveMindStonePersona } from "../persona/index.js";
+import { discoverMindStoneSkills, skillsDirFromConfig } from "../skills/index.js";
+import { discoverMindStoneKnowledgebases, knowledgebasesDirFromConfig } from "../knowledgebase/index.js";
 import { resolveConfiguredSessionKey } from "../routing/session.js";
 import { getMindStoneGatewayStatus, type MindStoneGatewayStatus } from "./gateway.js";
 import { getPiSessionSafetyStatus, type PiSessionSafetyStatus } from "./pi-session-safety.js";
@@ -58,6 +60,20 @@ export type MindStoneSystemStatus = {
     configuredActive?: string;
     routeRules: number;
     resolvedForDefaultSession?: { personaId: string; reason: string };
+  };
+  skills: {
+    dir: string;
+    builtinCount: number;
+    installedCount: number;
+    draftCount: number;
+    brokenCount: number;
+  };
+  knowledgebases: {
+    dir: string;
+    count: number;
+    indexedCount: number;
+    brokenCount: number;
+    entryCount: number;
   };
 };
 
@@ -125,6 +141,28 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
           config: loadedConfig.config,
           sessionKey: resolveConfiguredSessionKey(loadedConfig.config, { agentId: loadedConfig.config?.routing?.defaultAgentId ?? "default" }),
         }),
+      };
+    })(),
+    skills: (() => {
+      const skillsDir = skillsDirFromConfig(loadedConfig.config, paths);
+      const skills = discoverMindStoneSkills(skillsDir);
+      return {
+        dir: skillsDir,
+        builtinCount: skills.filter((skill) => skill.source === "builtin" && !skill.error).length,
+        installedCount: skills.filter((skill) => skill.source === "installed" && !skill.error).length,
+        draftCount: skills.filter((skill) => skill.source === "draft" && !skill.error).length,
+        brokenCount: skills.filter((skill) => skill.error).length,
+      };
+    })(),
+    knowledgebases: (() => {
+      const knowledgebasesDir = knowledgebasesDirFromConfig(loadedConfig.config, paths);
+      const knowledgebases = discoverMindStoneKnowledgebases(knowledgebasesDir);
+      return {
+        dir: knowledgebasesDir,
+        count: knowledgebases.length,
+        indexedCount: knowledgebases.filter((kb) => kb.indexed).length,
+        brokenCount: knowledgebases.filter((kb) => kb.error).length,
+        entryCount: knowledgebases.reduce((total, kb) => total + kb.entryCount, 0),
       };
     })(),
   };

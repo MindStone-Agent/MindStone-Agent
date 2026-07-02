@@ -43,7 +43,8 @@ own process.
 - Conditions: `sessionKeyPrefix`, `sourceChannel`, `sourceSubstrate`,
   `messagePrefix` (fields AND together).
 - `skills`/`knowledgebases` on route steps are carried into the decision as
-  references; their runtime targets are #13 (Skill Builder / KB v1) scope.
+  references; they resolve against the skill catalog ([SKILLS.md](SKILLS.md))
+  and KB catalog ([KNOWLEDGEBASES.md](KNOWLEDGEBASES.md)) shipped in #13.
 
 ## Which workflow runs (deterministic selection order)
 

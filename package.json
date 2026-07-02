@@ -52,6 +52,8 @@
     "smoke:local-route": "./scripts/smoke-local-route.sh",
     "smoke:persona": "./scripts/smoke-persona.sh",
     "smoke:workflow": "./scripts/smoke-workflow.sh",
+    "smoke:skill": "./scripts/smoke-skill.sh",
+    "smoke:kb": "./scripts/smoke-kb.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",
     "smoke:reset": "./scripts/smoke-reset.sh",
     "smoke:auto-recall": "./scripts/smoke-auto-recall.sh",

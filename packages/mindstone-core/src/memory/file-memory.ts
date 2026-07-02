@@ -47,7 +47,7 @@ function firstMarkdownTitle(body: string): string | undefined {
 function kindFromFrontmatter(value: string | undefined, fallback: MemoryKind): MemoryKind {
   const normalized = value?.trim() as MemoryKind | undefined;
   if (!normalized) return fallback;
-  const allowed: MemoryKind[] = ["identity", "journal", "doc", "wiki", "transcript", "checkpoint", "log", "index", "custom"];
+  const allowed: MemoryKind[] = ["identity", "journal", "doc", "wiki", "transcript", "checkpoint", "log", "index", "kb", "custom"];
   return allowed.includes(normalized) ? normalized : fallback;
 }
 

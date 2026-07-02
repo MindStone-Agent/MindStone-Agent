@@ -7,7 +7,6 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { pathToFileURL } from "node:url";
 import {
-  INTEGRATION_BUILDER_SKILL,
   backfillSqliteMemoryEmbeddings,
   backfillSqliteMemoryIndex,
   buildIntegrationBuilderBrief,
@@ -22,11 +21,22 @@ import {
   getSqliteMemoryIndexStats,
   maintainSqliteMemoryIndex,
   appendTranscriptEntry,
+  buildMindStoneSkillDraft,
+  discoverMindStoneKnowledgebases,
   discoverMindStonePersonas,
+  discoverMindStoneSkills,
+  ingestMindStoneKnowledgebase,
+  installMindStoneSkill,
+  knowledgebasesDirFromConfig,
   loadMindStoneConfig,
   loadMindStonePersona,
+  loadMindStoneSkill,
+  mindStoneKbStatus,
   personasDirFromConfig,
   resolveMindStonePersona,
+  resolveSkillRefs,
+  searchMindStoneKnowledgebase,
+  skillsDirFromConfig,
   writeMindStoneConfig,
   probeMemoryEmbeddingProvider,
   resolveConfigPath,
@@ -50,7 +60,7 @@ import {
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "persona" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "persona" | "skill" | "kb" | "channels" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;220m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -74,9 +84,15 @@ function usage(): string {
     "                         Manage the local MindStone Gateway process/service",
     "  mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]",
     "                         Synthesize first-activation identity from onboarding seed",
-    "  mindstone skill list   Show built-in MindStone skill surfaces",
+    "  mindstone skill list   Show built-in, installed, and draft skill surfaces",
+    "  mindstone skill build [--from-builtin ID | --id ID --label TEXT --description TEXT] [--force] [--json]",
+    "                         Generate a skill DRAFT artifact (not usable until installed)",
+    "  mindstone skill install <id> [--force] [--json]",
+    "                         Approve a draft skill: promote it to installed",
+    "  mindstone skill status [--json]  Skill catalog state + active persona skill/KB reference checks",
     "  mindstone skill integration-builder [--name NAME] [--kind KIND] [--goal TEXT] [--json]",
     "                         Build an integration/channel/tool implementation brief",
+    "  mindstone kb          Knowledgebases (list | ingest <id> | search <id> <query> | status [id])",
     "  mindstone persona     List/activate/deactivate persona overlays (list | status | activate <id> | deactivate)",
     "  mindstone channels [--json]",
     "                         Show channel/surface catalog without starting listeners",
@@ -97,7 +113,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "persona" || raw === "skill" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "persona" || raw === "skill" || raw === "kb" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -1349,20 +1365,130 @@ function parseIntegrationBuilderKind(value: string | undefined): IntegrationBuil
 async function runSkillCommand(argv: string[]): Promise<void> {
   const subcommand = argv[3] ?? "list";
   const json = hasOption(argv, "--json");
+  const skillPaths = runtimePathsFromEnv();
+  const loadedSkillConfig = loadMindStoneConfig(resolveConfigPath(process.env, skillPaths));
+  if (loadedSkillConfig.error) throw new Error(`Config error: ${loadedSkillConfig.error}`);
+  const skillConfig = loadedSkillConfig.config ?? {};
+  const skillsDir = skillsDirFromConfig(skillConfig, skillPaths);
+
   if (subcommand === "list") {
-    const skills = [INTEGRATION_BUILDER_SKILL];
+    const skills = discoverMindStoneSkills(skillsDir);
     if (json) {
-      output.write(`${JSON.stringify(skills, null, 2)}\n`);
+      output.write(`${JSON.stringify({ skillsDir, skills }, null, 2)}\n`);
       return;
     }
-    output.write(`${gold("🔶 MindStone skills")}\n\n`);
+    output.write(`${gold("🔶 MindStone skills")} ${dim(`(${skillsDir})`)}\n\n`);
     for (const skill of skills) {
-      output.write(`${bold(skill.id)} — ${skill.description}\n`);
-      output.write(`${dim(`outputs: ${skill.outputs.join(", ")}`)}\n\n`);
+      const marker =
+        skill.source === "draft" ? gold(" ○ draft — install to approve") : skill.source === "builtin" ? dim(" · builtin") : gold(" ● installed");
+      const detail = skill.error ? `broken: ${skill.error}` : skill.description ?? "";
+      output.write(`${bold(skill.id)}${skill.version ? ` v${skill.version}` : ""}${marker}\n`);
+      output.write(`${dim(`  ${detail}`)}\n\n`);
     }
     return;
   }
-  if (subcommand !== "integration-builder") throw new Error(`Unknown skill subcommand: ${subcommand}`);
+
+  if (subcommand === "build") {
+    const result = buildMindStoneSkillDraft({
+      skillsDir,
+      fromBuiltin: optionValue(argv, "--from-builtin"),
+      id: optionValue(argv, "--id"),
+      label: optionValue(argv, "--label"),
+      description: optionValue(argv, "--description"),
+      whenToUse: optionValues(argv, "--when"),
+      outputs: optionValues(argv, "--output"),
+      safetyNotes: optionValues(argv, "--safety"),
+      skillMarkdown: optionValue(argv, "--skill-md"),
+      force: hasOption(argv, "--force"),
+      now: new Date().toISOString(),
+    });
+    if (!result.ok) throw new Error(result.error);
+    if (json) {
+      output.write(`${JSON.stringify(result, null, 2)}\n`);
+      return;
+    }
+    output.write(`${gold("🔶")} Drafted skill ${bold(result.skillId)} at ${result.dir}\n`);
+    output.write(`${dim(`  Draft is NOT active. Approve it with: mindstone skill install ${result.skillId}`)}\n`);
+    return;
+  }
+
+  if (subcommand === "install") {
+    const skillId = argv[4];
+    if (!skillId || skillId.startsWith("--")) throw new Error("Usage: mindstone skill install <skill-id> [--force]");
+    const result = installMindStoneSkill(skillsDir, skillId, { force: hasOption(argv, "--force") });
+    if (!result.ok) throw new Error(result.error);
+    if (json) {
+      output.write(`${JSON.stringify(result, null, 2)}\n`);
+      return;
+    }
+    output.write(`${gold("🔶")} Installed skill ${bold(result.skillId)} at ${result.dir}\n`);
+    return;
+  }
+
+  if (subcommand === "status") {
+    const skills = discoverMindStoneSkills(skillsDir);
+    const broken = skills.filter((skill) => skill.error);
+    const counts = {
+      builtin: skills.filter((skill) => skill.source === "builtin" && !skill.error).length,
+      installed: skills.filter((skill) => skill.source === "installed" && !skill.error).length,
+      draft: skills.filter((skill) => skill.source === "draft" && !skill.error).length,
+    };
+    const sessionKey = resolveConfiguredSessionKey(skillConfig, { agentId: skillConfig.routing?.defaultAgentId ?? "default" });
+    const personaResolution = resolveMindStonePersona({ config: skillConfig, sessionKey });
+    let personaRefs: { personaId: string; skills: Array<{ id: string; status: string }>; knowledgebases: Array<{ id: string; status: string }> } | undefined;
+    if (personaResolution) {
+      const persona = loadMindStonePersona(personasDirFromConfig(skillConfig, skillPaths), personaResolution.personaId);
+      if (persona.ok) {
+        const kbIds = new Set(
+          discoverMindStoneKnowledgebases(knowledgebasesDirFromConfig(skillConfig, skillPaths))
+            .filter((kb) => !kb.error)
+            .map((kb) => kb.id),
+        );
+        personaRefs = {
+          personaId: personaResolution.personaId,
+          skills: resolveSkillRefs(persona.persona.skills, skillsDir),
+          knowledgebases: persona.persona.knowledgebases.map((id) => ({ id, status: kbIds.has(id) ? "present" : "missing" })),
+        };
+      }
+    }
+    if (json) {
+      output.write(`${JSON.stringify({ skillsDir, counts, broken, personaRefs }, null, 2)}\n`);
+      return;
+    }
+    output.write(
+      [
+        `${gold("🔶")} Skill status`,
+        `  skills dir: ${skillsDir}`,
+        `  builtin: ${counts.builtin} · installed: ${counts.installed} · drafts (pending approval): ${counts.draft}`,
+        ...(broken.length ? [`  ${bold("broken:")} ${broken.map((skill) => `${skill.id} (${skill.error})`).join(", ")}`] : []),
+        ...(personaRefs
+          ? [
+              `  active persona ${personaRefs.personaId} refs:`,
+              ...personaRefs.skills.map((ref) => `    skill ${ref.id}: ${ref.status}`),
+              ...personaRefs.knowledgebases.map((ref) => `    kb ${ref.id}: ${ref.status}`),
+            ]
+          : []),
+      ].join("\n"),
+    );
+    output.write("\n");
+    return;
+  }
+
+  if (subcommand === "load") {
+    const skillId = argv[4];
+    if (!skillId || skillId.startsWith("--")) throw new Error("Usage: mindstone skill load <skill-id>");
+    const result = loadMindStoneSkill(skillsDir, skillId);
+    if (!result.ok) throw new Error(result.error);
+    if (json) {
+      output.write(`${JSON.stringify({ artifact: result.skill.artifact, source: result.skill.source, dir: result.skill.dir }, null, 2)}\n`);
+      return;
+    }
+    output.write(result.skill.skillMarkdown ?? "");
+    output.write("\n");
+    return;
+  }
+
+  if (subcommand !== "integration-builder") throw new Error(`Unknown skill subcommand: ${subcommand} (expected list | build | install <id> | status | load <id> | integration-builder)`);
 
   if (hasOption(argv, "--emit-skill-md")) {
     output.write(formatIntegrationBuilderSkillMarkdown());
@@ -1383,6 +1509,103 @@ async function runSkillCommand(argv: string[]): Promise<void> {
     return;
   }
   output.write(brief.markdown);
+}
+
+async function runKbCommand(argv: string[]): Promise<void> {
+  const sub = argv[3] && !argv[3].startsWith("--") ? argv[3] : "list";
+  const json = hasOption(argv, "--json");
+  const paths = runtimePathsFromEnv();
+  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+  if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  const config = loaded.config ?? {};
+  const kbDir = knowledgebasesDirFromConfig(config, paths);
+
+  if (sub === "list") {
+    const kbs = discoverMindStoneKnowledgebases(kbDir);
+    if (json) {
+      output.write(`${JSON.stringify({ knowledgebasesDir: kbDir, knowledgebases: kbs }, null, 2)}\n`);
+      return;
+    }
+    output.write(`${gold("🔶 MindStone knowledgebases")} ${dim(`(${kbDir})`)}\n\n`);
+    if (kbs.length === 0) {
+      output.write(`${dim("  (none — create knowledgebases/<id>/kb.json + sources/*.md under the knowledgebases dir)")}\n`);
+      return;
+    }
+    for (const kb of kbs) {
+      const detail = kb.error
+        ? `broken: ${kb.error}`
+        : `${kb.description ?? ""} · sources=${kb.sourceCount} entries=${kb.entryCount} ${kb.indexed ? "indexed" : "NOT indexed (run: mindstone kb ingest)"}`;
+      output.write(`${bold(kb.id)}${kb.version ? ` v${kb.version}` : ""}\n${dim(`  ${detail.trim()}`)}\n\n`);
+    }
+    return;
+  }
+
+  if (sub === "ingest") {
+    const kbId = argv[4];
+    if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id>");
+    const result = ingestMindStoneKnowledgebase(kbDir, kbId, { now: new Date().toISOString() });
+    if (!result.ok) throw new Error(result.error);
+    if (json) {
+      output.write(`${JSON.stringify(result, null, 2)}\n`);
+      return;
+    }
+    output.write(`${gold("🔶")} Ingested ${bold(kbId)}: ${result.entryCount} entries from ${result.sourceCount} source(s) → ${result.indexPath}\n`);
+    return;
+  }
+
+  if (sub === "search") {
+    const kbId = argv[4];
+    const query = argv[5];
+    if (!kbId || kbId.startsWith("--") || !query || query.startsWith("--")) throw new Error('Usage: mindstone kb search <kb-id> "<query>" [--limit N]');
+    const limitRaw = optionValue(argv, "--limit");
+    const result = searchMindStoneKnowledgebase(kbDir, kbId, query, { limit: limitRaw ? Number(limitRaw) : undefined });
+    if (!result.ok) throw new Error(result.error);
+    if (json) {
+      output.write(`${JSON.stringify(result, null, 2)}\n`);
+      return;
+    }
+    output.write(`${gold("🔶")} KB ${bold(kbId)} search: "${query}" — ${result.hits.length} hit(s)\n\n`);
+    for (const [index, hit] of result.hits.entries()) {
+      output.write(`${index + 1}. ${bold(hit.entry.citation)} ${dim(`(score ${hit.score.toFixed(2)})`)}\n`);
+      output.write(`${dim(`   ${hit.entry.summary}`)}\n\n`);
+    }
+    return;
+  }
+
+  if (sub === "status") {
+    const kbId = argv[4] && !argv[4].startsWith("--") ? argv[4] : undefined;
+    if (kbId) {
+      const status = mindStoneKbStatus(kbDir, kbId);
+      if ("error" in status) throw new Error(status.error);
+      if (json) {
+        output.write(`${JSON.stringify(status, null, 2)}\n`);
+        return;
+      }
+      output.write(
+        [
+          `${gold("🔶")} KB status: ${bold(kbId)}`,
+          `  dir: ${status.dir}`,
+          `  indexed: ${status.indexed}${status.ingestedAt ? ` (ingested ${status.ingestedAt})` : ""}`,
+          `  entries: ${status.entryCount} · sources: ${status.sourceCount} · needing attention: ${status.staleCount}`,
+          ...status.sources.map((source) => `    ${source.sourcePath}: ${source.state} (${source.entryCount} entries)`),
+        ].join("\n"),
+      );
+      output.write("\n");
+      return;
+    }
+    const kbs = discoverMindStoneKnowledgebases(kbDir);
+    if (json) {
+      output.write(`${JSON.stringify({ knowledgebasesDir: kbDir, knowledgebases: kbs }, null, 2)}\n`);
+      return;
+    }
+    output.write(`${gold("🔶")} Knowledgebase status (${kbs.length} at ${kbDir})\n`);
+    for (const kb of kbs) {
+      output.write(`  ${bold(kb.id)}: ${kb.error ? `broken — ${kb.error}` : `${kb.indexed ? "indexed" : "not indexed"} · sources=${kb.sourceCount} entries=${kb.entryCount}`}\n`);
+    }
+    return;
+  }
+
+  throw new Error(`Unknown kb subcommand: ${sub} (expected list | ingest <id> | search <id> <query> | status [id])`);
 }
 
 const CONFIG_SECTION_VALUES: MindStoneConfigWizardSection[] = ["all", "workspace", "gateway", "routing", "context", "memory", "identity", "channels"];
@@ -1677,6 +1900,10 @@ async function main(): Promise<void> {
   }
   if (command === "skill") {
     await runSkillCommand(process.argv);
+    return;
+  }
+  if (command === "kb") {
+    await runKbCommand(process.argv);
     return;
   }
   if (command === "auth") {

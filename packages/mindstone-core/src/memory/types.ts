@@ -1,4 +1,4 @@
-export type MemoryKind = "identity" | "journal" | "doc" | "wiki" | "transcript" | "checkpoint" | "log" | "index" | "custom";
+export type MemoryKind = "identity" | "journal" | "doc" | "wiki" | "transcript" | "checkpoint" | "log" | "index" | "kb" | "custom";
 
 export type MemoryDocument = {
   id: string;

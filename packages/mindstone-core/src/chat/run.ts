@@ -7,6 +7,7 @@ import {
   createSqliteMemoryRecallProvider,
   discoverFileMemoryDocuments,
 } from "../memory/index.js";
+import { discoverKnowledgebaseRecallDocuments } from "../knowledgebase/index.js";
 import { providerDiagnosticsFromChatResult, type MindStoneModelInfo, type MindStoneModelProvider } from "../provider/index.js";
 import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
@@ -440,10 +441,12 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
           ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
               ...(input.config?.memory?.localDocuments ?? []),
               ...discoverFileMemoryDocuments({ config: input.config }),
+              ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
             ])
           : createLocalMemoryRecallProvider([
               ...(input.config?.memory?.localDocuments ?? []),
               ...discoverFileMemoryDocuments({ config: input.config }),
+              ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
             ]),
         config: input.config?.memory?.recall,
       },

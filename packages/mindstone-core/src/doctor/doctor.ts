@@ -6,6 +6,8 @@ import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats, maintainSqliteM
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { resolveDefaultSessionKey } from "../routing/session.js";
 import { discoverMindStonePersonas, loadMindStonePersona, personasDirFromConfig } from "../persona/index.js";
+import { discoverMindStoneSkills, skillsDirFromConfig } from "../skills/index.js";
+import { discoverMindStoneKnowledgebases, knowledgebasesDirFromConfig } from "../knowledgebase/index.js";
 import { getIsolatedModelsStatus } from "../provider/local-models.js";
 import { getMindStoneGatewayStatus } from "../status/gateway.js";
 import { getPiSessionSafetyStatus } from "../status/pi-session-safety.js";
@@ -418,6 +420,40 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
     );
   } else if ((config?.personas?.routes?.length ?? 0) > 0) {
     check(checks, "pass", "personas.active", "Persona activation is route-driven", `${config?.personas?.routes?.length} rule(s)`);
+  }
+
+  const skillsDir = skillsDirFromConfig(config, paths);
+  const skills = discoverMindStoneSkills(skillsDir);
+  const brokenSkills = skills.filter((skill) => skill.error);
+  const draftSkills = skills.filter((skill) => skill.source === "draft" && !skill.error);
+  check(
+    checks,
+    brokenSkills.length > 0 ? "warn" : "pass",
+    "skills.catalog",
+    "Skill surfaces load",
+    brokenSkills.length > 0
+      ? `${skills.length} skills, ${brokenSkills.length} broken: ${brokenSkills.map((skill) => skill.id).join(", ")}`
+      : `${skills.length} skills at ${skillsDir}${draftSkills.length ? ` (${draftSkills.length} draft(s) pending install)` : ""}`,
+  );
+
+  const knowledgebasesDir = knowledgebasesDirFromConfig(config, paths);
+  const knowledgebases = discoverMindStoneKnowledgebases(knowledgebasesDir);
+  const brokenKbs = knowledgebases.filter((kb) => kb.error);
+  const unindexedKbs = knowledgebases.filter((kb) => !kb.error && !kb.indexed);
+  if (knowledgebases.length === 0) {
+    check(checks, "info", "knowledgebases.catalog", "No knowledgebases present", knowledgebasesDir);
+  } else {
+    check(
+      checks,
+      brokenKbs.length > 0 || unindexedKbs.length > 0 ? "warn" : "pass",
+      "knowledgebases.catalog",
+      "Knowledgebases load and are indexed",
+      [
+        `${knowledgebases.length} KB(s) at ${knowledgebasesDir}`,
+        ...(brokenKbs.length ? [`broken: ${brokenKbs.map((kb) => kb.id).join(", ")}`] : []),
+        ...(unindexedKbs.length ? [`not indexed (run mindstone kb ingest): ${unindexedKbs.map((kb) => kb.id).join(", ")}`] : []),
+      ].join(" · "),
+    );
   }
 
   check(

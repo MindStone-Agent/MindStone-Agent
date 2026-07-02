@@ -192,11 +192,27 @@ export type MindStoneWorkflowsConfigSection = {
   routes?: MindStoneWorkflowRouteRuleConfig[];
 };
 
+export type MindStoneSkillsConfigSection = {
+  /** Override the skills directory (defaults to <dataDir>/skills; drafts live under <dir>/drafts). */
+  dir?: string;
+};
+
+export type MindStoneKnowledgebasesConfigSection = {
+  /** Override the knowledgebases directory (defaults to <dataDir>/knowledgebases). */
+  dir?: string;
+  recall?: {
+    /** Include KB source summaries/pointers as Auto Recall documents. Defaults to true when KBs are indexed. */
+    enabled?: boolean;
+  };
+};
+
 export type MindStoneConfig = {
   workspace?: { root?: string };
   onboarding?: MindStoneOnboardingConfig;
   personas?: MindStonePersonasConfigSection;
   workflows?: MindStoneWorkflowsConfigSection;
+  skills?: MindStoneSkillsConfigSection;
+  knowledgebases?: MindStoneKnowledgebasesConfigSection;
   gateway?: {
     host?: string;
     port?: number;

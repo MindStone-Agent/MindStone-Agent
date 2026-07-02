@@ -35,6 +35,7 @@ const KIND_BOOST: Record<MemoryKind, number> = {
   identity: 0.06,
   custom: 0.06,
   doc: 0.05,
+  kb: 0.04,
   wiki: 0.04,
   journal: 0.04,
   checkpoint: 0.035,

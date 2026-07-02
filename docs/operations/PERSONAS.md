@@ -70,4 +70,7 @@ CLI activate/deactivate with transcript events, deterministic route rules
 (rule beats static active), mock-routed chat turn carrying `personaContext`,
 status/doctor visibility, and load-failure surfacing. Not yet validated with a
 live provider (no live-LLM claims). Skills/workflows/knowledgebases references
-are carried metadata only — their runtime wiring is #12/#13 scope.
+now have runtime targets: workflows participate in selection (#12,
+[WORKFLOWS.md](WORKFLOWS.md)); skill refs resolve against the skill catalog and
+KB refs against the KB catalog (#13, [SKILLS.md](SKILLS.md) /
+[KNOWLEDGEBASES.md](KNOWLEDGEBASES.md) — see `mindstone skill status`).

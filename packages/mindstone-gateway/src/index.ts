@@ -64,6 +64,7 @@ import {
   createSqliteMemoryRecallProvider,
   decideGatewayAuth,
   discoverFileMemoryDocuments,
+  discoverKnowledgebaseRecallDocuments,
   getMindStoneSystemStatus,
   listTranscriptSessions,
   loadMindStoneConfig,
@@ -745,10 +746,12 @@ async function runConfiguredRoute(input: {
             ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
                 ...(input.config?.memory?.localDocuments ?? []),
                 ...discoverFileMemoryDocuments({ config: input.config }),
+                ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
               ])
             : createLocalMemoryRecallProvider([
                 ...(input.config?.memory?.localDocuments ?? []),
                 ...discoverFileMemoryDocuments({ config: input.config }),
+                ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
               ]),
           config: input.config?.memory?.recall,
         },
