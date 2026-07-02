@@ -70,3 +70,10 @@ with `inReplyToMessageId` correlation), and failure visibility (no-impl and
 credential-unresolved connectors error in status/doctor while `/health` stays
 200). No live external-service claims — those are per-connector issues
 (#17–#22) with live legs in `LIVE_UAT_RUNBOOK.md`.
+
+## Designed, not implemented
+
+- **Microsoft Teams (#20)** — design + MVP path in `TEAMS_CONNECTOR_DESIGN.md`
+  (Activity-protocol route, single-tenant Entra story, stub-Bot-Connector +
+  Agents Playground validation seams). Catalog status `planned`; implementation
+  deliberately sequenced after #21/#22.

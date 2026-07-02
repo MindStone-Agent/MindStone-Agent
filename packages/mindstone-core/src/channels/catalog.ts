@@ -167,6 +167,22 @@ export function getMindStoneChannelCatalog(config?: MindStoneConfig): MindStoneC
       ],
     },
     {
+      id: "teams",
+      label: "Microsoft Teams",
+      kind: "external_channel",
+      status: "planned",
+      configured: channelConfigured(config, "teams"),
+      enabled: false,
+      capabilities: { chatTypes: ["direct", "group", "channel"] },
+      summary: "Planned Gateway-owned Teams connector via the Activity protocol (Azure Bot Service); design approved, not implemented.",
+      setup: "Design + MVP path in docs/operations/TEAMS_CONNECTOR_DESIGN.md (single-tenant Entra app + Azure Bot resource + public HTTPS messaging endpoint).",
+      notes: [
+        "Not implemented yet — design-only (#20); implementation sequenced after #21/#22",
+        "First connector requiring a PUBLIC inbound HTTPS endpoint (no long-poll/socket mode exists for Teams)",
+        "Raw Activity protocol, no Bot Framework/Agents SDK dependency (SDK layer is deprecation churn; protocol is stable)",
+      ],
+    },
+    {
       id: "signal",
       label: "Signal",
       kind: "external_channel",
