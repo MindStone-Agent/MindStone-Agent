@@ -50,6 +50,7 @@
     "smoke:onboard-model-setup": "./scripts/smoke-onboard-model-setup.sh",
     "smoke:config-pi-models": "./scripts/smoke-config-pi-models.sh",
     "smoke:local-route": "./scripts/smoke-local-route.sh",
+    "smoke:persona": "./scripts/smoke-persona.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",
     "smoke:reset": "./scripts/smoke-reset.sh",
     "smoke:auto-recall": "./scripts/smoke-auto-recall.sh",

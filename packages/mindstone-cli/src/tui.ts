@@ -22,6 +22,7 @@ import {
   buildTuiGatewayPanel,
   buildTuiHandoffPanel,
   buildTuiIdentityPanel,
+  buildTuiPersonaPanel,
   buildTuiMemoryPanel,
   buildTuiModelsPanel,
   buildTuiPiPanel,
@@ -113,6 +114,7 @@ const TUI_COMMANDS: TuiCommandDefinition[] = [
   { name: "context", description: "Show context window policy and current session estimate" },
   { name: "handoff", description: "Show current compaction handoff status" },
   { name: "identity", description: "Show active agent identity/user context status" },
+  { name: "persona", description: "Show persona overlays and active persona resolution" },
   { name: "events", description: "Show recent transcript/runner events" },
   { name: "runs", description: "Show recent transcript runs" },
   { name: "doctor", description: "Show compact runtime doctor summary" },
@@ -672,6 +674,7 @@ export function createMindStoneTuiSmokeSnapshot(width = 80): string {
   chat.addPanel("context", buildTuiContextPanel({ config: smokeConfig, ctx, entries: [] }));
   chat.addPanel("handoff", buildTuiHandoffPanel(smokePaths));
   chat.addPanel("identity", buildTuiIdentityPanel({ config: smokeConfig, configPath: "/tmp/mindstone/config.json", ctx }));
+  chat.addPanel("persona", buildTuiPersonaPanel({ config: smokeConfig, ctx }));
   const smokeRunEntries: TranscriptEntry[] = [
     {
       id: "event-smoke-1",
@@ -1076,6 +1079,11 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
       }
       if (message === "/identity") {
         chat.addPanel("identity", buildTuiIdentityPanel({ config: loaded.config, configPath: loaded.path, ctx }));
+        tui.requestRender();
+        return;
+      }
+      if (message === "/persona") {
+        chat.addPanel("persona", buildTuiPersonaPanel({ config: loaded.config, ctx }));
         tui.requestRender();
         return;
       }

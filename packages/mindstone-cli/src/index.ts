@@ -21,7 +21,13 @@ import {
   getMindStoneSystemStatus,
   getSqliteMemoryIndexStats,
   maintainSqliteMemoryIndex,
+  appendTranscriptEntry,
+  discoverMindStonePersonas,
   loadMindStoneConfig,
+  loadMindStonePersona,
+  personasDirFromConfig,
+  resolveMindStonePersona,
+  writeMindStoneConfig,
   probeMemoryEmbeddingProvider,
   resolveConfigPath,
   resolveConfiguredSessionKey,
@@ -44,7 +50,7 @@ import {
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "persona" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;220m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -71,6 +77,7 @@ function usage(): string {
     "  mindstone skill list   Show built-in MindStone skill surfaces",
     "  mindstone skill integration-builder [--name NAME] [--kind KIND] [--goal TEXT] [--json]",
     "                         Build an integration/channel/tool implementation brief",
+    "  mindstone persona     List/activate/deactivate persona overlays (list | status | activate <id> | deactivate)",
     "  mindstone channels [--json]",
     "                         Show channel/surface catalog without starting listeners",
     "  mindstone status       Show isolated runtime/config status",
@@ -90,7 +97,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "skill" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "persona" || raw === "skill" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -994,6 +1001,8 @@ function printStatus(): void {
       `Pi-session resume cap: ${status.piSessionSafety.resumeCap.enabled} (${status.piSessionSafety.resumeCap.maxEntries} entries, dropErrorTurns=${status.piSessionSafety.resumeCap.dropErrorTurns})`,
       `Pi-session compaction floor: ${status.piSessionSafety.compaction.reserveTokensFloor}`,
       `Pi-session safeguard fallback: ${status.piSessionSafety.compaction.safeguardFallback}`,
+      `Personas: ${status.personas.count} discovered${status.personas.brokenCount ? ` (${status.personas.brokenCount} broken)` : ""} at ${status.personas.dir}`,
+      `Persona active: ${status.personas.resolvedForDefaultSession ? `${status.personas.resolvedForDefaultSession.personaId} (${status.personas.resolvedForDefaultSession.reason})` : "none"}${status.personas.routeRules ? ` · ${status.personas.routeRules} route rule(s)` : ""}`,
       loaded.config ? "" : undefined,
       loaded.config ? formatConfigSummary(loaded.config) : undefined,
     ]
@@ -1523,6 +1532,119 @@ async function runAuthCommand(argv: string[]): Promise<void> {
   }
 }
 
+
+type PersonaCommandJson = Record<string, unknown>;
+
+async function runPersonaCommand(argv: string[]): Promise<void> {
+  const sub = argv[3] && !argv[3].startsWith("--") ? argv[3] : "list";
+  const json = hasOption(argv, "--json");
+  const paths = runtimePathsFromEnv();
+  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+  if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
+  const config = loaded.config ?? {};
+  const personasDir = personasDirFromConfig(config, paths);
+  const emit = (payload: PersonaCommandJson, lines: string[]): void => {
+    if (json) {
+      output.write(`${JSON.stringify(payload, null, 2)}\n`);
+      return;
+    }
+    output.write(`${lines.join("\n")}\n`);
+  };
+
+  if (sub === "list") {
+    const personas = discoverMindStonePersonas(personasDir);
+    emit(
+      { personasDir, active: config.personas?.active, personas },
+      [
+        `${gold("🔶")} MindStone personas (${personasDir})`,
+        ...(personas.length === 0 ? [dim("  (none — create personas/<id>/PERSONA.md under the personas dir)")] : []),
+        ...personas.map((persona) => {
+          const marker = config.personas?.active === persona.id ? gold(" ● active") : "";
+          const detail = persona.error
+            ? `broken: ${persona.error}`
+            : `${persona.description ?? ""}${persona.hasSafety ? " · safety.md" : ""} · skills=${persona.skillCount} workflows=${persona.workflowCount} kbs=${persona.knowledgebaseCount}`;
+          return `  ${bold(persona.id)}${persona.version ? ` v${persona.version}` : ""}${marker}\n    ${dim(detail.trim())}`;
+        }),
+      ],
+    );
+    return;
+  }
+
+  if (sub === "status") {
+    const sessionKey = resolveConfiguredSessionKey(config, { agentId: config.routing?.defaultAgentId ?? "default" });
+    const resolution = resolveMindStonePersona({ config, sessionKey });
+    const active = resolution ? loadMindStonePersona(personasDir, resolution.personaId) : undefined;
+    emit(
+      {
+        personasDir,
+        configuredActive: config.personas?.active,
+        routeRules: config.personas?.routes?.length ?? 0,
+        resolved: resolution,
+        loaded: active?.ok ? { id: active.persona.id, name: active.persona.name, version: active.persona.version } : undefined,
+        loadError: active && !active.ok ? active.error : undefined,
+      },
+      [
+        `${gold("🔶")} Persona status`,
+        `  personas dir: ${personasDir}`,
+        `  configured active: ${config.personas?.active ?? "none"}`,
+        `  route rules: ${config.personas?.routes?.length ?? 0}`,
+        `  resolved for ${sessionKey}: ${resolution ? `${resolution.personaId} (${resolution.reason})` : "none"}`,
+        ...(active && !active.ok ? [`  ${bold("load error:")} ${active.error}`] : []),
+      ],
+    );
+    return;
+  }
+
+  if (sub === "activate") {
+    const personaId = argv[4];
+    if (!personaId || personaId.startsWith("--")) throw new Error("Usage: mindstone persona activate <persona-id>");
+    const loadResult = loadMindStonePersona(personasDir, personaId);
+    if (!loadResult.ok) throw new Error(`Cannot activate ${personaId}: ${loadResult.error}`);
+    const nextConfig = { ...config, personas: { ...config.personas, active: personaId } };
+    writeMindStoneConfig(loaded.path, nextConfig);
+    const sessionKey = resolveConfiguredSessionKey(nextConfig, { agentId: nextConfig.routing?.defaultAgentId ?? "default" });
+    const entry = appendTranscriptEntry({
+      sessionKey,
+      agentId: nextConfig.routing?.defaultAgentId ?? "default",
+      role: "event",
+      text: `Persona activated: ${loadResult.persona.name} (${personaId}).`,
+      source: { substrate: "mindstone-cli", channel: "terminal", chatType: "internal" },
+      metadata: { event: "persona_activated", personaId, personaName: loadResult.persona.name, personaVersion: loadResult.persona.version },
+    });
+    emit(
+      { activated: personaId, configPath: loaded.path, transcriptEntryId: entry.id, sessionKey },
+      [`${gold("🔶")} Activated persona ${bold(personaId)} (${loadResult.persona.name}) — event recorded on ${sessionKey}`],
+    );
+    return;
+  }
+
+  if (sub === "deactivate") {
+    const previous = config.personas?.active;
+    if (!previous) {
+      emit({ deactivated: false, reason: "no active persona" }, [`${gold("🔶")} No persona is active.`]);
+      return;
+    }
+    const nextConfig = { ...config, personas: { ...config.personas, active: undefined } };
+    writeMindStoneConfig(loaded.path, nextConfig);
+    const sessionKey = resolveConfiguredSessionKey(nextConfig, { agentId: nextConfig.routing?.defaultAgentId ?? "default" });
+    const entry = appendTranscriptEntry({
+      sessionKey,
+      agentId: nextConfig.routing?.defaultAgentId ?? "default",
+      role: "event",
+      text: `Persona deactivated: ${previous}.`,
+      source: { substrate: "mindstone-cli", channel: "terminal", chatType: "internal" },
+      metadata: { event: "persona_deactivated", personaId: previous },
+    });
+    emit(
+      { deactivated: previous, configPath: loaded.path, transcriptEntryId: entry.id, sessionKey },
+      [`${gold("🔶")} Deactivated persona ${bold(previous)} — event recorded on ${sessionKey}`],
+    );
+    return;
+  }
+
+  throw new Error(`Unknown persona subcommand: ${sub} (expected list | status | activate <id> | deactivate)`);
+}
+
 async function main(): Promise<void> {
   const command = parseCommand(process.argv);
   if (command === "help") {
@@ -1547,6 +1669,10 @@ async function main(): Promise<void> {
   }
   if (command === "identity") {
     await runIdentityCommand(process.argv);
+    return;
+  }
+  if (command === "persona") {
+    await runPersonaCommand(process.argv);
     return;
   }
   if (command === "skill") {

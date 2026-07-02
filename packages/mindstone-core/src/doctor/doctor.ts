@@ -5,6 +5,7 @@ import { getCurrentHandoffStatus } from "../lifecycle/index.js";
 import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats, maintainSqliteMemoryIndex } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { resolveDefaultSessionKey } from "../routing/session.js";
+import { discoverMindStonePersonas, loadMindStonePersona, personasDirFromConfig } from "../persona/index.js";
 import { getIsolatedModelsStatus } from "../provider/local-models.js";
 import { getMindStoneGatewayStatus } from "../status/gateway.js";
 import { getPiSessionSafetyStatus } from "../status/pi-session-safety.js";
@@ -387,6 +388,36 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
       "No custom local/cloud providers in isolated models.json",
       "use onboarding or `mindstone config --section routing` to register Ollama/LM Studio/Ollama Cloud",
     );
+  }
+
+  const personasDir = personasDirFromConfig(config, paths);
+  const personas = discoverMindStonePersonas(personasDir);
+  const brokenPersonas = personas.filter((persona) => persona.error);
+  if (personas.length === 0) {
+    check(checks, "info", "personas.catalog", "No persona overlays present", personasDir);
+  } else {
+    check(
+      checks,
+      brokenPersonas.length > 0 ? "warn" : "pass",
+      "personas.catalog",
+      "Persona overlays load",
+      brokenPersonas.length > 0
+        ? `${personas.length} personas, ${brokenPersonas.length} broken: ${brokenPersonas.map((persona) => persona.id).join(", ")}`
+        : `${personas.length} personas at ${personasDir}`,
+    );
+  }
+  const activePersonaId = config?.personas?.active;
+  if (activePersonaId) {
+    const activePersona = loadMindStonePersona(personasDir, activePersonaId);
+    check(
+      checks,
+      activePersona.ok ? "pass" : "warn",
+      "personas.active",
+      "Configured active persona loads",
+      activePersona.ok ? `${activePersonaId} (${activePersona.persona.name})` : activePersona.error,
+    );
+  } else if ((config?.personas?.routes?.length ?? 0) > 0) {
+    check(checks, "pass", "personas.active", "Persona activation is route-driven", `${config?.personas?.routes?.length} rule(s)`);
   }
 
   check(

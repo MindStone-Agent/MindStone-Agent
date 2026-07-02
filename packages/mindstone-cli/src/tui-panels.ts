@@ -12,6 +12,10 @@ import {
   transcriptPathForSession,
   type MindStoneModelInfo,
   type TranscriptEntry,
+  discoverMindStonePersonas,
+  loadMindStonePersona,
+  personasDirFromConfig,
+  resolveMindStonePersona,
 } from "@mindstone-agent/core";
 import { piSessionFileForKey } from "@mindstone-agent/gateway";
 
@@ -351,6 +355,29 @@ export function buildTuiIdentityPanel(params: {
     loaded.identity ? `- identity/user token estimate: \`${tokenEstimate}\`` : undefined,
     loaded.error ? `- error: \`${loaded.error}\`` : undefined,
   ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+export function buildTuiPersonaPanel(params: {
+  config: ReturnType<typeof loadMindStoneConfig>["config"];
+  ctx: TuiCommandContext;
+}): string {
+  const personasDir = personasDirFromConfig(params.config);
+  const personas = discoverMindStonePersonas(personasDir);
+  const resolution = resolveMindStonePersona({ config: params.config, sessionKey: params.ctx.sessionKey });
+  const active = resolution ? loadMindStonePersona(personasDir, resolution.personaId) : undefined;
+  return [
+    `- personas dir: \`${personasDir}\``,
+    `- discovered: \`${personas.length}\`${personas.some((persona) => persona.error) ? ` (${personas.filter((persona) => persona.error).length} broken)` : ""}`,
+    `- configured active: \`${params.config?.personas?.active ?? "none"}\``,
+    `- route rules: \`${params.config?.personas?.routes?.length ?? 0}\``,
+    `- resolved for \`${params.ctx.sessionKey}\`: \`${resolution ? `${resolution.personaId} (${resolution.reason})` : "none"}\``,
+    active && active.ok ? `- overlay: \`${active.persona.name}\`${active.persona.version ? ` v${active.persona.version}` : ""} — skills=${active.persona.skills.length} workflows=${active.persona.workflows.length} kbs=${active.persona.knowledgebases.length}${active.persona.safetyMarkdown ? " · safety.md" : ""}` : undefined,
+    active && !active.ok ? `- load error: \`${active.error}\`` : undefined,
+    "",
+    personas.length === 0
+      ? "No persona overlays present. Create personas/<id>/PERSONA.md under the personas dir, then `mindstone persona activate <id>`."
+      : "Personas overlay below core identity; activation via `mindstone persona activate <id>` or config route rules.",
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 export function buildTuiEventsPanel(params: { ctx: TuiCommandContext; entries: TranscriptEntry[]; limit?: number }): string {

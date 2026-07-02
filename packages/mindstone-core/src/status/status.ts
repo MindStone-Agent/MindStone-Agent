@@ -6,6 +6,8 @@ import { getCurrentHandoffStatus, type CurrentHandoffStatus } from "../lifecycle
 import { getSqliteMemoryIndexStats, type SqliteMemoryIndexStats } from "../memory/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { listTranscriptSessions } from "../transcript/index.js";
+import { discoverMindStonePersonas, personasDirFromConfig, resolveMindStonePersona } from "../persona/index.js";
+import { resolveConfiguredSessionKey } from "../routing/session.js";
 import { getMindStoneGatewayStatus, type MindStoneGatewayStatus } from "./gateway.js";
 import { getPiSessionSafetyStatus, type PiSessionSafetyStatus } from "./pi-session-safety.js";
 import { getMindStoneWebChatStatus, type MindStoneWebChatStatus } from "./webchat.js";
@@ -49,6 +51,14 @@ export type MindStoneSystemStatus = {
     defaultModel?: string;
   };
   piSessionSafety: PiSessionSafetyStatus;
+  personas: {
+    dir: string;
+    count: number;
+    brokenCount: number;
+    configuredActive?: string;
+    routeRules: number;
+    resolvedForDefaultSession?: { personaId: string; reason: string };
+  };
 };
 
 function summarizeAgents(loadedConfig: LoadedMindStoneConfig): MindStoneAgentStatus[] {
@@ -102,5 +112,20 @@ export function getMindStoneSystemStatus(env: NodeJS.ProcessEnv = process.env): 
       piAgentDir: paths.piAgentDir,
       piSessionDir: paths.piSessionDir,
     }),
+    personas: (() => {
+      const personasDir = personasDirFromConfig(loadedConfig.config, paths);
+      const personas = discoverMindStonePersonas(personasDir);
+      return {
+        dir: personasDir,
+        count: personas.length,
+        brokenCount: personas.filter((persona) => persona.error).length,
+        configuredActive: loadedConfig.config?.personas?.active,
+        routeRules: loadedConfig.config?.personas?.routes?.length ?? 0,
+        resolvedForDefaultSession: resolveMindStonePersona({
+          config: loadedConfig.config,
+          sessionKey: resolveConfiguredSessionKey(loadedConfig.config, { agentId: loadedConfig.config?.routing?.defaultAgentId ?? "default" }),
+        }),
+      };
+    })(),
   };
 }

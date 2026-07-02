@@ -10,6 +10,7 @@ import {
 import { providerDiagnosticsFromChatResult, type MindStoneModelInfo, type MindStoneModelProvider } from "../provider/index.js";
 import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
+import { resolveRoutePersonaContext } from "../persona/index.js";
 import {
   createProviderRouteAgentRunner,
   sanitizeRunnerStreamSubstrateEventPayload,
@@ -57,6 +58,7 @@ export type MindStoneChatTurnResult = {
   assistantEntry: TranscriptEntry;
   events: TranscriptEntry[];
   identityContext?: Awaited<ReturnType<typeof runMindStoneRoute>>["identityContext"];
+  personaContext?: Awaited<ReturnType<typeof runMindStoneRoute>>["personaContext"];
   promptWindow: {
     mode: string;
     pruned: boolean;
@@ -390,6 +392,13 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       }
     : undefined;
 
+  const personaResolution = resolveRoutePersonaContext({
+    config: input.config,
+    sessionKey: input.sessionKey,
+    sourceChannel: input.source?.channel,
+    sourceSubstrate: input.source?.substrate,
+  });
+
   const runner = input.runner ?? createProviderRouteAgentRunner();
   const streamOptions = resolveRunnerStreamOptions(input);
   const { route, streamEvents } = await runAgentRunner({
@@ -403,6 +412,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       model: input.model,
       provider: input.provider,
       identityContext: loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
+      personaContext: personaResolution.context,
       contextManagement: input.config?.contextManagement,
       reservedTokens: reservedPromptTokens(input.metadata),
       handoffReplay,
@@ -431,6 +441,17 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   });
 
   const events: TranscriptEntry[] = [];
+  if (personaResolution.error) {
+    events.push(appendTranscriptEntry({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      role: "event",
+      text: `Persona overlay failed to load (${personaResolution.resolution?.personaId ?? "unknown"}): ${personaResolution.error}`,
+      source: input.source,
+      metadata: { event: "persona_load_failed", personaId: personaResolution.resolution?.personaId, reason: personaResolution.resolution?.reason },
+      runId,
+    }));
+  }
   if (route.identityFormation?.enabled) {
     events.push(appendTranscriptEntry({
       sessionKey: input.sessionKey,
@@ -541,6 +562,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     assistantEntry,
     events,
     identityContext: route.identityContext,
+    personaContext: route.personaContext,
     promptWindow: {
       mode: route.promptWindow.policy.mode,
       pruned: route.promptWindow.pruned,

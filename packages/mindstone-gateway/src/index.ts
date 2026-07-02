@@ -55,6 +55,7 @@ export { PiSessionMindStoneProvider, buildPiSessionPromptParts, createPiSessionE
 export { PiSessionAgentRunner } from "./pi-session-runner.js";
 export { GatewayRunManager } from "./run-manager.js";
 import {
+  resolveRoutePersonaContext,
   appendTranscriptEntry,
   buildPromptWindow,
   createLocalMemoryRecallProvider,
@@ -701,6 +702,12 @@ async function runConfiguredRoute(input: {
         model,
         provider,
         identityContext: loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
+        personaContext: resolveRoutePersonaContext({
+          config: input.config,
+          sessionKey: input.sessionKey,
+          sourceChannel: source?.channel,
+          sourceSubstrate: source?.substrate,
+        }).context,
         contextManagement: input.config?.contextManagement,
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
@@ -855,6 +862,7 @@ async function runConfiguredRoute(input: {
         model: model.id,
         runner: route.runner,
         identityContext: route.identityContext,
+        personaContext: route.personaContext,
         promptWindow: {
           mode: route.promptWindow.policy.mode,
           pruned: route.promptWindow.pruned,

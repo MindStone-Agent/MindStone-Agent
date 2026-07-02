@@ -159,9 +159,26 @@ export type MindStoneOnboardingConfig = {
   identity?: MindStoneOnboardingIdentity;
 };
 
+export type MindStonePersonaRouteRuleConfig = {
+  personaId: string;
+  sessionKeyPrefix?: string;
+  sourceChannel?: string;
+  sourceSubstrate?: string;
+};
+
+export type MindStonePersonasConfigSection = {
+  /** Statically activated persona id (route rules take precedence). */
+  active?: string;
+  /** Override the personas directory (defaults to <dataDir>/personas). */
+  dir?: string;
+  /** First matching rule wins; falls back to `active`. */
+  routes?: MindStonePersonaRouteRuleConfig[];
+};
+
 export type MindStoneConfig = {
   workspace?: { root?: string };
   onboarding?: MindStoneOnboardingConfig;
+  personas?: MindStonePersonasConfigSection;
   gateway?: {
     host?: string;
     port?: number;

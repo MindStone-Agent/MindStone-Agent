@@ -3,6 +3,7 @@ import type { ContextManagementPolicy } from "../context/index.js";
 import { recallMindStoneMemory, type MemoryRecallConfig, type MemoryRecallProvider, type MemoryRecallResult } from "../memory/index.js";
 import type { MindStoneIdentity } from "../identity/index.js";
 import type { MindStoneChatMessage, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider } from "../provider/index.js";
+import type { MindStoneRoutePersonaContext, MindStoneRoutePersonaContextSummary } from "../persona/types.js";
 import type { TranscriptEntry } from "../transcript/index.js";
 
 export type MindStoneHandoffReplay = {
@@ -39,6 +40,7 @@ export type MindStoneRouteInput = {
   model: MindStoneModelInfo;
   provider: MindStoneModelProvider;
   identityContext?: MindStoneRouteIdentityContext;
+  personaContext?: MindStoneRoutePersonaContext;
   contextManagement?: ContextManagementPolicy;
   reservedTokens?: number;
   protectedEntryIds?: string[];
@@ -60,6 +62,7 @@ export type MindStoneRoutePlan = {
   promptWindow: PromptWindowBuildResult;
   messages: MindStoneChatMessage[];
   identityContext?: MindStoneRouteIdentityContextSummary;
+  personaContext?: MindStoneRoutePersonaContextSummary;
   identityFormation?: MindStoneIdentityFormationPrompt;
   memoryRecall?: MemoryRecallResult;
   handoffReplay?: MindStoneHandoffReplay;
@@ -114,11 +117,20 @@ function summarizeIdentityContext(
 export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provider" | "signal" | "memoryRecall"> & { memoryRecall?: MemoryRecallResult }): MindStoneRoutePlan {
   const identityPromptText = identityContextPrompt(input.identityContext);
   const identityContext = summarizeIdentityContext(input.identityContext, identityPromptText);
+  const personaPromptText = input.personaContext?.promptText?.trim() ? input.personaContext.promptText.trim() : undefined;
+  const personaContext: MindStoneRoutePersonaContextSummary | undefined = personaPromptText && input.personaContext
+    ? {
+        injected: true,
+        personaId: input.personaContext.personaId,
+        reason: input.personaContext.reason,
+        tokenEstimate: estimatePromptTokens(personaPromptText),
+      }
+    : undefined;
   const promptWindow = buildPromptWindow({
     entries: input.entries,
     contextWindowTokens: input.model.contextWindowTokens ?? 128_000,
     policy: input.contextManagement,
-    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0),
+    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (personaContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0),
     protectedEntryIds: input.protectedEntryIds,
   });
   const messages = promptWindow.promptEntries.map(transcriptEntryToChatMessage).filter((message): message is MindStoneChatMessage => Boolean(message));
@@ -137,6 +149,9 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
   if (input.identityFormation?.enabled && input.identityFormation.promptText.trim()) {
     messages.unshift({ role: "system", text: input.identityFormation.promptText.trim() });
   }
+  if (personaPromptText) {
+    messages.unshift({ role: "system", text: personaPromptText });
+  }
   if (identityPromptText) {
     messages.unshift({ role: "system", text: identityPromptText });
   }
@@ -147,6 +162,7 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     promptWindow,
     messages,
     identityContext,
+    personaContext,
     identityFormation: input.identityFormation?.enabled ? input.identityFormation : undefined,
     memoryRecall: input.memoryRecall,
     handoffReplay: input.handoffReplay,
