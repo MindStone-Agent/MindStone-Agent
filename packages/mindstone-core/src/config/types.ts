@@ -175,10 +175,28 @@ export type MindStonePersonasConfigSection = {
   routes?: MindStonePersonaRouteRuleConfig[];
 };
 
+export type MindStoneWorkflowRouteRuleConfig = {
+  workflowId: string;
+  sessionKeyPrefix?: string;
+  sourceChannel?: string;
+  sourceSubstrate?: string;
+  messagePrefix?: string;
+};
+
+export type MindStoneWorkflowsConfigSection = {
+  /** Statically selected workflow id (route rules take precedence). */
+  active?: string;
+  /** Override the workflows directory (defaults to <dataDir>/workflows). */
+  dir?: string;
+  /** First matching rule wins; falls back to `active`. */
+  routes?: MindStoneWorkflowRouteRuleConfig[];
+};
+
 export type MindStoneConfig = {
   workspace?: { root?: string };
   onboarding?: MindStoneOnboardingConfig;
   personas?: MindStonePersonasConfigSection;
+  workflows?: MindStoneWorkflowsConfigSection;
   gateway?: {
     host?: string;
     port?: number;

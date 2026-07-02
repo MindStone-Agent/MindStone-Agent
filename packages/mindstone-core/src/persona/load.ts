@@ -177,6 +177,27 @@ export type ResolveRoutePersonaContextResult = {
   error?: string;
 };
 
+/** Load a specific persona into a route context with an explicit activation reason (e.g. a workflow decision). */
+export function loadRoutePersonaContextById(params: {
+  config: MindStoneConfig | undefined;
+  paths?: MindStoneRuntimePaths;
+  personaId: string;
+  reason: string;
+}): ResolveRoutePersonaContextResult {
+  const resolution = { personaId: params.personaId, reason: params.reason };
+  const personasDir = personasDirFromConfig(params.config, params.paths);
+  const loaded = loadMindStonePersona(personasDir, params.personaId);
+  if (!loaded.ok) return { resolution, error: loaded.error };
+  return {
+    resolution,
+    context: {
+      personaId: params.personaId,
+      reason: params.reason,
+      promptText: personaOverlayPrompt(loaded.persona, params.reason),
+    },
+  };
+}
+
 /**
  * Resolve + load the active persona for a turn into a route-injectable context.
  * Load failures are surfaced (never silently dropped) but do not block the turn.

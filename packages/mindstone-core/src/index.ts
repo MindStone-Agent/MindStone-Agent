@@ -4,6 +4,7 @@ export * from "./config/index.js";
 export * from "./transcript/index.js";
 export * from "./context/index.js";
 export * from "./persona/index.js";
+export * from "./workflow/index.js";
 export * from "./provider/index.js";
 export * from "./profile/index.js";
 export * from "./memory/index.js";

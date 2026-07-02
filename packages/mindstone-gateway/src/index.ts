@@ -55,7 +55,9 @@ export { PiSessionMindStoneProvider, buildPiSessionPromptParts, createPiSessionE
 export { PiSessionAgentRunner } from "./pi-session-runner.js";
 export { GatewayRunManager } from "./run-manager.js";
 import {
+  loadRoutePersonaContextById,
   resolveRoutePersonaContext,
+  runMindStoneWorkflow,
   appendTranscriptEntry,
   buildPromptWindow,
   createLocalMemoryRecallProvider,
@@ -689,6 +691,26 @@ async function runConfiguredRoute(input: {
     metadata: { provider: provider.id, model: model.id },
   });
 
+  const workflowOutcome = runMindStoneWorkflow({
+    config: input.config,
+    turn: {
+      sessionKey: input.sessionKey,
+      sourceChannel: source?.channel,
+      sourceSubstrate: source?.substrate,
+      messageText: [...entries].reverse().find((entry) => entry.role === "user")?.text,
+    },
+  });
+  for (const workflowEvent of workflowOutcome?.events ?? []) {
+    appendTranscriptEntry({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      role: "event",
+      text: workflowEvent.text,
+      source,
+      metadata: workflowEvent.metadata,
+    });
+  }
+
   try {
     const runner = resolveRunner(input.config, provider);
     const streamOptions = resolveRunnerStreamOptions(input.config);
@@ -702,12 +724,18 @@ async function runConfiguredRoute(input: {
         model,
         provider,
         identityContext: loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
-        personaContext: resolveRoutePersonaContext({
-          config: input.config,
-          sessionKey: input.sessionKey,
-          sourceChannel: source?.channel,
-          sourceSubstrate: source?.substrate,
-        }).context,
+        personaContext: (workflowOutcome?.decision?.personaId
+          ? loadRoutePersonaContextById({
+              config: input.config,
+              personaId: workflowOutcome.decision.personaId,
+              reason: `workflow:${workflowOutcome.workflowId}/step:${workflowOutcome.decision.stepId}`,
+            })
+          : resolveRoutePersonaContext({
+              config: input.config,
+              sessionKey: input.sessionKey,
+              sourceChannel: source?.channel,
+              sourceSubstrate: source?.substrate,
+            })).context,
         contextManagement: input.config?.contextManagement,
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
@@ -863,6 +891,9 @@ async function runConfiguredRoute(input: {
         runner: route.runner,
         identityContext: route.identityContext,
         personaContext: route.personaContext,
+        workflow: workflowOutcome
+          ? { workflowId: workflowOutcome.workflowId, reason: workflowOutcome.reason, failed: workflowOutcome.failed, decision: workflowOutcome.decision }
+          : undefined,
         promptWindow: {
           mode: route.promptWindow.policy.mode,
           pruned: route.promptWindow.pruned,

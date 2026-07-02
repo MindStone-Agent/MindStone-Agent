@@ -10,7 +10,8 @@ import {
 import { providerDiagnosticsFromChatResult, type MindStoneModelInfo, type MindStoneModelProvider } from "../provider/index.js";
 import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
-import { resolveRoutePersonaContext } from "../persona/index.js";
+import { loadRoutePersonaContextById, resolveRoutePersonaContext } from "../persona/index.js";
+import { runMindStoneWorkflow } from "../workflow/index.js";
 import {
   createProviderRouteAgentRunner,
   sanitizeRunnerStreamSubstrateEventPayload,
@@ -59,6 +60,7 @@ export type MindStoneChatTurnResult = {
   events: TranscriptEntry[];
   identityContext?: Awaited<ReturnType<typeof runMindStoneRoute>>["identityContext"];
   personaContext?: Awaited<ReturnType<typeof runMindStoneRoute>>["personaContext"];
+  workflow?: { workflowId: string; reason: string; failed: boolean; decision?: { workflowId: string; stepId: string; personaId?: string; skills: string[]; knowledgebases: string[] } };
   promptWindow: {
     mode: string;
     pruned: boolean;
@@ -392,12 +394,27 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       }
     : undefined;
 
-  const personaResolution = resolveRoutePersonaContext({
+  const workflowOutcome = runMindStoneWorkflow({
     config: input.config,
-    sessionKey: input.sessionKey,
-    sourceChannel: input.source?.channel,
-    sourceSubstrate: input.source?.substrate,
+    turn: {
+      sessionKey: input.sessionKey,
+      sourceChannel: input.source?.channel,
+      sourceSubstrate: input.source?.substrate,
+      messageText: [...entries].reverse().find((entry) => entry.role === "user")?.text,
+    },
   });
+  const personaResolution = workflowOutcome?.decision?.personaId
+    ? loadRoutePersonaContextById({
+        config: input.config,
+        personaId: workflowOutcome.decision.personaId,
+        reason: `workflow:${workflowOutcome.workflowId}/step:${workflowOutcome.decision.stepId}`,
+      })
+    : resolveRoutePersonaContext({
+        config: input.config,
+        sessionKey: input.sessionKey,
+        sourceChannel: input.source?.channel,
+        sourceSubstrate: input.source?.substrate,
+      });
 
   const runner = input.runner ?? createProviderRouteAgentRunner();
   const streamOptions = resolveRunnerStreamOptions(input);
@@ -441,6 +458,17 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   });
 
   const events: TranscriptEntry[] = [];
+  for (const workflowEvent of workflowOutcome?.events ?? []) {
+    events.push(appendTranscriptEntry({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      role: "event",
+      text: workflowEvent.text,
+      source: input.source,
+      metadata: workflowEvent.metadata,
+      runId,
+    }));
+  }
   if (personaResolution.error) {
     events.push(appendTranscriptEntry({
       sessionKey: input.sessionKey,
@@ -563,6 +591,9 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     events,
     identityContext: route.identityContext,
     personaContext: route.personaContext,
+    workflow: workflowOutcome
+      ? { workflowId: workflowOutcome.workflowId, reason: workflowOutcome.reason, failed: workflowOutcome.failed, decision: workflowOutcome.decision }
+      : undefined,
     promptWindow: {
       mode: route.promptWindow.policy.mode,
       pruned: route.promptWindow.pruned,
