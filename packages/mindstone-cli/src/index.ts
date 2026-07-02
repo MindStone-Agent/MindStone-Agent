@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { pathToFileURL } from "node:url";
@@ -44,7 +44,7 @@ import {
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "auth" | "gateway" | "identity" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "skill" | "channels" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;220m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -61,6 +61,7 @@ function usage(): string {
     "  mindstone config [--section NAME|--sections a,b] [--dry-run]",
     "                         Configure MindStone-Agent runtime settings or one section",
     "  mindstone onboard      First-run onboarding with risk notice, config, and identity/user scaffold",
+    "  mindstone reset        Reset the isolated local runtime after typed destructive confirmation",
     "  mindstone auth login <provider> [--dry-run]",
     "                         Connect a subscription/OAuth provider through MindStone's isolated auth flow",
     "  mindstone gateway [status|run|start|stop|restart|logs|install|uninstall]",
@@ -89,7 +90,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "skill" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "skill" || raw === "channels" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -110,6 +111,7 @@ function selectWithArrows<T extends string>(params: {
   message: string;
   options: Array<MindStoneSelectOption<T>>;
   initialValue?: T;
+  prefixLines?: string[];
 }): Promise<T> {
   if (!input.isTTY || !output.isTTY) {
     return Promise.resolve(
@@ -127,6 +129,7 @@ function selectWithArrows<T extends string>(params: {
   const render = () => {
     if (renderedLines > 0) output.write(`\x1b[${renderedLines}A\x1b[0J`);
     const lines = [
+      ...(params.prefixLines?.length ? [...params.prefixLines, ""] : []),
       bold(params.message),
       dim("Use ↑/↓ arrows, Enter to select, Ctrl+C to cancel."),
       ...arrowOptionLines(params.options, selectedIndex),
@@ -219,19 +222,41 @@ function inputHidden(message: string, placeholder?: string): Promise<string> {
 
 function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
   const rl = createInterface({ input, output });
+  const pageMode = input.isTTY && output.isTTY && process.env.MINDSTONE_AGENT_SCROLL_ONBOARDING !== "1";
+  let pendingPageLines: string[] = [];
 
+  const clearPage = () => {
+    if (pageMode) output.write("\x1b[2J\x1b[H");
+  };
+  const consumePagePrefix = (): string[] => {
+    const lines = pendingPageLines;
+    pendingPageLines = [];
+    if (pageMode) clearPage();
+    return lines;
+  };
+  const pushPageNote = (message: string, title?: string) => {
+    if (title) pendingPageLines.push(bold(title));
+    pendingPageLines.push(message);
+  };
   const ask = async (question: string): Promise<string> => (await rl.question(question)).trim();
 
   return {
     close: () => rl.close(),
     intro: async (title) => {
+      if (pageMode) clearPage();
       output.write(`${gold(formatMindStoneConfigHeader())}\n`);
       output.write(`${bold(title)}\n\n`);
     },
     outro: async (message) => {
-      output.write(`\n${gold("🔶")} ${message}\n`);
+      const prefix = consumePagePrefix();
+      if (prefix.length) output.write(`${prefix.join("\n")}\n\n`);
+      output.write(`${gold("🔶")} ${message}\n`);
     },
     note: async (message, title) => {
+      if (pageMode) {
+        pushPageNote(message, title);
+        return;
+      }
       if (title) output.write(`${bold(title)}\n`);
       output.write(`${message}\n\n`);
     },
@@ -246,6 +271,7 @@ function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
               { value: "no", label: "No" },
             ],
             initialValue: initialValue ? "yes" : "no",
+            prefixLines: consumePagePrefix(),
           })) === "yes"
         );
       } finally {
@@ -259,13 +285,15 @@ function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
     }): Promise<T> => {
       rl.pause();
       try {
-        return await selectWithArrows({ message, options, initialValue });
+        return await selectWithArrows({ message, options, initialValue, prefixLines: consumePagePrefix() });
       } finally {
         rl.resume();
       }
     },
     text: async ({ message, placeholder, initialValue, sensitive, validate }) => {
       const fallback = initialValue ?? "";
+      const prefix = consumePagePrefix();
+      if (prefix.length) output.write(`${prefix.join("\n")}\n\n`);
       const value = sensitive ? await inputHidden(message, placeholder) : await ask(`${message}${fallback || placeholder ? ` [${fallback || placeholder}]` : ""}: `);
       const resolved = value || fallback;
       const issue = validate?.(resolved);
@@ -735,6 +763,120 @@ async function runOneChatTurn(params: {
     },
     metadata,
   });
+}
+
+const RESET_CONFIRMATION_PHRASE = "RESET MINDSTONE";
+
+type PreservedRuntimeFile = {
+  relativePath: string;
+  body: Buffer;
+};
+
+function isPathInside(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || Boolean(rel) && !rel.startsWith("..") && !rel.startsWith("/");
+}
+
+function preserveRuntimeFiles(runtimeDir: string, relativePaths: string[]): PreservedRuntimeFile[] {
+  const preserved: PreservedRuntimeFile[] = [];
+  for (const relativePath of relativePaths) {
+    const path = join(runtimeDir, relativePath);
+    if (existsSync(path)) preserved.push({ relativePath, body: readFileSync(path) });
+  }
+  return preserved;
+}
+
+function restoreRuntimeFiles(runtimeDir: string, files: PreservedRuntimeFile[]): void {
+  for (const file of files) {
+    const path = join(runtimeDir, file.relativePath);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, file.body);
+  }
+}
+
+async function runResetCommand(argv: string[]): Promise<void> {
+  const subcommand = argv[3];
+  if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    output.write(
+      [
+        gold("🔶 MindStone reset"),
+        "",
+        "Usage:",
+        "  mindstone reset [--dry-run] [--keep-pi-auth] [--confirm \"RESET MINDSTONE\"]",
+        "",
+        "Deletes the isolated local runtime directory for this MindStone-Agent root.",
+        "By default this removes config, identity, user context, transcripts, memory index, Pi auth/models, and session state under .runtime.",
+        "",
+        "Safety:",
+        `  Interactive reset requires typing exactly: ${RESET_CONFIRMATION_PHRASE}`,
+        "  Runtime dir must be inside the configured project root unless --allow-outside-root is passed.",
+      ].join("\n"),
+    );
+    output.write("\n");
+    return;
+  }
+
+  const paths = runtimePathsFromEnv();
+  const root = resolve(paths.root);
+  const runtimeDir = resolve(paths.runtimeDir);
+  const dryRun = hasOption(argv, "--dry-run");
+  const keepPiAuth = hasOption(argv, "--keep-pi-auth");
+  const allowOutsideRoot = hasOption(argv, "--allow-outside-root");
+  const confirmation = optionValue(argv, "--confirm");
+
+  if (runtimeDir === root) throw new Error(`Refusing to reset because runtime dir equals root: ${runtimeDir}`);
+  if (runtimeDir === "/") throw new Error("Refusing to reset filesystem root");
+  if (!allowOutsideRoot && !isPathInside(root, runtimeDir)) {
+    throw new Error(`Refusing to reset runtime outside project root: ${runtimeDir}\nRoot: ${root}\nPass --allow-outside-root only if you are certain.`);
+  }
+
+  const targets = [
+    `root: ${root}`,
+    `runtime dir: ${runtimeDir}`,
+    `data dir: ${resolve(paths.dataDir)}`,
+    `pi agent dir: ${resolve(paths.piAgentDir)}`,
+    `pi session dir: ${resolve(paths.piSessionDir)}`,
+  ];
+
+  output.write(`${gold("🔶 MindStone runtime reset")}\n`);
+  output.write(`${targets.join("\n")}\n`);
+  output.write(`keep isolated Pi auth/models: ${keepPiAuth ? "yes" : "no"}\n`);
+
+  if (!existsSync(runtimeDir)) {
+    output.write("Runtime directory does not exist; nothing to reset.\n");
+    return;
+  }
+
+  if (dryRun) {
+    output.write("Dry run only. No files were deleted.\n");
+    return;
+  }
+
+  if (confirmation !== RESET_CONFIRMATION_PHRASE) {
+    if (!input.isTTY || !output.isTTY) {
+      throw new Error(`Refusing non-interactive reset without --confirm "${RESET_CONFIRMATION_PHRASE}"`);
+    }
+    const rl = createInterface({ input, output });
+    try {
+      const typed = (await rl.question(`Type ${RESET_CONFIRMATION_PHRASE} to delete the runtime directory: `)).trim();
+      if (typed !== RESET_CONFIRMATION_PHRASE) {
+        output.write("Reset cancelled. Confirmation phrase did not match.\n");
+        return;
+      }
+    } finally {
+      rl.close();
+    }
+  }
+
+  const preserved = keepPiAuth
+    ? preserveRuntimeFiles(runtimeDir, ["pi-agent/auth.json", "pi-agent/models.json"])
+    : [];
+  rmSync(runtimeDir, { recursive: true, force: true });
+  if (preserved.length) restoreRuntimeFiles(runtimeDir, preserved);
+
+  output.write("MindStone runtime reset complete.\n");
+  if (preserved.length) output.write(`Restored ${preserved.length} isolated Pi auth/model file(s).\n`);
+  output.write("Next: mindstone onboard\n");
 }
 
 async function runChatCommand(argv: string[]): Promise<void> {
@@ -1399,6 +1541,10 @@ async function main(): Promise<void> {
     await runMemoryCommand(process.argv);
     return;
   }
+  if (command === "reset") {
+    await runResetCommand(process.argv);
+    return;
+  }
   if (command === "identity") {
     await runIdentityCommand(process.argv);
     return;
@@ -1421,6 +1567,9 @@ async function main(): Promise<void> {
   }
   if (command === "tui") {
     await runTuiCommand(process.argv);
+    if (!process.argv.some((arg) => arg.startsWith("--smoke"))) {
+      process.exit(0);
+    }
     return;
   }
   if (command === "doctor") {

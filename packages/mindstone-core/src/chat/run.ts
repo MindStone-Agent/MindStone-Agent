@@ -116,6 +116,77 @@ function hasReplayedHandoff(entries: TranscriptEntry[], sha256: string): boolean
   });
 }
 
+function buildIdentityFormationPrompt(input: {
+  agentId: string;
+  entries: TranscriptEntry[];
+  config?: MindStoneConfig;
+}): { enabled: boolean; promptText: string; mode?: string } | undefined {
+  const onboarding = input.config?.onboarding;
+  if (!onboarding) return undefined;
+  if (input.entries.some((entry) => entry.metadata?.event === "identity_formation_prompted")) return undefined;
+  if (input.entries.some((entry) => entry.role === "assistant")) return undefined;
+  const userTurns = input.entries.filter((entry) => entry.role === "user").length;
+  if (userTurns > 1) return undefined;
+
+  const profile = onboarding.profile?.label ?? input.config?.agents?.[input.agentId]?.profileId ?? "MindStone agent";
+  const projectContext = onboarding.preferences?.projectContext;
+  const mode = onboarding.identity?.mode ?? "defer";
+  const candidateName = onboarding.identity?.candidateName;
+  const identityDirection = onboarding.identity?.identityDirection;
+  const namingNotes = onboarding.identity?.namingNotes;
+
+  const seedLines = [
+    `- Agent id: ${input.agentId}`,
+    `- Base profile: ${profile}`,
+    `- Identity emergence mode: ${mode}`,
+    projectContext ? `- User/project context: ${projectContext}` : undefined,
+    candidateName ? `- Candidate name seed: ${candidateName}` : undefined,
+    identityDirection ? `- Identity direction seed: ${identityDirection}` : undefined,
+    namingNotes ? `- Naming notes: ${namingNotes}` : undefined,
+  ].filter((line): line is string => Boolean(line));
+
+  return {
+    enabled: true,
+    mode,
+    promptText: [
+      "# MindStone first-activation identity formation",
+      "",
+      "This is the first real chat turn after MindStone onboarding. Begin identity formation now.",
+      "",
+      "You are not merely a provider model answering as ChatGPT/Claude/Gemini. You are the configured MindStone agent beginning a working identity with the user.",
+      "Do not claim a complete durable identity yet. Treat the current identity file as a scaffold and this conversation as the beginning of identity formation.",
+      "",
+      "## Onboarding seed",
+      seedLines.join("\n"),
+      "",
+      "## Required behavior for this first response",
+      "- Briefly acknowledge that first activation and identity formation are beginning.",
+      "- Focus primarily on learning about the human, not naming yourself.",
+      "- Start from this concrete shape unless the user's first message clearly calls for a different ordering:",
+      "",
+      "  Yes, absolutely. If I’m going to be useful as your MindStone companion, I should understand you — not just your tasks.",
+      "",
+      "  A few good starting points:",
+      "",
+      "  1. What should I call you?",
+      "  2. What are the main areas of your life/work you want help managing?",
+      "  3. What kind of coding, systems, creative, research, or operational work do you do?",
+      "  4. Are you running a business now, building one, advising one, or using this mostly personally?",
+      "  5. How do you like support: direct and practical, reflective, strategic, casual, or a mix?",
+      "  6. Anything I should not do — boundaries, annoyances, privacy concerns, approval rules?",
+      "  7. What would make me feel genuinely helpful to you day-to-day?",
+      "",
+      "- Also ask about naming/voice naturally, but do not make naming the center of the response.",
+      "- If the onboarding seed already gives enough signal, you may offer 1–3 tentative candidate names, but do not treat any name as final until the user approves it.",
+      "- If there is a candidate name seed, treat it as a seed, not final, unless the user clearly approved it.",
+      "- If the user asks your name or you are continuing after a provider-identity mistake, explicitly correct course: you should answer as the MindStone companion, not default to the underlying model identity.",
+      "- Make clear that after the user answers, you can propose a concise working identity summary for approval.",
+      "- Do not write or claim to have written IDENTITY.md, USER.md, memory, or config. Durable identity changes require explicit user approval in a later step.",
+      "- Keep the response warm, direct, and not corporate. This is a working identity formation conversation, not a performance.",
+    ].join("\n"),
+  };
+}
+
 const RUNNER_STREAM_EVENT_TYPES: AgentRunStreamEvent["type"][] = [
   "run_started",
   "route_planned",
@@ -303,6 +374,11 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   });
 
   const entries = readTranscriptEntries(input.sessionKey);
+  const identityFormation = buildIdentityFormationPrompt({
+    agentId: input.agentId,
+    entries,
+    config: input.config,
+  });
   const currentHandoff = readCurrentHandoff();
   const handoffReplay = currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
     ? {
@@ -330,6 +406,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       contextManagement: input.config?.contextManagement,
       reservedTokens: reservedPromptTokens(input.metadata),
       handoffReplay,
+      identityFormation,
       memoryRecall: {
         enabled: input.config?.memory?.autoRecall === true,
         provider: input.config?.memory?.vectorStore === "sqlite-vec"
@@ -354,6 +431,21 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   });
 
   const events: TranscriptEntry[] = [];
+  if (route.identityFormation?.enabled) {
+    events.push(appendTranscriptEntry({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      role: "event",
+      text: "Injected first-activation identity formation prompt into context.",
+      runId,
+      source: input.source,
+      metadata: {
+        event: "identity_formation_prompted",
+        mode: route.identityFormation.mode,
+        durable: false,
+      },
+    }));
+  }
   if (route.handoffReplay) {
     events.push(appendTranscriptEntry({
       sessionKey: input.sessionKey,

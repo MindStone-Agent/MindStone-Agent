@@ -13,6 +13,12 @@ export type MindStoneHandoffReplay = {
   tokenEstimate: number;
 };
 
+export type MindStoneIdentityFormationPrompt = {
+  enabled: boolean;
+  promptText: string;
+  mode?: string;
+};
+
 export type MindStoneRouteIdentityContext = Pick<MindStoneIdentity, "name" | "identityMarkdown" | "userMarkdown"> & {
   identityPath?: string;
   userPath?: string;
@@ -37,6 +43,7 @@ export type MindStoneRouteInput = {
   reservedTokens?: number;
   protectedEntryIds?: string[];
   handoffReplay?: MindStoneHandoffReplay;
+  identityFormation?: MindStoneIdentityFormationPrompt;
   memoryRecall?: {
     enabled?: boolean;
     provider?: MemoryRecallProvider;
@@ -53,6 +60,7 @@ export type MindStoneRoutePlan = {
   promptWindow: PromptWindowBuildResult;
   messages: MindStoneChatMessage[];
   identityContext?: MindStoneRouteIdentityContextSummary;
+  identityFormation?: MindStoneIdentityFormationPrompt;
   memoryRecall?: MemoryRecallResult;
   handoffReplay?: MindStoneHandoffReplay;
 };
@@ -74,7 +82,11 @@ function transcriptEntryToChatMessage(entry: TranscriptEntry): MindStoneChatMess
 function identityContextPrompt(identityContext: MindStoneRouteIdentityContext | undefined): string | undefined {
   if (!identityContext?.identityMarkdown?.trim() && !identityContext?.userMarkdown?.trim()) return undefined;
   const sections = [
-    "MindStone standing identity context. Treat this as durable orientation for the agent and user, not as a conversation transcript.",
+    [
+      "MindStone standing identity context. Treat this as durable orientation for the agent and user, not as a conversation transcript.",
+      "You are operating as the configured MindStone agent for this runtime. Do not identify as the underlying model/provider (for example ChatGPT, Claude, or Gemini) unless the user specifically asks about the substrate/model.",
+      "If the identity file is pending or only a placeholder, be explicit that MindStone identity activation is pending; do not invent a completed identity or fall back to provider identity.",
+    ].join("\n"),
   ];
   if (identityContext.identityMarkdown?.trim()) {
     sections.push(["## IDENTITY.md", identityContext.identityMarkdown.trim()].join("\n\n"));
@@ -106,7 +118,7 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     entries: input.entries,
     contextWindowTokens: input.model.contextWindowTokens ?? 128_000,
     policy: input.contextManagement,
-    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0),
+    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0),
     protectedEntryIds: input.protectedEntryIds,
   });
   const messages = promptWindow.promptEntries.map(transcriptEntryToChatMessage).filter((message): message is MindStoneChatMessage => Boolean(message));
@@ -122,6 +134,9 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
       ].join("\n\n"),
     });
   }
+  if (input.identityFormation?.enabled && input.identityFormation.promptText.trim()) {
+    messages.unshift({ role: "system", text: input.identityFormation.promptText.trim() });
+  }
   if (identityPromptText) {
     messages.unshift({ role: "system", text: identityPromptText });
   }
@@ -132,6 +147,7 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     promptWindow,
     messages,
     identityContext,
+    identityFormation: input.identityFormation?.enabled ? input.identityFormation : undefined,
     memoryRecall: input.memoryRecall,
     handoffReplay: input.handoffReplay,
   };

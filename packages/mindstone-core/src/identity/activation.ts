@@ -45,11 +45,17 @@ function formatPreferenceLines(preferences: MindStoneOnboardingPreferences | und
   if (!preferences) return ["- Preferences: unset"];
   return [
     `- Interaction detail: ${preferenceLabel(preferences.interactionDetail)}`,
+    preferences.interactionDetailNotes ? `- Interaction detail notes: ${sanitizeMarkdownLine(preferences.interactionDetailNotes)}` : undefined,
     `- Recommendation style: ${preferenceLabel(preferences.recommendationStyle)}`,
+    preferences.recommendationStyleNotes ? `- Recommendation style notes: ${sanitizeMarkdownLine(preferences.recommendationStyleNotes)}` : undefined,
     `- Work style: ${preferenceLabel(preferences.workStyle)}`,
+    preferences.workStyleNotes ? `- Work style notes: ${sanitizeMarkdownLine(preferences.workStyleNotes)}` : undefined,
     `- Approval mode: ${preferenceLabel(preferences.approvalMode)}`,
     preferences.approvalNotes ? `- Approval notes: ${sanitizeMarkdownLine(preferences.approvalNotes)}` : undefined,
     `- Memory/checkpoint style: ${preferenceLabel(preferences.memoryStyle)}`,
+    preferences.memoryStyleNotes ? `- Memory/checkpoint notes: ${sanitizeMarkdownLine(preferences.memoryStyleNotes)}` : undefined,
+    preferences.setupNotes ? `- Setup notes: ${sanitizeMarkdownLine(preferences.setupNotes)}` : undefined,
+    preferences.modelSetupNotes ? `- Model setup notes: ${sanitizeMarkdownLine(preferences.modelSetupNotes)}` : undefined,
     preferences.projectContext ? `- Project/domain context: ${sanitizeMarkdownLine(preferences.projectContext)}` : undefined,
     preferences.sensitiveContext ? "- Sensitive context: configured in USER.md; treat as private and do not disclose casually." : undefined,
   ].filter((line): line is string => Boolean(line));
@@ -65,12 +71,23 @@ function formatIdentitySeedLines(identity: MindStoneOnboardingIdentity | undefin
   ].filter((line): line is string => Boolean(line));
 }
 
+export function isInitializerPlaceholderIdentity(markdown: string): boolean {
+  return /^#\s+Default MindStone Agent\s*$/m.test(markdown) &&
+    /placeholder identity for a newly initialized MindStone-Agent runtime/i.test(markdown);
+}
+
+export function isPendingMindStoneIdentity(markdown: string): boolean {
+  return /^#\s+MindStone Agent Identity Pending\s*$/m.test(markdown) ||
+    isInitializerPlaceholderIdentity(markdown) ||
+    (
+      /identity scaffold was created by `mindstone onboard`/i.test(markdown) &&
+      /first activation/i.test(markdown) &&
+      /identity pending/i.test(markdown)
+    );
+}
+
 function isPendingIdentity(markdown: string): boolean {
-  return /^#\s+MindStone Agent Identity Pending\s*$/m.test(markdown) || (
-    /identity scaffold was created by `mindstone onboard`/i.test(markdown) &&
-    /first activation/i.test(markdown) &&
-    /identity pending/i.test(markdown)
-  );
+  return isPendingMindStoneIdentity(markdown);
 }
 
 function safeTimestamp(value: string): string {

@@ -141,7 +141,13 @@ export type MindStoneOnboardingPreferences = {
   workStyle?: MindStoneWorkStyle;
   approvalMode?: MindStoneApprovalMode;
   approvalNotes?: string;
+  interactionDetailNotes?: string;
+  recommendationStyleNotes?: string;
+  workStyleNotes?: string;
   memoryStyle?: MindStoneMemoryStyle;
+  memoryStyleNotes?: string;
+  setupNotes?: string;
+  modelSetupNotes?: string;
   projectContext?: string;
   sensitiveContext?: string;
   selectedAt?: string;

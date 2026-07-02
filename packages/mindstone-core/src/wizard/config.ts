@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { formatMindStoneChannelCatalog } from "../channels/index.js";
 import { resolveContextManagementPolicy, type ContextManagementMode } from "../context/index.js";
+import { isInitializerPlaceholderIdentity, synthesizeMindStoneIdentityActivation } from "../identity/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { loadMindStoneConfig, resolveConfigPath, resolvePathRelativeToConfig } from "../config/load.js";
 import type {
@@ -69,6 +70,8 @@ export type MindStoneOnboardingResult = MindStoneConfigWizardResult & {
   userPath?: string;
   identityCreated: boolean;
   userCreated: boolean;
+  identityActivated?: boolean;
+  identityActivationName?: string;
 };
 
 const TITLE = String.raw`
@@ -775,28 +778,49 @@ async function configureOnboardingModel(
     "Connect a model",
   );
 
-  type ModelSetupChoice = "connect" | "mock" | "skip";
-  const choice = await prompter.select<ModelSetupChoice>({
+  type ModelSetupChoice = "connect" | "mock" | "skip" | "custom";
+  let choice = await prompter.select<ModelSetupChoice>({
     message: "Do you want to connect a model now?",
     options: [
       { value: "connect", label: "Yes — choose provider and model", hint: "recommended; OpenAI/Codex, Claude, Gemini, OpenRouter, etc." },
       { value: "mock", label: "Use a local mock model for now", hint: "good for testing the UI, but not useful for real answers" },
       { value: "skip", label: "Skip model setup for now", hint: "MindStone will save transcripts but chat will not produce real model answers" },
+      { value: "custom", label: "Custom / Write-in", hint: "describe model/account setup needs" },
     ],
     initialValue: config.routing?.mode === "mock" ? "mock" : config.routing?.mode === "pi-session" || config.routing?.mode === "pi" ? "connect" : "connect",
   });
 
-  if (choice === "skip") return config;
+  let nextConfig = config;
+  if (choice === "custom") {
+    const modelSetupNotes = markdownEscape(await prompter.text({
+      message: "Custom model setup notes",
+      placeholder: config.onboarding?.preferences?.modelSetupNotes ?? "example: use my Codex subscription if available; otherwise skip for now",
+      initialValue: config.onboarding?.preferences?.modelSetupNotes ?? "",
+    }));
+    nextConfig = {
+      ...config,
+      onboarding: {
+        ...config.onboarding,
+        preferences: {
+          ...config.onboarding?.preferences,
+          modelSetupNotes: modelSetupNotes || undefined,
+        },
+      },
+    };
+    choice = "connect";
+  }
+
+  if (choice === "skip") return nextConfig;
 
   if (choice === "mock") {
     return {
-      ...config,
+      ...nextConfig,
       routing: {
-        ...config.routing,
+        ...nextConfig.routing,
         mode: "mock",
-        defaultAgentId: config.routing?.defaultAgentId ?? "default",
-        defaultModel: config.routing?.defaultModel ?? "mindstone/mock",
-        mock: { ...config.routing?.mock, responsePrefix: config.routing?.mock?.responsePrefix ?? "Mock response" },
+        defaultAgentId: nextConfig.routing?.defaultAgentId ?? "default",
+        defaultModel: nextConfig.routing?.defaultModel ?? "mindstone/mock",
+        mock: { ...nextConfig.routing?.mock, responsePrefix: nextConfig.routing?.mock?.responsePrefix ?? "Mock response" },
       },
     };
   }
@@ -804,7 +828,7 @@ async function configureOnboardingModel(
   const paths = runtimePathsFromEnv();
   const defaultModel = await choosePiModel({
     prompter,
-    current: config.routing?.defaultModel,
+    current: nextConfig.routing?.defaultModel,
     availableModels: options.availableModels,
     availableProviders: options.availableProviders,
     discoveryError: options.modelDiscoveryError,
@@ -819,17 +843,17 @@ async function configureOnboardingModel(
       ].join("\n"),
       "Model setup skipped",
     );
-    return config;
+    return nextConfig;
   }
 
   return {
-    ...config,
+    ...nextConfig,
     routing: {
-      ...config.routing,
+      ...nextConfig.routing,
       mode: "pi-session",
-      defaultAgentId: config.routing?.defaultAgentId ?? "default",
+      defaultAgentId: nextConfig.routing?.defaultAgentId ?? "default",
       defaultModel,
-      pi: { ...config.routing?.pi, agentDir: config.routing?.pi?.agentDir ?? paths.piAgentDir },
+      pi: { ...nextConfig.routing?.pi, agentDir: nextConfig.routing?.pi?.agentDir ?? paths.piAgentDir },
     },
   };
 }
@@ -1367,11 +1391,17 @@ function selectedPreferencesToLines(preferences: MindStoneOnboardingPreferences 
   if (!preferences) return ["Preferences: unset"];
   return [
     `Interaction detail: ${preferenceLabel(preferences.interactionDetail)}`,
+    preferences.interactionDetailNotes ? `Interaction detail notes: ${preferences.interactionDetailNotes}` : undefined,
     `Recommendation style: ${preferenceLabel(preferences.recommendationStyle)}`,
+    preferences.recommendationStyleNotes ? `Recommendation style notes: ${preferences.recommendationStyleNotes}` : undefined,
     `Work style: ${preferenceLabel(preferences.workStyle)}`,
+    preferences.workStyleNotes ? `Work style notes: ${preferences.workStyleNotes}` : undefined,
     `Approval mode: ${preferenceLabel(preferences.approvalMode)}`,
     preferences.approvalNotes ? `Approval notes: ${preferences.approvalNotes}` : undefined,
     `Memory style: ${preferenceLabel(preferences.memoryStyle)}`,
+    preferences.memoryStyleNotes ? `Memory style notes: ${preferences.memoryStyleNotes}` : undefined,
+    preferences.setupNotes ? `Setup notes: ${preferences.setupNotes}` : undefined,
+    preferences.modelSetupNotes ? `Model setup notes: ${preferences.modelSetupNotes}` : undefined,
     preferences.projectContext ? `Project/domain context: ${preferences.projectContext}` : undefined,
     preferences.sensitiveContext ? `Sensitive context / cautions: ${preferences.sensitiveContext}` : undefined,
   ].filter((line): line is string => Boolean(line));
@@ -1382,35 +1412,65 @@ async function chooseOnboardingPreferences(
   prompter: MindStonePrompter,
 ): Promise<MindStoneOnboardingPreferences> {
   const current = config.onboarding?.preferences;
-  const interactionDetail = await prompter.select<MindStoneInteractionDetail>({
+  type InteractionChoice = MindStoneInteractionDetail | "custom";
+  const interactionChoice = await prompter.select<InteractionChoice>({
     message: "Interaction detail",
     options: [
       { value: "concise", label: "Concise", hint: "short answers unless more detail is requested" },
       { value: "balanced", label: "Balanced", hint: "default; enough context without overbuilding" },
       { value: "detailed", label: "Detailed", hint: "more explanation, rationale, and examples" },
+      { value: "custom", label: "Custom / Write-in", hint: "describe your preferred level of detail" },
     ],
     initialValue: current?.interactionDetail ?? "balanced",
   });
+  const interactionDetail: MindStoneInteractionDetail = interactionChoice === "custom" ? "balanced" : interactionChoice;
+  const interactionDetailNotes = interactionChoice === "custom"
+    ? markdownEscape(await prompter.text({
+        message: "Custom interaction detail preference",
+        placeholder: current?.interactionDetailNotes ?? "example: concise by default, but explain tradeoffs for architecture choices",
+        initialValue: current?.interactionDetailNotes ?? "",
+      }))
+    : undefined;
 
-  const recommendationStyle = await prompter.select<MindStoneRecommendationStyle>({
+  type RecommendationChoice = MindStoneRecommendationStyle | "custom";
+  const recommendationChoice = await prompter.select<RecommendationChoice>({
     message: "Recommendation style",
     options: [
       { value: "direct", label: "Direct recommendations", hint: "say what you think when there is enough evidence" },
       { value: "options_tradeoffs", label: "Options + tradeoffs", hint: "present choices before recommending" },
       { value: "ask_first", label: "Ask before recommending", hint: "clarify more often before choosing a path" },
+      { value: "custom", label: "Custom / Write-in", hint: "describe how recommendations should work" },
     ],
     initialValue: current?.recommendationStyle ?? "direct",
   });
+  const recommendationStyle: MindStoneRecommendationStyle = recommendationChoice === "custom" ? "direct" : recommendationChoice;
+  const recommendationStyleNotes = recommendationChoice === "custom"
+    ? markdownEscape(await prompter.text({
+        message: "Custom recommendation preference",
+        placeholder: current?.recommendationStyleNotes ?? "example: recommend directly, but call out uncertainty and alternatives when stakes are high",
+        initialValue: current?.recommendationStyleNotes ?? "",
+      }))
+    : undefined;
 
-  const workStyle = await prompter.select<MindStoneWorkStyle>({
+  type WorkChoice = MindStoneWorkStyle | "custom";
+  const workChoice = await prompter.select<WorkChoice>({
     message: "Work style",
     options: [
       { value: "act_directly", label: "Act directly", hint: "when safe, inspect/edit/test without extra ceremony" },
       { value: "plan_first", label: "Plan first", hint: "outline approach before changing things" },
       { value: "ask_first", label: "Ask first", hint: "pause more often before taking action" },
+      { value: "custom", label: "Custom / Write-in", hint: "describe when the agent should act versus ask" },
     ],
     initialValue: current?.workStyle ?? "act_directly",
   });
+  const workStyle: MindStoneWorkStyle = workChoice === "custom" ? "ask_first" : workChoice;
+  const workStyleNotes = workChoice === "custom"
+    ? markdownEscape(await prompter.text({
+        message: "Custom work style preference",
+        placeholder: current?.workStyleNotes ?? "example: inspect freely, but ask before edits; run tests without asking",
+        initialValue: current?.workStyleNotes ?? "",
+      }))
+    : undefined;
 
   const approvalMode = await prompter.select<MindStoneApprovalMode>({
     message: "Approval boundaries",
@@ -1429,15 +1489,25 @@ async function chooseOnboardingPreferences(
       }))
     : undefined;
 
-  const memoryStyle = await prompter.select<MindStoneMemoryStyle>({
+  type MemoryChoice = MindStoneMemoryStyle | "custom";
+  const memoryChoice = await prompter.select<MemoryChoice>({
     message: "How should MindStone remember things?",
     options: [
       { value: "propose_checkpoint_memories", label: "Suggest memories at checkpoints", hint: "recommended; MindStone proposes what seems worth remembering and you approve it" },
       { value: "minimal", label: "Remember very little", hint: "only clearly durable project/user facts" },
       { value: "ask_each_time", label: "Ask before every memory", hint: "confirm before treating anything as memory-worthy" },
+      { value: "custom", label: "Custom / Write-in", hint: "describe memory/checkpoint behavior" },
     ],
     initialValue: current?.memoryStyle ?? "propose_checkpoint_memories",
   });
+  const memoryStyle: MindStoneMemoryStyle = memoryChoice === "custom" ? "propose_checkpoint_memories" : memoryChoice;
+  const memoryStyleNotes = memoryChoice === "custom"
+    ? markdownEscape(await prompter.text({
+        message: "Custom memory preference",
+        placeholder: current?.memoryStyleNotes ?? "example: propose memories only for durable decisions and recurring corrections",
+        initialValue: current?.memoryStyleNotes ?? "",
+      }))
+    : undefined;
 
   await prompter.note(
     [
@@ -1475,11 +1545,15 @@ async function chooseOnboardingPreferences(
 
   return {
     interactionDetail,
+    interactionDetailNotes: interactionDetailNotes || undefined,
     recommendationStyle,
+    recommendationStyleNotes: recommendationStyleNotes || undefined,
     workStyle,
+    workStyleNotes: workStyleNotes || undefined,
     approvalMode,
     approvalNotes: approvalNotes || undefined,
     memoryStyle,
+    memoryStyleNotes: memoryStyleNotes || undefined,
     projectContext: projectContext || undefined,
     sensitiveContext: sensitiveContext || undefined,
     selectedAt: new Date().toISOString(),
@@ -1589,9 +1663,26 @@ function resolveOnboardingAgentPaths(config: MindStoneConfig, configPath: string
   };
 }
 
-function writeIfMissing(path: string, body: string): boolean {
-  if (existsSync(path)) return false;
+function readFileIfExists(path: string): string | undefined {
+  if (!existsSync(path)) return undefined;
+  try {
+    return readFileSync(path, "utf-8");
+  } catch {
+    return undefined;
+  }
+}
+
+function isInitializerPlaceholderUserContext(markdown: string): boolean {
+  return /^#\s+User Context\s*$/m.test(markdown) &&
+    /placeholder user context for a newly initialized MindStone-Agent runtime/i.test(markdown);
+}
+
+function writeScaffoldIfMissingOrPlaceholder(path: string, body: string, replacePlaceholder: boolean): boolean {
+  if (existsSync(path) && !replacePlaceholder) return false;
   mkdirSync(dirname(path), { recursive: true });
+  if (existsSync(path) && replacePlaceholder) {
+    writeFileSync(`${path}.pre-onboarding-placeholder.bak`, readFileSync(path, "utf-8"), "utf-8");
+  }
   writeFileSync(path, `${body.trimEnd()}\n`, "utf-8");
   return true;
 }
@@ -1602,15 +1693,29 @@ async function createOnboardingIdentityFiles(params: {
   configPath: string;
 }): Promise<Pick<MindStoneOnboardingResult, "identityPath" | "userPath" | "identityCreated" | "userCreated">> {
   const paths = resolveOnboardingAgentPaths(params.config, params.configPath);
-  const identityExists = existsSync(paths.identityPath);
-  const userExists = existsSync(paths.userPath);
+  const identityText = readFileIfExists(paths.identityPath);
+  const userText = readFileIfExists(paths.userPath);
+  const identityExists = identityText !== undefined;
+  const userExists = userText !== undefined;
+  const identityIsPlaceholder = identityText ? isInitializerPlaceholderIdentity(identityText) : false;
+  const userIsPlaceholder = userText ? isInitializerPlaceholderUserContext(userText) : false;
 
-  if (identityExists && userExists) {
+  if (identityExists && userExists && !identityIsPlaceholder && !userIsPlaceholder) {
     await params.prompter.note(
       [`Identity already exists: ${paths.identityPath}`, `User context already exists: ${paths.userPath}`, "No identity/user files were overwritten."].join("\n"),
       "Identity scaffold",
     );
     return { identityPath: paths.identityPath, userPath: paths.userPath, identityCreated: false, userCreated: false };
+  }
+
+  if (identityIsPlaceholder || userIsPlaceholder) {
+    await params.prompter.note(
+      [
+        "Initializer placeholder identity/user files were found.",
+        "Onboarding will replace placeholders with the first-activation scaffold and keep .pre-onboarding-placeholder.bak backups.",
+      ].join("\n"),
+      "Identity scaffold",
+    );
   }
 
   await params.prompter.note(
@@ -1715,8 +1820,8 @@ ${userContext || "No initial context provided."}
 - Preserve useful context in memory/checkpoints when appropriate.
 `;
 
-  const identityCreated = writeIfMissing(paths.identityPath, identityBody);
-  const userCreated = writeIfMissing(paths.userPath, userBody);
+  const identityCreated = writeScaffoldIfMissingOrPlaceholder(paths.identityPath, identityBody, identityIsPlaceholder);
+  const userCreated = writeScaffoldIfMissingOrPlaceholder(paths.userPath, userBody, userIsPlaceholder);
   await params.prompter.note(
     [
       `${identityCreated ? "Created" : "Kept existing"}: ${paths.identityPath}`,
@@ -1726,6 +1831,61 @@ ${userContext || "No initial context provided."}
   );
 
   return { identityPath: paths.identityPath, userPath: paths.userPath, identityCreated, userCreated };
+}
+
+async function offerOnboardingIdentityActivation(params: {
+  prompter: MindStonePrompter;
+  configPath: string;
+  agentId?: string;
+  dryRun?: boolean;
+}): Promise<Pick<MindStoneOnboardingResult, "identityActivated" | "identityActivationName">> {
+  if (params.dryRun) return { identityActivated: false };
+
+  const preview = synthesizeMindStoneIdentityActivation({
+    configPath: params.configPath,
+    agentId: params.agentId,
+    dryRun: true,
+  });
+  if (!preview.wouldWrite) {
+    await params.prompter.note(
+      [`Identity already active: ${preview.identityPath ?? "unset"}`, `Name: ${preview.name}`].join("\n"),
+      "Identity activation",
+    );
+    return { identityActivated: false, identityActivationName: preview.name };
+  }
+
+  await params.prompter.note(
+    [
+      "MindStone can now synthesize the first working agent identity from your onboarding choices.",
+      "This replaces only the pending onboarding scaffold or initializer placeholder; a backup is kept.",
+      `Proposed name: ${preview.name}`,
+      `Identity path: ${preview.identityPath ?? "unset"}`,
+    ].join("\n"),
+    "First working identity",
+  );
+  const activate = await params.prompter.confirm({
+    message: "Activate this first working identity now?",
+    initialValue: true,
+  });
+  if (!activate) {
+    await params.prompter.note(
+      "Identity activation skipped. The agent can still start, but it will remain in pending-identity mode until activated.",
+      "Identity activation",
+    );
+    return { identityActivated: false, identityActivationName: preview.name };
+  }
+
+  const result = synthesizeMindStoneIdentityActivation({
+    configPath: params.configPath,
+    agentId: params.agentId,
+  });
+  await params.prompter.note(
+    [`Activated: ${result.name}`, `Identity: ${result.identityPath ?? "unset"}`, result.backupPath ? `Backup: ${result.backupPath}` : undefined]
+      .filter((line): line is string => Boolean(line))
+      .join("\n"),
+    "Identity activated",
+  );
+  return { identityActivated: result.wrote, identityActivationName: result.name };
 }
 
 export async function runMindStoneOnboardingWizard(
@@ -1778,19 +1938,32 @@ export async function runMindStoneOnboardingWizard(
   const loadedForProfile = loadMindStoneConfig(configPath);
   if (loadedForProfile.error) throw new Error(`Cannot load MindStone config at ${configPath}: ${loadedForProfile.error}`);
   const selectedProfile = await chooseOnboardingProfile(loadedForProfile.config ?? {}, prompter);
-  const selectedPreferences = await chooseOnboardingPreferences(loadedForProfile.config ?? {}, prompter);
+  let selectedPreferences = await chooseOnboardingPreferences(loadedForProfile.config ?? {}, prompter);
   const selectedIdentity = await chooseOnboardingIdentity(loadedForProfile.config ?? {}, prompter);
 
-  const mode =
-    options.onboardingMode ??
-    (await prompter.select<MindStoneOnboardingMode>({
+  type SetupChoice = MindStoneOnboardingMode | "custom";
+  let setupChoice: SetupChoice = options.onboardingMode ?? "quickstart";
+  if (!options.onboardingMode) {
+    setupChoice = await prompter.select<SetupChoice>({
       message: "Setup depth",
       options: [
         { value: "quickstart", label: "Recommended setup", hint: "safe defaults, model connection, then identity/user seed" },
         { value: "manual", label: "Advanced setup", hint: "edit workspace, Gateway, model routing, context, memory, identity paths, and channels" },
+        { value: "custom", label: "Custom / Write-in", hint: "describe setup preferences before continuing with recommended setup" },
       ],
       initialValue: "quickstart",
+    });
+  }
+  if (setupChoice === "custom") {
+    const setupNotes = markdownEscape(await prompter.text({
+      message: "Custom setup preference",
+      placeholder: selectedPreferences.setupNotes ?? "example: keep it simple, but ask me before model auth or Gateway exposure",
+      initialValue: selectedPreferences.setupNotes ?? "",
     }));
+    selectedPreferences = { ...selectedPreferences, setupNotes: setupNotes || undefined };
+    setupChoice = "quickstart";
+  }
+  const mode: MindStoneOnboardingMode = setupChoice;
 
   let configResult: MindStoneConfigWizardResult;
   if (mode === "quickstart") {
@@ -1852,16 +2025,28 @@ export async function runMindStoneOnboardingWizard(
   const identityResult = configResult.wrote
     ? await createOnboardingIdentityFiles({ prompter, config: configResult.config, configPath: configResult.path })
     : { identityPath: undefined, userPath: undefined, identityCreated: false, userCreated: false };
+  const activationResult = configResult.wrote
+    ? await offerOnboardingIdentityActivation({
+        prompter,
+        configPath: configResult.path,
+        agentId: configResult.config.routing?.defaultAgentId,
+        dryRun: options.dryRun,
+      })
+    : { identityActivated: false };
 
   await prompter.outro?.(
     [
       "MindStone onboarding complete.",
+      activationResult.identityActivated
+        ? `Agent identity is active${activationResult.identityActivationName ? `: ${activationResult.identityActivationName}` : ""}.`
+        : "Agent identity is not active yet; run `mindstone identity activate` before expecting a durable agent identity.",
       "Next useful commands:",
+      "  mindstone tui",
       "  mindstone status",
       "  mindstone config",
       "  mindstone gateway start",
     ].join("\n"),
   );
 
-  return { ...configResult, ...identityResult };
+  return { ...configResult, ...identityResult, ...activationResult };
 }

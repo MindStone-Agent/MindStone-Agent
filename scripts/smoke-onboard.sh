@@ -8,11 +8,16 @@ CONFIG="$TMP_DIR/config.json"
 
 cd "$ROOT"
 MINDSTONE_AGENT_ROOT="$ROOT" MINDSTONE_AGENT_CONFIG="$CONFIG" npx tsx <<'TS'
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { runMindStoneOnboardingWizard, type MindStonePrompter, type MindStoneSelectOption } from "./packages/mindstone-core/src/index.ts";
 
 const configPath = process.env.MINDSTONE_AGENT_CONFIG!;
+const identityPath = resolve(dirname(configPath), "agents/default/IDENTITY.md");
+const userPath = resolve(dirname(configPath), "agents/default/USER.md");
+mkdirSync(dirname(identityPath), { recursive: true });
+writeFileSync(identityPath, "# Default MindStone Agent\n\nThis is a placeholder identity for a newly initialized MindStone-Agent runtime.\nReplace it during onboarding with the agent's real identity.\n");
+writeFileSync(userPath, "# User Context\n\nThis is placeholder user context for a newly initialized MindStone-Agent runtime.\nReplace it during onboarding with approved user/project context.\n");
 const texts = [
   "MindStone-Agent rebuild on isolated Pi with Gateway, onboarding, memory, and channel work.",
   "help build and operate MindStone-Agent",
@@ -30,7 +35,7 @@ const selects = [
   "quickstart",
   "skip",
 ];
-const confirms = [true, true];
+const confirms = [true, true, true];
 
 const prompter: MindStonePrompter = {
   intro: async () => undefined,
@@ -59,6 +64,7 @@ const result = await runMindStoneOnboardingWizard(prompter, { configPath, showHe
 if (!result.wrote) throw new Error("Onboarding did not write config");
 if (!result.identityCreated) throw new Error("Onboarding did not create identity file");
 if (!result.userCreated) throw new Error("Onboarding did not create user file");
+if (!result.identityActivated) throw new Error("Onboarding did not activate the first working identity");
 if (texts.length || selects.length || confirms.length) throw new Error("Smoke prompt queues were not fully consumed");
 
 const config = JSON.parse(readFileSync(result.path, "utf-8")) as any;
@@ -74,19 +80,20 @@ if (config.onboarding?.preferences?.projectContext !== "MindStone-Agent rebuild 
 if (config.onboarding?.identity?.mode !== "defer") throw new Error("Identity emergence mode was not written");
 if (config.agents?.default?.profileId !== "integration_builder") throw new Error("Agent profileId was not written");
 
-const identityPath = resolve(dirname(result.path), "agents/default/IDENTITY.md");
-const userPath = resolve(dirname(result.path), "agents/default/USER.md");
 if (!existsSync(identityPath)) throw new Error("Identity file does not exist");
 if (!existsSync(userPath)) throw new Error("User file does not exist");
 const identity = readFileSync(identityPath, "utf-8");
 const user = readFileSync(userPath, "utf-8");
-if (!identity.includes("MindStone Agent Identity Pending")) throw new Error("Identity scaffold content missing");
-if (!identity.includes("Base profile: Integration Builder")) throw new Error("Identity profile seed missing");
+if (!identity.includes("This identity was synthesized by `mindstone identity activate`")) throw new Error("Activated identity content missing");
+if (!identity.includes("# MindStone Integration Builder")) throw new Error("Activated identity name missing");
+if (!identity.includes("Profile: Integration Builder")) throw new Error("Identity profile seed missing");
 if (!identity.includes("Interaction detail: balanced")) throw new Error("Identity preference seed missing");
 if (!identity.includes("Identity emergence mode: defer")) throw new Error("Identity emergence seed missing");
 if (!user.includes("Base profile: Integration Builder")) throw new Error("User profile seed missing");
 if (!user.includes("Project/domain context: MindStone-Agent rebuild")) throw new Error("User project context missing");
 if (!user.includes("Clint prefers truthful")) throw new Error("User scaffold content missing");
+if (!existsSync(`${identityPath}.pre-onboarding-placeholder.bak`)) throw new Error("Identity placeholder backup missing");
+if (!existsSync(`${userPath}.pre-onboarding-placeholder.bak`)) throw new Error("User placeholder backup missing");
 
 console.log(`onboard smoke passed: ${result.path}`);
 TS

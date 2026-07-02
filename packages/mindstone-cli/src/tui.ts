@@ -334,6 +334,14 @@ function isRunnerStreamTranscriptEvent(entry: TranscriptEntry): boolean {
   return entry.metadata?.event === "runner_stream_event";
 }
 
+function isDefaultHiddenTranscriptEvent(entry: TranscriptEntry): boolean {
+  const event = entry.metadata?.event;
+  return event === "runner_stream_event" ||
+    event === "pi_adapter_session_shutdown" ||
+    event === "pi_adapter_session_compact" ||
+    event === "pi_adapter_session_tree";
+}
+
 function commandArgument(message: string, command: string): string | undefined {
   if (!message.startsWith(`${command} `)) return undefined;
   const value = message.slice(command.length + 1).trim();
@@ -390,6 +398,7 @@ function appendTranscriptEntryToChatLog(chat: MindStoneChatLog, entry: Transcrip
     return true;
   }
   if (entry.role === "event") {
+    if (isDefaultHiddenTranscriptEvent(entry)) return false;
     const label = eventEntryLabel(entry);
     if (!label) return false;
     chat.addEvent(label);
@@ -400,7 +409,7 @@ function appendTranscriptEntryToChatLog(chat: MindStoneChatLog, entry: Transcrip
 
 function isRenderableTranscriptEntry(entry: TranscriptEntry): boolean {
   if (entry.role === "user" || entry.role === "assistant" || entry.role === "tool") return true;
-  if (entry.role === "event") return Boolean(eventEntryLabel(entry));
+  if (entry.role === "event") return !isDefaultHiddenTranscriptEvent(entry) && Boolean(eventEntryLabel(entry));
   return false;
 }
 
@@ -913,6 +922,14 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
         stop();
         return { consume: true };
       }
+      if (matchesKey(data, Key.enter)) {
+        const pending = editor.getText().trim();
+        if (pending === "/exit" || pending === "/quit") {
+          editor.setText("");
+          stop();
+          return { consume: true };
+        }
+      }
       return undefined;
     });
 
@@ -1183,8 +1200,10 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
             assistant.setText(streamedAssistantText);
             footer.setStatus("receiving response…");
           } else {
-            chat.addEvent(runnerStreamEventLabel(event));
-            footer.setStatus(event.type === "run_completed" ? "finalizing…" : runnerStreamEventLabel(event));
+            if (event.type === "run_failed") {
+              chat.addEvent(runnerStreamEventLabel(event));
+            }
+            footer.setStatus(event.type === "run_completed" ? "finalizing…" : "working…");
           }
           tui.requestRender();
         },
