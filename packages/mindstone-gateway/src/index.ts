@@ -57,9 +57,11 @@ export { GatewayRunManager } from "./run-manager.js";
 export { LOOPBACK_CONNECTOR } from "./connectors/loopback.js";
 export { TELEGRAM_CONNECTOR, telegramUpdateToInbound } from "./connectors/telegram.js";
 export { SLACK_CONNECTOR, slackEventToInbound } from "./connectors/slack.js";
+export { DISCORD_CONNECTOR, DISCORD_LEAST_PRIVILEGE_INTENTS, discordMessageToInbound } from "./connectors/discord.js";
 import "./connectors/loopback.js";
 import "./connectors/telegram.js";
 import "./connectors/slack.js";
+import "./connectors/discord.js";
 import {
   loadRoutePersonaContextById,
   resolveRoutePersonaContext,

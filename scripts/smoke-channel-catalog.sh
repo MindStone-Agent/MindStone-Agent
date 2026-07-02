@@ -44,14 +44,19 @@ const loaded = JSON.parse(JSON.stringify({
   }
 }));
 const catalog = getMindStoneChannelCatalog(loaded);
+// Telegram is the "configured + implemented" exemplar (available since #17).
 if (!catalog.configuredChannelKeys.includes("telegram")) throw new Error("Configured telegram key missing");
 const telegram = catalog.entries.find((entry) => entry.id === "telegram");
 if (!telegram?.configured) throw new Error("Telegram not marked configured");
-if (telegram.status !== "not_implemented") throw new Error(`Unexpected telegram status: ${telegram?.status}`);
+if (telegram.status !== "available") throw new Error(`Unexpected telegram status: ${telegram?.status}`);
+// Signal is the stable "not implemented yet" exemplar for the honest-status rendering
+// path (not on the connector sprint roadmap; swap if it ever ships).
+const signal = catalog.entries.find((entry) => entry.id === "signal");
+if (signal?.status !== "not_implemented") throw new Error(`Unexpected signal status: ${signal?.status}`);
 const responses = catalog.entries.find((entry) => entry.id === "openresponses");
 if (responses?.status !== "available" || responses.enabled !== true) throw new Error(`Unexpected OpenResponses status: ${responses?.status}`);
 const formatted = formatMindStoneChannelCatalog(loaded);
-if (!formatted.includes("Telegram: not implemented/validated yet")) throw new Error("Formatted catalog missing Telegram honest status");
+if (!formatted.includes("Signal: not implemented/validated yet")) throw new Error("Formatted catalog missing honest not-implemented status");
 if (!formatted.includes("diagnostic only")) throw new Error("Formatted catalog missing diagnostic-only warning");
 
 const notes: string[] = [];
@@ -63,7 +68,7 @@ const prompter: MindStonePrompter = {
 };
 const result = await runMindStoneConfigWizard(prompter, { configPath, sections: ["channels"], dryRun: true, showHeader: false, showIntro: false });
 if (result.changedSections.length !== 0) throw new Error("Channels diagnostic section mutated config");
-if (!notes.some((note) => note.includes("Channel/plugin catalog") && note.includes("Telegram: not implemented/validated yet"))) throw new Error("Wizard channels section did not list catalog");
+if (!notes.some((note) => note.includes("Channel/plugin catalog") && note.includes("Signal: not implemented/validated yet"))) throw new Error("Wizard channels section did not list catalog");
 
 console.log(`channel catalog core smoke passed: ${configPath}`);
 TS
@@ -77,7 +82,7 @@ if [[ -f "$ROOT/packages/mindstone-cli/dist/index.js" ]]; then
 }
 JSON
   OUTPUT="$(MINDSTONE_AGENT_ROOT="$ROOT" MINDSTONE_AGENT_CONFIG="$CLI_CONFIG" node "$ROOT/packages/mindstone-cli/dist/index.js" channels)"
-  if ! grep -q "MindStone channels" <<<"$OUTPUT" || ! grep -q "Telegram: not implemented/validated yet" <<<"$OUTPUT" || ! grep -q "diagnostic only" <<<"$OUTPUT"; then
+  if ! grep -q "MindStone channels" <<<"$OUTPUT" || ! grep -q "Signal: not implemented/validated yet" <<<"$OUTPUT" || ! grep -q "diagnostic only" <<<"$OUTPUT"; then
     echo "channels CLI output missing expected catalog content" >&2
     echo "$OUTPUT" >&2
     exit 1
@@ -87,7 +92,9 @@ JSON
 const payload = JSON.parse(process.env.JSON_PAYLOAD);
 if (!payload.configuredChannelKeys.includes('telegram')) throw new Error('JSON configured channel missing');
 const telegram = payload.entries.find((entry) => entry.id === 'telegram');
-if (!telegram || telegram.status !== 'not_implemented') throw new Error('JSON telegram status mismatch');
+if (!telegram || telegram.status !== 'available') throw new Error('JSON telegram status mismatch');
+const signal = payload.entries.find((entry) => entry.id === 'signal');
+if (!signal || signal.status !== 'not_implemented') throw new Error('JSON signal status mismatch');
 NODE
 else
   echo "CLI dist not built; skipped CLI channel catalog smoke path"

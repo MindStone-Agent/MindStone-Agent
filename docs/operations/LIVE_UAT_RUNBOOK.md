@@ -135,4 +135,22 @@ good: say the word and the sprint's commits push.
   *in a thread* on your message; a non-allowlisted member gets nothing.
   Upgrades #18 from smoke-tested (local stub Web API + Socket Mode) to
   live-validated.
-- _(Connectors #19–#22 will add per-service live legs as they ship.)_
+- **#19 Discord (live leg, ~10 min, needs a Discord app + bot):** create an
+  app at discord.com/developers → add a Bot → enable the **Message Content
+  Intent** (privileged) → invite the bot to your server with the `bot` scope
+  and Send Messages / Read Message History permissions.
+
+  ```bash
+  export MINDSTONE_DISCORD_TOKEN='<bot token>'
+  # channels.discord = { enabled, tokenEnv: "MINDSTONE_DISCORD_TOKEN",
+  #   allowedGuilds: ["<your server id>"],
+  #   allowedSenders: ["<your user id>"] }
+  ./scripts/mindstone gateway run
+  ```
+
+  **Pass:** DM the bot → real reply; @mention it in an allowlisted guild
+  channel → reply; a message in a non-allowlisted guild or from a
+  non-allowlisted user → nothing. The bot connects with least-privilege
+  intents only (no member/presence reads). Upgrades #19 from smoke-tested
+  (local stub REST + gateway WS) to live-validated.
+- _(Connectors #20–#22 will add per-service live legs as they ship.)_
