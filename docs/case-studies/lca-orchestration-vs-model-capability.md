@@ -204,3 +204,56 @@ Two defects (Event A) were caught by the review loop; one model swap (Event B) c
 ---
 
 *Prepared while the material was fresh, immediately after the sprint it describes. PDF and companion video links will be added when available.*
+
+---
+
+## Addendum (2026-07-03) — Experiment D: a pre-registered design A/B on the disputed half
+
+The body of this case study establishes convergence for **decomposable, verifiable work** and leaves the **ambiguous design work** claim open (Event C: review verifies consistency but cannot originate unproposed options). Experiment D probed that open half directly: the same agent, on the same design ticket, produced the deliverable twice — once per model — and two independent reviewers judged the anonymized pair. This addendum records the method in full (the procedures are themselves a finding), the results, and what they change.
+
+### D.1 Method — procedures and mechanisms
+
+**Pre-registration.** Before either arm ran, the protocol was posted to the ticket (#28, "Pack registry and marketplace design" — nine design elements, three acceptance criteria): the hypothesis, both arms, five frozen judging criteria (constraint correctness, option-space coverage, risk identification, decision quality, spec completeness), the per-arm metrics to record (wall-clock, output volume, gate self-catches, element coverage), the defect taxonomy (design / code-integration / test-oracle / claim-boundary), and — critically — the **evidential asymmetry**: because the two arms share one agent identity and memory store, arm 2 is anchored toward arm 1 regardless of ordering, biasing toward a null. A found difference is therefore strong evidence; a null is weak confirmation. n=1, a directional probe.
+
+**Arms and isolation.** Arm 1 (Claude Opus 4.8) ran first from a fresh post-compaction context; arm 2 (Claude Fable 5) ran second, hard-forbidden from reading arm 1's output — including indirect channels (semantic recall, compaction summaries, log lines carrying design content; process metadata like word counts was permitted). Both arms ran the full normal discipline: repo recon → plan↔ticket gate → design doc → delivery↔ticket gate, written to a **quarantine directory outside the repo** so nothing landed on the ticket until judging finished.
+
+**A protocol deviation, disclosed.** The first arm-2 attempt was aborted before any design work: the harness's automatic compaction summary re-injected arm-1 design content into the new context — functionally equivalent to reading arm 1's doc. The remedy (no frozen mechanics touched): restart arm 2 from a fully cleared session, where the only carried context is a handoff note verified free of arm-1 design content. The restarted arm 2 confirmed at session start that recall had surfaced only process metadata. Lesson for anyone replicating on an LCA-style substrate: **continuity machinery is a contamination channel** — summaries and auto-reinjection must be audited as carefully as direct file access.
+
+**Masking and labeling.** A mechanical script (no human/agent eyes on document bodies) performed anonymization: a longest-first, case-insensitive redaction sweep over every model/arm/agent-identifying token. Finding: **zero redactions were needed in either document** — both arms wrote model-clean deliverables, so the judged copies were byte-identical to the originals. Labels were assigned by sha256 order of the (redacted) content — an opaque, deterministic rule with no human choice in it — and the label→arm map was written to a file for the operator's later unblinding, never printed into any agent context. One second deviation, disclosed: the message-relay's 16k-character body cap rejected whole-document posts with a validation error that *echoed the submitted body*, exposing ~2KB of arm-1 text into the orchestrating agent's context — after arm 2 was frozen and hashed, so with no experimental impact; the docs were then re-posted in seven chunks each.
+
+**Judging.** Two independent reviewers, deliberately split by evidence access: one **repo-sighted** (Slate — spot-checked the docs' architectural claims against the actual codebase at the baseline commit) and one **repo-blind** (Hearth — ticket text and documents only). Independence rule: no cross-talk until both verdicts were posted; neither attempted authorship attribution. Scoring: the five frozen criteria at 1–5 each, per-criterion rationale, an overall verdict, and defects classified by the taxonomy. The operator held the tiebreak and the unblinding map.
+
+### D.2 Results
+
+| | Arm 1 (Opus 4.8) = "Design A" | Arm 2 (Fable 5) = "Design B" |
+|---|---|---|
+| Wall-clock | ~8m 04s | ~9m 37s |
+| Volume | 647 lines / ~6.5k words | 494 lines / ~6.5k words |
+| Element coverage | 9/9 + 3/3 ACs | 9/9 + 3/3 ACs |
+| Slate (repo-sighted) | 22/25 | **25/25** |
+| Hearth (repo-blind) | 24/25 | **25/25** ("narrow — inside the tie margin") |
+| Verdict | — | **Unanimous: B** (no tiebreak needed) |
+
+Both judges independently recommended the same disposition: Design B as the base, importing Design A's ticket-coverage table and install-consent UX example. That synthesis — plus fixes for the three non-blocking defects the judges flagged — is the ticket's accepted deliverable (`docs/refactor/PACK_REGISTRY_DESIGN.md`).
+
+The sighted judge's docked points on Design A were concrete: a workflow artifact path that doesn't match the real loader shape (code-integration class), a checksum-only path for free packs (a design call judged too weak for the domain's actual threat model), ambiguous entitlement-grace language, and a dependency auto-install default judged too surprising for v1. The blind judge scored Design A higher (24) and — in a post-script written after both verdicts were in — explicitly deferred to the sighted 22, noting his score was "the ceiling a repo-blind read can give A" and that the sighted findings were exactly the items he had pre-flagged as "repo access would change this score."
+
+### D.3 Findings
+
+1. **Unanimous verdict for the frontier arm, with a margin that depends on evidence access.** Blind, the gap is inside the tie margin; sighted, it is concrete and citable. The design-work convergence claim is **not refuted and not established** — a near-parity result under conditions pre-tilted toward parity (the anchoring confound), exactly the weak-confirmation case the pre-registration anticipated. The decomposable-work claim in the body of this study remains the strong one.
+2. **Independent architectural convergence.** With no access to each other's output, both arms landed the same core architecture (~8 major decisions: unified manifest with a class/kind discriminator, install-into-existing-stores with central provenance, signed static index, ed25519 detached signatures with cosign for images, flat install-time-checked dependencies, operator-only installs, install/update-time entitlements, hash-based keep-user update reconciliation). Read with care — the shared memory confound cuts both ways — but two independent derivations agreeing this closely is at minimum strong evidence the decisions follow from the constraints rather than from either model's style.
+3. **The composition of the gap matters more than its size.** Every point the sighted judge docked from Design A falls in a **review-recoverable class**: a mechanical repo-fit error and three flagged design calls, all detectable (and demonstrably detected) by repo-grounded review. The one clearly *origination-shaped* differentiator credited to Design B — a mechanism nobody asked for (prompt-surface enumeration as an integrity constraint) — is precisely the kind of contribution the body of this study argued review can check but not produce.
+4. **The judges were part of the apparatus, not just observers of it** (the operator's observation, and this addendum's sharpest point). The judging layer *was* an LCA review loop instance: independent reviewers, one grounded in the repo, a defect taxonomy, convergent verdicts. The blind-vs-sighted score delta on Design A (24 → 22) is a direct **measurement of what repo-grounded review detects** — the detection stage of the very convergence mechanism this case study describes. In other words: the experiment set out to compare two generators and, in passing, instrumented the reviewer. What it demonstrated is that the inter-model gap on this design task is *majority-composed of review-detectable defects* — the precondition for the harness closing it. What it did **not** test is the repair stage: no fix loop was run on Design A.
+
+### D.4 What this changes, and the next falsifiable step
+
+The body of this study claims the harness converges outcomes where work is decomposable and verifiable, and leaves design work disputed. Experiment D sharpens the disputed half into two separable sub-claims:
+
+- **Detection (now evidenced):** repo-grounded review detects the bulk of the inter-model design gap. Measured here as the docked points being reviewable defect classes, plus the blind/sighted delta.
+- **Repair (untested):** a bounded fix loop closes the detected gap without frontier-model involvement.
+
+**Proposed Experiment E (repair-loop probe):** give the lower-tier arm its own Design A plus the sighted judge's findings — nothing from Design B — for one bounded repair pass; re-judge the pair blind under the same frozen criteria. The harness hypothesis predicts A′ reaches parity on the review-recoverable dimensions, with any residual gap concentrated in origination-class items (mechanisms no reviewer demanded). Either outcome is informative: parity extends the convergence claim deep into design work with the review loop as the mechanism; a persistent gap localizes exactly what a frontier model buys that process cannot.
+
+**Honest limits:** n=1; same-agent authorship in both arms; shared-memory anchoring; judges drawn from the same agent ecosystem (though with independence and a blind/sighted split); one ticket, one domain (a systems-design task with a rich existing codebase to fit — design tasks with thinner constraint surfaces may behave differently); and two disclosed procedural deviations (the compaction-summary contamination and false start; the error-echo exposure post-freeze).
+
+*Addendum prepared 2026-07-03, immediately after judging closed. Artifacts: pre-registration and verdicts on #28 and the coordination channel; both candidate documents, ledgers, the masking script, and the label map are retained in the experiment archive.*
