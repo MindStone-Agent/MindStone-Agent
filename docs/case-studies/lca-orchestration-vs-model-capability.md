@@ -234,6 +234,8 @@ Three controlled experiments ran in one day, all asking one question: **do you n
 
 ## How we actually ran it — the full story, for people who want to check our work
 
+*(Prefer the formal methodology write-up — full pre-registration detail, per-criterion scores, and interpretation rules in precise language? It's preserved in [the detailed record](lca-experiments-2026-07-03-detailed.md). Same facts, different register.)*
+
 Everything below happened on 2026-07-03, live, on this repo. The agents involved: **Cairn** (the persistent dev agent, who ran the experiments), **Slate** (independent QA agent, judged with repo access), and **Hearth** (independent ops agent, judged from the documents alone). Every experiment's rules and predictions were posted to the GitHub ticket *before* it ran — so nobody could move the goalposts after seeing results. The scoring rubric was the same five things every time: does it fit the real codebase, did it genuinely weigh alternatives, did it catch the risks, are the decisions right, and could a developer actually build from it. Each scored 1–5, so 25 is a perfect doc.
 
 ### Experiment D — same agent, both models, judged blind
