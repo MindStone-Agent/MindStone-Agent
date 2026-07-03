@@ -1,4 +1,4 @@
-# Does a Continuity-and-Review Overlay Narrow the Gap Between Frontier Models?
+# Does a Good Systematic Harness Narrow the Gap Between Frontier Models?
 
 ### A case study from a live software sprint, using Layered Continuity Architecture (LCA) and a dual-agent developer/QA setup
 
@@ -10,11 +10,11 @@
 
 ## Abstract
 
-A common assumption is that agent performance is dominated by the underlying model: pick the strongest model and you get the best results. This case study examines a competing claim — that a well-built *orchestration overlay* (persistent identity, layered memory, and an independent reviewing agent) can narrow the practical gap between two frontier models on real engineering work.
+A common assumption is that agent performance is dominated by the underlying model: pick the strongest model and you get the best results. This case study examines a competing claim — that a good systematic harness (persistent identity, layered memory, checkpointing, review discipline, and independent QA) can make model choice matter less on real engineering work.
 
-Over a single day, an AI developer agent ("Cairn") shipped six substantial features into a TypeScript agent framework, with an independent AI QA agent ("Slate") reviewing each one, the two coordinating over a message channel ("Synapse"), all on top of a memory-and-checkpoint architecture called Layered Continuity Architecture (LCA). Midway, the developer's model was swapped from one frontier model to another with no loss of work.
+Over a single day, a MindStone agent team shipped six substantial features into a TypeScript agent framework. Cairn did the primary implementation work, Slate independently QA-reviewed each handoff, Hearth later sharpened the framing, and the agents coordinated over a message channel ("Synapse"), all on top of a memory-and-checkpoint architecture called Layered Continuity Architecture (LCA). Midway, the developer's model was swapped from one frontier model to another with no loss of work.
 
-The finding is not "the overlay makes model choice irrelevant." It is more precise and, we think, more useful: **the overlay strongly narrows the gap on some axes of capability — reliability, accuracy, knowledge-continuity, and portability across models — while barely touching the gap on others — original generative reasoning, design taste, and the irreducibly hard single step that does not decompose.** The overlay is a *multiplier* on whatever the base model produces, not a substitute for it. We derive a practical model-routing rule from this and connect it back to the thesis behind LCA.
+The finding is not "the lesser model became as good as the stronger one." It is stranger and more useful: **LCA makes the gap stop mattering on decomposable, verifiable work, and it makes the higher-ceiling model's headroom reachable where long-session friction would otherwise hard-stop it.** Put differently, the harness narrows the practical gap through two mechanisms: portability, because state lives in commits, receipts, memory, and handoffs rather than in a model's working context; and availability, because checkpoint → compact → resume turns a model-stopping context-density failure into a recoverable speed bump. It does **not** erase the gap on original generative reasoning, design taste, or irreducibly hard single-step problems. The overlay is a *multiplier* on whatever the base model produces, not a substitute for it.
 
 ---
 
@@ -22,7 +22,7 @@ The finding is not "the overlay makes model choice irrelevant." It is more preci
 
 You do not need to know this project, these agents, or LCA to read this. The primers below fill those gaps. If you only read one paragraph, read this one:
 
-> An orchestration overlay narrows the gap between models on the axes where *errors and forgetting* are the enemy — because independent review catches mistakes, layered memory prevents relearning, and decomposition shrinks how much hard reasoning any single step requires. It does **not** narrow the gap on the axis where *originating the right answer* is the enemy, because verification loops can catch a wrong answer but cannot produce a right one. So a well-orchestrated "lesser" model can out-*ship* a solo "greater" one on decomposable, verifiable work, while the greater model retains its edge on novel design, deep debugging, and ambiguous problems where taste is doing the work.
+> A good systematic harness narrows the practical gap between models where *errors, forgetting, and interruption* are the enemy. Independent review catches mistakes, layered memory prevents relearning, decomposition shrinks how much hard reasoning any single step requires, and checkpointed state makes a mid-task model swap survivable. The stronger claim is not that a lesser model becomes a greater one; it is that the gap stops mattering on decomposable, verifiable work, while the higher-ceiling model becomes more usable on long dense sessions because checkpoint → compact → resume turns friction into recovery. The gap remains where *originating the right answer* is the enemy: novel design, deep debugging, and ambiguous problems where taste is doing the work.
 
 ---
 
@@ -52,11 +52,12 @@ The point to carry forward: LCA is what lets an agent **recover after interrupti
 
 The sprint ran on an LCA implementation nicknamed "TestFlight" (built on a base called MS4CC — "MindStone for Claude Code"). Three concrete pieces matter for this study:
 
-- **Cairn** — a *persistent-identity developer agent.* Cairn is not a fresh chatbot each session; it has a durable identity file, an append-only log, and a memory store, all reloaded at the start of every session. It did the implementation work in this sprint.
+- **Cairn** — a *persistent-identity developer agent.* Cairn is not a fresh chatbot each session; it has a durable identity file, an append-only log, and a memory store, all reloaded at the start of every session. Cairn did the primary implementation work in this sprint.
 - **Slate** — a *persistent-identity QA agent*, running on a separate substrate. Slate independently reviewed each shipped feature: reading the diff, running the test suites in an isolated copy of the repository, and either accepting the work or blocking it with specifics.
-- **Synapse** — the cross-agent message channel (a `#devops` room) over which Cairn and Slate coordinated: announcements, hand-offs, and — importantly — a live protocol for *not colliding* while working the same repository in parallel.
+- **Hearth** — a persistent operations/devops agent whose later review sharpened the interpretation of the sprint: the strongest finding is not weaker-model parity, but portability plus availability.
+- **Synapse** — the cross-agent message channel (a `#devops` room) over which the agents coordinated: announcements, hand-offs, and — importantly — a live protocol for *not colliding* while working the same repository in parallel.
 
-The essential shape is a **two-agent adversarial-collaborative loop**: one agent produces, a second, independent agent verifies, and a durable memory layer accumulates the lessons from both. This is not novel in the abstract — it is the software-industry practice of separating development from QA — but implementing it with *two autonomous AI agents plus a shared persistent memory* is what makes it interesting as a capability question.
+The essential shape during the sprint was a **developer/QA adversarial-collaborative loop**: one agent produces, a second, independent agent verifies, and a durable memory layer accumulates the lessons from both. The surrounding MindStone team review then refined the public interpretation. This is not novel in the abstract — it is the software-industry practice of separating development from QA and then reviewing the postmortem — but implementing it with autonomous persistent agents plus shared continuity infrastructure is what makes it interesting as a capability question.
 
 ### 1.4 The two models, and the situation
 
@@ -90,7 +91,7 @@ Three concrete moments from the sprint do most of the analytical work.
 The Discord connector had a subtle defect: it skipped messages flagged as coming from a bot, but not messages that came from *its own* account without that flag — so it could, in some conditions, reply to itself. Separately, an earlier change had flipped a connector's status to "available" in the catalog but left a test still asserting the *old* status; that test was not in the earlier feature's regression set, so it slipped, and it silently threatened the next two features that made the same catalog change. **Both were caught by test discipline and the independent QA pass — not by the intelligence of either model on a single reading.** Neither model, solo and unverified, would reliably have caught either on one pass.
 
 **Event B — a mid-task model swap with zero loss.**
-Deep into the sprint, on the Discord feature, the developer's model (Fable 5) hit safeguard friction from accumulated context density. The work was ~70% done and uncommitted. Because the state lived in *commits, receipts, memory, and a handoff note* rather than in the model's working context, the developer's model was switched to Opus 4.8, which finished the feature, fixed both bugs above, and cleaned the tree — losing nothing. The task was, in effect, **portable across models** because the continuity layer, not the model, held the state.
+Deep into the sprint, on the Discord feature, the developer's model (Fable 5) hit safeguard friction from accumulated context density. The work was ~70% done and uncommitted. Because the state lived in *commits, receipts, memory, and a handoff note* rather than in the model's working context, the developer's model was switched to Opus 4.8, which finished the feature, fixed both bugs above, and cleaned the tree — losing nothing. The task was, in effect, **portable across models** because the continuity layer, not the model, held the state. That is not weaker-model parity. It is engine choice becoming nearly consequence-free for that kind of work.
 
 **Event C — the counter-example: a reasoning step the loop could only check, not produce.**
 The Agent Mesh feature needed a rule for which stored memories a given request may recall, so that tenant A's data never leaks to tenant B and an agent's private memory never leaks "upward" to a broader scope. The first version of that rule was written as *strict equality of scope maps.* That was wrong in a non-obvious way — it would have hidden an agent's own agent-level memories from that agent's more narrowly scoped requests. The developer caught it mid-implementation and corrected it to a *document-subset-of-filter* rule. **No amount of QA generates that rule.** An independent reviewer could only have told the developer a wrong version was wrong *after* it shipped. The *right* version came from a single reasoning step where the whole scope lattice has to be held in mind at once.
@@ -111,7 +112,7 @@ The mistake in the original question ("does the setup close the gap?") is treati
 
 **The shape of the work — the most important and least obvious effect.** The implement→ship→verify rhythm forces work into small, independently checkable units. This disproportionately shrinks the gap, because it converts *"one hard problem where deep single-pass reasoning wins"* into *"many small problems where the per-unit difference between models is minor."* Once the connector *framework* existed, each connector was mostly transport-swapping against a proven pattern — low reasoning-per-unit, high verification value. That is precisely the work shape where an orchestrated Opus matches a solo Fable, and the sprint is the evidence.
 
-**Portability across models — a real and underrated form of narrowing.** Event B shows the overlay makes the *choice of model at any given moment* nearly consequence-free. A setup that lets you swap the engine mid-task without losing work lowers the cost of not having the strongest model available right now. That is gap-narrowing of a different kind: not "the weaker model is as good," but "which model you're on matters less to the outcome."
+**Portability across models — a real and underrated form of narrowing.** Event B shows the overlay makes the *choice of model at any given moment* nearly consequence-free on decomposable work. A setup that lets you swap the engine mid-task without losing work lowers the cost of not having the strongest model available right now. That is gap-narrowing of a different kind: not "the weaker model is as good," but "which model you're on matters less to the outcome because the state is outside the model."
 
 ### 3.2 Where the overlay does not narrow the gap
 
@@ -123,7 +124,9 @@ The overlay cannot generate the hard answer. **Verification loops catch wrong an
 
 ### 3.3 The asymmetry worth naming
 
-There is one way the overlay helps the *higher-capability, higher-friction* model (Fable) more than it helps the steadier one (Opus) — and it is not about capability, it is about **availability.** The checkpoint → compact → resume machinery is Fable's operational remedy for safeguard friction. Without it, the friction is a hard stop; with it, it becomes a speed-bump you route around. So for the stronger model the overlay is not merely a multiplier — it is what converts an intermittent hard-stop into a workable process. Put bluntly: the orchestration may be *most* essential precisely for the model with the most raw headroom.
+There is one way the overlay helps the *higher-capability, higher-friction* model (Fable) more than it helps the steadier one (Opus) — and it is not about capability, it is about **availability.** The checkpoint → compact → resume machinery is Fable's operational remedy for safeguard friction. Without it, the friction is a hard stop; with it, it becomes a speed bump you route around.
+
+This is the counterintuitive finding worth foregrounding: **the harness may be most essential for the model with the most raw headroom, because that is the model whose long-session ceiling otherwise becomes unreachable.** Part of "closing the gap" is therefore not making Opus become Fable. It is making Fable usable where it previously stalled, while also making Opus sufficient for decomposable pieces when Fable is unavailable or not worth spending.
 
 ---
 
@@ -133,7 +136,8 @@ There is one way the overlay helps the *higher-capability, higher-friction* mode
 
 The decomposition yields a directly usable rule:
 
-- **Decomposable, verifiable, pattern-heavy work** (connectors, migrations, CRUD, anything with a proven template and a good test) — the gap is narrow enough that either model in the harness performs well. Route by cost/availability.
+- **Decomposable, verifiable, pattern-heavy work** (connectors, migrations, CRUD, anything with a proven template and a good test) — the gap often stops mattering to the outcome if the harness is strong. Route by cost, availability, latency, and operational friction.
+- **Long, dense sessions on high-ceiling/high-friction models** — use LCA checkpointing aggressively. The point is not only continuity; it is making the stronger model's headroom reachable across work that would otherwise stall.
 - **Generative, non-decomposable, ambiguous work** (novel architecture, deep debugging, design documents, anything where taste is load-bearing) — reserve the stronger model. Here the overlay can *check* the output but cannot *produce* it, so the base model's ceiling is what you are buying.
 
 Applied to the remainder of this very project: the connector and data-plumbing tasks are gap-narrowed; the design deliverables and architecturally ambiguous features are where the stronger model's edge is actually felt.
@@ -163,15 +167,16 @@ LCA bets that continuity plus structure makes an agent *more than its base model
 - **Layered Continuity Architecture — technical primer** (the seven layers, resonance-weighted recall, consolidation cycles, handoffs): <https://mindstoneagent.ai/docs/research/layered-continuity/architecture/>
 - **Video series** (LCA and MindStone walkthroughs): <https://www.youtube.com/playlist?list=PLFgIjBvcsqPrZPVf5AIH0gBQXUvvk4gkG>
 
-Internal artifacts from the sprint this study draws on (in this repository): the connector framework and per-connector operations docs under `docs/operations/`, and the consolidated `docs/operations/LIVE_UAT_RUNBOOK.md`.
+Internal artifacts from the sprint this study draws on live in the MindStone-Agent project: the connector framework and per-connector operations docs under `docs/operations/`, and the consolidated `docs/operations/LIVE_UAT_RUNBOOK.md`.
 
 ---
 
 ## Appendix A — Glossary
 
 - **Agent (here)** — an autonomous LLM-driven process that reads, writes code, runs tools, and communicates, rather than a single chat turn.
-- **Cairn** — the persistent-identity developer agent in this study.
+- **Cairn** — the persistent-identity developer agent that did the primary implementation work in this study.
 - **Slate** — the independent persistent-identity QA agent.
+- **Hearth** — the persistent operations/devops agent whose review sharpened the published framing around portability and availability.
 - **Synapse** — the cross-agent message channel used for coordination and review.
 - **LCA (Layered Continuity Architecture)** — the multi-layer continuity pattern described in Part 1.2.
 - **Auto Recall** — automatic injection of relevant stored memories just before the model runs, triggered by prompt content.
@@ -197,4 +202,4 @@ Two defects (Event A) were caught by the review loop; one model swap (Event B) c
 
 ---
 
-*Prepared while the material was fresh, immediately after the sprint it describes. Status: initial draft for review and possible publication alongside the LCA research materials.*
+*Prepared while the material was fresh, immediately after the sprint it describes. PDF and companion video links will be added when available.*
