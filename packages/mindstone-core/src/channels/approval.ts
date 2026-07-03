@@ -241,6 +241,32 @@ export function extractMemoryProposal(replyText: string): { text: string; propos
   return { text: extracted.text, proposal: extracted.memory };
 }
 
+/** Strip proposal fences from a string WITHOUT proposing; no-op (identity) when none present. */
+export function stripProposalFences(text: string): string {
+  const fence = /```mindstone-(?:memory|calendar)-proposal\s*\n[\s\S]*?```/g;
+  if (!fence.test(text)) return text;
+  fence.lastIndex = 0;
+  return text.replace(fence, "").trim();
+}
+
+/**
+ * Deep strip-only pass over an arbitrary content value (Slate's #22 QA
+ * finding): providers may return structured/opaque `content` alongside
+ * `text`, and transcript/context/auto-compact/webchat paths can read it — so
+ * a fence stripped from `text` must not survive in `content`. Walks plain
+ * JSON-ish data (strings, arrays, objects) and strips fences from every
+ * string; never proposes (proposing is text-path-only, keeping it
+ * single-source).
+ */
+export function stripActionProposalsDeep(value: unknown): unknown {
+  if (typeof value === "string") return stripProposalFences(value);
+  if (Array.isArray(value)) return value.map((entry) => stripActionProposalsDeep(entry));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, stripActionProposalsDeep(entry)]));
+  }
+  return value;
+}
+
 /**
  * The single shared proposal-discipline step (issues #21/#22), called by BOTH
  * assistant-reply finalization sites (core chat turn AND the Gateway's
@@ -251,6 +277,8 @@ export function extractMemoryProposal(replyText: string): { text: string; propos
  */
 export function applyActionProposalDiscipline(params: {
   replyText: string;
+  /** Provider `content` payload persisted alongside text — deep-stripped of fences (never proposed from). */
+  content?: unknown;
   sessionKey?: string;
   agentId?: string;
   /** Where the reply came from (e.g. "chat", "gateway", "connector:email"). */
@@ -258,10 +286,14 @@ export function applyActionProposalDiscipline(params: {
   source?: TranscriptSource;
   runId?: string;
   store?: ApprovalStore;
-}): { text: string; events: TranscriptEntry[]; proposals: ProposedAction[] } {
+}): { text: string; content: unknown; events: TranscriptEntry[]; proposals: ProposedAction[] } {
   const extracted = extractActionProposals(params.replyText);
+  // Sanitize content whenever it plausibly carries a fence — proposals may
+  // exist in content even when text is already clean (diverging shapes).
+  const contentProbe = params.content !== undefined ? JSON.stringify(params.content) : undefined;
+  const content = contentProbe?.includes("```mindstone-") ? stripActionProposalsDeep(params.content) : params.content;
   if (!extracted.memory && !extracted.mutations.length) {
-    return { text: extracted.text, events: [], proposals: [] };
+    return { text: extracted.text, content, events: [], proposals: [] };
   }
   const approvals = params.store ?? new ApprovalStore();
   const proposals: ProposedAction[] = [
@@ -301,7 +333,7 @@ export function applyActionProposalDiscipline(params: {
         }),
       )
     : [];
-  return { text: extracted.text, events, proposals };
+  return { text: extracted.text, content, events, proposals };
 }
 
 /**

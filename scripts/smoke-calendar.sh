@@ -115,6 +115,85 @@ assert.ok(agenda.includes("Standup") && agenda.includes("@ Zoom") && agenda.incl
 assert.ok(agenda.includes("2026-07-04 — Dentist"));
 assert.ok(formatUpcomingEvents([], { days: 3 }).includes("No upcoming events"));
 
+// REGRESSION (Slate #22 QA blocker): fences must not survive in assistant
+// `content` (string OR structured) or transcript JSONL — providers may return
+// content alongside text, and context/auto-compact/webchat paths read it.
+{
+  const { mkdtempSync, readdirSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const isolated = mkdtempSync(join(tmpdir(), "content-strip-regression."));
+  const prevDataDir = process.env.MINDSTONE_AGENT_DATA_DIR;
+  process.env.MINDSTONE_AGENT_DATA_DIR = isolated;
+  try {
+    const { runMindStoneChatTurn, ApprovalStore: IsolatedStore } = await import("@mindstone-agent/core");
+    const FENCE = '```mindstone-calendar-proposal\n{ "operation": "create", "resource": "event", "data": { "summary": "Sneaky", "start": { "date": "2026-07-05" }, "end": { "date": "2026-07-05" } } }\n```';
+    const model = { id: "fake/model", provider: "fake", name: "Fake", contextWindowTokens: 8192 };
+    const makeProvider = (reply: { text: string; content?: unknown }) => ({
+      id: "fake",
+      listModels: () => [model],
+      completeChat: async () => ({ role: "assistant", text: reply.text, content: reply.content, model: "fake/model" }),
+    });
+
+    // Slate's repro shape: content is a string equal to the fence-bearing text.
+    const stringCase = await runMindStoneChatTurn({
+      agentId: "default",
+      sessionKey: "agent:default:main",
+      message: "schedule it",
+      provider: makeProvider({ text: `Visible.\n${FENCE}`, content: `Visible.\n${FENCE}` }) as never,
+      model: model as never,
+    });
+    assert.equal(stringCase.assistantEntry.text, "Visible.");
+    assert.equal(stringCase.assistantEntry.content, "Visible.");
+
+    // Structured content: fences stripped from every nested string.
+    const structuredCase = await runMindStoneChatTurn({
+      agentId: "default",
+      sessionKey: "agent:default:main",
+      message: "again",
+      provider: makeProvider({
+        text: `Also visible.\n${FENCE}`,
+        content: [{ type: "text", text: `Also visible.\n${FENCE}` }, { type: "meta", nested: { deep: FENCE } }],
+      }) as never,
+      model: model as never,
+    });
+    const structured = JSON.stringify(structuredCase.assistantEntry.content);
+    assert.ok(!structured.includes("mindstone-calendar-proposal"), "structured content must be deep-stripped");
+    assert.ok(structured.includes("Also visible."), "non-fence content survives");
+
+    // Divergent case: text clean, fence ONLY in content -> stripped, NOT proposed.
+    const divergentBefore = new IsolatedStore().list().length;
+    const divergent = await runMindStoneChatTurn({
+      agentId: "default",
+      sessionKey: "agent:default:main",
+      message: "divergent",
+      provider: makeProvider({ text: "Clean text.", content: `Clean text.\n${FENCE}` }) as never,
+      model: model as never,
+    });
+    assert.equal(JSON.stringify(divergent.assistantEntry.content).includes("mindstone-calendar-proposal"), false);
+    assert.equal(new IsolatedStore().list().length, divergentBefore, "content-only fences are dropped, never proposed (text is the single proposal source)");
+
+    // Proposing still works from text (both earlier turns) and is pending-only.
+    const store = new IsolatedStore();
+    assert.equal(store.pending().filter((a) => a.kind === "connector_mutation").length, 2);
+
+    // Transcript JSONL: neither fence name anywhere.
+    const transcriptDir = join(isolated, "transcripts");
+    for (const file of readdirSync(transcriptDir)) {
+      const body = readFileSync(join(transcriptDir, file), "utf-8");
+      assert.ok(!body.includes("mindstone-calendar-proposal"), `fence leaked into transcript ${file}`);
+      assert.ok(!body.includes("mindstone-memory-proposal"), `memory fence leaked into transcript ${file}`);
+    }
+
+    // Strip helper is identity on fence-free strings (no trim side-effects).
+    const { stripProposalFences } = await import("@mindstone-agent/core");
+    assert.equal(stripProposalFences("  keep my whitespace  "), "  keep my whitespace  ");
+  } finally {
+    if (prevDataDir === undefined) delete process.env.MINDSTONE_AGENT_DATA_DIR;
+    else process.env.MINDSTONE_AGENT_DATA_DIR = prevDataDir;
+  }
+}
+
 // Setup wizard: three REFS; no raw secret enters config.
 const texts = ["MY_GCAL_REFRESH", "MY_GCAL_CLIENT_ID", "MY_GCAL_CLIENT_SECRET", "primary"];
 const prompter = { note: async () => undefined, confirm: async () => true, select: async () => "env", text: async () => texts.shift() } as never;
@@ -267,6 +346,29 @@ grep -q 'token exchange failed' "${RUNTIME_DATA}/connectors/calendar/status.json
 kill "${gateway_pid}" >/dev/null 2>&1 || true
 wait "${gateway_pid}" >/dev/null 2>&1 || true
 unset gateway_pid
+
+# Blanket fence sweep (Slate #22 QA): after every E2E turn above, no fence in
+# any NON-USER transcript entry (text or content). User entries are faithful
+# append-only input history — a user-typed fence stays recorded verbatim, and
+# any later model re-derivation of it re-enters the approval gate.
+RUNTIME_DATA="${RUNTIME_DATA}" node <<'NODE'
+const { readdirSync, readFileSync } = require("node:fs");
+const { join } = require("node:path");
+const dir = `${process.env.RUNTIME_DATA}/transcripts`;
+for (const file of readdirSync(dir)) {
+  if (!file.endsWith(".jsonl")) continue;
+  const lines = readFileSync(join(dir, file), "utf-8").split("\n").filter(Boolean);
+  for (const line of lines) {
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (entry.role === "user") continue;
+    if (line.includes("mindstone-calendar-proposal") || line.includes("mindstone-memory-proposal")) {
+      console.error(`proposal fence leaked into non-user transcript entry (role=${entry.role}) in ${file}`);
+      process.exit(1);
+    }
+  }
+}
+NODE
 
 # --- 4. Status visibility; secrets never leak ---
 STATUS_JSON="$(${MS} status --json)"

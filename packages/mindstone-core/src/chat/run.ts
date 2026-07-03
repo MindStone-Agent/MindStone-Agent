@@ -589,6 +589,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   // reply — nothing consequential executes without an explicit approval.
   const extracted = applyActionProposalDiscipline({
     replyText: route.result.text,
+    content: route.result.content,
     sessionKey: input.sessionKey,
     agentId: input.agentId,
     origin: input.source?.substrate ?? "chat",
@@ -602,7 +603,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     agentId: input.agentId,
     role: "assistant",
     text: extracted.text,
-    content: route.result.content,
+    content: extracted.content,
     source: input.source,
     runId,
     metadata: {

@@ -932,6 +932,7 @@ async function runConfiguredRoute(input: {
     // events; the assistant entry gets the stripped text.
     const proposalDiscipline = applyActionProposalDiscipline({
       replyText: route.result.text,
+      content: route.result.content,
       sessionKey: input.sessionKey,
       agentId: input.agentId,
       origin: source?.substrate ?? "gateway",
@@ -944,7 +945,7 @@ async function runConfiguredRoute(input: {
       agentId: input.agentId,
       role: "assistant",
       text: proposalDiscipline.text,
-      content: route.result.content,
+      content: proposalDiscipline.content,
       source,
       runId: run.id,
       metadata: {
