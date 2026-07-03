@@ -185,6 +185,23 @@ export function getMindStoneChannelCatalog(config?: MindStoneConfig): MindStoneC
       ],
     },
     {
+      id: "calendar",
+      label: "Calendar (Google)",
+      kind: "external_channel",
+      status: "available",
+      configured: channelConfigured(config, "calendar"),
+      enabled: channelConfigured(config, "calendar"),
+      capabilities: { chatTypes: ["direct"] },
+      summary: "Gateway-owned Google Calendar connector: agenda pull (mindstone calendar upcoming) + APPROVAL-GATED event mutations; not a chat listener.",
+      setup: "Configure channels.calendar with three REFS (tokenEnv=refresh token, clientIdEnv, clientSecretEnv). Mutations are model-proposed and applied only via mindstone approvals. Live validation steps in docs/operations/LIVE_UAT_RUNBOOK.md.",
+      notes: [
+        "Pull + mutate interaction model (no inbound messages, no reply path — sendOutbound refuses plain replies)",
+        "Event create/update is ALWAYS approval-gated (connector_mutation ProposedActions; auditable)",
+        "Apply-time validation fails closed (create needs summary/start/end; update needs eventId)",
+        "Live-Google-Calendar validation pending (smoke uses a local stub API + OAuth endpoint); M365/Todoist/GitHub-Issues/Notion are a documented plan in docs/operations/CALENDAR_CONNECTOR.md",
+      ],
+    },
+    {
       id: "teams",
       label: "Microsoft Teams",
       kind: "external_channel",

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
+import { appendTranscriptEntry, type TranscriptEntry, type TranscriptSource } from "../transcript/index.js";
 import type { ConnectorOutboundMessage } from "./connector.js";
 
 /**
@@ -17,7 +18,7 @@ import type { ConnectorOutboundMessage } from "./connector.js";
  * skills, personas, workflows, config) and adds a UI + defer on top of this
  * same store.
  */
-export type ProposedActionKind = "connector_send" | "memory_write";
+export type ProposedActionKind = "connector_send" | "memory_write" | "connector_mutation";
 
 export type ProposedActionStatus = "pending" | "approved" | "rejected";
 
@@ -25,6 +26,23 @@ export type MemoryWritePayload = {
   /** Relative path inside the memory directory (sanitized on apply). */
   path: string;
   content: string;
+};
+
+/**
+ * A proposed mutation against an external service (issue #22): create/update
+ * a calendar event, task, etc. Mutations are ALWAYS approval-gated — there is
+ * no auto path for connector_mutation at all. On approve the payload is
+ * enqueued onto the target connector's delivery queue as a typed outbound
+ * message; the connector's sendOutbound applies it (retry/dead-letter apply).
+ */
+export type ConnectorMutationPayload = {
+  /** Target connector (e.g. "calendar"). */
+  connectorId: string;
+  operation: "create" | "update";
+  /** Resource type in the target service's vocabulary (e.g. "event", "task"). */
+  resource: string;
+  /** Provider-shaped resource data (validated by the connector on apply). */
+  data: Record<string, unknown>;
 };
 
 export type ProposedAction = {
@@ -41,6 +59,8 @@ export type ProposedAction = {
   send?: ConnectorOutboundMessage;
   /** memory_write: the memory file proposal to apply on approval. */
   memory?: MemoryWritePayload;
+  /** connector_mutation: the external-service mutation to apply on approval. */
+  mutation?: ConnectorMutationPayload;
   status: ProposedActionStatus;
   decidedAt?: string;
   decidedBy?: string;
@@ -168,30 +188,120 @@ export function resolveConnectorSendPolicy(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Memory-proposal block extraction (issue #21): a routed reply may carry one
-// fenced block proposing a durable memory write. The block is extracted (and
-// stripped from the draft text) into a memory_write ProposedAction — email-
-// derived memory is always proposed, never written directly. The reply text
-// derives from untrusted email content (prompt injection), which is exactly
-// why this terminates in the human approval gate.
+// Action-proposal block extraction (issues #21/#22): a model reply may carry
+// fenced blocks proposing consequential actions — a durable memory write
+// (mindstone-memory-proposal) or an external-service mutation such as a
+// calendar event (mindstone-calendar-proposal). Blocks are extracted (and
+// stripped from the visible reply) into pending ProposedActions — model
+// output derives from untrusted input (email bodies, chat), which is exactly
+// why every proposal terminates in the human approval gate and is never
+// applied directly.
 // ---------------------------------------------------------------------------
 
-const MEMORY_PROPOSAL_FENCE = /```mindstone-memory-proposal\s*\n([\s\S]*?)```/;
+const PROPOSAL_FENCE = /```mindstone-(memory|calendar)-proposal\s*\n([\s\S]*?)```/g;
 
+export type ExtractedActionProposals = {
+  /** Reply text with every proposal block stripped. */
+  text: string;
+  memory?: MemoryWritePayload;
+  mutations: ConnectorMutationPayload[];
+};
+
+export function extractActionProposals(replyText: string): ExtractedActionProposals {
+  const mutations: ConnectorMutationPayload[] = [];
+  let memory: MemoryWritePayload | undefined;
+  const text = replyText
+    .replace(PROPOSAL_FENCE, (_, fenceKind: string, body: string) => {
+      try {
+        const parsed = JSON.parse(body);
+        if (fenceKind === "memory") {
+          const path = typeof parsed?.path === "string" ? parsed.path.trim() : "";
+          const content = typeof parsed?.content === "string" ? parsed.content : "";
+          if (path && content && !memory) memory = { path, content };
+        } else {
+          const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
+          const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
+          const data = parsed?.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? (parsed.data as Record<string, unknown>) : undefined;
+          if (operation && data) {
+            mutations.push({ connectorId: "calendar", operation, resource, data });
+          }
+        }
+      } catch {
+        // malformed proposal blocks are dropped from the reply, never applied
+      }
+      return "";
+    })
+    .trim();
+  return { text, memory, mutations };
+}
+
+/** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
 export function extractMemoryProposal(replyText: string): { text: string; proposal?: MemoryWritePayload } {
-  const match = replyText.match(MEMORY_PROPOSAL_FENCE);
-  if (!match) return { text: replyText };
-  const stripped = (replyText.slice(0, match.index) + replyText.slice((match.index ?? 0) + match[0].length)).trim();
-  try {
-    const parsed = JSON.parse(match[1]);
-    const path = typeof parsed?.path === "string" ? parsed.path.trim() : "";
-    const content = typeof parsed?.content === "string" ? parsed.content : "";
-    if (!path || !content) return { text: stripped };
-    return { text: stripped, proposal: { path, content } };
-  } catch {
-    // malformed proposal blocks are dropped from the draft, never applied
-    return { text: stripped };
+  const extracted = extractActionProposals(replyText);
+  return { text: extracted.text, proposal: extracted.memory };
+}
+
+/**
+ * The single shared proposal-discipline step (issues #21/#22), called by BOTH
+ * assistant-reply finalization sites (core chat turn AND the Gateway's
+ * configured-route path): extract proposal blocks from the reply, persist
+ * them as pending ProposedActions, append approval_proposed audit events, and
+ * return the stripped reply text. Nothing consequential executes here — apply
+ * happens only via an explicit approve.
+ */
+export function applyActionProposalDiscipline(params: {
+  replyText: string;
+  sessionKey?: string;
+  agentId?: string;
+  /** Where the reply came from (e.g. "chat", "gateway", "connector:email"). */
+  origin: string;
+  source?: TranscriptSource;
+  runId?: string;
+  store?: ApprovalStore;
+}): { text: string; events: TranscriptEntry[]; proposals: ProposedAction[] } {
+  const extracted = extractActionProposals(params.replyText);
+  if (!extracted.memory && !extracted.mutations.length) {
+    return { text: extracted.text, events: [], proposals: [] };
   }
+  const approvals = params.store ?? new ApprovalStore();
+  const proposals: ProposedAction[] = [
+    ...(extracted.memory
+      ? [approvals.propose({
+          kind: "memory_write" as const,
+          connectorId: params.origin,
+          sessionKey: params.sessionKey,
+          agentId: params.agentId,
+          createdAt: new Date().toISOString(),
+          summary: `memory write proposal from ${params.origin}: ${extracted.memory.path}`,
+          memory: extracted.memory,
+        })]
+      : []),
+    ...extracted.mutations.map((mutation) =>
+      approvals.propose({
+        kind: "connector_mutation" as const,
+        connectorId: mutation.connectorId,
+        sessionKey: params.sessionKey,
+        agentId: params.agentId,
+        createdAt: new Date().toISOString(),
+        summary: `${mutation.operation} ${mutation.resource} via ${mutation.connectorId}: ${JSON.stringify(mutation.data).slice(0, 80)}`,
+        mutation,
+      }),
+    ),
+  ];
+  const events = params.sessionKey
+    ? proposals.map((proposal) =>
+        appendTranscriptEntry({
+          sessionKey: params.sessionKey!,
+          agentId: params.agentId ?? "default",
+          role: "event",
+          text: `approval proposed: ${proposal.kind} ${proposal.id} (${proposal.summary})`,
+          source: params.source,
+          runId: params.runId,
+          metadata: { event: "approval_proposed", approvalId: proposal.id, kind: proposal.kind, origin: params.origin },
+        }),
+      )
+    : [];
+  return { text: extracted.text, events, proposals };
 }
 
 /**

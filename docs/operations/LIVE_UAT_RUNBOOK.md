@@ -179,4 +179,28 @@ good: say the word and the sprint's commits push.
   inbox; `approvals reject` on a second email → archived, nothing sent; a
   non-allowlisted sender → nothing (deniedCount rises). Upgrades #21 from
   smoke-tested (local stub Gmail API + OAuth endpoint) to live-validated.
-- _(Connectors #20/#22 will add per-service live legs as they ship.)_
+- **#22 Calendar/Google (live leg, ~15 min, reuses the #21 Google Cloud
+  project):** enable the Google Calendar API in the same project → re-run the
+  consent flow adding the `calendar.events` scope → export the three refs
+  (may share the Gmail client id/secret; the refresh token must carry the
+  calendar scope).
+
+  ```bash
+  export MINDSTONE_GCAL_REFRESH_TOKEN='<refresh token>'
+  export MINDSTONE_GCAL_CLIENT_ID='<client id>'
+  export MINDSTONE_GCAL_CLIENT_SECRET='<client secret>'
+  # channels.calendar = { enabled, tokenEnv: "MINDSTONE_GCAL_REFRESH_TOKEN",
+  #   clientIdEnv: "MINDSTONE_GCAL_CLIENT_ID",
+  #   clientSecretEnv: "MINDSTONE_GCAL_CLIENT_SECRET" }
+  ./scripts/mindstone gateway run
+  ```
+
+  **Pass:** `mindstone calendar upcoming` prints your real agenda;
+  `--summarize` produces a sensible commitments summary (live-LLM quality
+  check); a chat turn that yields a `mindstone-calendar-proposal` block
+  creates a PENDING approval and **no event appears** in Google Calendar;
+  `approvals approve` → the event appears in the real calendar within
+  seconds; `approvals reject` on a second proposal → nothing appears.
+  Upgrades #22 from smoke-tested (local stub API + OAuth endpoint) to
+  live-validated.
+- _(Connector #20 (Teams) adds its live leg at implementation time — see #32.)_

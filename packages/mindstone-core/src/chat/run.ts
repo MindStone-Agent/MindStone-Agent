@@ -26,6 +26,7 @@ import {
   type TranscriptEntry,
   type TranscriptSource,
 } from "../transcript/index.js";
+import { applyActionProposalDiscipline } from "../channels/approval.js";
 
 export type MindStoneRunnerStreamTranscriptOptions = {
   persistTranscriptEvents?: boolean;
@@ -582,11 +583,25 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   });
   events.push(...runnerStreamTranscriptEvents);
 
+  // Action-proposal discipline (issues #21/#22): the reply is scanned for
+  // fenced proposal blocks (memory writes, calendar mutations), which become
+  // PENDING ProposedActions + audit events and are stripped from the visible
+  // reply — nothing consequential executes without an explicit approval.
+  const extracted = applyActionProposalDiscipline({
+    replyText: route.result.text,
+    sessionKey: input.sessionKey,
+    agentId: input.agentId,
+    origin: input.source?.substrate ?? "chat",
+    source: input.source,
+    runId,
+  });
+  events.push(...extracted.events);
+
   const assistantEntry = appendTranscriptEntry({
     sessionKey: input.sessionKey,
     agentId: input.agentId,
     role: "assistant",
-    text: route.result.text,
+    text: extracted.text,
     content: route.result.content,
     source: input.source,
     runId,

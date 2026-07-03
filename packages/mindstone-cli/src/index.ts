@@ -9,6 +9,8 @@ import { pathToFileURL } from "node:url";
 import {
   ApprovalStore,
   ConnectorDeliveryQueue,
+  connectorCredentialRefFromChannelConfig,
+  resolveConnectorCredential,
   sanitizeMemoryProposalPath,
   backfillSqliteMemoryEmbeddings,
   backfillSqliteMemoryIndex,
@@ -61,10 +63,10 @@ import {
   type IntegrationBuilderKind,
   type MindStoneSelectOption,
 } from "@mindstone-agent/core";
-import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider } from "@mindstone-agent/gateway";
+import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider, calendarProviderFromContext, formatUpcomingEvents } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "persona" | "skill" | "kb" | "channels" | "approvals" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "persona" | "skill" | "kb" | "channels" | "approvals" | "calendar" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;220m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -101,6 +103,8 @@ function usage(): string {
     "  mindstone channels [--json]",
     "                         Show channel/surface catalog without starting listeners",
     "  mindstone approvals   Proposed-action approvals (list [--all] | show <id> | approve <id> [--yes] | reject <id> [--note TEXT])",
+    "  mindstone calendar upcoming [--days N] [--summarize] [--json]",
+    "                         Pull the upcoming agenda from the configured calendar (read-only; --summarize routes it through the model)",
     "  mindstone status       Show isolated runtime/config status",
     "  mindstone doctor       Check runtime, config, identity, memory, routing, and provider discovery",
     "  mindstone memory backfill [--embed] [--force] [--maintain] [--dedupe-text] [--json]  Index memory/transcripts and optionally maintain/embed chunks",
@@ -118,7 +122,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "persona" || raw === "skill" || raw === "kb" || raw === "channels" || raw === "approvals" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "persona" || raw === "skill" || raw === "kb" || raw === "channels" || raw === "approvals" || raw === "calendar" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -1966,6 +1970,10 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`Memory path: ${action.memory.path}\n`);
       output.write(`--- content ---\n${action.memory.content}\n--- end content ---\n`);
     }
+    if (action.mutation) {
+      output.write(`Mutation: ${action.mutation.operation} ${action.mutation.resource} via ${action.mutation.connectorId}\n`);
+      output.write(`--- data ---\n${JSON.stringify(action.mutation.data, null, 2)}\n--- end data ---\n`);
+    }
     if (action.status !== "pending") {
       output.write(`Decided: ${action.decidedAt ?? "?"} by ${action.decidedBy ?? "?"}${action.decisionNote ? ` — ${action.decisionNote}` : ""}\n`);
     }
@@ -1978,7 +1986,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       if (!input.isTTY || !output.isTTY) throw new Error("Refusing non-interactive approve without --yes");
       const prompter = makeTerminalPrompter();
       try {
-        const preview = action.send?.text ?? action.memory?.content ?? "";
+        const preview = action.send?.text ?? action.memory?.content ?? (action.mutation ? JSON.stringify(action.mutation, null, 2) : "");
         await prompter.note(`${action.summary}\n\n${preview}`, `Approve ${action.kind}?`);
         const accepted = await prompter.confirm({ message: "Approve this action now?", initialValue: false });
         if (!accepted) {
@@ -1997,6 +2005,18 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       appendApprovalAuditEvent(action, "approved", `enqueued for delivery via ${action.connectorId}`);
       output.write(`${gold("Approved")} — draft enqueued for delivery via ${action.connectorId}.\n`);
       output.write("A running Gateway delivers it within seconds; a stopped one on next start.\n");
+      return;
+    }
+    if (action.kind === "connector_mutation" && action.mutation) {
+      store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
+      const queue = new ConnectorDeliveryQueue(action.mutation.connectorId);
+      queue.enqueue(
+        { text: action.summary, metadata: { kind: "connector_mutation", mutation: action.mutation } },
+        { now: new Date().toISOString() },
+      );
+      appendApprovalAuditEvent(action, "approved", `mutation enqueued for apply via ${action.mutation.connectorId}`);
+      output.write(`${gold("Approved")} — ${action.mutation.operation} ${action.mutation.resource} enqueued for apply via ${action.mutation.connectorId}.\n`);
+      output.write("A running Gateway applies it within seconds; a stopped one on next start.\n");
       return;
     }
     if (action.kind === "memory_write" && action.memory) {
@@ -2029,6 +2049,67 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
   throw new Error(`Unknown approvals subcommand: ${subcommand} (expected list | show <id> | approve <id> | reject <id>)`);
 }
 
+// ---------------------------------------------------------------------------
+// Calendar (issue #22): the read-only pull surface over the calendar
+// connector. Mutations do NOT happen here — the model proposes them via
+// fenced blocks and they land in `mindstone approvals` (always gated).
+// ---------------------------------------------------------------------------
+
+async function runCalendarCommand(argv: string[]): Promise<void> {
+  const subcommand = argv[3] ?? "upcoming";
+  if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    output.write(
+      [
+        gold("🔶 MindStone calendar"),
+        "",
+        "Usage:",
+        "  mindstone calendar upcoming [--days N] [--summarize] [--json]",
+        "",
+        "Notes:",
+        "  Read-only agenda pull from channels.calendar (Google Calendar MVP).",
+        "  Event create/update is model-proposed and ALWAYS approval-gated —",
+        "  see mindstone approvals. --summarize routes the agenda through the",
+        "  configured model for a commitments summary.",
+      ].join("\n"),
+    );
+    output.write("\n");
+    return;
+  }
+  if (subcommand !== "upcoming") throw new Error(`Unknown calendar subcommand: ${subcommand} (expected upcoming)`);
+
+  const loaded = loadMindStoneConfig(resolveConfigPath());
+  const channelConfig = ((loaded.config?.channels ?? {}) as Record<string, Record<string, unknown>>).calendar;
+  if (!channelConfig || channelConfig.enabled === false) {
+    throw new Error("channels.calendar is not configured/enabled. Configure it (three REFS: tokenEnv/clientIdEnv/clientSecretEnv) first.");
+  }
+  const ref = connectorCredentialRefFromChannelConfig(channelConfig);
+  const resolved = ref ? resolveConnectorCredential(ref) : undefined;
+  if (!resolved?.present) {
+    throw new Error(`calendar refresh token unresolved: ${resolved && !resolved.present ? resolved.error : "no tokenEnv/tokenFile ref configured"}`);
+  }
+  const provider = calendarProviderFromContext({ config: loaded.config, channelConfig, credential: resolved.value });
+
+  const daysRaw = optionValue(argv, "--days");
+  const days = daysRaw ? Math.max(1, Number(daysRaw) || 0) : 7;
+  const events = await provider.upcoming({ days });
+  if (hasOption(argv, "--json")) {
+    output.write(`${JSON.stringify(events, null, 2)}\n`);
+    return;
+  }
+  const agenda = formatUpcomingEvents(events, { days });
+  output.write(`${agenda}\n`);
+
+  if (hasOption(argv, "--summarize")) {
+    const result = await runOneChatTurn({
+      argv,
+      loaded,
+      message: `Summarize my upcoming commitments from this agenda — surface conflicts, prep needed, and follow-ups:\n\n${agenda}`,
+    });
+    if (!result.ok) throw new Error("summarize turn failed");
+    output.write(`\n${gold("Summary")}\n${result.assistantEntry.text}\n`);
+  }
+}
+
 async function main(): Promise<void> {
   const command = parseCommand(process.argv);
   if (command === "help") {
@@ -2045,6 +2126,10 @@ async function main(): Promise<void> {
   }
   if (command === "approvals") {
     await runApprovalsCommand(process.argv);
+    return;
+  }
+  if (command === "calendar") {
+    await runCalendarCommand(process.argv);
     return;
   }
   if (command === "memory") {

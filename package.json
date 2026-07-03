@@ -80,7 +80,8 @@
     "smoke:telegram": "./scripts/smoke-telegram.sh",
     "smoke:slack": "./scripts/smoke-slack.sh",
     "smoke:discord": "./scripts/smoke-discord.sh",
-    "smoke:email": "./scripts/smoke-email.sh"
+    "smoke:email": "./scripts/smoke-email.sh",
+    "smoke:calendar": "./scripts/smoke-calendar.sh"
   },
   "engines": {
     "node": ">=22.19.0"

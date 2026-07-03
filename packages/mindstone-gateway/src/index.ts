@@ -67,11 +67,20 @@ export {
   parseEmailAddress,
   threadDigestFromMessages,
 } from "./connectors/email.js";
+export {
+  CALENDAR_CONNECTOR,
+  GoogleCalendarProvider,
+  calendarProviderFromContext,
+  formatUpcomingEvents,
+  mutationFromOutbound,
+  validateCalendarMutation,
+} from "./connectors/calendar.js";
 import "./connectors/loopback.js";
 import "./connectors/telegram.js";
 import "./connectors/slack.js";
 import "./connectors/discord.js";
 import "./connectors/email.js";
+import "./connectors/calendar.js";
 import {
   loadRoutePersonaContextById,
   resolveRoutePersonaContext,
@@ -88,9 +97,9 @@ import {
   scopedSessionKey,
   ApprovalStore,
   ConnectorDeliveryQueue,
+  applyActionProposalDiscipline,
   configuredConnectorIds,
   connectorAccessPolicyFromChannelConfig,
-  extractMemoryProposal,
   resolveConnectorSendPolicy,
   connectorCredentialRefFromChannelConfig,
   connectorSessionKey,
@@ -918,11 +927,23 @@ async function runConfiguredRoute(input: {
       streamOptions,
     });
 
+    // Action-proposal discipline (issues #21/#22) — same shared step as the
+    // core chat turn: proposal blocks become pending ProposedActions + audit
+    // events; the assistant entry gets the stripped text.
+    const proposalDiscipline = applyActionProposalDiscipline({
+      replyText: route.result.text,
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      origin: source?.substrate ?? "gateway",
+      source,
+      runId: run.id,
+    });
+
     const assistantEntry = appendTranscriptEntry({
       sessionKey: input.sessionKey,
       agentId: input.agentId,
       role: "assistant",
-      text: route.result.text,
+      text: proposalDiscipline.text,
       content: route.result.content,
       source,
       runId: run.id,
@@ -1930,36 +1951,11 @@ async function handleConnectorInbound(params: {
   });
   if (!routed.routed) return;
   const body = routed.body as { entry?: { text?: string } } | undefined;
-  const rawReplyText = body?.entry?.text;
-  if (!rawReplyText?.trim()) return;
-
-  // Memory-proposal extraction (issue #21): a routed reply may carry one
-  // fenced mindstone-memory-proposal block. It is stripped from the reply and
-  // becomes a pending memory_write ProposedAction — connector-derived memory
-  // (untrusted input, prompt-injection surface) is proposed, never written.
-  const extracted = extractMemoryProposal(rawReplyText);
-  const replyText = extracted.text;
-  const approvals = new ApprovalStore();
-  if (extracted.proposal) {
-    const proposal = approvals.propose({
-      kind: "memory_write",
-      connectorId,
-      sessionKey,
-      agentId,
-      createdAt: new Date().toISOString(),
-      summary: `memory write proposal from ${connectorId}: ${extracted.proposal.path}`,
-      memory: extracted.proposal,
-    });
-    appendTranscriptEntry({
-      sessionKey,
-      agentId,
-      role: "event",
-      text: `approval proposed: memory_write ${proposal.id} (${extracted.proposal.path})`,
-      source,
-      metadata: { event: "approval_proposed", approvalId: proposal.id, kind: "memory_write", connector: connectorId },
-    });
-  }
-  if (!replyText.trim()) return; // the reply was only a proposal block
+  // Proposal blocks (memory writes, mutations) are already extracted into
+  // pending ProposedActions by the core chat turn (issues #21/#22) — the
+  // routed text arrives here pre-stripped.
+  const replyText = body?.entry?.text;
+  if (!replyText?.trim()) return; // no reply, or the reply was only proposal blocks
 
   const outbound = {
     text: replyText,
@@ -1975,6 +1971,7 @@ async function handleConnectorInbound(params: {
   // the normal delivery queue; nothing sends without a decision.
   const sendPolicy = resolveConnectorSendPolicy({ connectorDefault: connector?.defaultSendPolicy, channelConfig });
   if (sendPolicy === "approval_required") {
+    const approvals = new ApprovalStore();
     const proposal = approvals.propose({
       kind: "connector_send",
       connectorId,
