@@ -207,6 +207,33 @@ Two defects (Event A) were caught by the review loop; one model swap (Event B) c
 
 ---
 
+## The 2026-07-03 experiments in plain language (read this first)
+
+Three controlled experiments ran in one day, all asking one question: **do you need the most expensive frontier model to get top-quality design work, or can a well-run process get the same final result out of a less expensive model?**
+
+**What we did:**
+
+1. **Experiment D** — the same agent wrote the same design document twice: once on the workhorse model (Claude Opus 4.8), once on the frontier model (Claude Fable 5). Two independent judges scored both without knowing which was which. The frontier doc won — but it was written *second*, with shared memory across the runs, so the win could have been the model *or* the ordering.
+2. **Experiment F** — to settle that, four completely fresh agents (two per model, no memory, no harness, run simultaneously) each wrote a design for a different ticket from the same frozen instructions. This isolates the *models themselves*.
+3. **Experiment E** — the workhorse model's doc from D was handed back to it along with the reviewer's critique, for one revision pass. This tests whether *review + repair* closes whatever gap exists.
+
+**What we found:**
+
+| # | Finding | Evidence |
+|---|---|---|
+| 1 | **The codebase decides the architecture, not the model.** All four independent F docs — different models, zero shared memory — landed the *same* core design. | 4-way convergence with the memory channel physically removed |
+| 2 | **The frontier model is slightly better — but only at fine details.** Same architecture, executed a notch sharper (edge cases, idempotence, growth bounds). The measured gap: ~5% of available points. | F scores: frontier 50+49 vs workhorse 48+46 (two judges, four docs) |
+| 3 | **A good review closes the gap completely.** Given the reviewer's findings, the workhorse model's revision scored a perfect 25/25 from both judges — full parity with the frontier doc, including adopting the one clever mechanism it had originally missed (the review named it; the loop carried it across). | E: 22 → 25 sighted, 24 → 25 blind |
+| 4 | **The review instrument itself works.** A repo-sighted judge paired with a repo-blind judge caught, localized, and sized the gap — four separate times across the three experiments. | Blind/sighted split replicated 4× |
+
+**What it means:** on constraint-rich engineering work, the shipped artifact is essentially **model-independent when the process includes independent, code-grounded review**. The frontier premium buys a small edge in detail execution; the review loop recovers that edge either way. The practical routing rule: run the architecture pass on the cost-effective tier — any capable model converges — and spend the frontier tier (or extra review) only on the detail pass, because that's the only layer where it changes the outcome.
+
+**The honest limit:** nothing here measures what happens when a review *fails to name* something important. That un-named residual is the one place a frontier model might still quietly matter, and it remains the open question.
+
+*(Full methods, scores, pre-registrations, deviations, and caveats in the detailed sections below.)*
+
+---
+
 ## Addendum (2026-07-03) — Experiment D: a pre-registered design A/B on the disputed half
 
 The body of this case study establishes convergence for **decomposable, verifiable work** and leaves the **ambiguous design work** claim open (Event C: review verifies consistency but cannot originate unproposed options). Experiment D probed that open half directly: the same agent, on the same design ticket, produced the deliverable twice — once per model — and two independent reviewers judged the anonymized pair. This addendum records the method in full (the procedures are themselves a finding), the results, and what they change.
@@ -267,3 +294,74 @@ The body of this study claims the harness converges outcomes where work is decom
 **Honest limits:** n=1; same-agent authorship in both arms; shared-memory anchoring with the second-mover direction (finding 1); fixed arm order; judges drawn from the same agent ecosystem (though with independence and a blind/sighted split); one ticket, one domain (a systems-design task with a rich existing codebase to fit — design tasks with thinner constraint surfaces may behave differently); and two disclosed procedural deviations (the compaction-summary contamination and false start; the error-echo exposure post-freeze).
 
 *Addendum prepared 2026-07-03, immediately after judging closed. Artifacts: pre-registration and verdicts on #28 and the coordination channel; both candidate documents, ledgers, the masking script, and the label map are retained in the experiment archive.*
+
+---
+
+## Addendum, continued (2026-07-03, later the same day) — Experiments F and E
+
+Both follow-ups proposed above ran the same day, each pre-registered before its arm(s) executed (F on the scheduler design ticket #29; E on #28). Together with D they complete a three-probe program: **D measured detection, F measured attribution, E measured repair.**
+
+### F.1 Experiment F — method
+
+F answers the attribution question D could not: was the observed design edge the model's, or the ordering's? Per the reviewers' specification it measures the **raw model design gap — harness-OFF, order-clean**; it is explicitly *not* a harness-value result.
+
+- **De-anchored arms:** four fresh subagents (two per model), no orchestrator memory, no recall, no shared state; the orchestrator authored nothing. With the memory channel physically removed, the second-mover mechanism that confounded D cannot exist — so the arms ran **concurrently**, making order-independence manifest rather than asserted.
+- **Scaffold freeze:** one briefing text for all four arms (sha256-pinned, archived), identical agent type/toolset/effort, repo read-only at a pinned SHA, stopping rule of one continuous pass plus at most one self-review. Arms were forbidden from reading issue comments; the ticket body was embedded verbatim in the briefing so the pre-registration itself stayed invisible to them.
+- **k=2 per model** (the reviewers' upgrade): two runs per model separate "model better" from "this roll better," lifting the claim tier from directional to **suggestive** — no further.
+- **Request-vs-served verification** (added mid-run after an operator question): each arm's transcript metadata carries the served model ID on every assistant message; a metadata-only extraction verified all four arms mid-run and again at harvest. This closed a scaffold-freeze hole the pre-registration had not named — *model requested* is not evidence of *model served* — and is now a standing check for any model comparison here.
+- **Judging:** unchanged instrument — five frozen criteria, one repo-sighted judge, one repo-blind judge, independence until both posted, mechanical masking, hash-order labels across all four documents, map sealed until unmasking.
+
+### F.2 Experiment F — results
+
+| Doc (label) | Model | Sighted | Blind | Combined |
+|---|---|---|---|---|
+| C | Fable 5 | 25 | 25 | **50** |
+| D | Fable 5 | 24 | 25 | **49** |
+| B | Opus 4.8 | 24 | 24 | 48 |
+| A | Opus 4.8 | 23 | 23 | 46 |
+
+Per the pre-committed interpretation rules: between-model gap **2.5** (means 49.5 vs 47.0) exceeds the within-model spread (1 and 2), with consistent direction — both frontier docs outrank both workhorse docs on combined scores. **Result: a small but consistent bare-model design gap favoring the frontier tier — suggestive tier, no stronger.** Counterweights, stated: the magnitude is ~5% of available points, and the sighted judge's individual scoring contained one cross-model tie — the distributions nearly touch.
+
+**Retro-interpretation of D (the pre-committed question):** D's second-arm win is **consistent with a real capability edge, not attributable purely to order** — the direction reproduces with the order channel physically removed.
+
+### F.3 The sharpest finding: a three-layer localization
+
+The result that outranks the ranking: **four models, zero shared memory, one architecture.** All four docs independently landed the same design core (scheduler in the daemon, config-authored and disabled by default, pure schedule math in core, reuse of existing queues and the approval gate, no new approval authority). With anchoring physically impossible, that convergence means the codebase constraints — not model capability — determine *what* gets built on constraint-rich work.
+
+The blind judge's localization (adopted here as the program's framing):
+
+1. **Architecture is constraint-driven.** Any frontier-class model converges; tier is nearly irrelevant to *what* you build when the constraint surface is rich.
+2. **The frontier premium lives in detail execution** — DST semantics, idempotence keys, ledger-growth bounding, drift-killing refactors: the same design executed a notch sharper.
+3. **The review loop is the instrument that recovers layer 2.** Evidence: the one place the judges diverged (an integration-placement claim) was exactly the item the blind judge pre-flagged as "largest verification surface" and the sighted judge independently docked — the third replication of the blind/sighted mechanism working.
+
+**The routing rule that falls out:** on constraint-rich engineering, route the *architecture pass* by cost — any tier converges there. Spend the frontier tier, or lean harder on independent review, on the *detail-execution pass*, because that is the only layer where tier and review move the outcome. This is a layer-level routing rule, not a task-level one.
+
+### E.1 Experiment E — method
+
+E measures the **repair stage at its ceiling**: a perfect sighted review handed to the lower-tier model (the reviewers' label, adopted at pre-registration). One fresh, de-anchored workhorse-tier subagent received Experiment D's Design A plus the sighted judge's findings verbatim, and ran one bounded revision pass in a git worktree **pinned to D's baseline commit** — the landed synthesis and this addendum did not exist in its tree, and history reads beyond the checkout were forbidden. Same wire-level model verification at launch and harvest.
+
+**Hint-transfer disclosure (pre-registered):** the verbatim findings contained one origination-class hint — the reviewer's critique *named* prompt-surface enumeration, the very mechanism that had differentiated D's winning doc. E's ceiling therefore includes hint transfer; the origination-residual prediction applied only to mechanisms *not* named in the findings.
+
+**Re-judge:** same five criteria, same two judges, **non-blind by design** (disclosed — the same instruments that measured A and B are asked whether A′ closed the gap they measured), rationale before score, per-criterion delta against each judge's own D scores.
+
+### E.2 Experiment E — results
+
+**A′ = 25/25 from both seats.** The sighted judge's delta: **+3** (22 → 25), residual vs D's winner: **0** — all four findings judged genuinely repaired, not papered over, with no new blocking defects. The blind judge's delta: **+1** (24 → 25) — the same repair at two magnitudes, which is itself the fourth replication of the blind/sighted instrument: *the sighted seat measures the damage; the blind seat confirms the artifact now reads as parity.* The pre-committed prediction (≈24–25 sighted) was confirmed.
+
+Both judges independently tagged the prompt-surface repair as **ceiling-assisted — transferred by the critique, not re-originated.** That precision produced the program's most consequential sentence, from the blind judge: **the review loop transports origination across arms** — a reviewer names an insight found in the stronger arm's work, and the repair arm implements it faithfully; the weaker model does not re-originate the insight, and does not need to.
+
+### E.3 The honest residual
+
+None of D, E, or F isolates the **un-named origination gap** — the part of design quality a review *fails to name*. E could not measure it, because D's review happened to name the key origination item. As of these three experiments, that residual is the precise boundary of the convergence claim: constraint-driven architecture converges (F), review detects and localizes the detail gap (D), a comprehensive review closes everything it can name — including carried origination (E). What no probe here measures is how often reviews fail to name what matters. That is stated as the boundary, not papered over.
+
+### Program summary
+
+| Probe | Isolates | Result | Tier |
+|---|---|---|---|
+| **D** | Detection (harness-on, order-confounded) | Repo-grounded review detects and localizes the inter-model gap (blind→sighted delta as direct measurement) | evidenced |
+| **F** | Attribution (harness-off, order-clean, k=2) | Small consistent raw gap favoring the frontier tier (~5%); architecture layer constraint-driven (4-way zero-memory convergence) | suggestive |
+| **E** | Repair (ceiling: perfect review handed over) | Lower tier reaches parity in the shipped artifact, including transported origination | evidenced at ceiling |
+
+**Combined limits:** small n throughout; one codebase, one task family (constraint-rich systems design); judges from one agent ecosystem (mitigated by independence + the blind/sighted split, which replicated four times); E is a ceiling, not an average; the un-named origination residual is unmeasured. Deviations across the program (both disclosed at the time): D's compaction-summary contamination and false start; the error-echo exposure post-freeze; E's pre-registration shipped with placeholder hashes, corrected append-only minutes later.
+
+*Continuation prepared 2026-07-03 immediately after Experiment E's verdicts. All arms' documents, ledgers, briefings, maps, masking scripts, and verification records are retained in the experiment archive; pre-registrations and verdicts live on #28, #29, and the coordination channel.*
