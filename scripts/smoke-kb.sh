@@ -169,8 +169,12 @@ assert.ok(seg.text.includes("guides/segmentation.md § Firewall placement"), "re
 assert.ok(seg.text.includes("mindstone kb search ot-security"), "recall doc must point at the dedicated search path");
 assert.ok(!seg.text.includes("SENTINEL-FULL-BODY-ONLY"), "recall doc carries first-paragraph summaries, not full section bodies");
 
-const badIngest = ingestMindStoneKnowledgebase(kbDir, "broken-kb");
-assert.ok(!badIngest.ok);
+// NOTE: ingest is async since #23 (url sources fetch at ingest time). This
+// assertion previously decayed into a false-positive when un-awaited (a
+// Promise's .ok is undefined) — Slate's #23 QA catch. Assert the error SHAPE.
+const badIngest = await ingestMindStoneKnowledgebase(kbDir, "broken-kb");
+assert.equal(badIngest.ok, false);
+assert.ok(!badIngest.ok && /kb\.json/.test(badIngest.error), "broken KB must surface a kb.json error");
 console.log("knowledgebase assertions passed");
 TS
 

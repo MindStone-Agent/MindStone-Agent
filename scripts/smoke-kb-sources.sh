@@ -146,6 +146,21 @@ MS="./scripts/mindstone"
 ${MS} kb ingest fusion --json > /tmp/kbsrc-ingest.json
 grep -q '"sourceCount": 4' /tmp/kbsrc-ingest.json   # local-intro + 2 vault files + 1 url
 
+# Aggregate counts agree across ingest/status/list (Slate #23 QA fix):
+# external sources count everywhere, not just in the per-source matrix.
+${MS} kb status fusion --json | node -e '
+let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+  const s=JSON.parse(d);
+  if (s.sourceCount !== 4) { console.error("status sourceCount must be 4 (local+2 folder+1 url), got", s.sourceCount); process.exit(1); }
+  if (s.sources.length !== 4) { console.error("status matrix must have 4 rows, got", s.sources.length); process.exit(1); }
+})'
+${MS} kb list --json | node -e '
+let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+  const kbs=JSON.parse(d).knowledgebases;
+  const fusion=kbs.find((k)=>k.id==="fusion");
+  if (!fusion || fusion.sourceCount !== 4) { console.error("list sourceCount must be 4, got", fusion && fusion.sourceCount); process.exit(1); }
+})'
+
 INDEX="${KB_DIR}/fusion/index.json"
 # Folder entries: virtual path, absolute origin, sensitivity, wikilink stripped.
 grep -q '"sourcePath": "folder:vault/reactor-notes.md"' "${INDEX}"

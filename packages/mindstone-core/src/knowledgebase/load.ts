@@ -336,7 +336,10 @@ export function mindStoneKbStatus(kbDir: string, kbId: string, options: { now?: 
     indexed: Boolean(index),
     ingestedAt: index?.ingestedAt,
     entryCount: index?.entries.length ?? 0,
-    sourceCount: sourcePaths.length,
+    // All sources represented in the matrix — local files, external
+    // folder/url sources, and indexed-but-missing leftovers (#23 QA fix:
+    // aggregate counts must agree with the per-source rows, not just local).
+    sourceCount: sources.length,
     staleCount: sources.filter((source) => source.state !== "indexed").length,
     sources,
   };
@@ -390,6 +393,16 @@ export function discoverMindStoneKnowledgebases(kbDir: string): MindStoneKnowled
     const loaded = loadMindStoneKnowledgebase(kbDir, entry.name);
     if (loaded.ok) {
       const index = readMindStoneKbIndex(loaded.kb);
+      // #23 QA fix: count external sources too, without running providers
+      // (no network, no folder reads): indexed source paths ∪ local files,
+      // plus declared external sources that have no indexed entries yet.
+      const indexedPaths = new Set((index?.entries ?? []).map((indexEntry) => indexEntry.sourcePath));
+      const localPaths = walkMarkdownFiles(loaded.kb.sourcesDir).map((path) => relative(loaded.kb.sourcesDir, path));
+      const distinct = new Set([...indexedPaths, ...localPaths]);
+      const declaredUnindexed = loaded.kb.externalSources.filter((source) => {
+        const prefix = `${source.type}:${source.id}`;
+        return ![...indexedPaths].some((path) => path === prefix || path.startsWith(`${prefix}/`));
+      }).length;
       summaries.push({
         id: loaded.kb.id,
         name: loaded.kb.name,
@@ -398,7 +411,7 @@ export function discoverMindStoneKnowledgebases(kbDir: string): MindStoneKnowled
         dir: loaded.kb.dir,
         indexed: Boolean(index),
         entryCount: index?.entries.length ?? 0,
-        sourceCount: walkMarkdownFiles(loaded.kb.sourcesDir).length,
+        sourceCount: distinct.size + declaredUnindexed,
       });
     } else {
       summaries.push({
