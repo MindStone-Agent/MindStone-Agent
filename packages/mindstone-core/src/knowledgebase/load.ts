@@ -13,6 +13,12 @@ import type {
   MindStoneKnowledgebaseCatalog,
   MindStoneKnowledgebaseSummary,
 } from "./types.js";
+import {
+  loadFolderSourceDocuments,
+  loadUrlSourceDocument,
+  parseExternalSources,
+  type ExternalSourceDocument,
+} from "./sources.js";
 
 /**
  * Knowledgebase v1 layout (issue #13):
@@ -48,6 +54,7 @@ export function loadMindStoneKnowledgebase(kbDir: string, kbId: string): LoadKno
         name: typeof record.name === "string" ? record.name : undefined,
         version: typeof record.version === "string" ? record.version : undefined,
         description: typeof record.description === "string" ? record.description : undefined,
+        externalSources: record.externalSources,
       };
     }
   } catch (error) {
@@ -63,6 +70,7 @@ export function loadMindStoneKnowledgebase(kbDir: string, kbId: string): LoadKno
       description: catalog.description,
       sourcesDir: join(dir, "sources"),
       indexPath: join(dir, "index.json"),
+      externalSources: parseExternalSources(catalog.externalSources),
     },
   };
 }
@@ -148,42 +156,101 @@ export type IngestKnowledgebaseResult =
   | { ok: true; kbId: string; indexPath: string; entryCount: number; sourceCount: number }
   | { ok: false; kbId: string; error: string };
 
-/** Deterministic extractive ingest: walk sources/, split on H2 sections, preserve citations. No model calls. */
-export function ingestMindStoneKnowledgebase(kbDir: string, kbId: string, options: { now?: string; maxSummaryChars?: number } = {}): IngestKnowledgebaseResult {
+function entriesFromParsedSource(params: {
+  sourcePath: string;
+  parsed: ParsedSource;
+  titleHint?: string;
+  citationBase: string;
+  mtimeMs: number;
+  maxSummaryChars: number;
+  origin?: string;
+  sensitivity?: string;
+  fetchedAt?: string;
+}): MindStoneKbIndexEntry[] {
+  const entries: MindStoneKbIndexEntry[] = [];
+  const title = params.parsed.title ?? params.titleHint;
+  params.parsed.sections.forEach((section, ordinal) => {
+    if (!section.text.trim()) return;
+    const slug = sectionSlug(section.heading, ordinal);
+    entries.push({
+      entryId: `${params.sourcePath}#${slug}`,
+      sourceId: params.sourcePath,
+      sourcePath: params.sourcePath,
+      sourceTitle: title,
+      section: section.heading,
+      citation: section.heading ? `${params.citationBase} § ${section.heading}` : params.citationBase,
+      summary: extractSummary(section.text, params.maxSummaryChars),
+      text: section.text,
+      sourceMtimeMs: params.mtimeMs,
+      origin: params.origin,
+      sensitivity: params.sensitivity,
+      fetchedAt: params.fetchedAt,
+    });
+  });
+  return entries;
+}
+
+/**
+ * Deterministic extractive ingest: walk sources/, pull declared external
+ * sources (folders at their real paths; URLs fetched HERE and only here —
+ * issue #23), split on H2 sections, preserve citations. No model calls.
+ * A failing external source fails the ingest LOUDLY rather than silently
+ * indexing a partial KB.
+ */
+export async function ingestMindStoneKnowledgebase(kbDir: string, kbId: string, options: { now?: string; maxSummaryChars?: number } = {}): Promise<IngestKnowledgebaseResult> {
   const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
   if (!loaded.ok) return { ok: false, kbId, error: loaded.error };
   const kb = loaded.kb;
   const sourcePaths = walkMarkdownFiles(kb.sourcesDir);
-  if (sourcePaths.length === 0) {
-    return { ok: false, kbId, error: `No markdown sources found under ${kb.sourcesDir}` };
+
+  const externalDocuments: ExternalSourceDocument[] = [];
+  for (const source of kb.externalSources) {
+    try {
+      if (source.type === "folder") {
+        externalDocuments.push(...loadFolderSourceDocuments(source, kb.dir));
+      } else {
+        externalDocuments.push(await loadUrlSourceDocument(source, { now: options.now }));
+      }
+    } catch (error) {
+      return { ok: false, kbId, error: `external source "${source.id}" failed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+
+  if (sourcePaths.length === 0 && externalDocuments.length === 0) {
+    return { ok: false, kbId, error: `No markdown sources found under ${kb.sourcesDir} and no external sources declared` };
   }
 
   const maxSummaryChars = options.maxSummaryChars ?? DEFAULT_SUMMARY_CHARS;
   const entries: MindStoneKbIndexEntry[] = [];
   for (const path of sourcePaths) {
     const sourcePath = relative(kb.sourcesDir, path);
-    const mtimeMs = statSync(path).mtimeMs;
-    const parsed = parseSourceMarkdown(readFileSync(path, "utf-8"));
-    parsed.sections.forEach((section, ordinal) => {
-      if (!section.text.trim()) return;
-      const slug = sectionSlug(section.heading, ordinal);
-      entries.push({
-        entryId: `${sourcePath}#${slug}`,
-        sourceId: sourcePath,
-        sourcePath,
-        sourceTitle: parsed.title,
-        section: section.heading,
-        citation: section.heading ? `${sourcePath} § ${section.heading}` : sourcePath,
-        summary: extractSummary(section.text, maxSummaryChars),
-        text: section.text,
-        sourceMtimeMs: mtimeMs,
-      });
-    });
+    entries.push(...entriesFromParsedSource({
+      sourcePath,
+      parsed: parseSourceMarkdown(readFileSync(path, "utf-8")),
+      citationBase: sourcePath,
+      mtimeMs: statSync(path).mtimeMs,
+      maxSummaryChars,
+    }));
+  }
+  for (const document of externalDocuments) {
+    entries.push(...entriesFromParsedSource({
+      sourcePath: document.sourcePath,
+      parsed: parseSourceMarkdown(document.raw),
+      titleHint: document.titleHint,
+      // URL citations point at the URL itself; folder citations keep the
+      // readable virtual path (the absolute path rides in `origin`).
+      citationBase: document.sourcePath.startsWith("url:") ? document.origin : document.sourcePath,
+      mtimeMs: document.mtimeMs,
+      maxSummaryChars,
+      origin: document.origin,
+      sensitivity: document.sensitivity,
+      fetchedAt: document.fetchedAt,
+    }));
   }
 
   const index: MindStoneKbIndex = { kbId, ingestedAt: options.now, entries };
   writeFileSync(kb.indexPath, `${JSON.stringify(index, null, 2)}\n`);
-  return { ok: true, kbId, indexPath: kb.indexPath, entryCount: entries.length, sourceCount: sourcePaths.length };
+  return { ok: true, kbId, indexPath: kb.indexPath, entryCount: entries.length, sourceCount: sourcePaths.length + externalDocuments.length };
 }
 
 export function readMindStoneKbIndex(kb: MindStoneKnowledgebase): MindStoneKbIndex | undefined {
@@ -197,8 +264,13 @@ export function readMindStoneKbIndex(kb: MindStoneKnowledgebase): MindStoneKbInd
   }
 }
 
-/** Per-source ingest/index state, with mtime-based staleness so edits after ingest are visible. */
-export function mindStoneKbStatus(kbDir: string, kbId: string): MindStoneKbStatus | { kbId: string; error: string } {
+/**
+ * Per-source ingest/index state. Staleness: KB-local + folder sources compare
+ * real file mtimes; url sources go stale when `refreshMs` has elapsed since
+ * their recorded fetchedAt (absent refreshMs = manual refresh, never
+ * auto-stale). Re-running `kb ingest` refreshes everything.
+ */
+export function mindStoneKbStatus(kbDir: string, kbId: string, options: { now?: number } = {}): MindStoneKbStatus | { kbId: string; error: string } {
   const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
   if (!loaded.ok) return { kbId, error: loaded.error };
   const kb = loaded.kb;
@@ -223,6 +295,37 @@ export function mindStoneKbStatus(kbDir: string, kbId: string): MindStoneKbStatu
     const stale = statSync(path).mtimeMs > Math.max(...entries.map((entry) => entry.sourceMtimeMs));
     sources.push({ sourceId: sourcePath, sourcePath, state: stale ? "stale" : "indexed", entryCount: entries.length });
   }
+
+  // External sources (issue #23): consume their indexed entries by prefix so
+  // they never misreport as "missing" local files.
+  const now = options.now ?? Date.now();
+  for (const source of kb.externalSources) {
+    const prefix = `${source.type}:${source.id}`;
+    const externalEntries = new Map<string, MindStoneKbIndexEntry[]>();
+    for (const [sourcePath, entries] of indexedBySource) {
+      if (sourcePath === prefix || sourcePath.startsWith(`${prefix}/`)) {
+        externalEntries.set(sourcePath, entries);
+        indexedBySource.delete(sourcePath);
+      }
+    }
+    if (externalEntries.size === 0) {
+      sources.push({ sourceId: prefix, sourcePath: prefix, state: "unindexed", entryCount: 0 });
+      continue;
+    }
+    for (const [sourcePath, entries] of externalEntries) {
+      let state: MindStoneKbSourceStatus["state"] = "indexed";
+      if (source.type === "folder") {
+        const origin = entries[0]?.origin;
+        if (!origin || !existsSync(origin)) state = "missing";
+        else if (statSync(origin).mtimeMs > Math.max(...entries.map((entry) => entry.sourceMtimeMs))) state = "stale";
+      } else if (source.refreshMs) {
+        const fetchedAt = entries[0]?.fetchedAt ? Date.parse(entries[0].fetchedAt) : 0;
+        if (now - fetchedAt > source.refreshMs) state = "stale";
+      }
+      sources.push({ sourceId: sourcePath, sourcePath, state, entryCount: entries.length });
+    }
+  }
+
   for (const [sourcePath, entries] of indexedBySource) {
     sources.push({ sourceId: sourcePath, sourcePath, state: "missing", entryCount: entries.length });
   }
@@ -337,17 +440,30 @@ export function discoverKnowledgebaseRecallDocuments(options: { config?: MindSto
       const sections = entries
         .map((entry) => `- ${entry.citation}: ${entry.summary}`)
         .join("\n");
+      const origin = entries[0].origin;
+      const sensitivity = entries[0].sensitivity;
       documents.push({
         id: `kb:${summary.id}:${sourcePath}`,
         kind: "kb",
         title: `[KB ${summary.name}] ${title}`,
-        path: join(loaded.kb.sourcesDir, sourcePath),
+        // External sources live at their origin (real folder path / URL);
+        // KB-local sources under sources/.
+        path: origin ?? join(loaded.kb.sourcesDir, sourcePath),
         text: [
           `Knowledgebase "${summary.name}" (${summary.id}) — source: ${sourcePath}`,
+          // AC3 (#23): KB hits are REFERENCE MATERIAL, not memory — stated in
+          // the injected text itself so the model treats it accordingly.
+          `Reference material (not memory): cite sources when used.${sensitivity ? ` Sensitivity: ${sensitivity}.` : ""}`,
           sections,
           `Full content: mindstone kb search ${summary.id} "<query>"`,
         ].join("\n"),
-        metadata: { kbId: summary.id, sourcePath, citations: entries.map((entry) => entry.citation) },
+        metadata: {
+          kbId: summary.id,
+          sourcePath,
+          citations: entries.map((entry) => entry.citation),
+          ...(origin ? { origin } : {}),
+          ...(sensitivity ? { sensitivity } : {}),
+        },
       });
     }
   }

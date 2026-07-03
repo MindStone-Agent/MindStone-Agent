@@ -1,7 +1,11 @@
+import type { MindStoneKbExternalSource } from "./sources.js";
+
 export type MindStoneKnowledgebaseCatalog = {
   name?: string;
   version?: string;
   description?: string;
+  /** External source declarations (issue #23) — operator-authored, parsed by sources.ts. */
+  externalSources?: unknown;
 };
 
 export type MindStoneKnowledgebase = {
@@ -12,6 +16,8 @@ export type MindStoneKnowledgebase = {
   description?: string;
   sourcesDir: string;
   indexPath: string;
+  /** Parsed external sources (issue #23): folder trees and ingest-time-fetched URLs. */
+  externalSources: MindStoneKbExternalSource[];
 };
 
 /** One indexed section of one source document. Citations always survive ingest. */
@@ -30,6 +36,12 @@ export type MindStoneKbIndexEntry = {
   summary: string;
   text: string;
   sourceMtimeMs: number;
+  /** Provenance for external sources (issue #23): absolute file path or URL. */
+  origin?: string;
+  /** Operator-declared sensitivity label inherited from the source declaration. */
+  sensitivity?: string;
+  /** Fetch timestamp for url sources — drives refreshMs staleness. */
+  fetchedAt?: string;
 };
 
 export type MindStoneKbIndex = {

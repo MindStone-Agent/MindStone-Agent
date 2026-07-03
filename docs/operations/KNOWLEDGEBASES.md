@@ -52,11 +52,69 @@ never injected via Auto Recall.
   recall comes from that store and KB docs do not participate; embedding KB
   entries into the vector store is future scope.
 
+## External sources (#23)
+
+Beyond `sources/*.md`, a KB may declare **external sources** in `kb.json` —
+they feed the SAME deterministic ingest/index/search/recall pipeline:
+
+```jsonc
+// kb.json
+{
+  "name": "Fusion Ops",
+  "externalSources": [
+    { "id": "vault", "type": "folder", "path": "/Users/me/Obsidian/FusionVault", "sensitivity": "internal" },
+    { "id": "guide", "type": "url", "url": "https://docs.example.com/guide.html", "sensitivity": "public", "refreshMs": 86400000 }
+  ]
+}
+```
+
+- **`folder`** — walks any local directory for `.md`/`.markdown` (nested dirs,
+  dotfiles skipped). Covers **Obsidian vaults**: wikilinks are normalized
+  (`[[Note|Label]]` → `Label`) before parsing. Entries get virtual source
+  paths (`folder:<id>/<relpath>`), the absolute file path as `origin`, and
+  real-mtime staleness in `kb status`.
+- **`url`** — fetched at **ingest time only** (never during search, status, or
+  recall — smoke-proven with a fetch counter). HTML is reduced by a
+  deterministic extractor (title + h1/h2 structure kept, script/style/nav
+  dropped, entities decoded); markdown/plain pass straight through. The
+  citation IS the URL (`https://… § Heading`). Staleness: `refreshMs` since
+  the recorded `fetchedAt` (absent = manual); re-run `kb ingest` to refresh.
+- **`sensitivity`** — optional operator label stamped on every entry from the
+  source; rides into search hits and recall-document metadata/text (the
+  sensitive-context-routing forward hook, same family as email's
+  `sensitiveSource`).
+- **Trust boundary:** `kb.json` is operator-authored configuration — no
+  model-facing tool writes it, so folder paths and URLs are operator-trusted.
+  Fetched *content* is untrusted reference material and is labeled as such in
+  recall.
+- **Reference-not-memory (AC3):** every KB recall document now carries an
+  explicit `Reference material (not memory): cite sources when used.` line in
+  its injected text, plus kind `kb` and the `[KB <name>]` title prefix.
+
+**Per-persona KB binding** (ticket capability): unchanged from #11/#13 —
+persona packages reference KB ids; `mindstone skill status` verifies the
+references resolve.
+
+### Follow-on source targets (documented plan, not implemented)
+
+Behind the same provider seam, in rough order of value/effort: **RSS/Atom**
+(url variant with feed-XML extraction, per-item entries); **GitHub
+repos/issues** (PAT ref; markdown files via the contents API, issues as
+documents); **Notion** (integration-token ref + database/page ids);
+**Google Drive/Docs** (three-REF Google OAuth, export-as-markdown/text —
+same credential pattern as Gmail/Calendar); **OneDrive/SharePoint** (Graph
+`Files.Read` on the single-tenant Entra story from the Teams design). Cloud
+sources will fetch at ingest time only, exactly like `url`.
+
 ## Claim status
 
-Implemented + smoke-tested (`npm run smoke:kb`, 2026-07-02): catalog/schema
-with broken-file surfacing, deterministic ingest with citation + source
-metadata preservation, per-source fresh/stale/unindexed status, dedicated
-search with cited hits, KB summary injection proven on a real mock-routed chat
-turn (`memory_recall_injected` transcript event), and the recall opt-out. No
-live-provider or embedding claims.
+Implemented + smoke-tested (`npm run smoke:kb` + `npm run smoke:kb-sources`,
+2026-07-02/03): catalog/schema with broken-file surfacing, deterministic
+ingest with citation + source metadata preservation (now including external
+folder/Obsidian/url sources with provenance `origin` + `sensitivity` labels),
+per-source fresh/stale/unindexed status (mtime for files, `refreshMs` for
+urls), dedicated search with cited hits, ingest-time-only URL fetching
+(fetch-counter-proven), KB summary injection proven on a real mock-routed
+chat turn (`memory_recall_injected` + a `kb:`-sourced hit), reference-not-
+memory labeling, and the recall opt-out. No live-provider, cloud-source, or
+embedding claims.

@@ -54,6 +54,7 @@
     "smoke:workflow": "./scripts/smoke-workflow.sh",
     "smoke:skill": "./scripts/smoke-skill.sh",
     "smoke:kb": "./scripts/smoke-kb.sh",
+    "smoke:kb-sources": "./scripts/smoke-kb-sources.sh",
     "smoke:app-engine": "./scripts/smoke-app-engine.sh",
     "smoke:connector": "./scripts/smoke-connector.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",

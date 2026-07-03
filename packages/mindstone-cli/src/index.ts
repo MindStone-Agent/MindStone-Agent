@@ -1564,7 +1564,7 @@ async function runKbCommand(argv: string[]): Promise<void> {
   if (sub === "ingest") {
     const kbId = argv[4];
     if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id>");
-    const result = ingestMindStoneKnowledgebase(kbDir, kbId, { now: new Date().toISOString() });
+    const result = await ingestMindStoneKnowledgebase(kbDir, kbId, { now: new Date().toISOString() });
     if (!result.ok) throw new Error(result.error);
     if (json) {
       output.write(`${JSON.stringify(result, null, 2)}\n`);
