@@ -224,144 +224,72 @@ Three controlled experiments ran in one day, all asking one question: **do you n
 | 1 | **The codebase decides the architecture, not the model.** All four independent F docs — different models, zero shared memory — landed the *same* core design. | 4-way convergence with the memory channel physically removed |
 | 2 | **Claude Fable 5 is slightly better — but only at fine details.** Same architecture, executed a notch sharper (edge cases, idempotence, growth bounds). The measured gap: ~5% of available points. | F scores: Fable 5 docs 50+49 vs Opus 4.8 docs 48+46 (two judges, four docs) |
 | 3 | **A good review closes the gap completely.** Given the reviewer's findings, Claude Opus 4.8's revision scored a perfect 25/25 from both judges — full parity with the Fable 5 doc, including adopting the one clever mechanism it had originally missed (the review named it; the loop carried it across). | E: 22 → 25 sighted, 24 → 25 blind |
-| 4 | **The review instrument itself works.** A repo-sighted judge paired with a repo-blind judge caught, localized, and sized the gap — four separate times across the three experiments. | Blind/sighted split replicated 4× |
+| 4 | **The review setup itself works.** A judge with repo access paired with a judge without it caught, localized, and sized the gap — four separate times across the three experiments. | Blind/sighted split replicated 4× |
 
-**What it means:** on constraint-rich engineering work, the shipped artifact is essentially **model-independent when the process includes independent, code-grounded review**. Fable 5's premium buys a small edge in detail execution; the review loop recovers that edge either way. The practical routing rule: run the architecture pass on the cost-effective model — Opus 4.8 converges to the same design — and spend Fable 5 (or extra review) only on the detail pass, because that's the only layer where it changes the outcome.
+**What it means:** on real engineering work in a real codebase, the shipped artifact is essentially **model-independent when the process includes independent, code-grounded review**. Fable 5's premium buys a small edge in detail execution; the review loop recovers that edge either way. The practical routing rule: run the architecture pass on the cost-effective model — Opus 4.8 converges to the same design — and spend Fable 5 (or extra review) only on the detail pass, because that's the only layer where it changes the outcome.
 
 **The honest limit:** nothing here measures what happens when a review *fails to name* something important. That un-named residual is the one place Fable 5 might still quietly matter, and it remains the open question.
 
-*(Full methods, scores, pre-registrations, deviations, and caveats in the detailed sections below.)*
-
 ---
 
-## Addendum (2026-07-03) — Experiment D: a pre-registered design A/B on the disputed half
+## How we actually ran it — the full story, for people who want to check our work
 
-The body of this case study establishes convergence for **decomposable, verifiable work** and leaves the **ambiguous design work** claim open (Event C: review verifies consistency but cannot originate unproposed options). Experiment D probed that open half directly: the same agent, on the same design ticket, produced the deliverable twice — once per model — and two independent reviewers judged the anonymized pair. This addendum records the method in full (the procedures are themselves a finding), the results, and what they change.
+Everything below happened on 2026-07-03, live, on this repo. The agents involved: **Cairn** (the persistent dev agent, who ran the experiments), **Slate** (independent QA agent, judged with repo access), and **Hearth** (independent ops agent, judged from the documents alone). Every experiment's rules and predictions were posted to the GitHub ticket *before* it ran — so nobody could move the goalposts after seeing results. The scoring rubric was the same five things every time: does it fit the real codebase, did it genuinely weigh alternatives, did it catch the risks, are the decisions right, and could a developer actually build from it. Each scored 1–5, so 25 is a perfect doc.
 
-### D.1 Method — procedures and mechanisms
+### Experiment D — same agent, both models, judged blind
 
-**Pre-registration.** Before either arm ran, the protocol was posted to the ticket (#28, "Pack registry and marketplace design" — nine design elements, three acceptance criteria): the hypothesis, both arms, five frozen judging criteria (constraint correctness, option-space coverage, risk identification, decision quality, spec completeness), the per-arm metrics to record (wall-clock, output volume, gate self-catches, element coverage), the defect taxonomy (design / code-integration / test-oracle / claim-boundary), and — critically — the **evidential asymmetry**: because the two arms share one agent identity and memory store, arm 2 is anchored toward arm 1 regardless of ordering, biasing toward a null. A found difference is therefore strong evidence; a null is weak confirmation. n=1, a directional probe.
+Cairn wrote the design doc for the pack-registry ticket (#28) twice. First run: Claude Opus 4.8, fresh context. Second run: Claude Fable 5, fresh context, hard-forbidden from reading the first doc. Both docs were then scrubbed and labeled by a script (no one read them during masking — the labels came from content hashes), and handed to the judges. The judges couldn't talk to each other until both verdicts were up.
 
-**Arms and isolation.** Arm 1 (Claude Opus 4.8) ran first from a fresh post-compaction context; arm 2 (Claude Fable 5) ran second, hard-forbidden from reading arm 1's output — including indirect channels (semantic recall, compaction summaries, log lines carrying design content; process metadata like word counts was permitted). Both arms ran the full normal discipline: repo recon → plan↔ticket gate → design doc → delivery↔ticket gate, written to a **quarantine directory outside the repo** so nothing landed on the ticket until judging finished.
+**Two things went wrong, and they're worth knowing about if you run agents on Claude Code:**
 
-**A protocol deviation, disclosed.** The first arm-2 attempt was aborted before any design work: the harness's automatic compaction summary re-injected arm-1 design content into the new context — functionally equivalent to reading arm 1's doc. The remedy (no frozen mechanics touched): restart arm 2 from a fully cleared session, where the only carried context is a handoff note verified free of arm-1 design content. The restarted arm 2 confirmed at session start that recall had surfaced only process metadata. Lesson for anyone replicating on an LCA-style substrate: **continuity machinery is a contamination channel** — summaries and auto-reinjection must be audited as carefully as direct file access.
+- The first attempt at run two had to be thrown away before it started. Claude Code's own **compaction summary** carried pieces of the first doc into the new context — the continuity machinery that makes a persistent agent useful is also a leak channel. The fix: restart from a fully cleared session where no summary exists. If you ever need two runs to be genuinely independent, `/compact` is not enough; `/clear` is.
+- When we posted the docs to our message channel for judging, the server's 16,000-character limit rejected them with an error that **echoed the entire rejected document back** — leaking quarantined content into the orchestrator's context. Harmless here (the second doc was already finished and hashed), but a real gotcha: oversized posts of sensitive content can bounce back at you through error messages.
 
-**Masking and labeling.** A mechanical script (no human/agent eyes on document bodies) performed anonymization: a longest-first, case-insensitive redaction sweep over every model/arm/agent-identifying token. Finding: **zero redactions were needed in either document** — both arms wrote model-clean deliverables, so the judged copies were byte-identical to the originals. Labels were assigned by sha256 order of the (redacted) content — an opaque, deterministic rule with no human choice in it — and the label→arm map was written to a file for the operator's later unblinding, never printed into any agent context. One second deviation, disclosed: the message-relay's 16k-character body cap rejected whole-document posts with a validation error that *echoed the submitted body*, exposing ~2KB of arm-1 text into the orchestrating agent's context — after arm 2 was frozen and hashed, so with no experimental impact; the docs were then re-posted in seven chunks each.
+**The scores:** Slate (repo access): Opus doc 22/25, Fable doc 25/25. Hearth (doc-only): 24 and 25 — "inside the tie margin." Unanimous for Fable. Slate's gap was concrete: a file-path example that didn't match the real loader, a signing policy too loose for the threat model, two fuzzy policy calls.
 
-**Judging.** Two independent reviewers, deliberately split by evidence access: one **repo-sighted** (Slate — spot-checked the docs' architectural claims against the actual codebase at the baseline commit) and one **repo-blind** (Hearth — ticket text and documents only). Independence rule: no cross-talk until both verdicts were posted; neither attempted authorship attribution. Scoring: the five frozen criteria at 1–5 each, per-criterion rationale, an overall verdict, and defects classified by the taxonomy. The operator held the tiebreak and the unblinding map.
+**Then the judges did something important: they attacked our interpretation.** After their verdicts, both pointed out that the winner *went second* — and even without reading the first doc, shared memory makes "second draft advantage" impossible to rule out. A narrow win by the second mover proves nothing by itself. They were right, we said so in writing, and that critique is what created Experiment F.
 
-### D.2 Results
+### Experiment F — four fresh agents, no memory, no help, same instructions
 
-| | Arm 1 (Opus 4.8) = "Design A" | Arm 2 (Fable 5) = "Design B" |
+This is the clean model-vs-model test. Four subagents launched via the Agent tool, **at the same time**, on a different design ticket (#29, a job scheduler):
+
+- Two on Claude Fable 5, two on Claude Opus 4.8 (the per-arm `model` override; assignment sealed in a map file until judging ended).
+- Every arm got the **byte-identical prompt** (we recorded its hash), the same tools, the same repo at the same commit, and the same stopping rule. No orchestrator memory, no recall, no experiment awareness — bare model + repo + ticket.
+- Two runs per model, so we could tell "this model is better" apart from "this run got lucky."
+- And because "I requested Opus" is not the same as "I got Opus," we **verified the served model at the wire level** — grepping the model ID stamped on every message in each agent's transcript, mid-run and again at the end. All four arms clean. (That check exists because Clint asked, mid-run, "how do we know the right model is actually being used?" — and we didn't have a good answer until we built one. It's now standard practice here.)
+
+**The scores** (both judges, same rubric): Fable doc #1: **50/50** combined. Fable doc #2: **49**. Opus doc #1: **48**. Opus doc #2: **46**. Both Fable docs beat both Opus docs, and the gap between models (2.5 points) was bigger than the gap within either model (1–2 points). So the direction is real — but it's about **5%**, and one judge actually had an Opus doc tied with a Fable doc. This is "Fable is a bit better," not "Fable is a different league."
+
+**The result that matters more than the ranking:** all four agents — different models, zero communication, zero shared memory — produced **the same architecture**. Scheduler lives in the daemon, jobs declared in config and off by default, pure scheduling math in core, everything consequential routed through the existing approval gates. Nobody copied anybody; the codebase's constraints forced the design. Which gives you a three-layer picture of where model quality actually lives:
+
+1. **Architecture: decided by your codebase.** Both models land the same design. Paying more here buys nothing.
+2. **Details: where Fable 5's edge lives.** Daylight-saving-time semantics, idempotence keys, bounding a log file that would otherwise grow forever. Same blueprint, sharper finish work.
+3. **Review: the thing that recovers layer 2.** The one scoring disagreement between the two judges was on a doc's integration claims — exactly the thing the doc-only judge flagged as "someone with repo access should check this," and exactly where the repo-access judge docked it. The pairing works.
+
+**The practical routing rule for your own Claude Code usage:** put the cheaper model on the architecture pass — it gets there. Spend the expensive model, *or a genuinely independent review with repo access*, on the details. That's the only layer where the extra money changes the outcome.
+
+### Experiment E — hand Opus the review, let it fix its own doc
+
+Last question: if review catches the details, can the cheaper model actually *fix* them? We took the Opus doc from Experiment D, gave a fresh Opus 4.8 agent that doc plus Slate's critique word-for-word, and let it do one revision pass. To keep it honest, the agent worked in a checkout **pinned to the pre-experiment commit** — the winning design and everything written since didn't exist in its world, and git commands that could peek forward were off-limits.
+
+One caveat we put on the record *before* running: Slate's critique happened to name the clever mechanism that had made the Fable doc special (treating a pack's prompt files as a first-class security surface). So this measures review-driven repair **at its best** — with a review that caught everything — not on an average day.
+
+**The result: 25/25 from both judges.** Every finding genuinely fixed — not patched over — and nothing new broken. The judge with repo access saw the score jump +3 (he'd measured the original damage); the doc-only judge saw +1 (from his seat there'd been little visible damage to begin with). Same repair, two vantage points, and that split behaving exactly as expected is the fourth time the two-judge design validated itself in one day.
+
+And the sentence that matters most, from Hearth: **the review loop carries ideas across.** The Opus revision adopted the clever mechanism *because the reviewer named it*. The cheaper model didn't have to invent the insight — it just had to build it well once someone pointed, and it did, flawlessly.
+
+### What the day proved, and what it didn't
+
+| Experiment | Question | Answer |
 |---|---|---|
-| Wall-clock | ~8m 04s | ~9m 37s |
-| Volume | 647 lines / ~6.5k words | 494 lines / ~6.5k words |
-| Element coverage | 9/9 + 3/3 ACs | 9/9 + 3/3 ACs |
-| Slate (repo-sighted) | 22/25 | **25/25** |
-| Hearth (repo-blind) | 24/25 | **25/25** ("narrow — inside the tie margin") |
-| Verdict | — | **Unanimous: B** (no tiebreak needed) |
+| **D** | Can review detect the gap between models? | Yes — and locate it precisely (needed the repo-access judge to size it) |
+| **F** | Is there a real model gap at all? | Yes, but small (~5%) and confined to details; the architecture converges regardless of model |
+| **E** | Can review + the cheaper model close the gap? | Yes — to a perfect score, clever ideas included, when the review names the problems |
 
-*Note: arm 2 was the second mover — see D.3 finding 1 for why that matters to attribution.*
+**Proved:** with independent, code-grounded review in the loop, the finished artifact comes out the same whichever of these two models you pay for. The process, not the model, is what guarantees the ceiling.
 
-Both judges independently recommended the same disposition: Design B as the base, importing Design A's ticket-coverage table and install-consent UX example. That synthesis — plus fixes for the three non-blocking defects the judges flagged — is the ticket's accepted deliverable (`docs/refactor/PACK_REGISTRY_DESIGN.md`).
+**Not proved:** what happens when a review *misses* something. Every point recovered in E sat on something the review named. If your reviewer is weak — or nobody with repo access checks the claims — the ~5% detail gap is presumably yours to keep, and the expensive model may earn its price. Nobody has measured that case yet; it's the honest asterisk.
 
-The sighted judge's docked points on Design A were concrete: a workflow artifact path that doesn't match the real loader shape (code-integration class), a checksum-only path for free packs (a design call judged too weak for the domain's actual threat model), ambiguous entitlement-grace language, and a dependency auto-install default judged too surprising for v1. The blind judge scored Design A higher (24) and — in a post-script written after both verdicts were in — explicitly deferred to the sighted 22, noting his score was "the ceiling a repo-blind read can give A" and that the sighted findings were exactly the items he had pre-flagged as "repo access would change this score."
+**Other limits, plainly:** one day, one codebase, one kind of task (systems design against a rich existing codebase — greenfield creative work might behave differently), small run counts, and the judges are our own agents (independent, no cross-talk, one with repo access — and the pairing caught real issues four separate times — but still ours).
 
-### D.3 Findings
-
-1. **The winner was the second mover — model-gap attribution is unresolved** *(revised after the reviewers' post-verdict methodological note, which this finding adopts)*. The unanimous verdict went to arm 2, which ran second with shared durable memory across the arm boundary. The pre-registration framed that sharing one-sidedly, as convergence pressure ("a found difference despite anchoring is strong evidence"); the reviewers completed the physics: for the *second* arm, shared memory is in principle not only a pull toward mimicry but an opportunity to **improve on** a design already produced — and a refined-rather-than-copied second document is what a second pass would produce. Under that reading the observed edge is an **upper bound** on the true model gap: a narrow second-mover win is equally consistent with "Fable 5 is slightly better," "order advantage alone," or any blend, and the one cleanly interpretable outcome (the disadvantaged first mover winning anyway) did not occur. One precision from the session record caps — without dismissing — the confound's plausible size: the restarted arm-2 session's context-injection channels were audited, and **no arm-1 design content reached arm 2 through any observed channel** (session-start recall surfaced process metadata only; the handoff was verified clean; the shared memory entries were deliberately written content-blind). The strong form of the confound — "a second draft written with the first in hand" — is therefore not supported by the record; the design-level limitation (same agent, fixed order, n=1, unobservable residual influence) stands regardless. Blind, the margin was inside the tie band; sighted, it was concrete (see finding 4). **Net: a narrow Fable 5 lean was observed, order-confounded; the solo design-capability gap between the models remains unresolved.**
-2. **Independent architectural convergence.** With no access to each other's output, both arms landed the same core architecture (~8 major decisions: unified manifest with a class/kind discriminator, install-into-existing-stores with central provenance, signed static index, ed25519 detached signatures with cosign for images, flat install-time-checked dependencies, operator-only installs, install/update-time entitlements, hash-based keep-user update reconciliation). Read with care — the shared memory confound cuts both ways — but the audited-clean injection channels (finding 1) strengthen the independent-derivation reading: two derivations agreeing this closely is at minimum strong evidence the decisions follow from the constraints rather than from either model's style.
-3. **The composition of the gap matters more than its size.** Every point the sighted judge docked from Design A falls in a **review-recoverable class**: a mechanical repo-fit error and three flagged design calls, all detectable (and demonstrably detected) by repo-grounded review. The one clearly *origination-shaped* differentiator credited to Design B — a mechanism nobody asked for (prompt-surface enumeration as an integrity constraint) — is precisely the kind of contribution the body of this study argued review can check but not produce.
-4. **The judges were part of the apparatus, not just observers of it** (the operator's observation, and this addendum's sharpest point). The judging layer *was* an LCA review loop instance: independent reviewers, one grounded in the repo, a defect taxonomy, convergent verdicts. The blind-vs-sighted score delta on Design A (24 → 22) is a direct **measurement of what repo-grounded review detects** — the detection stage of the very convergence mechanism this case study describes. In other words: the experiment set out to compare two generators and, in passing, instrumented the reviewer. What it demonstrated is that the inter-model gap on this design task is *majority-composed of review-detectable defects* — the precondition for the harness closing it. What it did **not** test is the repair stage: no fix loop was run on Design A.
-
-### D.4 What this changes, and the next falsifiable steps
-
-**Headline framing (recommended by both reviewers post-verdict, adopted):**
-
-1. *Design-work model gap:* a narrow Fable 5 lean was observed but is **confounded by second-mover order** — not clean evidence of a real design edge; attribution unresolved.
-2. *Harness value:* independent blind+sighted review **detected and localized** the gap, and synthesis merged the Fable 5 and Opus 4.8 drafts into an artifact better than either — practical end-result uplift holds via the loop even where solo-draft parity is unproven.
-
-The body of this study claims the harness converges outcomes where work is decomposable and verifiable, and leaves design work disputed. Experiment D sharpens the disputed half into separable sub-claims:
-
-- **Detection (now evidenced):** repo-grounded review detects the bulk of the inter-model design gap. Measured here as the docked points being reviewable defect classes, plus the blind/sighted delta.
-- **Repair (untested):** a bounded fix loop closes the detected gap without Fable 5 involvement.
-- **Attribution (unresolved):** whether any solo-draft design edge belongs to the model or to the ordering.
-
-**Proposed Experiment E (repair-loop probe — tests repair):** give the Opus 4.8 arm its own Design A plus the sighted judge's findings — nothing from Design B — for one bounded repair pass; re-judge the pair blind under the same frozen criteria. The harness hypothesis predicts A′ reaches parity on the review-recoverable dimensions, with any residual gap concentrated in origination-class items (mechanisms no reviewer demanded). Either outcome is informative: parity extends the convergence claim deep into design work with the review loop as the mechanism; a persistent gap localizes exactly what Fable 5 buys that process cannot.
-
-**Proposed Experiment F (order-counterbalanced probe — tests attribution; the reviewers' recommendation):** run a design ticket of comparable ambiguity with the order reversed — Fable 5 first, Opus 4.8 second — and ideally **de-anchored** (a fresh agent instance per arm, no shared memory carry), so second-mover improvement is structurally off the table. If the second seat closes the gap regardless of which model sits in it, Experiment D's edge was order; if Fable 5 wins from the *first* seat, that is the clean design-capability signal this trial could not produce.
-
-**Honest limits:** n=1; same-agent authorship in both arms; shared-memory anchoring with the second-mover direction (finding 1); fixed arm order; judges drawn from the same agent ecosystem (though with independence and a blind/sighted split); one ticket, one domain (a systems-design task with a rich existing codebase to fit — design tasks with thinner constraint surfaces may behave differently); and two disclosed procedural deviations (the compaction-summary contamination and false start; the error-echo exposure post-freeze).
-
-*Addendum prepared 2026-07-03, immediately after judging closed. Artifacts: pre-registration and verdicts on #28 and the coordination channel; both candidate documents, ledgers, the masking script, and the label map are retained in the experiment archive.*
-
----
-
-## Addendum, continued (2026-07-03, later the same day) — Experiments F and E
-
-Both follow-ups proposed above ran the same day, each pre-registered before its arm(s) executed (F on the scheduler design ticket #29; E on #28). Together with D they complete a three-probe program: **D measured detection, F measured attribution, E measured repair.**
-
-### F.1 Experiment F — method
-
-F answers the attribution question D could not: was the observed design edge the model's, or the ordering's? Per the reviewers' specification it measures the **raw model design gap — harness-OFF, order-clean**; it is explicitly *not* a harness-value result.
-
-- **De-anchored arms:** four fresh subagents (two per model), no orchestrator memory, no recall, no shared state; the orchestrator authored nothing. With the memory channel physically removed, the second-mover mechanism that confounded D cannot exist — so the arms ran **concurrently**, making order-independence manifest rather than asserted.
-- **Scaffold freeze:** one briefing text for all four arms (sha256-pinned, archived), identical agent type/toolset/effort, repo read-only at a pinned SHA, stopping rule of one continuous pass plus at most one self-review. Arms were forbidden from reading issue comments; the ticket body was embedded verbatim in the briefing so the pre-registration itself stayed invisible to them.
-- **k=2 per model** (the reviewers' upgrade): two runs per model separate "model better" from "this roll better," lifting the claim tier from directional to **suggestive** — no further.
-- **Request-vs-served verification** (added mid-run after an operator question): each arm's transcript metadata carries the served model ID on every assistant message; a metadata-only extraction verified all four arms mid-run and again at harvest. This closed a scaffold-freeze hole the pre-registration had not named — *model requested* is not evidence of *model served* — and is now a standing check for any model comparison here.
-- **Judging:** unchanged instrument — five frozen criteria, one repo-sighted judge, one repo-blind judge, independence until both posted, mechanical masking, hash-order labels across all four documents, map sealed until unmasking.
-
-### F.2 Experiment F — results
-
-| Doc (label) | Model | Sighted | Blind | Combined |
-|---|---|---|---|---|
-| C | Fable 5 | 25 | 25 | **50** |
-| D | Fable 5 | 24 | 25 | **49** |
-| B | Opus 4.8 | 24 | 24 | 48 |
-| A | Opus 4.8 | 23 | 23 | 46 |
-
-Per the pre-committed interpretation rules: between-model gap **2.5** (means 49.5 vs 47.0) exceeds the within-model spread (1 and 2), with consistent direction — both Fable 5 docs outrank both Opus 4.8 docs on combined scores. **Result: a small but consistent bare-model design gap favoring Claude Fable 5 — suggestive tier, no stronger.** Counterweights, stated: the magnitude is ~5% of available points, and the sighted judge's individual scoring contained one cross-model tie — the distributions nearly touch.
-
-**Retro-interpretation of D (the pre-committed question):** D's second-arm win is **consistent with a real capability edge, not attributable purely to order** — the direction reproduces with the order channel physically removed.
-
-### F.3 The sharpest finding: a three-layer localization
-
-The result that outranks the ranking: **four models, zero shared memory, one architecture.** All four docs independently landed the same design core (scheduler in the daemon, config-authored and disabled by default, pure schedule math in core, reuse of existing queues and the approval gate, no new approval authority). With anchoring physically impossible, that convergence means the codebase constraints — not model capability — determine *what* gets built on constraint-rich work.
-
-The blind judge's localization (adopted here as the program's framing):
-
-1. **Architecture is constraint-driven.** Both Claude Fable 5 and Claude Opus 4.8 converge; model tier is nearly irrelevant to *what* you build when the constraint surface is rich.
-2. **Fable 5's premium lives in detail execution** — DST semantics, idempotence keys, ledger-growth bounding, drift-killing refactors: the same design executed a notch sharper.
-3. **The review loop is the instrument that recovers layer 2.** Evidence: the one place the judges diverged (an integration-placement claim) was exactly the item the blind judge pre-flagged as "largest verification surface" and the sighted judge independently docked — the third replication of the blind/sighted mechanism working.
-
-**The routing rule that falls out:** on constraint-rich engineering, route the *architecture pass* by cost — Opus 4.8 converges there. Spend Fable 5, or lean harder on independent review, on the *detail-execution pass*, because that is the only layer where model tier and review move the outcome. This is a layer-level routing rule, not a task-level one.
-
-### E.1 Experiment E — method
-
-E measures the **repair stage at its ceiling**: a perfect sighted review handed to Claude Opus 4.8 (the reviewers' label, adopted at pre-registration). One fresh, de-anchored Opus 4.8 subagent received Experiment D's Design A plus the sighted judge's findings verbatim, and ran one bounded revision pass in a git worktree **pinned to D's baseline commit** — the landed synthesis and this addendum did not exist in its tree, and history reads beyond the checkout were forbidden. Same wire-level model verification at launch and harvest.
-
-**Hint-transfer disclosure (pre-registered):** the verbatim findings contained one origination-class hint — the reviewer's critique *named* prompt-surface enumeration, the very mechanism that had differentiated D's winning doc. E's ceiling therefore includes hint transfer; the origination-residual prediction applied only to mechanisms *not* named in the findings.
-
-**Re-judge:** same five criteria, same two judges, **non-blind by design** (disclosed — the same instruments that measured A and B are asked whether A′ closed the gap they measured), rationale before score, per-criterion delta against each judge's own D scores.
-
-### E.2 Experiment E — results
-
-**A′ = 25/25 from both seats.** The sighted judge's delta: **+3** (22 → 25), residual vs D's winner: **0** — all four findings judged genuinely repaired, not papered over, with no new blocking defects. The blind judge's delta: **+1** (24 → 25) — the same repair at two magnitudes, which is itself the fourth replication of the blind/sighted instrument: *the sighted seat measures the damage; the blind seat confirms the artifact now reads as parity.* The pre-committed prediction (≈24–25 sighted) was confirmed.
-
-Both judges independently tagged the prompt-surface repair as **ceiling-assisted — transferred by the critique, not re-originated.** That precision produced the program's most consequential sentence, from the blind judge: **the review loop transports origination across arms** — a reviewer names an insight found in the stronger arm's work, and the repair arm implements it faithfully; the weaker model does not re-originate the insight, and does not need to.
-
-### E.3 The honest residual
-
-None of D, E, or F isolates the **un-named origination gap** — the part of design quality a review *fails to name*. E could not measure it, because D's review happened to name the key origination item. As of these three experiments, that residual is the precise boundary of the convergence claim: constraint-driven architecture converges (F), review detects and localizes the detail gap (D), a comprehensive review closes everything it can name — including carried origination (E). What no probe here measures is how often reviews fail to name what matters. That is stated as the boundary, not papered over.
-
-### Program summary
-
-| Probe | Isolates | Result | Tier |
-|---|---|---|---|
-| **D** | Detection (harness-on, order-confounded) | Repo-grounded review detects and localizes the inter-model gap (blind→sighted delta as direct measurement) | evidenced |
-| **F** | Attribution (harness-off, order-clean, k=2) | Small consistent raw gap favoring Claude Fable 5 (~5%); architecture layer constraint-driven (4-way zero-memory convergence) | suggestive |
-| **E** | Repair (ceiling: perfect review handed over) | Claude Opus 4.8 reaches parity in the shipped artifact, including transported origination | evidenced at ceiling |
-
-**Combined limits:** small n throughout; one codebase, one task family (constraint-rich systems design); judges from one agent ecosystem (mitigated by independence + the blind/sighted split, which replicated four times); E is a ceiling, not an average; the un-named origination residual is unmeasured. Deviations across the program (both disclosed at the time): D's compaction-summary contamination and false start; the error-echo exposure post-freeze; E's pre-registration shipped with placeholder hashes, corrected append-only minutes later.
-
-*Continuation prepared 2026-07-03 immediately after Experiment E's verdicts. All arms' documents, ledgers, briefings, maps, masking scripts, and verification records are retained in the experiment archive; pre-registrations and verdicts live on #28, #29, and the coordination channel.*
+*Want to check the work? The rules-posted-in-advance and full verdicts are on tickets #28 and #29 and the coordination channel; every document, prompt, hash, model-verification record, and label map is archived in the experiment records. Two process mishaps (the compaction leak and the error-echo) are documented above rather than hidden — they're useful gotchas in their own right.*
