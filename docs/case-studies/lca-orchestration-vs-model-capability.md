@@ -294,7 +294,9 @@ Three arms built from the same prompt:
 | **Cedar** | Bare Claude Opus 4.8 | Good complete app, but lower under discipline-weighted judging |
 | **Birch** | Claude Opus 4.8 + MindStone/LCA review workflow with Hearth QA | Top-band app, scored with Maple/Fable |
 
-The agreed conclusion was not “models do not matter.” It was the harness/productivity claim Clint wanted to measure: **MindStone/LCA review workflow moved Opus 4.8 into the Fable 5 shipped-result band.** Bare Opus matched many visible features but trailed on shipping-quality and discipline; the harness supplied exactly that discipline layer through review, verification, hygiene checks, and defect discovery.
+The agreed conclusion was not “models do not matter.” It was the harness/productivity claim Clint wanted to measure: **MindStone/LCA review workflow moved Opus 4.8 into the Fable 5 shipped-result band.** Bare Opus matched many visible features but trailed on shipping-quality and discipline; the harness supplied exactly that discipline layer through review, verification, dependency/security checks, and defect discovery.
+
+A fairness note: one Cedar hygiene signal, a stray `.claude/launch.json`, was later traced to judging-package assembly rather than Cedar's build. So the Cedar discipline gap should lean on npm vulnerabilities and validation depth, not that packaging artifact.
 
 The important caveat is that the harnessed arm also introduced its own defect through a heavier Tone.js architecture: a phase-dependent stop/playhead bug. Hearth caught it, Cairn fixed it, and the frozen artifact was verified. The honest lesson is not that the harness magically makes every technical choice better. It is that the harness catches and repairs edge-case defects before shipment.
 
@@ -313,6 +315,6 @@ Also, Birch did **not** use every capability available in the broader MindStone 
 
 **Not proved:** what happens when a review *misses* something. Every point recovered in E sat on something the review named, and the harnessed G arm benefited from live QA. If your reviewer is weak — or nobody with repo access checks the claims — the detail and discipline gap may remain. Nobody has measured that case yet; it's the honest asterisk.
 
-**Other limits, plainly:** one codebase-grounded task family plus one greenfield app, small run counts, n=1 for G, mixed-blindness judging, and judges drawn from the same agent ecosystem. The evidence supports the harness/productivity claim; it is not a broad proof that models do not matter.
+**Other limits, plainly:** one codebase-grounded task family plus one greenfield app, small run counts, n=1 for G, mixed-blindness judging, and judges drawn from the same agent ecosystem. G's bare-Opus and harnessed-Opus arms were separate single builds by different agent instances, with different tooling and architecture choices, so the harness effect is not perfectly isolated from build-to-build variation. The airtight follow-up would run the same bare-Opus artifact back through the harness, or repeat each arm at k>1. The evidence supports the harness/productivity claim; it is not a broad proof that models do not matter.
 
 *Want to check the work? The rules-posted-in-advance and full verdicts are on tickets #28 and #29 and the coordination channel; every document, prompt, hash, model-verification record, and label map is archived in the experiment records. Two process mishaps (the compaction leak and the error-echo) are documented above rather than hidden — they're useful gotchas in their own right.*
