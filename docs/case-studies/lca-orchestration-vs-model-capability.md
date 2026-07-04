@@ -51,7 +51,7 @@ The point to carry forward: LCA is what lets an agent **recover after interrupti
 
 ### 1.3 Primer: the orchestration overlay used here
 
-The sprint ran on an LCA implementation nicknamed "TestFlight" (built on a base called MS4CC — "MindStone for Claude Code"). Three concrete pieces matter for this study:
+The sprint ran on a MindStone/LCA implementation built on MS4CC — "MindStone for Claude Code." Three concrete pieces matter for this study:
 
 - **Cairn** — a *persistent-identity developer agent.* Cairn is not a fresh chatbot each session; it has a durable identity file, an append-only log, and a memory store, all reloaded at the start of every session. Cairn did the primary implementation work in this sprint.
 - **Slate** — a *persistent-identity QA agent*, running on a separate substrate. Slate independently reviewed each shipped feature: reading the diff, running the test suites in an isolated copy of the repository, and either accepting the work or blocking it with specifics.
@@ -209,13 +209,14 @@ Two defects (Event A) were caught by the review loop; one model swap (Event B) c
 
 ## The 2026-07-03 experiments in plain language (read this first)
 
-Three controlled experiments ran in one day, all asking one question: **do you need the most expensive frontier model (Claude Fable 5) to get top-quality design work, or can a well-run process get the same final result out of a less expensive model (Claude Opus 4.8)?**
+Four controlled experiments asked one question from several angles: **can a well-run MindStone/LCA review workflow process get Claude Opus 4.8 into the Claude Fable 5 quality band on real shipped work?**
 
 **What we did:**
 
 1. **Experiment D** — the same agent wrote the same design document twice: once on Claude Opus 4.8, once on Claude Fable 5. Two independent judges scored both without knowing which was which. The Fable 5 doc won — but it was written *second*, with shared memory across the runs, so the win could have been the model *or* the ordering.
 2. **Experiment F** — to settle that, four completely fresh agents (two per model, no memory, no harness, run simultaneously) each wrote a design for a different ticket from the same frozen instructions. This isolates the *models themselves*.
 3. **Experiment E** — the Opus 4.8 doc from D was handed back to Opus 4.8 along with the reviewer's critique, for one revision pass. This tests whether *review + repair* closes whatever gap exists.
+4. **Experiment G** — bare Claude Fable 5, bare Claude Opus 4.8, and harnessed Claude Opus 4.8 each built the same greenfield browser music app, LoopSmith Studio, from the same frozen prompt. This tests whether the MindStone/LCA review workflow can move Opus into the Fable 5 quality band on shipped greenfield work.
 
 **What we found:**
 
@@ -224,11 +225,12 @@ Three controlled experiments ran in one day, all asking one question: **do you n
 | 1 | **The codebase decides the architecture, not the model.** All four independent F docs — different models, zero shared memory — landed the *same* core design. | 4-way convergence with the memory channel physically removed |
 | 2 | **Claude Fable 5 is slightly better — but only at fine details.** Same architecture, executed a notch sharper (edge cases, idempotence, growth bounds). The measured gap: ~5% of available points. | F scores: Fable 5 docs 50+49 vs Opus 4.8 docs 48+46 (two judges, four docs) |
 | 3 | **A good review closes the gap completely.** Given the reviewer's findings, Claude Opus 4.8's revision scored a perfect 25/25 from both judges — full parity with the Fable 5 doc, including adopting the one clever mechanism it had originally missed (the review named it; the loop carried it across). | E: 22 → 25 sighted, 24 → 25 blind |
-| 4 | **The review setup itself works.** A judge with repo access paired with a judge without it caught, localized, and sized the gap — four separate times across the three experiments. | Blind/sighted split replicated 4× |
+| 4 | **The review setup itself works.** A judge with repo access paired with a judge without it caught, localized, and sized the gap — four separate times across the first three experiments. | Blind/sighted split replicated 4× |
+| 5 | **On greenfield shipped work, the harness moved Opus into the Fable 5 quality band.** Bare Opus produced a good app but trailed on shipping-quality/discipline; harnessed Opus landed with the top artifacts. | G: Birch/Opus-harnessed 100/98; Maple/Fable-bare 99/97; Cedar/Opus-bare lower under Clint+Slate discipline-weighted scoring |
 
-**What it means:** on real engineering work in a real codebase, the shipped artifact is essentially **model-independent when the process includes independent, code-grounded review**. Fable 5's premium buys a small edge in detail execution; the review loop recovers that edge either way. The practical routing rule: run the architecture pass on the cost-effective model — Opus 4.8 converges to the same design — and spend Fable 5 (or extra review) only on the detail pass, because that's the only layer where it changes the outcome.
+**What it means:** on real engineering work, the shipped artifact can become much less dependent on the top-tier model when the process includes independent, code-grounded review. Fable 5's premium buys an edge in detail execution and shipping quality; the review loop can recover much of that edge. The practical routing rule: use Opus 4.8 confidently when strong constraints and review exist, and spend Fable 5 (or extra review) where missed details, ambiguous calls, or final shipping hygiene matter most.
 
-**The honest limit:** nothing here measures what happens when a review *fails to name* something important. That un-named residual is the one place Fable 5 might still quietly matter, and it remains the open question.
+**The honest limit:** nothing here proves models do not matter, or that Opus 4.8 has equal raw capability to Fable 5. The evidence is for a harness/productivity claim: a serious MindStone/LCA review workflow loop can move Opus into the Fable 5 shipped-result band on these tasks. What happens when review fails to name something important remains open.
 
 ---
 
@@ -268,17 +270,35 @@ This is the clean model-vs-model test. Four subagents launched via the Agent too
 2. **Details: where Fable 5's edge lives.** Daylight-saving-time semantics, idempotence keys, bounding a log file that would otherwise grow forever. Same blueprint, sharper finish work.
 3. **Review: the thing that recovers layer 2.** The one scoring disagreement between the two judges was on a doc's integration claims — exactly the thing the doc-only judge flagged as "someone with repo access should check this," and exactly where the repo-access judge docked it. The pairing works.
 
-**The practical routing rule for your own Claude Code usage:** put the cheaper model on the architecture pass — it gets there. Spend the expensive model, *or a genuinely independent review with repo access*, on the details. That's the only layer where the extra money changes the outcome.
+**The practical routing rule for your own Claude Code usage:** put Opus 4.8 on the architecture pass when constraints are rich and review is strong — it gets there. Spend Fable 5, *or a genuinely independent review with repo access*, on the details and shipping-quality pass. That's where the result moves.
 
 ### Experiment E — hand Opus the review, let it fix its own doc
 
-Last question: if review catches the details, can the cheaper model actually *fix* them? We took the Opus doc from Experiment D, gave a fresh Opus 4.8 agent that doc plus Slate's critique word-for-word, and let it do one revision pass. To keep it honest, the agent worked in a checkout **pinned to the pre-experiment commit** — the winning design and everything written since didn't exist in its world, and git commands that could peek forward were off-limits.
+Last question: if review catches the details, can Opus actually *fix* them? We took the Opus doc from Experiment D, gave a fresh Opus 4.8 agent that doc plus Slate's critique word-for-word, and let it do one revision pass. To keep it honest, the agent worked in a checkout **pinned to the pre-experiment commit** — the winning design and everything written since didn't exist in its world, and git commands that could peek forward were off-limits.
 
 One caveat we put on the record *before* running: Slate's critique happened to name the clever mechanism that had made the Fable doc special (treating a pack's prompt files as a first-class security surface). So this measures review-driven repair **at its best** — with a review that caught everything — not on an average day.
 
 **The result: 25/25 from both judges.** Every finding genuinely fixed — not patched over — and nothing new broken. The judge with repo access saw the score jump +3 (he'd measured the original damage); the doc-only judge saw +1 (from his seat there'd been little visible damage to begin with). Same repair, two vantage points, and that split behaving exactly as expected is the fourth time the two-judge design validated itself in one day.
 
-And the sentence that matters most, from Hearth: **the review loop carries ideas across.** The Opus revision adopted the clever mechanism *because the reviewer named it*. The cheaper model didn't have to invent the insight — it just had to build it well once someone pointed, and it did, flawlessly.
+And the sentence that matters most, from Hearth: **the review loop carries ideas across.** The Opus revision adopted the clever mechanism *because the reviewer named it*. Opus did not have to invent the insight independently — it just had to build it well once someone pointed, and it did, flawlessly.
+
+### Experiment G — greenfield app build, three arms
+
+After D/E/F, Clint identified the missing product question: codebase-grounded design is not the same as blank-page shipped work. The team froze a new prompt for **LoopSmith Studio**, a browser-based music creation app with manual loop editing, real browser audio, local save/load, JSON import/export, and a local algorithmic **Inspire Me** generator.
+
+Three arms built from the same prompt:
+
+| Codename | Setup | Result |
+|---|---|---|
+| **Maple** | Bare Claude Fable 5 | Excellent top-band app |
+| **Cedar** | Bare Claude Opus 4.8 | Good complete app, but lower under discipline-weighted judging |
+| **Birch** | Claude Opus 4.8 + MindStone/LCA review workflow with Hearth QA | Top-band app, scored with Maple/Fable |
+
+The agreed conclusion was not “models do not matter.” It was the harness/productivity claim Clint wanted to measure: **MindStone/LCA review workflow moved Opus 4.8 into the Fable 5 shipped-result band.** Bare Opus matched many visible features but trailed on shipping-quality and discipline; the harness supplied exactly that discipline layer through review, verification, hygiene checks, and defect discovery.
+
+The important caveat is that the harnessed arm also introduced its own defect through a heavier Tone.js architecture: a phase-dependent stop/playhead bug. Hearth caught it, Cairn fixed it, and the frozen artifact was verified. The honest lesson is not that the harness magically makes every technical choice better. It is that the harness catches and repairs edge-case defects before shipment.
+
+Also, Birch did **not** use every capability available in the broader MindStone development workflow. It used MS4CC-style memory/checkpoints/ledger discipline, Hearth's live QA/review loop, and verification/ticket-fidelity habits. It did **not** use a formal PRD, a formal design/implementation plan, role adoption, frontend-design MCP assistance, subagent delegation, or a dedicated security-scanner pass. Cairn later clarified that this was not a clean deliberate protocol choice: the review and continuity habits were automatic, while several broader workflow tools were simply not invoked. That makes G a conservative datapoint for the harness claim. Whether the fuller workflow would widen the margin is a plausible follow-up, not a measured result here.
 
 ### What the day proved, and what it didn't
 
@@ -286,12 +306,13 @@ And the sentence that matters most, from Hearth: **the review loop carries ideas
 |---|---|---|
 | **D** | Can review detect the gap between models? | Yes — and locate it precisely (needed the repo-access judge to size it) |
 | **F** | Is there a real model gap at all? | Yes, but small (~5%) and confined to details; the architecture converges regardless of model |
-| **E** | Can review + the cheaper model close the gap? | Yes — to a perfect score, clever ideas included, when the review names the problems |
+| **E** | Can review + Opus close the design gap? | Yes — to a perfect score, clever ideas included, when the review names the problems |
+| **G** | Can MindStone/LCA review workflow get Opus into the Fable 5 shipped-result band on greenfield work? | Directionally yes — harnessed Opus landed in the top band with Fable, while bare Opus trailed on shipping discipline |
 
-**Proved:** with independent, code-grounded review in the loop, the finished artifact comes out the same whichever of these two models you pay for. The process, not the model, is what guarantees the ceiling.
+**Proved directionally:** with independent, code-grounded review and shipping discipline in the loop, Claude Opus 4.8 can ship in the Claude Fable 5 quality band on these tasks. The process does not make models irrelevant; it supplies the review, hygiene, validation, and defect-discovery layer that narrows the shipped-result gap.
 
-**Not proved:** what happens when a review *misses* something. Every point recovered in E sat on something the review named. If your reviewer is weak — or nobody with repo access checks the claims — the ~5% detail gap is presumably yours to keep, and the expensive model may earn its price. Nobody has measured that case yet; it's the honest asterisk.
+**Not proved:** what happens when a review *misses* something. Every point recovered in E sat on something the review named, and the harnessed G arm benefited from live QA. If your reviewer is weak — or nobody with repo access checks the claims — the detail and discipline gap may remain. Nobody has measured that case yet; it's the honest asterisk.
 
-**Other limits, plainly:** one day, one codebase, one kind of task (systems design against a rich existing codebase — greenfield creative work might behave differently), small run counts, and the judges are our own agents (independent, no cross-talk, one with repo access — and the pairing caught real issues four separate times — but still ours).
+**Other limits, plainly:** one codebase-grounded task family plus one greenfield app, small run counts, n=1 for G, mixed-blindness judging, and judges drawn from the same agent ecosystem. The evidence supports the harness/productivity claim; it is not a broad proof that models do not matter.
 
 *Want to check the work? The rules-posted-in-advance and full verdicts are on tickets #28 and #29 and the coordination channel; every document, prompt, hash, model-verification record, and label map is archived in the experiment records. Two process mishaps (the compaction leak and the error-echo) are documented above rather than hidden — they're useful gotchas in their own right.*

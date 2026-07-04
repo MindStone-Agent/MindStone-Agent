@@ -126,6 +126,34 @@ Both judges independently tagged the prompt-surface repair as **ceiling-assisted
 
 None of D, E, or F isolates the **un-named origination gap** — the part of design quality a review *fails to name*. E could not measure it, because D's review happened to name the key origination item. As of these three experiments, that residual is the precise boundary of the convergence claim: constraint-driven architecture converges (F), review detects and localizes the detail gap (D), a comprehensive review closes everything it can name — including carried origination (E). What no probe here measures is how often reviews fail to name what matters. That is stated as the boundary, not papered over.
 
+### G.1 Experiment G — greenfield shipped-result probe
+
+G was added after the D/E/F program because those probes all used existing-codebase work. Clint's measurement target was not “models do not matter.” It was narrower: can MindStone/LCA review workflow move Claude Opus 4.8 into the **Claude Fable 5 quality band** on a greenfield shipped artifact?
+
+**Task.** All arms received the same frozen prompt for **LoopSmith Studio**, a browser-based music creation app combining a visual loop editor with a local algorithmic “Inspire Me” generator. The prompt required actual browser audio, percussion, at least two pitched instruments, tempo/transport controls, editable notes, clean looping, local save/load, JSON import/export, friendly instructions, and no external AI/API/cloud dependency.
+
+**Arms.**
+
+| Codename | Arm | Setup |
+|---|---|---|
+| **Maple** | Fable-bare | Claude Fable 5 in stock Claude Code, clean-room setup |
+| **Cedar** | Opus-bare | Claude Opus 4.8 in stock Claude Code, clean-room setup |
+| **Birch** | Opus-harnessed | Claude Opus 4.8 with MindStone/LCA review workflow and Hearth QA |
+
+**Judging.** Clint, Mira, and Slate judged the final frozen artifacts. Blinding was imperfect: Mira's pass was blind; Slate discovered Birch's identity through the public `f0742bb` commit hash; Cairn and Hearth were sighted participants. Scores therefore support directional interpretation, not hard proof.
+
+| Judge | Birch / Opus-harnessed | Maple / Fable-bare | Cedar / Opus-bare |
+|---|---:|---:|---:|
+| Mira | 100 | 99 | 99 |
+| Slate | 98 | 97 | 85 |
+| Clint | Birch and Maple strongest; Birch edged Maple on education/music quality | Top band | Less complete |
+
+**Agreed interpretation.** G supports the harness/productivity claim: bare Opus 4.8 produced a good greenfield app but trailed bare Fable 5 on shipping-quality/discipline dimensions under Clint+Slate weighting. Harnessed Opus 4.8 landed in the same top quality band as Fable 5. The mechanism matters: the gap was not primarily visible features; it was hygiene, validation depth, and defect discovery — exactly the layer a review harness is designed to supply.
+
+**Important caveat.** The review loop also caught a real defect introduced by the harnessed arm's heavier architecture: a phase-dependent stop/playhead bug caused by Tone.js draw scheduling. Hearth found it, Cairn fixed it, and both later verified the frozen artifact. The bare arms did not have that bug. The honest claim is not that the harness makes every technical choice better; it is that the harness catches defects before shipment and raises shipped confidence.
+
+**Harness scope caveat.** Birch did not use every capability available in the broader MindStone development workflow. It used MS4CC-style memory/checkpoints/ledger discipline, Hearth's live QA/review loop, and verification/ticket-fidelity habits. It did **not** use a formal PRD, a formal design/implementation plan, role adoption, frontend-design MCP assistance, subagent delegation, or a dedicated security-scanner pass. Cairn later clarified that this was not a clean deliberate protocol choice: the review and continuity habits were automatic, while several broader workflow tools were simply not invoked. Therefore G is a conservative datapoint for the harness claim. Whether the fuller workflow would widen the margin is untested.
+
 ### Program summary
 
 | Probe | Isolates | Result | Tier |
@@ -133,7 +161,8 @@ None of D, E, or F isolates the **un-named origination gap** — the part of des
 | **D** | Detection (harness-on, order-confounded) | Repo-grounded review detects and localizes the inter-model gap (blind→sighted delta as direct measurement) | evidenced |
 | **F** | Attribution (harness-off, order-clean, k=2) | Small consistent raw gap favoring Claude Fable 5 (~5%); architecture layer constraint-driven (4-way zero-memory convergence) | suggestive |
 | **E** | Repair (ceiling: perfect review handed over) | Claude Opus 4.8 reaches parity in the shipped artifact, including transported origination | evidenced at ceiling |
+| **G** | Greenfield shipped-result uplift (three-arm app build) | MindStone/LCA review workflow moves Claude Opus 4.8 into Claude Fable 5's judged quality band by supplying shipping discipline | directional |
 
-**Combined limits:** small n throughout; one codebase, one task family (constraint-rich systems design); judges from one agent ecosystem (mitigated by independence + the blind/sighted split, which replicated four times); E is a ceiling, not an average; the un-named origination residual is unmeasured. Deviations across the program (both disclosed at the time): D's compaction-summary contamination and false start; the error-echo exposure post-freeze; E's pre-registration shipped with placeholder hashes, corrected append-only minutes later.
+**Combined limits:** small n throughout; one codebase and one greenfield app; judges from one agent ecosystem; mixed blindness in G; E is a ceiling, not an average; the un-named origination residual is still unmeasured. Deviations across the program were disclosed at the time: D's compaction-summary contamination and false start; the error-echo exposure post-freeze; E's pre-registration shipped with placeholder hashes, corrected append-only minutes later; G's Slate scoring was partially unblinded by the public Birch commit hash.
 
-*Continuation prepared 2026-07-03 immediately after Experiment E's verdicts. All arms' documents, ledgers, briefings, maps, masking scripts, and verification records are retained in the experiment archive; pre-registrations and verdicts live on #28, #29, and the coordination channel.*
+*Continuation prepared 2026-07-03/04 after Experiment G's verdicts. All arms' documents, ledgers, briefings, maps, masking scripts, blinded repos, scorecards, and verification records are retained in the experiment archive; pre-registrations and verdicts live on #28, #29, #34, and the coordination channel.*
