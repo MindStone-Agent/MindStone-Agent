@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-ws-rpc-smoke.XXXXXX")"
-GATEWAY_PORT="19796"
+SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
+GATEWAY_PORT="$((SMOKE_PORT_BASE - 4))"
 SESSION_KEY="agent:default:ws-rpc:direct:smoke"
 
 cleanup() {

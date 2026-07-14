@@ -9,13 +9,14 @@ set -euo pipefail
 #      non-allowlisted sender denied (no unrestricted access by default);
 #      group gated on mention; delivery failure retried by the queue drain
 #   3. bad token fails VISIBLY at startup while the gateway stays healthy
-#   Binds gateway port 19812 + stub port 19813 — serialize per smoke protocol.
+#   Binds gateway port base+12 + stub port base+13 — serialize per smoke protocol.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-telegram-smoke.XXXXXX")"
-GATEWAY_PORT="19812"
-STUB_PORT="19813"
+SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
+GATEWAY_PORT="$((SMOKE_PORT_BASE + 12))"
+STUB_PORT="$((SMOKE_PORT_BASE + 13))"
 STUB_URL="http://127.0.0.1:${STUB_PORT}"
 
 cleanup() {

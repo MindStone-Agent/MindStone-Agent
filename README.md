@@ -547,6 +547,20 @@ npm run smoke:memory-backfill
 npm run smoke:pi-session-runner
 ```
 
+Port-binding smokes derive their listen ports from `MINDSTONE_SMOKE_PORT_BASE`
+(default `19800`, which reproduces the historical fixed ports exactly). Two
+lanes — e.g. a dev checkout and a pinned QA worktree — can run port smokes
+concurrently by exporting different bases:
+
+```bash
+MINDSTONE_SMOKE_PORT_BASE=21800 npm run smoke:rpc
+```
+
+With distinct bases, port smokes no longer need to be serialized between
+lanes; operations that touch the real `.runtime` still do. (`smoke:docker`
+keeps fixed ports — they are container-internal and cannot collide on the
+host.)
+
 Live Pi-session validation is opt-in and uses isolated credentials only:
 
 ```bash

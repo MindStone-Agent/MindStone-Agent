@@ -6,6 +6,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-auth-smoke.XXXXXX")"
 TOKEN="auth-smoke-token"
 PASSWORD="auth-smoke-password"
+SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
 
 cleanup() {
   if [[ -n "${gateway_pid:-}" ]]; then
@@ -71,7 +72,7 @@ stop_gateway() {
 
 echo "-- token auth --"
 set_auth_mode token
-start_gateway_on_port 19790
+start_gateway_on_port "$((SMOKE_PORT_BASE - 10))"
 node <<'NODE'
 const base = `http://127.0.0.1:${process.env.MINDSTONE_AGENT_GATEWAY_PORT}`;
 const token = process.env.MINDSTONE_AGENT_GATEWAY_TOKEN;
@@ -104,7 +105,7 @@ stop_gateway
 
 echo "-- password auth --"
 set_auth_mode password
-start_gateway_on_port 19791
+start_gateway_on_port "$((SMOKE_PORT_BASE - 9))"
 node <<'NODE'
 const base = `http://127.0.0.1:${process.env.MINDSTONE_AGENT_GATEWAY_PORT}`;
 const password = process.env.MINDSTONE_AGENT_GATEWAY_PASSWORD;

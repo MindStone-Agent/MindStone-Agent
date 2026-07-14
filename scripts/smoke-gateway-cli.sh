@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-gateway-cli-smoke.XXXXXX")"
-PORT="19897"
+SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
+PORT="$((SMOKE_PORT_BASE + 97))"
 
 cleanup() {
   MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}" MINDSTONE_AGENT_GATEWAY_PORT="${PORT}" \

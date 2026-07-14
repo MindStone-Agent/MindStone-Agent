@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-webchat-ui-smoke.XXXXXX")"
-GATEWAY_PORT="19802"
+SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
+GATEWAY_PORT="$((SMOKE_PORT_BASE + 2))"
 SESSION_KEY="agent:default:main"
 
 cleanup() {

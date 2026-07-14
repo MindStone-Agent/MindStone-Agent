@@ -12,12 +12,13 @@ set -euo pipefail
 #      fetched at INGEST TIME ONLY (fetch counter); recall documents are
 #      labeled REFERENCE MATERIAL, not memory (AC3) and carry origin +
 #      sensitivity metadata — asserted on a real mock-routed chat turn
-#   Binds stub port 19822 — serialize per smoke protocol (no gateway needed).
+#   Binds stub port base+22 — serialize per smoke protocol (no gateway needed).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-kbsrc-smoke.XXXXXX")"
-STUB_PORT="19822"
+SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
+STUB_PORT="$((SMOKE_PORT_BASE + 22))"
 STUB_URL="http://127.0.0.1:${STUB_PORT}"
 
 cleanup() {

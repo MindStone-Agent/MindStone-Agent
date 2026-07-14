@@ -9,12 +9,13 @@ set -euo pipefail
 #      spool -> access -> trigger -> session/source metadata -> route (mock)
 #      -> delivery queue -> outbox
 #   3. connector failures surface in doctor/status WITHOUT crashing the gateway
-#   Binds gateway port 19811 — serialize per smoke protocol.
+#   Binds gateway port base+11 — serialize per smoke protocol.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-connector-smoke.XXXXXX")"
-GATEWAY_PORT="19811"
+SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
+GATEWAY_PORT="$((SMOKE_PORT_BASE + 11))"
 
 cleanup() {
   if [[ -n "${gateway_pid:-}" ]]; then

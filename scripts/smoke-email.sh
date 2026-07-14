@@ -16,13 +16,14 @@ set -euo pipefail
 #      delivery failure -> retried by the queue drain
 #   3. bad refresh token fails VISIBLY at startup while the gateway stays up
 #   4. status/doctor visibility without leaking any of the three secrets
-#   Binds gateway port 19818 + stub port 19819 — serialize per smoke protocol.
+#   Binds gateway port base+18 + stub port base+19 — serialize per smoke protocol.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-email-smoke.XXXXXX")"
-GATEWAY_PORT="19818"
-STUB_PORT="19819"
+SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
+GATEWAY_PORT="$((SMOKE_PORT_BASE + 18))"
+STUB_PORT="$((SMOKE_PORT_BASE + 19))"
 STUB_URL="http://127.0.0.1:${STUB_PORT}"
 
 cleanup() {

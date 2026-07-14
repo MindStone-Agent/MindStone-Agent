@@ -8,13 +8,14 @@ set -euo pipefail
 #      WebSocket): DM reply, envelope acks, fail-closed allowlist, channel
 #      reply THREADED on the triggering message, delivery retry via the queue
 #   3. bad bot token fails VISIBLY at startup while the gateway stays healthy
-#   Binds gateway port 19814 + stub port 19815 — serialize per smoke protocol.
+#   Binds gateway port base+14 + stub port base+15 — serialize per smoke protocol.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-slack-smoke.XXXXXX")"
-GATEWAY_PORT="19814"
-STUB_PORT="19815"
+SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
+GATEWAY_PORT="$((SMOKE_PORT_BASE + 14))"
+STUB_PORT="$((SMOKE_PORT_BASE + 15))"
 STUB_URL="http://127.0.0.1:${STUB_PORT}"
 
 cleanup() {
