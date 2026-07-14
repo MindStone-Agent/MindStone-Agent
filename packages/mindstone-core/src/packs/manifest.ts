@@ -88,24 +88,31 @@ export function parsePackManifest(raw: unknown): ManifestValidation {
 }
 
 /**
- * Prompt-surface derivation, rule 1 (§4): every archive-relative path matching
- * personas/<asterisk>/PERSONA.md, personas/<asterisk>/safety.md, skills/<asterisk>/SKILL.md, the declared
- * identitySeed, and every *.md under the declared memorySeeds path — as a
- * byte-wise-sorted list of POSIX relative paths. Implemented identically at
- * build and install so the two derivations cannot drift.
+ * Prompt-surface derivation, rule 1 (§4): EVERY archive-relative path whose
+ * name ends in `.md` (case-insensitive), plus the declared identitySeed even
+ * if it is not markdown — as a byte-wise-sorted list of POSIX relative paths.
+ * Implemented identically at build and install so the two derivations cannot
+ * drift.
+ *
+ * Loader-agnostic and exhaustive by DESIGN (adversarial QA #28, Findings 1 & 2):
+ * the runtime loaders that inject markdown into the model context — persona /
+ * safety overlays, skill SKILL.md, memory-seed recall (case-INsensitive:
+ * `EVIL.MD` loads), and knowledgebase markdown source ingestion under each
+ * knowledgebases/<id>/sources/ dir — do not share one hand-listed subset, so
+ * a hand-listed subset always risks
+ * missing a file a loader will inject. Enumerating every `.md` case-
+ * insensitively closes that gap; over-listing a non-loaded `.md` is harmless
+ * (the integrity check is exact-match), but missing a loaded one is the whole
+ * integrity hole. Prompt text embedded in JSON artifacts (workflow steps,
+ * skill.json fields, kb.json) remains covered by per-file digests and
+ * whole-artifact review, per §4.
  */
 export function derivePromptSurfaces(manifest: PackManifest, archivePaths: string[]): string[] {
   const surfaces = new Set<string>();
-  const memorySeeds = manifest.artifacts.memorySeeds
-    ? manifest.artifacts.memorySeeds.replace(/\/+$/, "") + "/"
-    : undefined;
   for (const path of archivePaths) {
-    if (/^personas\/[^/]+\/PERSONA\.md$/.test(path)) surfaces.add(path);
-    else if (/^personas\/[^/]+\/safety\.md$/.test(path)) surfaces.add(path);
-    else if (/^skills\/[^/]+\/SKILL\.md$/.test(path)) surfaces.add(path);
-    else if (manifest.artifacts.identitySeed && path === manifest.artifacts.identitySeed) surfaces.add(path);
-    else if (memorySeeds && path.startsWith(memorySeeds) && path.endsWith(".md")) surfaces.add(path);
+    if (path.toLowerCase().endsWith(".md")) surfaces.add(path);
   }
+  if (manifest.artifacts.identitySeed) surfaces.add(manifest.artifacts.identitySeed);
   return [...surfaces].sort();
 }
 
@@ -134,8 +141,11 @@ const SECRET_PATTERNS: Array<{ re: RegExp; label: string }> = [
 export function denylistScan(files: TarFile[]): string[] {
   const findings: string[] = [];
   for (const file of files) {
-    if (/\.(sh|bash|zsh|ps1|exe|dylib|so|bin)$/.test(file.path) && !file.path.startsWith("deploy/")) {
-      findings.push(`${file.path}: executable content outside deploy/`);
+    // Executable/interpreter content outside deploy/ (agent class). Content packs
+    // ship inert data (markdown, JSON) — anything runnable is suspect. Broadened
+    // past shells/binaries to interpreter scripts (adversarial QA #28, Finding 5).
+    if (/\.(sh|bash|zsh|ps1|psm1|exe|dylib|so|bin|py|rb|pl|js|mjs|cjs|bat|cmd|com|scpt|command|jar|war|app)$/i.test(file.path) && !file.path.startsWith("deploy/")) {
+      findings.push(`${file.path}: executable/interpreter content outside deploy/`);
       continue;
     }
     // Only scan text-ish payloads; digests protect binary integrity regardless.

@@ -279,6 +279,17 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
     if (storePath) installPlan.set(file.path, storePath);
   }
 
+  // Refuse a malformed archive where one entry is a file AND a directory
+  // prefix of another (e.g. `personas/foo` alongside `personas/foo/PERSONA.md`)
+  // — those cannot coexist on a filesystem and would throw mid-COMMIT
+  // (adversarial QA #28, Finding 3). Caught here so we never touch live stores.
+  const planPaths = [...installPlan.values()].sort();
+  for (let i = 0; i < planPaths.length - 1; i += 1) {
+    if (planPaths[i + 1].startsWith(`${planPaths[i]}/`)) {
+      return { ok: false, errors: [`malformed archive: "${planPaths[i]}" is both a file and a directory prefix of "${planPaths[i + 1]}"`] };
+    }
+  }
+
   return { ok: true, staged: { manifest, files, archiveDigest, trusted, installPlan }, warnings };
 }
 
@@ -379,68 +390,85 @@ export async function installPackArchive(archivePath: string, options: PackInsta
   const refusal = await safetyGate(staged, packPaths, options);
   if (refusal) return { ok: false, errors: refusal };
 
-  // Step 10 — COMMIT.
+  // Step 10 — COMMIT. Transactional (adversarial QA #28, Finding 3): every
+  // live-store write is tracked, and ANY failure before the receipt lands
+  // rolls the whole set back so the runtime is left exactly as it was — no
+  // orphaned, receipt-less, loadable artifacts. The installedDir (payload +
+  // pack.json) is also removed on failure so a re-run stages cleanly.
   const summary: string[] = [];
   const receiptFiles: PackReceiptFile[] = [];
-  for (const [archiveFilePath, storePath] of staged.installPlan) {
-    const data = staged.files.find((file) => file.path === archiveFilePath)?.data as Buffer;
-    const liveTarget = join(runtimePaths.dataDir, storePath);
-    mkdirSync(dirname(liveTarget), { recursive: true });
-    if (userBackups.includes(storePath)) {
-      copyFileSync(liveTarget, `${liveTarget}.user-backup`);
-      summary.push(`preserved user file: ${storePath} -> ${storePath}.user-backup`);
-    }
-    writeFileSync(liveTarget, data);
-    receiptFiles.push({ storePath, archivePath: archiveFilePath, sha256AtInstall: sha256Hex(data), currentStatus: "owned" });
-  }
-
-  // Memory seeds — first install only, never overwrite existing memory.
+  const written: string[] = [];
+  const installedDir = installedPackDir(packPaths, manifest.id);
   let seededAt: string | undefined;
   const seededFiles: string[] = [];
-  const memorySeedsRoot = manifest.artifacts.memorySeeds?.replace(/\/+$/, "");
-  if (memorySeedsRoot) {
+  try {
+    for (const [archiveFilePath, storePath] of staged.installPlan) {
+      const data = staged.files.find((file) => file.path === archiveFilePath)?.data as Buffer;
+      const liveTarget = join(runtimePaths.dataDir, storePath);
+      mkdirSync(dirname(liveTarget), { recursive: true });
+      if (userBackups.includes(storePath)) {
+        copyFileSync(liveTarget, `${liveTarget}.user-backup`);
+        summary.push(`preserved user file: ${storePath} -> ${storePath}.user-backup`);
+      }
+      writeFileSync(liveTarget, data);
+      written.push(liveTarget);
+      receiptFiles.push({ storePath, archivePath: archiveFilePath, sha256AtInstall: sha256Hex(data), currentStatus: "owned" });
+    }
+
+    // Memory seeds — first install only, never overwrite existing memory.
+    const memorySeedsRoot = manifest.artifacts.memorySeeds?.replace(/\/+$/, "");
+    if (memorySeedsRoot) {
+      for (const file of staged.files) {
+        if (!file.path.startsWith(`${memorySeedsRoot}/`)) continue;
+        const relativeSeed = file.path.slice(memorySeedsRoot.length + 1);
+        const target = join(runtimePaths.memoryDir, relativeSeed);
+        if (existsSync(target)) { summary.push(`memory seed skipped (exists): ${relativeSeed}`); continue; }
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, file.data);
+        written.push(target);
+        seededFiles.push(relativeSeed);
+      }
+      if (seededFiles.length > 0) {
+        seededAt = new Date().toISOString();
+        summary.push(`memory seeds applied (first install): ${seededFiles.length} file(s)`);
+      }
+    }
+
+    mkdirSync(join(installedDir, "payload"), { recursive: true });
     for (const file of staged.files) {
-      if (!file.path.startsWith(`${memorySeedsRoot}/`)) continue;
-      const relativeSeed = file.path.slice(memorySeedsRoot.length + 1);
-      const target = join(runtimePaths.memoryDir, relativeSeed);
-      if (existsSync(target)) { summary.push(`memory seed skipped (exists): ${relativeSeed}`); continue; }
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, file.data);
-      seededFiles.push(relativeSeed);
+      const payloadTarget = join(installedDir, "payload", file.path);
+      mkdirSync(dirname(payloadTarget), { recursive: true });
+      writeFileSync(payloadTarget, file.data);
     }
-    if (seededFiles.length > 0) {
-      seededAt = new Date().toISOString();
-      summary.push(`memory seeds applied (first install): ${seededFiles.length} file(s)`);
+    writeFileSync(join(installedDir, "pack.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+
+    const receipt: PackReceipt = {
+      packId: manifest.id,
+      version: manifest.version,
+      archiveDigest: staged.archiveDigest,
+      installedAt: new Date().toISOString(),
+      trusted: staged.trusted,
+      ...(options.acceptRevoked && manifest.safety.reviewStatus === "revoked" ? { revokedOverride: true } : {}),
+      ...(seededAt ? { seededAt, seededFiles } : {}),
+      files: receiptFiles,
+    };
+    writeReceipt(packPaths, receipt);
+
+    const lock = readPackLock(packPaths);
+    lock.packs = [
+      ...lock.packs.filter((entry) => entry.id !== manifest.id),
+      { id: manifest.id, version: manifest.version, digest: staged.archiveDigest, installedAt: receipt.installedAt, trusted: staged.trusted, channel: manifest.updates?.channel ?? "stable" },
+    ].sort((a, b) => a.id.localeCompare(b.id));
+    writePackLock(packPaths, lock);
+  } catch (error) {
+    // Roll back every live-store write; drop the half-written installedDir.
+    for (const path of written) {
+      try { unlinkSync(path); removeEmptyDirs(dirname(path), runtimePaths.dataDir); removeEmptyDirs(dirname(path), runtimePaths.memoryDir); } catch { /* best-effort */ }
     }
+    rmSync(installedDir, { recursive: true, force: true });
+    clearStaging(packPaths, manifest.id);
+    return { ok: false, errors: [`install aborted and rolled back (no partial state): ${error instanceof Error ? error.message : String(error)}`] };
   }
-
-  const installedDir = installedPackDir(packPaths, manifest.id);
-  mkdirSync(join(installedDir, "payload"), { recursive: true });
-  for (const file of staged.files) {
-    const payloadTarget = join(installedDir, "payload", file.path);
-    mkdirSync(dirname(payloadTarget), { recursive: true });
-    writeFileSync(payloadTarget, file.data);
-  }
-  writeFileSync(join(installedDir, "pack.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-
-  const receipt: PackReceipt = {
-    packId: manifest.id,
-    version: manifest.version,
-    archiveDigest: staged.archiveDigest,
-    installedAt: new Date().toISOString(),
-    trusted: staged.trusted,
-    ...(options.acceptRevoked && manifest.safety.reviewStatus === "revoked" ? { revokedOverride: true } : {}),
-    ...(seededAt ? { seededAt, seededFiles } : {}),
-    files: receiptFiles,
-  };
-  writeReceipt(packPaths, receipt);
-
-  const lock = readPackLock(packPaths);
-  lock.packs = [
-    ...lock.packs.filter((entry) => entry.id !== manifest.id),
-    { id: manifest.id, version: manifest.version, digest: staged.archiveDigest, installedAt: receipt.installedAt, trusted: staged.trusted, channel: manifest.updates?.channel ?? "stable" },
-  ].sort((a, b) => a.id.localeCompare(b.id));
-  writePackLock(packPaths, lock);
   clearStaging(packPaths, manifest.id);
 
   summary.unshift(`installed ${manifest.id}@${manifest.version} — ${receiptFiles.length} file(s) into ${[...new Set(receiptFiles.map((file) => file.storePath.split("/")[0]))].join(", ")}`);
@@ -472,9 +500,19 @@ async function applyUpdate(
     const prior = previousByStore.get(storePath);
 
     if (!prior) {
-      // New artifact file in the new version — install normally (collision rules still apply).
+      // New artifact file in the new version. Collision rules still apply — and
+      // (adversarial QA #28, Finding 4) a pre-existing UN-owned user file must
+      // never be silently clobbered here the way the first-install path would
+      // refuse it. Another pack's file → refuse; a user-authored file → keep it,
+      // stage the incoming version as .pack-new, surface a conflict.
       const owner = findOwningPack(packPaths, storePath, manifest.id);
       if (owner) return { ok: false, errors: [`artifact collision on update: ${storePath} is owned by ${owner}`] };
+      if (existsSync(liveTarget)) {
+        writeFileSync(`${liveTarget}.pack-new`, data);
+        receiptFiles.push({ storePath, archivePath: archiveFilePath, sha256AtInstall: sha256Hex(readFileSync(liveTarget)), currentStatus: "conflict", incomingSha256: incomingSha });
+        conflicts.push(`${storePath} (pre-existing user file; incoming version at ${storePath}.pack-new)`);
+        continue;
+      }
       mkdirSync(dirname(liveTarget), { recursive: true });
       writeFileSync(liveTarget, data);
       receiptFiles.push({ storePath, archivePath: archiveFilePath, sha256AtInstall: incomingSha, currentStatus: "owned" });
