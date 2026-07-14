@@ -46,6 +46,10 @@ const hostile = [
   ["nan-hits", { hits: "NaN", prevented: "NaN" }],
   ["garbage", { hits: "over 9000", prevented: "lots", half_life_days: "yes" }],
   ["huge", { hits: "999999999999", prevented: "1000000" }],
+  // Finite-but-huge prevented in the >5.99e307 band: 3*prevented would overflow
+  // to +Infinity and yield NaN preventedBoost -> score collapse (QA #36 F1).
+  ["overflow-prevented", { hits: "1", prevented: "1e308" }],
+  ["max-value-prevented", { hits: "0", prevented: "1.7976931348623157e308" }],
   ["neg-halflife", { hits: "10", prevented: "1", half_life_days: "-30", last_applied: "not-a-date" }],
   ["weird-critical", { critical: "TRUEish", evergreen: 42 }],
   ["null-ish", { hits: null, prevented: undefined, last_applied: null }],
@@ -75,10 +79,24 @@ const weak = rankMemoryHitsWithScri([
 if (weak.hits[0].id !== "old-odometer2") { console.error("parity: prevented=1 should NOT beat hits=2400"); process.exit(1); }
 console.log("parity battery 2 ok: authority anchors hold");
 
-// 3. Usage logger is fail-open: unwritable path must not throw.
+// 3. Manual path logs the shared schema with authority_factor:null (raw, unweighted).
+const os = await import("node:os");
+const nodefs = await import("node:fs");
+const tmpMem = nodefs.mkdtempSync(`${os.tmpdir()}/scri-manual-`);
+process.env.MINDSTONE_AGENT_MEMORY_DIR = tmpMem;
+logRecallUsage("manual", "manual battery query", swamp.hits, new Set());
+const manualLog = `${tmpMem}/recall-usage.jsonl`;
+if (!nodefs.existsSync(manualLog)) { console.error("manual path wrote no usage log"); process.exit(1); }
+const manualLines = nodefs.readFileSync(manualLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+if (!manualLines.every((l) => l.path === "manual" && l.authority_factor === null)) { console.error("manual log must be path:manual, authority_factor:null (raw)", manualLines); process.exit(1); }
+nodefs.rmSync(tmpMem, { recursive: true, force: true });
+console.log("parity battery 3 ok: manual path logs shared schema, authority_factor null (raw)");
+
+// 4. Usage logger is fail-open: unwritable path must not throw (auto OR manual).
 process.env.MINDSTONE_AGENT_MEMORY_DIR = "/dev/null/nope";
 logRecallUsage("auto", "battery query", swamp.hits, new Set());
-console.log("parity battery 3 ok: usage logger fail-open on unwritable path");
+logRecallUsage("manual", "battery query", swamp.hits, new Set());
+console.log("parity battery 4 ok: usage logger fail-open on unwritable path (auto + manual)");
 NODE
 
 node <<'NODE'

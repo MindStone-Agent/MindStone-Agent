@@ -14,10 +14,14 @@
  * post-ranking position, and `authority_factor` the composite SCRI re-rank
  * ratio (finalScore / providerScore) — the closest analogue of the reference
  * implementation's multiplicative factor in an additive-boost architecture
- * (null when the provider score is 0). This substrate has no manual
- * memory-search surface today; if one lands it MUST log path:"manual" with
- * authority_factor null and stay raw-ranked (manual/CLI recall is
- * deliberately unweighted — Clint's 2026-06-10 ruling).
+ * (null when the provider score is 0).
+ *
+ * Two paths log here. The AUTO path (per-turn recall, recall.ts) is
+ * authority-re-ranked and logs authority_factor. The MANUAL path (the
+ * pi-adapter's on-demand `memory search`, which queries the SAME memory
+ * corpus) logs path:"manual" with authority_factor:null and stays
+ * RAW-ranked — manual/CLI recall is deliberately unweighted (Clint's
+ * 2026-06-10 ruling). Any future manual surface must follow the same rule.
  */
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";

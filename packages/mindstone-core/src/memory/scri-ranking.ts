@@ -135,6 +135,11 @@ const HITS_BOOST_CAP = 0.02;
 const PREVENTED_WEIGHT = 3;
 const PREVENTED_SAT_K = 12;
 const PREVENTED_BOOST_CAP = 0.07;
+// Algebraic half of the 3:1 saturation: 3p/(3p+12) === p/(p+4). We divide by
+// this rather than multiplying prevented by 3 first, so a huge-but-finite
+// prevented (e.g. 1e308) can never overflow the intermediate to +Infinity and
+// yield NaN. (Adversarial QA #36, Finding 1.)
+const PREVENTED_SAT_HALF = PREVENTED_SAT_K / PREVENTED_WEIGHT;
 
 function usageBoost(hit: MemoryHit): { hitsBoost: number; preventedBoost: number; reasons: string[] } {
   const hits = Math.max(0, numberValue(hit.metadata?.hits) ?? 0);
@@ -142,8 +147,8 @@ function usageBoost(hit: MemoryHit): { hitsBoost: number; preventedBoost: number
   const reasons: string[] = [];
   const hitsBoost = hits > 0 ? Math.min(HITS_BOOST_CAP, Math.log1p(hits) * HITS_BOOST_SCALE) : 0;
   if (hitsBoost > 0) reasons.push("usage");
-  const preventedRaw = PREVENTED_WEIGHT * prevented;
-  const preventedBoost = prevented > 0 ? PREVENTED_BOOST_CAP * (preventedRaw / (preventedRaw + PREVENTED_SAT_K)) : 0;
+  // 3p/(3p+12) rewritten as p/(p+4): identical for realistic values, overflow-proof.
+  const preventedBoost = prevented > 0 ? PREVENTED_BOOST_CAP * (prevented / (prevented + PREVENTED_SAT_HALF)) : 0;
   if (preventedBoost > 0) reasons.push("prevented-authority");
   return { hitsBoost, preventedBoost, reasons };
 }

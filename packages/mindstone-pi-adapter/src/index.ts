@@ -7,6 +7,7 @@ import {
   getSqliteMemoryIndexStats,
   listTranscriptSessions,
   loadMindStoneConfig,
+  logRecallUsage,
   loadMindStoneIdentity,
   recallMindStoneMemory,
   resolveConfigPath,
@@ -575,6 +576,12 @@ async function memorySearchMessage(query: string, limit: number): Promise<{ text
     };
   }
   const hits = await provider.search({ text: query, limit });
+  // Manual/on-demand recall stays RAW (no authority ranking — Clint's 2026-06-10
+  // ruling); but it IS instrumented, path:"manual" with authority_factor:null,
+  // so auto-vs-manual pull can be compared empirically (#36 AC, shared schema).
+  // "injected" is false here: manual search displays results, it does not inject
+  // them into a model turn. Fail-open logger — never breaks the search path.
+  logRecallUsage("manual", query, hits, new Set());
   return {
     text: [
       `MindStone recall search: ${query}`,
