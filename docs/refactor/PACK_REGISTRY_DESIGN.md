@@ -1,7 +1,9 @@
 # Pack Registry and Marketplace — Design
 
 **Ticket:** #28 — Pack registry and marketplace design
-**Status:** DESIGN ONLY — nothing in this document is implemented. Repo baseline: `origin/main` @ `4e6502cb`. The `packs` subsystem is greenfield.
+**Status:** **Phase 1 (local content-pack lifecycle) IMPLEMENTED + smoke-tested.** Phases 2–5 (registry client, agent packs, entitlements, marketplace site) remain design-only. See §16 for the current per-subject claim table. Design baseline: `4e6502cb`.
+
+> **Phase 1 as-built (the AC2 path):** `packages/mindstone-core/src/packs/` (manifest validator, ed25519 signing, in-memory ustar+gzip with the extraction guard, dependency-free SemVer, staged install/update/remove/verify with receipts, build tool) + `mindstone packs` CLI noun + `packs` config section + `packs.{catalog,integrity,trust,compat}` doctor checks + `pack_installed`/`pack_updated`/`pack_removed` transcript events. Proven by `smoke:packs` (10 legs: signed roundtrip, user-modify→update→conflict→remove-retains-user-file, tampered-sig refusal, unsigned two-act hatch, zip-slip refusal, collision refusal + --force backup, promptSurfaces-mismatch refusal, verify drift detection, doctor surfacing). No network path exists yet by construction.
 **Provenance:** the judged deliverable of a pre-registered two-candidate design A/B (see the 2026-07-03 addendum in `docs/case-studies/lca-orchestration-vs-model-capability.md`); synthesized from the winning candidate plus the reviewers' recommended imports and fixes from the runner-up.
 **Relation to prior work:** Refines and supersedes the registry/packaging portions (§5–§10) of the planning draft `docs/refactor/AGENT_PACKS.md`. Product naming, commercial framing, and Docker-stack material from that draft are adopted where still accurate and sharpened where this design makes a concrete call.
 
@@ -517,8 +519,11 @@ Claim-status table as of baseline `4e6502cb`, using the project claim taxonomy (
 
 | Subject | Honest status |
 |---|---|
-| Pack registry, marketplace, `mindstone packs` CLI, manifest, signing, entitlements | **pending — design only (this doc).** Nothing implemented. |
-| Agent Packs / Persona Packs as products | **pending** — planning draft + this design; no pack exists |
+| Local content-pack lifecycle: `mindstone packs` (install/update/remove/verify/status/inspect/build/keygen/trust-add), manifest schema + validator, ed25519 signing, staged install with the extraction guard, receipts, doctor checks, transcript events | **implemented + smoke-tested** (`smoke:packs`, 10 legs). No live-registry, no live-LLM claims. |
+| Registry client, static signed index, free-pack distribution | **pending — design only** (Phase 2). No network path exists in code. |
+| Agent Packs (Docker stack + image verification) | **pending — design only** (Phase 3); `class:"agent"` install is refused with a "Phase 3" error today |
+| Entitlements / private registry / marketplace site | **pending — design only** (Phases 4–5) |
+| Agent Packs / Persona Packs as products | **pending** — no published pack exists yet |
 | Personas, skills, KBs, workflows (the stores packs install into) | implemented + smoke-tested per their own docs; no live-LLM claims |
 | Approvals framework packs would extend for model-proposed ops | implemented + smoke-tested (#21/#22); the `pack_install` kind is **post-MVP** |
 

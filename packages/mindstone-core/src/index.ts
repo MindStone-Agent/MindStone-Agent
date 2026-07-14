@@ -13,6 +13,7 @@ export * from "./memory/index.js";
 export * from "./scri/types.js";
 export * from "./channels/index.js";
 export * from "./skills/index.js";
+export * from "./packs/index.js";
 export * from "./wizard/prompter.js";
 export * from "./wizard/config.js";
 export * from "./routing/session.js";

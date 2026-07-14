@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { resolveContextManagementPolicy } from "../context/index.js";
 import { loadConfiguredIdentities } from "../identity/index.js";
 import { getCurrentHandoffStatus } from "../lifecycle/index.js";
@@ -8,6 +9,10 @@ import { resolveDefaultSessionKey } from "../routing/session.js";
 import { discoverMindStonePersonas, loadMindStonePersona, personasDirFromConfig } from "../persona/index.js";
 import { discoverMindStoneSkills, skillsDirFromConfig } from "../skills/index.js";
 import { discoverMindStoneKnowledgebases, knowledgebasesDirFromConfig } from "../knowledgebase/index.js";
+import { harnessVersion, verifyPack } from "../packs/lifecycle.js";
+import { installedPackDir, listInstalledPackIds, listStaleStaging, packPathsFromConfig, readPackLock, readReceipt, readTrustStore } from "../packs/store.js";
+import { satisfiesRange } from "../packs/semver.js";
+import type { PackManifest } from "../packs/types.js";
 import { getConnectorVisibilityStatuses } from "../channels/index.js";
 import { getIsolatedModelsStatus } from "../provider/local-models.js";
 import { getMindStoneGatewayStatus } from "../status/gateway.js";
@@ -436,6 +441,83 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
       ? `${skills.length} skills, ${brokenSkills.length} broken: ${brokenSkills.map((skill) => skill.id).join(", ")}`
       : `${skills.length} skills at ${skillsDir}${draftSkills.length ? ` (${draftSkills.length} draft(s) pending install)` : ""}`,
   );
+
+  // Pack checks (design §9). Never contacts a registry — receipt/lock/trust state only.
+  try {
+    const packPaths = packPathsFromConfig(config, paths);
+    const installedPacks = listInstalledPackIds(packPaths);
+    const staleStaging = listStaleStaging(packPaths);
+    readPackLock(packPaths); // throws on corrupt lock — caught below as packs.catalog fail
+    if (installedPacks.length === 0) {
+      check(
+        checks,
+        staleStaging.length > 0 ? "warn" : "info",
+        "packs.catalog",
+        "No packs installed",
+        staleStaging.length > 0 ? `${staleStaging.length} stale staging dir(s) pending cleanup` : packPaths.packsDir,
+      );
+    } else {
+      check(
+        checks,
+        staleStaging.length > 0 ? "warn" : "pass",
+        "packs.catalog",
+        "Pack receipts load",
+        `${installedPacks.length} pack(s)${staleStaging.length ? `, ${staleStaging.length} stale staging dir(s)` : ""}`,
+      );
+      let userModified = 0;
+      let drift = 0;
+      let conflicts = 0;
+      let unsigned = 0;
+      let revokedOverrides = 0;
+      const incompatible: string[] = [];
+      for (const packId of installedPacks) {
+        const report = verifyPack(packId, { config, paths });
+        if (!("errors" in report)) {
+          userModified += report.files.filter((file) => file.status === "user-modified").length;
+          drift += report.files.filter((file) => file.status === "drift").length + (report.payloadIntact ? 0 : 1);
+          conflicts += report.files.filter((file) => file.status === "conflict-pending").length;
+        }
+        const receipt = readReceipt(packPaths, packId);
+        if (receipt && !receipt.trusted) unsigned += 1;
+        if (receipt?.revokedOverride) revokedOverrides += 1;
+        try {
+          const manifest = JSON.parse(readFileSync(join(installedPackDir(packPaths, packId), "pack.json"), "utf-8")) as PackManifest;
+          if (manifest.engines?.mindstone && !satisfiesRange(harnessVersion(), manifest.engines.mindstone)) incompatible.push(packId);
+        } catch {
+          drift += 1;
+        }
+      }
+      check(
+        checks,
+        drift > 0 ? "fail" : userModified > 0 ? "warn" : conflicts > 0 ? "info" : "pass",
+        "packs.integrity",
+        "Installed pack files match receipts",
+        drift > 0
+          ? `${drift} file(s)/payload(s) with UNEXPLAINED drift — run: mindstone packs verify`
+          : `${userModified} user-modified file(s), ${conflicts} pending .pack-new conflict(s)`,
+      );
+      const trust = readTrustStore(packPaths);
+      const expiredKeys = trust.publishers.filter((key) => key.expiresAt && Date.parse(key.expiresAt) <= Date.now());
+      check(
+        checks,
+        revokedOverrides > 0 ? "fail" : unsigned > 0 || expiredKeys.length > 0 ? "warn" : "pass",
+        "packs.trust",
+        "Pack trust posture",
+        revokedOverrides > 0
+          ? `${revokedOverrides} REVOKED pack(s) installed via override`
+          : `${unsigned} unsigned install(s), ${expiredKeys.length} expired trust key(s)`,
+      );
+      check(
+        checks,
+        incompatible.length > 0 ? "warn" : "pass",
+        "packs.compat",
+        "Installed packs match harness version",
+        incompatible.length > 0 ? `engines unsatisfied after upgrade: ${incompatible.join(", ")}` : `harness ${harnessVersion()}`,
+      );
+    }
+  } catch (error) {
+    check(checks, "fail", "packs.catalog", "Pack state unreadable", error instanceof Error ? error.message : String(error));
+  }
 
   const connectorStatuses = getConnectorVisibilityStatuses(config, { paths });
   if (connectorStatuses.length === 0) {

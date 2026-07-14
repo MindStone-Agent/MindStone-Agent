@@ -66,7 +66,7 @@ import {
 import { MockMindStoneProvider, PiMindStoneProvider, PiSessionAgentRunner, PiSessionMindStoneProvider, calendarProviderFromContext, formatUpcomingEvents } from "@mindstone-agent/gateway";
 import { runTuiCommand } from "./tui.js";
 
-type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "persona" | "skill" | "kb" | "channels" | "approvals" | "calendar" | "status" | "doctor" | "memory" | "help";
+type Command = "chat" | "tui" | "config" | "onboard" | "reset" | "auth" | "gateway" | "identity" | "persona" | "skill" | "kb" | "packs" | "channels" | "approvals" | "calendar" | "status" | "doctor" | "memory" | "help";
 
 const gold = (text: string) => `\x1b[38;5;220m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -100,6 +100,7 @@ function usage(): string {
     "                         Build an integration/channel/tool implementation brief",
     "  mindstone kb          Knowledgebases (list | ingest <id> | search <id> <query> | status [id])",
     "  mindstone persona     List/activate/deactivate persona overlays (list | status | activate <id> | deactivate)",
+    "  mindstone packs       Signed pack lifecycle (list | inspect | install <path.mspack> | remove <id> | verify | status | build | keygen | trust-add) — local-first, no network",
     "  mindstone channels [--json]",
     "                         Show channel/surface catalog without starting listeners",
     "  mindstone approvals   Proposed-action approvals (list [--all] | show <id> | approve <id> [--yes] | reject <id> [--note TEXT])",
@@ -122,7 +123,7 @@ function usage(): string {
 function parseCommand(argv: string[]): Command {
   const raw = argv[2] ?? "help";
   if (raw === "--help" || raw === "-h") return "help";
-  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "persona" || raw === "skill" || raw === "kb" || raw === "channels" || raw === "approvals" || raw === "calendar" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
+  if (raw === "chat" || raw === "tui" || raw === "config" || raw === "onboard" || raw === "reset" || raw === "auth" || raw === "gateway" || raw === "identity" || raw === "persona" || raw === "skill" || raw === "kb" || raw === "packs" || raw === "channels" || raw === "approvals" || raw === "calendar" || raw === "status" || raw === "doctor" || raw === "memory" || raw === "help") return raw;
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
@@ -2154,6 +2155,11 @@ async function main(): Promise<void> {
   }
   if (command === "kb") {
     await runKbCommand(process.argv);
+    return;
+  }
+  if (command === "packs") {
+    const { runPacksCommand } = await import("./packs-command.js");
+    await runPacksCommand(process.argv);
     return;
   }
   if (command === "auth") {

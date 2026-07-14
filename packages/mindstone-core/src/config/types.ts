@@ -1,5 +1,6 @@
 import type { ContextManagementPolicy } from "../context/index.js";
 import type { MemoryDocument, MemoryRecallConfig } from "../memory/index.js";
+import type { MindStonePacksConfigSection } from "../packs/types.js";
 import type { MindStoneSelectedProfile } from "../profile/index.js";
 
 export type GatewayAuthConfig =
@@ -213,6 +214,7 @@ export type MindStoneConfig = {
   workflows?: MindStoneWorkflowsConfigSection;
   skills?: MindStoneSkillsConfigSection;
   knowledgebases?: MindStoneKnowledgebasesConfigSection;
+  packs?: MindStonePacksConfigSection;
   gateway?: {
     host?: string;
     port?: number;
