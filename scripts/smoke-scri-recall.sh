@@ -26,6 +26,61 @@ echo "== SCRI recall ranking/dedup smoke test =="
 npm run build:mindstone
 ./scripts/init-runtime.sh
 
+# --- Ranking parity battery (#36): hostile inputs, authority anchors, fail-open logger ---
+node --input-type=module <<'NODE'
+import { pathToFileURL } from "node:url";
+const rankingUrl = pathToFileURL(`${process.cwd()}/packages/mindstone-core/dist/memory/scri-ranking.js`).href;
+const usageUrl = pathToFileURL(`${process.cwd()}/packages/mindstone-core/dist/memory/recall-usage.js`).href;
+const { rankMemoryHitsWithScri } = await import(rankingUrl);
+const { logRecallUsage } = await import(usageUrl);
+
+const mk = (id, score, metadata, text) => ({
+  id, kind: "custom", text, chunkId: `${id}#0`, sourceId: id, ordinal: 0, score,
+  metadata: { relativePath: `memory/${id}.md`, ...metadata },
+});
+
+// 1. Hostile-input battery: 0 raises, every bound holds.
+const hostile = [
+  ["neg-hits", { hits: "-50", prevented: "-3" }],
+  ["inf-hits", { hits: "1e309", prevented: "2" }],
+  ["nan-hits", { hits: "NaN", prevented: "NaN" }],
+  ["garbage", { hits: "over 9000", prevented: "lots", half_life_days: "yes" }],
+  ["huge", { hits: "999999999999", prevented: "1000000" }],
+  ["neg-halflife", { hits: "10", prevented: "1", half_life_days: "-30", last_applied: "not-a-date" }],
+  ["weird-critical", { critical: "TRUEish", evergreen: 42 }],
+  ["null-ish", { hits: null, prevented: undefined, last_applied: null }],
+];
+const hostileHits = hostile.map(([id, md], i) => mk(id, 0.5, md, `hostile battery case ${i} distinct text ${id}`));
+const hostileResult = rankMemoryHitsWithScri(hostileHits, { dedupAgainstActiveContext: false });
+if (hostileResult.hits.length !== hostile.length) { console.error("hostile: hits dropped"); process.exit(1); }
+for (const h of hostileResult.hits) {
+  if (!Number.isFinite(h.score) || h.score < 0 || h.score > 1) { console.error(`hostile: unbounded score ${h.id}=${h.score}`); process.exit(1); }
+  const s = h.metadata.scri;
+  if (!(s.usageBoost >= 0 && s.usageBoost <= 0.02 + 1e-9)) { console.error(`hostile: usageBoost out of cap ${h.id}=${s.usageBoost}`); process.exit(1); }
+  if (!(s.preventedBoost >= 0 && s.preventedBoost <= 0.07 + 1e-9)) { console.error(`hostile: preventedBoost out of cap ${h.id}=${s.preventedBoost}`); process.exit(1); }
+}
+console.log("parity battery 1 ok: hostile inputs — 0 raises, bounds hold");
+
+// 2. Authority anchors (reference-consistent): prevented=3 outranks hits=2400
+//    at equal similarity; prevented=1 does NOT (matches ms4cc#63 math).
+const swamp = rankMemoryHitsWithScri([
+  mk("old-odometer", 0.5, { prevented: "0", hits: "2400" }, "long-present odometer memory distinct text one"),
+  mk("high-prevented", 0.5, { prevented: "3", hits: "0" }, "memory that stopped three real mistakes distinct"),
+], { dedupAgainstActiveContext: false });
+if (swamp.hits[0].id !== "high-prevented") { console.error("parity: prevented=3 must outrank hits=2400"); process.exit(1); }
+const weak = rankMemoryHitsWithScri([
+  mk("old-odometer2", 0.5, { prevented: "0", hits: "2400" }, "long-present odometer memory distinct text two"),
+  mk("one-prevented", 0.5, { prevented: "1", hits: "0" }, "memory with one prevention credit distinct text"),
+], { dedupAgainstActiveContext: false });
+if (weak.hits[0].id !== "old-odometer2") { console.error("parity: prevented=1 should NOT beat hits=2400"); process.exit(1); }
+console.log("parity battery 2 ok: authority anchors hold");
+
+// 3. Usage logger is fail-open: unwritable path must not throw.
+process.env.MINDSTONE_AGENT_MEMORY_DIR = "/dev/null/nope";
+logRecallUsage("auto", "battery query", swamp.hits, new Set());
+console.log("parity battery 3 ok: usage logger fail-open on unwritable path");
+NODE
+
 node <<'NODE'
 const { readFileSync, writeFileSync } = require("node:fs");
 const path = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone/config.json`;
@@ -118,6 +173,25 @@ if (typeof alpha.providerScore !== "number") process.exit(1);
 if (!alpha.scri || typeof alpha.scri.finalScore !== "number") process.exit(1);
 if (alpha.score <= alpha.providerScore) process.exit(1);
 if (!Array.isArray(alpha.scri.reasons) || !alpha.scri.reasons.includes("critical") || !alpha.scri.reasons.includes("evergreen")) process.exit(1);
+NODE
+
+# Usage instrumentation (#36): the auto path must write the shared-schema JSONL.
+USAGE_LOG="${TEMP_RUNTIME}/mindstone/memory/recall-usage.jsonl"
+test -f "${USAGE_LOG}" || { echo "recall-usage.jsonl missing at ${USAGE_LOG}" >&2; exit 1; }
+USAGE_LOG_PATH="${USAGE_LOG}" node <<'NODE'
+const { readFileSync } = require("node:fs");
+const lines = readFileSync(process.env.USAGE_LOG_PATH, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+if (lines.length < 1) process.exit(1);
+const required = ["ts", "path", "query", "source_type", "source_path", "chunk_id", "similarity", "rank", "authority_factor", "injected"];
+for (const line of lines) {
+  for (const key of required) {
+    if (!(key in line)) { console.error(`usage log missing field ${key}: ${JSON.stringify(line)}`); process.exit(1); }
+  }
+}
+if (!lines.every((l) => l.path === "auto")) { console.error("usage log: non-auto path on the auto route"); process.exit(1); }
+if (!lines.some((l) => l.injected === true)) { console.error("usage log: no injected=true record"); process.exit(1); }
+if (!lines.some((l) => typeof l.authority_factor === "number" && l.authority_factor > 0)) { console.error("usage log: no positive authority_factor"); process.exit(1); }
+console.log(`usage log ok: ${lines.length} line(s), shared schema complete, auto path, injected present`);
 NODE
 
 echo "SCRI recall ranking/dedup smoke test passed."

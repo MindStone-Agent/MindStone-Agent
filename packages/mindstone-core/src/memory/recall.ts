@@ -10,6 +10,7 @@ import type {
   MemoryRecallResult,
 } from "./types.js";
 import { rankMemoryHitsWithScri } from "./scri-ranking.js";
+import { logRecallUsage } from "./recall-usage.js";
 
 export type MemoryRecallInput = {
   agentId: string;
@@ -160,6 +161,10 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
   }
 
   const prompt = buildMemoryRecallPrompt(hits, maxPromptTokens);
+  // Usage instrumentation (#36): log every ranked candidate with its injected
+  // flag. This is the AUTO path by definition (per-turn recall); logging is
+  // NOT weighting and the logger is fail-open, so recall never breaks on it.
+  logRecallUsage("auto", query, ranked.hits, new Set(prompt.hits.map((hit) => hit.chunkId)));
   return {
     query,
     hits: prompt.hits,

@@ -7,7 +7,10 @@ export type ScriScoreBreakdown = {
   sourceBoost: number;
   criticalBoost: number;
   evergreenBoost: number;
+  /** Dampened hits-odometer contribution (log1p, capped low). */
   usageBoost: number;
+  /** Human-confirmed mistake-prevention authority contribution (bounded saturation). */
+  preventedBoost: number;
   recencyBoost: number;
   finalScore: number;
   reasons: string[];
@@ -117,12 +120,32 @@ function recencyBoost(hit: MemoryHit, now = Date.now()): { boost: number; reason
   return { boost: 0.04 * decay, reason: "recency" };
 }
 
-function usageBoost(hit: MemoryHit): { boost: number; reason?: string } {
+// Usage/authority tunables (recall ranking parity — #36, spec: ms4cc#63).
+// `hits` is an age-odometer: it accumulates with a memory's PRESENCE over time,
+// not its usefulness, so it enters dampened (log1p) and capped LOW. `prevented`
+// is the human-confirmed "this memory stopped a real mistake" signal: weighted
+// OUTSIDE the log (3:1, matching the reference impl) through a bounded
+// saturation, so an old memory's odometer can never numerically swamp it and a
+// runaway value can never dominate the score. Behavioral anchor from the
+// reference battery: prevented=3 outranks hits=2400 at equal similarity
+// (3*3=9 > log1p(2400)=7.78 there; 0.030 > 0.020-cap here), while prevented=1
+// still loses to that odometer in both implementations.
+const HITS_BOOST_SCALE = 0.004;
+const HITS_BOOST_CAP = 0.02;
+const PREVENTED_WEIGHT = 3;
+const PREVENTED_SAT_K = 12;
+const PREVENTED_BOOST_CAP = 0.07;
+
+function usageBoost(hit: MemoryHit): { hitsBoost: number; preventedBoost: number; reasons: string[] } {
   const hits = Math.max(0, numberValue(hit.metadata?.hits) ?? 0);
   const prevented = Math.max(0, numberValue(hit.metadata?.prevented) ?? 0);
-  if (hits === 0 && prevented === 0) return { boost: 0, reason: undefined };
-  const boost = Math.min(0.06, Math.log1p(hits + prevented * 2) * 0.015);
-  return { boost, reason: "proven-usefulness" };
+  const reasons: string[] = [];
+  const hitsBoost = hits > 0 ? Math.min(HITS_BOOST_CAP, Math.log1p(hits) * HITS_BOOST_SCALE) : 0;
+  if (hitsBoost > 0) reasons.push("usage");
+  const preventedRaw = PREVENTED_WEIGHT * prevented;
+  const preventedBoost = prevented > 0 ? PREVENTED_BOOST_CAP * (preventedRaw / (preventedRaw + PREVENTED_SAT_K)) : 0;
+  if (preventedBoost > 0) reasons.push("prevented-authority");
+  return { hitsBoost, preventedBoost, reasons };
 }
 
 export function rankMemoryHitsWithScri(
@@ -167,19 +190,20 @@ export function rankMemoryHitsWithScri(
       if (evergreenBoost) reasons.push("evergreen");
 
       const usage = usageBoost(hit);
-      if (usage.reason) reasons.push(usage.reason);
+      reasons.push(...usage.reasons);
 
       const recency = recencyBoost(hit);
       if (recency.reason && recency.boost > 0) reasons.push(recency.reason);
 
-      const finalScore = clamp01((providerScore * 0.78) + kindBoost + source.boost + criticalBoost + evergreenBoost + usage.boost + recency.boost);
+      const finalScore = clamp01((providerScore * 0.78) + kindBoost + source.boost + criticalBoost + evergreenBoost + usage.hitsBoost + usage.preventedBoost + recency.boost);
       const scri: ScriScoreBreakdown = {
         providerScore,
         kindBoost,
         sourceBoost: source.boost,
         criticalBoost,
         evergreenBoost,
-        usageBoost: usage.boost,
+        usageBoost: usage.hitsBoost,
+        preventedBoost: usage.preventedBoost,
         recencyBoost: recency.boost,
         finalScore,
         reasons,

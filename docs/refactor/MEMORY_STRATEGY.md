@@ -88,6 +88,32 @@ The recall block is not appended as standing context. The next turn recomputes r
 
 This gives MindStone the benefit of memory resonance without letting prompt context grow unbounded.
 
+#### Authority ranking parity (#36, cross-substrate spec: mindstone-for-claude-code#63)
+
+Two invariants inside the SCRI ranking, shared with the MS4CC reference
+implementation:
+
+- **`hits` is an age-odometer, not a usefulness signal** — it accumulates with
+  a memory's presence over time. It enters ranking only dampened
+  (`log1p(hits)`) and capped low.
+- **`prevented` is the human-confirmed authority signal** ("this memory stopped
+  a real mistake"). It is weighted OUTSIDE the log (3:1, matching the
+  reference), through a bounded saturation, so an old memory's odometer can
+  never numerically swamp it and a runaway value can never dominate the score.
+  Behavioral anchor: `prevented: 3` outranks `hits: 2400` at equal similarity;
+  `prevented: 1` does not (both match the reference math).
+
+The similarity gate (`minScore`) runs BEFORE ranking, so authority only
+reorders already-relevant hits — it can never surface sub-threshold noise.
+
+**Usage instrumentation (logging ≠ weighting):** every ranked candidate on the
+auto path is appended, fail-open, to `<dataDir>/memory/recall-usage.jsonl`
+using the shared cross-substrate schema (`ts, path, query, source_type,
+source_path, chunk_id, similarity, rank, authority_factor, injected`). This
+substrate has no manual memory-search surface today; if one lands it MUST log
+`path: "manual"` with `authority_factor: null` and stay raw-ranked — manual /
+on-demand recall is deliberately unweighted (2026-06-10 ruling).
+
 ### 3. On-demand recall
 
 Auto-recall should often provide pointers, not exhaustive detail. When more detail is needed, the agent should deliberately read the source:
