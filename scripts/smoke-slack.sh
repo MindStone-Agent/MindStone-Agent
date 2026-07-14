@@ -137,6 +137,19 @@ wait_for_sent() {
   return 1
 }
 
+# Runtime status is written async by the connector — POLL with a wide budget
+# and print the actual state on timeout; never assert after a fixed sleep.
+wait_for_status() {
+  local file="$1" pattern="$2"
+  for _ in $(seq 1 40); do
+    grep -q "${pattern}" "${file}" 2>/dev/null && return 0
+    sleep 0.25
+  done
+  echo "status never matched: ${pattern}" >&2
+  echo "actual status: $(cat "${file}" 2>/dev/null || echo '<missing>')" >&2
+  return 1
+}
+
 # Allowed DM -> mock reply, envelope acked, DM reply NOT threaded.
 push_event '{"event":{"type":"message","channel_type":"im","user":"U777","text":"hello agent","ts":"200.100","channel":"D0CLINT"}}'
 wait_for_sent 1
@@ -159,8 +172,7 @@ test "$(sent_count)" -eq 2
 SENT="$(curl -s "${STUB_URL}/_test/sent")"
 grep -q '"channel":"C0OPS"' <<<"${SENT}"
 grep -q '"thread_ts":"200.300"' <<<"${SENT}"
-sleep 0.5
-grep -q '"deniedCount": 1' "${RUNTIME_DATA}/connectors/slack/status.json"
+wait_for_status "${RUNTIME_DATA}/connectors/slack/status.json" '"deniedCount": 1'
 
 # Delivery failure -> retried by the periodic queue drain.
 curl -s -X POST "${STUB_URL}/_test/fail" -H "Content-Type: application/json" -d '{"count":1}' >/dev/null
@@ -186,8 +198,8 @@ for _ in $(seq 1 20); do
 done
 HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${GATEWAY_PORT}/health")"
 test "${HEALTH_CODE}" = "200"
-sleep 0.5
-grep -q '"state": "error"' "${RUNTIME_DATA}/connectors/slack/status.json"
+wait_for_status "${RUNTIME_DATA}/connectors/slack/status.json" '"state": "error"'
+# Reason lands in the same atomic status write as the error state.
 grep -q 'auth.test failed' "${RUNTIME_DATA}/connectors/slack/status.json"
 kill "${gateway_pid}" >/dev/null 2>&1 || true
 wait "${gateway_pid}" >/dev/null 2>&1 || true

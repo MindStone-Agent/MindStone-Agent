@@ -265,6 +265,18 @@ wait_for_sent() {
   echo "stub never received ${expected} send(s); got $(sent_count)" >&2
   return 1
 }
+# Runtime status is written async by the connector — POLL with a wide budget
+# and print the actual state on timeout; never assert after a fixed sleep.
+wait_for_status() {
+  local file="$1" pattern="$2"
+  for _ in $(seq 1 40); do
+    grep -q "${pattern}" "${file}" 2>/dev/null && return 0
+    sleep 0.25
+  done
+  echo "status never matched: ${pattern}" >&2
+  echo "actual status: $(cat "${file}" 2>/dev/null || echo '<missing>')" >&2
+  return 1
+}
 pending_count() {
   ${MS} approvals list --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).length))'
 }
@@ -362,8 +374,8 @@ for _ in $(seq 1 20); do
 done
 HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${GATEWAY_PORT}/health")"
 test "${HEALTH_CODE}" = "200"
-sleep 0.5
-grep -q '"state": "error"' "${RUNTIME_DATA}/connectors/email/status.json"
+wait_for_status "${RUNTIME_DATA}/connectors/email/status.json" '"state": "error"'
+# Reason lands in the same atomic status write as the error state.
 grep -q 'token exchange failed' "${RUNTIME_DATA}/connectors/email/status.json"
 kill "${gateway_pid}" >/dev/null 2>&1 || true
 wait "${gateway_pid}" >/dev/null 2>&1 || true

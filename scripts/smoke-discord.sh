@@ -145,6 +145,19 @@ wait_for_sent() {
   return 1
 }
 
+# Runtime status is written async by the connector — POLL with a wide budget
+# and print the actual state on timeout; never assert after a fixed sleep.
+wait_for_status() {
+  local file="$1" pattern="$2"
+  for _ in $(seq 1 40); do
+    grep -q "${pattern}" "${file}" 2>/dev/null && return 0
+    sleep 0.25
+  done
+  echo "status never matched: ${pattern}" >&2
+  echo "actual status: $(cat "${file}" 2>/dev/null || echo '<missing>')" >&2
+  return 1
+}
+
 # Identify happens asynchronously after gateway startup (getMe -> gateway/bot ->
 # WS connect -> hello -> identify), so poll for it rather than checking immediately.
 EXPECTED_INTENTS=$(( (1<<9) | (1<<12) | (1<<15) ))
@@ -181,15 +194,17 @@ test "$(sent_count)" -eq 2
 grep -q '"channel_id":"C0OPS"' <<<"$(curl -s "${STUB_URL}/_test/sent")"
 # Denial count lands async on the inbound handler — POLL, don't sleep-and-hope
 # (a fixed 0.5s budget flaked under regression-sweep CPU load, 2026-07-02).
-for _ in $(seq 1 20); do
-  grep -q '"deniedCount": 1' "${RUNTIME_DATA}/connectors/discord/status.json" 2>/dev/null && break
+wait_for_status "${RUNTIME_DATA}/connectors/discord/status.json" '"deniedCount": 1'
+
+# Heartbeat loop is alive (hello interval is 400ms) — an async counter, so
+# poll for it like everything else instead of assuming enough time has passed.
+hb_count() { curl -s "${STUB_URL}/_test/heartbeats" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).heartbeats))'; }
+hb_ok=""
+for _ in $(seq 1 40); do
+  if [[ "$(hb_count)" -ge 1 ]]; then hb_ok=1; break; fi
   sleep 0.25
 done
-grep -q '"deniedCount": 1' "${RUNTIME_DATA}/connectors/discord/status.json"
-
-# Heartbeat loop is alive (hello interval is 400ms; we've waited > that).
-HB="$(curl -s "${STUB_URL}/_test/heartbeats" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).heartbeats))')"
-test "${HB}" -ge 1
+test -n "${hb_ok}" || { echo "heartbeat never arrived; got $(hb_count)" >&2; exit 1; }
 
 # Delivery failure -> retried by the periodic queue drain.
 curl -s -X POST "${STUB_URL}/_test/fail" -H "Content-Type: application/json" -d '{"count":1}' >/dev/null
@@ -211,8 +226,8 @@ gateway_pid=$!
 for _ in $(seq 1 20); do curl -s "http://127.0.0.1:${GATEWAY_PORT}/health" >/dev/null 2>&1 && break; sleep 0.5; done
 HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${GATEWAY_PORT}/health")"
 test "${HEALTH_CODE}" = "200"
-sleep 0.5
-grep -q '"state": "error"' "${RUNTIME_DATA}/connectors/discord/status.json"
+wait_for_status "${RUNTIME_DATA}/connectors/discord/status.json" '"state": "error"'
+# Reason lands in the same atomic status write as the error state.
 grep -q 'users/@me failed' "${RUNTIME_DATA}/connectors/discord/status.json"
 kill "${gateway_pid}" >/dev/null 2>&1 || true
 wait "${gateway_pid}" >/dev/null 2>&1 || true

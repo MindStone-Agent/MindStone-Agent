@@ -181,6 +181,19 @@ wait_for_sent() {
   return 1
 }
 
+# Runtime status is written async by the connector — POLL with a wide budget
+# and print the actual state on timeout; never assert after a fixed sleep.
+wait_for_status() {
+  local file="$1" pattern="$2"
+  for _ in $(seq 1 40); do
+    grep -q "${pattern}" "${file}" 2>/dev/null && return 0
+    sleep 0.25
+  done
+  echo "status never matched: ${pattern}" >&2
+  echo "actual status: $(cat "${file}" 2>/dev/null || echo '<missing>')" >&2
+  return 1
+}
+
 # Allowed DM -> mock reply with chat + reply correlation.
 push_update '{"message":{"message_id":100,"from":{"id":777,"username":"clint"},"chat":{"id":777,"type":"private"},"text":"hello agent"}}'
 wait_for_sent 1
@@ -197,8 +210,7 @@ push_update '{"message":{"message_id":102,"from":{"id":777},"chat":{"id":-100500
 push_update '{"message":{"message_id":103,"from":{"id":777},"chat":{"id":-100500,"type":"supergroup"},"text":"@mindstone_stub_bot report","entities":[{"type":"mention","offset":0,"length":19}]}}'
 wait_for_sent 2
 test "$(sent_count)" -eq 2
-sleep 0.5
-grep -q '"deniedCount": 1' "${RUNTIME_DATA}/connectors/telegram/status.json"
+wait_for_status "${RUNTIME_DATA}/connectors/telegram/status.json" '"deniedCount": 1'
 
 # Delivery failure -> retried by the periodic queue drain (queued, not lost).
 curl -s -X POST "${STUB_URL}/_test/fail" -H "Content-Type: application/json" -d '{"count":1}' >/dev/null
@@ -224,8 +236,8 @@ for _ in $(seq 1 20); do
 done
 HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${GATEWAY_PORT}/health")"
 test "${HEALTH_CODE}" = "200"
-sleep 0.5
-grep -q '"state": "error"' "${RUNTIME_DATA}/connectors/telegram/status.json"
+wait_for_status "${RUNTIME_DATA}/connectors/telegram/status.json" '"state": "error"'
+# Reason lands in the same atomic status write as the error state.
 grep -q 'getMe failed' "${RUNTIME_DATA}/connectors/telegram/status.json"
 kill "${gateway_pid}" >/dev/null 2>&1 || true
 wait "${gateway_pid}" >/dev/null 2>&1 || true

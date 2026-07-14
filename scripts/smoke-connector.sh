@@ -173,6 +173,20 @@ wait_for_outbox_lines() {
   return 1
 }
 
+# Runtime status is written async by the connector runtime — POLL with a wide
+# budget and print the actual state on timeout; never assert after a fixed
+# sleep (or, worse, immediately after /health answers).
+wait_for_status() {
+  local file="$1" pattern="$2"
+  for _ in $(seq 1 40); do
+    grep -q "${pattern}" "${file}" 2>/dev/null && return 0
+    sleep 0.25
+  done
+  echo "status never matched: ${pattern}" >&2
+  echo "actual status: $(cat "${file}" 2>/dev/null || echo '<missing>')" >&2
+  return 1
+}
+
 # Allowed DM -> mock reply lands in the outbox with thread correlation.
 printf '%s\n' '{"messageId":"m1","text":"hello agent","senderId":"clint","chatId":"dm-clint","chatType":"direct"}' >> "${INBOX}"
 wait_for_outbox_lines 1
@@ -190,10 +204,9 @@ test "$(grep -c . "${OUTBOX}")" -eq 2
 grep -q '"inReplyToMessageId":"m4"' "${OUTBOX}"
 
 # Denial is counted in runtime status; the listener is still running.
-sleep 0.5
 STATUS_FILE="${RUNTIME_DATA}/connectors/loopback/status.json"
+wait_for_status "${STATUS_FILE}" '"deniedCount": 1'
 grep -q '"state": "running"' "${STATUS_FILE}"
-grep -q '"deniedCount": 1' "${STATUS_FILE}"
 
 # Transcript for the DM session carries connector source metadata.
 DM_KEY_FILE="${RUNTIME_DATA}/transcripts/$(node -p 'Buffer.from("agent:default:dm-clint:direct:clint","utf-8").toString("base64url")').jsonl"
@@ -204,7 +217,8 @@ grep -q '"substrate": *"connector:loopback"' "${DM_KEY_FILE}" || grep -q '"subst
 # The gateway is still healthy despite a configured connector with no implementation.
 HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${GATEWAY_PORT}/health")"
 test "${HEALTH_CODE}" = "200"
-grep -q '"state": "error"' "${RUNTIME_DATA}/connectors/ghost-connector/status.json"
+wait_for_status "${RUNTIME_DATA}/connectors/ghost-connector/status.json" '"state": "error"'
+# Reason lands in the same atomic status write as the error state.
 grep -q 'no registered connector implementation' "${RUNTIME_DATA}/connectors/ghost-connector/status.json"
 
 kill "${gateway_pid}" >/dev/null 2>&1 || true
@@ -230,7 +244,8 @@ for _ in $(seq 1 20); do
 done
 HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${GATEWAY_PORT}/health")"
 test "${HEALTH_CODE}" = "200"
-grep -q '"state": "error"' "${RUNTIME_DATA}/connectors/loopback/status.json"
+wait_for_status "${RUNTIME_DATA}/connectors/loopback/status.json" '"state": "error"'
+# Reason lands in the same atomic status write as the error state.
 grep -q 'credential unresolved' "${RUNTIME_DATA}/connectors/loopback/status.json"
 kill "${gateway_pid}" >/dev/null 2>&1 || true
 wait "${gateway_pid}" >/dev/null 2>&1 || true
