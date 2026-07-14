@@ -316,6 +316,43 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
     }
   }
 
+  // A packed kb.json is THIRD-PARTY-authored — the KB trust model's
+  // "operator-authored" assumption does not hold for it (round-4 QA). Two of
+  // its fields steer recall content that the surface enumeration can't cover:
+  //   - `name` is injected verbatim into recall (`Knowledgebase "<name>" …`);
+  //     a hostile name breaks the quote and injects instructions.
+  //   - `externalSources` steers `kb ingest` to read arbitrary host folders /
+  //     fetch URLs into recall — content never in the pack, never reviewed.
+  // A packed KB must therefore be SELF-CONTAINED and its labels bounded-safe:
+  // reject external sources outright (the operator adds those post-install if
+  // wanted — that path is operator-authored and trusted), and require
+  // name/description to be single-line labels with no quote/control chars. With
+  // this + the whitelist, everything a packed KB injects is either reviewed
+  // sources/*.md or a bounded-safe label.
+  const isSafeKbLabel = (value: unknown): boolean => {
+    if (typeof value !== "string") return true;
+    if (value.length > 200 || value.includes('"')) return false;
+    for (let i = 0; i < value.length; i += 1) {
+      if (value.charCodeAt(i) < 0x20) return false; // no control chars (incl. CR/LF)
+    }
+    return true;
+  };
+  for (const file of files) {
+    if (!/^knowledgebases\/[^/]+\/kb\.json$/.test(file.path)) continue;
+    let catalog: { name?: unknown; description?: unknown; externalSources?: unknown };
+    try {
+      catalog = JSON.parse(file.data.toString("utf-8")) as typeof catalog;
+    } catch (error) {
+      return { ok: false, errors: [`${file.path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`] };
+    }
+    if (Array.isArray(catalog.externalSources) ? catalog.externalSources.length > 0 : catalog.externalSources != null) {
+      return { ok: false, errors: [`${file.path} declares externalSources; a packed knowledgebase must be self-contained (bundle sources/ only). Add external sources post-install as the operator (operator-authored kb.json is the trusted path).`] };
+    }
+    if (!isSafeKbLabel(catalog.name) || !isSafeKbLabel(catalog.description)) {
+      return { ok: false, errors: [`${file.path} has an unsafe name/description (must be a single-line label <=200 chars with no double-quote or control characters) — it is injected verbatim into recall context`] };
+    }
+  }
+
   return { ok: true, staged: { manifest, files, archiveDigest, trusted, installPlan }, warnings };
 }
 
