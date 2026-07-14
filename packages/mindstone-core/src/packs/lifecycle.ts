@@ -282,12 +282,26 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
   // Refuse a malformed archive where one entry is a file AND a directory
   // prefix of another (e.g. `personas/foo` alongside `personas/foo/PERSONA.md`)
   // — those cannot coexist on a filesystem and would throw mid-COMMIT
-  // (adversarial QA #28, Finding 3). Caught here so we never touch live stores.
-  const planPaths = [...installPlan.values()].sort();
-  for (let i = 0; i < planPaths.length - 1; i += 1) {
-    if (planPaths[i + 1].startsWith(`${planPaths[i]}/`)) {
-      return { ok: false, errors: [`malformed archive: "${planPaths[i]}" is both a file and a directory prefix of "${planPaths[i + 1]}"`] };
+  // (adversarial QA #28, Finding 3). Scan ALL archive paths, not just the
+  // artifact install plan: the same collision in a memory-seed path or the
+  // payload mirror also throws mid-COMMIT (round-2 QA), so catch every case
+  // here, before we ever touch live stores.
+  const allPaths = files.map((file) => file.path).sort();
+  for (let i = 0; i < allPaths.length - 1; i += 1) {
+    if (allPaths[i + 1].startsWith(`${allPaths[i]}/`)) {
+      return { ok: false, errors: [`malformed archive: "${allPaths[i]}" is both a file and a directory prefix of "${allPaths[i + 1]}"`] };
     }
+  }
+
+  // Forbid a pre-built knowledgebase index (round-2 QA residual): a shipped
+  // `knowledgebases/<id>/index.json` carries recall-injected summary/text that
+  // bypasses source review entirely — a reviewer signing off on the enumerated
+  // `sources/*.md` never sees it. The index must be BUILT post-install from the
+  // reviewed, digest-covered, surface-enumerated sources (`mindstone kb ingest`),
+  // so the only KB content that reaches the model derives from reviewed sources.
+  const shippedIndex = files.find((file) => /^knowledgebases\/[^/]+\/index\.json$/.test(file.path));
+  if (shippedIndex) {
+    return { ok: false, errors: [`pack ships a pre-built knowledgebase index (${shippedIndex.path}); ship only kb.json + sources/ and build the index post-install with 'mindstone kb ingest' (a shipped index is unreviewed recall-injected content)`] };
   }
 
   return { ok: true, staged: { manifest, files, archiveDigest, trusted, installPlan }, warnings };
@@ -398,6 +412,11 @@ export async function installPackArchive(archivePath: string, options: PackInsta
   const summary: string[] = [];
   const receiptFiles: PackReceiptFile[] = [];
   const written: string[] = [];
+  // --force user-file backups, tracked so rollback can RESTORE the user's file
+  // to its real path (round-2 QA): otherwise a mid-COMMIT throw would unlink the
+  // pack data written over the user file and leave the original only as
+  // `.user-backup` litter — data displacement, the opposite of "left as it was".
+  const backups: Array<{ target: string; backup: string }> = [];
   const installedDir = installedPackDir(packPaths, manifest.id);
   let seededAt: string | undefined;
   const seededFiles: string[] = [];
@@ -408,6 +427,7 @@ export async function installPackArchive(archivePath: string, options: PackInsta
       mkdirSync(dirname(liveTarget), { recursive: true });
       if (userBackups.includes(storePath)) {
         copyFileSync(liveTarget, `${liveTarget}.user-backup`);
+        backups.push({ target: liveTarget, backup: `${liveTarget}.user-backup` });
         summary.push(`preserved user file: ${storePath} -> ${storePath}.user-backup`);
       }
       writeFileSync(liveTarget, data);
@@ -463,7 +483,16 @@ export async function installPackArchive(archivePath: string, options: PackInsta
   } catch (error) {
     // Roll back every live-store write; drop the half-written installedDir.
     for (const path of written) {
-      try { unlinkSync(path); removeEmptyDirs(dirname(path), runtimePaths.dataDir); removeEmptyDirs(dirname(path), runtimePaths.memoryDir); } catch { /* best-effort */ }
+      try { unlinkSync(path); } catch { /* best-effort */ }
+    }
+    // Restore any --force-displaced user files from their backups FIRST (before
+    // pruning empty dirs), then remove the backup litter, so the user's file is
+    // back exactly where the runtime loads it.
+    for (const { target, backup } of backups) {
+      try { copyFileSync(backup, target); unlinkSync(backup); } catch { /* best-effort */ }
+    }
+    for (const path of written) {
+      try { removeEmptyDirs(dirname(path), runtimePaths.dataDir); removeEmptyDirs(dirname(path), runtimePaths.memoryDir); } catch { /* best-effort */ }
     }
     rmSync(installedDir, { recursive: true, force: true });
     clearStaging(packPaths, manifest.id);
