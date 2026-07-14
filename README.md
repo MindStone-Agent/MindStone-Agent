@@ -1,5 +1,13 @@
 # MindStone-Agent
 
+> ⚠️ **BETA — not guaranteed to be functional yet.**
+> MindStone-Agent is currently released as **BETA** and is under active
+> development. No part of it is guaranteed to work in your environment yet.
+> Read every capability below at its stated maturity — see
+> [Current status](#current-status) for the exact claim taxonomy
+> (**implemented** / **smoke-tested** / **live-validated** / **pending**) — and
+> expect rough edges. Do not depend on it for production or unattended use.
+
 🔶 **Persistent AI agents with identity, memory, recall, and shared continuity across surfaces.**
 
 MindStone-Agent is a local-first agent harness for building AI collaborators that keep their identity, history, working context, and accumulated judgment across sessions. It combines a native CLI/TUI, a local Gateway, structured memory, append-only transcripts, Auto Recall, context management, and Pi-backed model execution inside an isolated runtime.
@@ -48,9 +56,16 @@ MindStone-Agent can prune, summarize, compact, or rebuild the live prompt, but t
 
 ## Current status
 
-MindStone-Agent is in active development and is close to MVP validation. Claim taxonomy used throughout: **implemented** (code exists), **smoke-tested** (proven by the non-live smoke suite), **live-validated** (proven against a real endpoint/terminal), **pending** (not yet proven).
+MindStone-Agent is **BETA** and in active development. Claim taxonomy used throughout: **implemented** (code exists), **smoke-tested** (proven by the non-live smoke suite), **live-validated** (proven against a real endpoint/terminal), **pending** (not yet proven).
 
-**Smoke-tested (full non-live suite, 49/49 green on 2026-07-01):**
+The non-live smoke suite is the source of truth for what works and is invoked
+per-area with `npm run smoke:*` (see [Development and validation](#development-and-validation)).
+The last recorded green pass of the *whole* suite was **49/49 on 2026-07-01**;
+every subsystem that landed since ships with its own smoke leg, and those are
+listed below at their individual maturity rather than folded into a single
+whole-suite number.
+
+**Smoke-tested (non-live), through the 2026-07-01 full-suite pass:**
 
 - isolated runtime under `.runtime/`, separate from global `~/.pi/agent`;
 - native `mindstone` CLI, onboarding/config/auth flows, `mindstone chat`, styled `mindstone tui`;
@@ -61,6 +76,13 @@ MindStone-Agent is in active development and is close to MVP validation. Claim t
 - local model (Ollama / LM Studio / OpenAI-compatible) and Ollama Cloud setup lanes (`docs/operations/LOCAL_MODELS.md`);
 - Pi adapter commands/tools/hooks for Pi-side use;
 - Pi `AgentSession` / `SessionManager` execution path (non-live).
+
+**Smoke-tested (non-live), landed since the 2026-07-01 pass — each with its own smoke leg:**
+
+- content system — persona overlays (`mindstone persona`), skills plus the Skill/Integration Builder (`mindstone skill`), extractive knowledgebases (`mindstone kb`), and the deterministic workflow router; every artifact sits *below* the core `IDENTITY.md`/`USER.md` and never overrides identity, user boundaries, or safety (`smoke:persona`, `smoke:skill`, `smoke:kb`, `smoke:kb-sources`, `smoke:workflow`);
+- content packs — Phase 1 signed local pack lifecycle: `build` / `inspect` / `install` / `verify` / `remove` / `status` / `keygen` / `trust-add`, ed25519-signed `.mspack` bundles with a shipped-publisher trust seed, an extraction guard (path traversal refused), a prompt-surface integrity gate, and a knowledgebase whitelist (`smoke:packs` — green **2026-07-14**);
+- channel connector framework v1 — a deterministic loopback reference connector, a persistent delivery queue with retry/dead-letter, fail-closed allowlist/pairing, and the approval framework (send policies + fenced action proposals); Telegram / Slack / Discord / email / calendar connectors implemented against the shared contract (`smoke:connector`, `smoke:telegram`, `smoke:slack`, `smoke:discord`, `smoke:email`, `smoke:calendar`);
+- App Engine / Agent Mesh v1 scaffold — in-process `runMindStone()` runtime and logically-isolated multi-agent mode (`smoke:app-engine`).
 
 **Live-validated (2026-07-01):**
 
@@ -74,7 +96,10 @@ MindStone-Agent is in active development and is close to MVP validation. Claim t
 - live compaction validation (issue #8 — after #7);
 - Ollama Cloud live chat (needs an ollama.com API key — steps in `docs/operations/LOCAL_MODELS.md`);
 - native `sqlite-vec` nearest-neighbor backend (current fallback: `js-cosine`);
-- human-at-keyboard TUI `/quit` spot-check (pty-verified already).
+- human-at-keyboard TUI `/quit` spot-check (pty-verified already);
+- live validation of the production channel connectors against real Telegram / Slack / Discord / email / calendar services (the framework and connectors are smoke-tested non-live only);
+- pack registry Phase 2 — the signed static registry index and a `mindstone packs install <id>` auto-resolver (Phase 1 install is manual from a local `.mspack` + `.sig`);
+- Microsoft Teams connector (designed under issue #20 in `docs/operations/TEAMS_CONNECTOR_DESIGN.md`; implementation tracked as #32, not started).
 
 ## Media and demos
 
@@ -193,6 +218,14 @@ mindstone identity activate
 mindstone memory status
 mindstone memory backfill --embed
 mindstone memory maintain
+mindstone persona list
+mindstone persona activate <persona-id>
+mindstone skill list
+mindstone kb search <kb-id> "<query>"
+mindstone packs list
+mindstone packs install ./pack.mspack --sig ./pack.mspack.sig
+mindstone channels
+mindstone approvals list
 ```
 
 The CLI is designed to avoid setup dead-ends. If `mindstone chat` or `mindstone tui` starts while routing is still unconfigured, it can launch model/routing setup in place.
@@ -482,30 +515,93 @@ Current Pi adapter command surface includes:
 
 Read-only tools include memory status/search/read and transcript status. Lifecycle hooks append conservative sanitized marker events; they do not persist raw private Pi summaries/details/messages.
 
-## Skills and channels
+## Personas, skills, knowledgebases, and workflows
 
-List available channel/surface status without starting listeners:
+MindStone-Agent loads a layer of reusable content artifacts that sit **below**
+the core agent identity — an overlay never overrides `IDENTITY.md`/`USER.md`,
+user boundaries, or safety rules.
+
+- **Personas** — role/domain overlays that reference their own skills, workflows, and knowledgebases.
+- **Skills** — a JSON definition plus a `SKILL.md` prompt document, with a draft → install approval path; the built-in **Integration Builder** is the first example.
+- **Knowledgebases** — curated markdown sources with a deterministic, citation-preserving, extractive index and a dedicated search path.
+- **Workflows** — a deterministic router that forces persona/skill/KB selection from conditions rather than model judgment, before inference.
 
 ```bash
-mindstone channels
-```
+mindstone persona list
+mindstone persona activate <persona-id>
 
-List built-in skill surfaces:
-
-```bash
 mindstone skill list
-```
-
-Generate an Integration Builder brief:
-
-```bash
 mindstone skill integration-builder \
   --name "Telegram incident notifier" \
   --kind channel \
   --goal "Send approved incident summaries to an allowlisted Telegram chat"
+
+mindstone kb ingest <kb-id>
+mindstone kb search <kb-id> "<query>"
 ```
 
-External channel setup flows such as Telegram/Discord/Slack/Signal are planned; the current catalog is intentionally non-mutating and honest about validation status.
+See `docs/operations/PERSONAS.md`, `SKILLS.md`, `KNOWLEDGEBASES.md`, and `WORKFLOWS.md`.
+
+## Content packs
+
+A **content pack** is a signed, versioned bundle of the artifacts above
+(personas, skills, knowledgebases, workflows) with an install lifecycle — a
+**Persona Pack** is the common case. Packs are not a new runtime concept; they
+bundle what the runtime already loads, then sign it and give it a lifecycle.
+
+**Phase 1 (what ships today):** the local pack lifecycle only — no network
+registry, auto-resolver, or Docker/agent packs yet.
+
+```bash
+mindstone packs build <sourceDir> --key "ed25519-priv:..." --out ./dist
+mindstone packs inspect ./pack.mspack
+mindstone packs install ./pack.mspack --sig ./pack.mspack.sig
+mindstone packs list
+mindstone packs verify
+mindstone packs remove <id>
+```
+
+Packs are ed25519-signed `.mspack` archives verified against a shipped
+publisher trust seed (a `mindstone/…`-signed pack installs trusted out of the
+box; other publishers are added with `mindstone packs trust-add`). Install is
+transactional and fail-closed: path-traversal entries are refused at
+extraction, every prompt surface is enumerated and must match the manifest,
+knowledgebase payloads are whitelisted, and a conflicting install rolls back
+without clobbering user files. Unsigned packs install only through a two-act
+escape hatch and are marked `trusted: false`.
+
+Generate a signing keypair (writing the private key to a `chmod 600` file and
+printing only the public key):
+
+```bash
+mindstone packs keygen --out ~/.mindstone/publisher.key
+```
+
+Authoring guide: `docs/operations/PACK_AUTHORING.md`. Design and rationale:
+`docs/refactor/PACK_REGISTRY_DESIGN.md`.
+
+## Channel connectors
+
+A channel connector framework (v1) lets an agent send and receive over external
+surfaces through one shared contract. It ships with a deterministic
+**loopback** reference connector (a local file spool — no network), a persistent
+delivery queue with retry and dead-letter, fail-closed allowlist/pairing, and
+an **approval framework**: routed replies and fenced action proposals can be
+diverted into a durable approval store before they leave the agent.
+
+```bash
+mindstone channels          # per-connector status without starting listeners
+mindstone approvals list    # pending proposed actions
+mindstone approvals approve <id>
+```
+
+Telegram, Slack, Discord, email, and calendar connectors are implemented
+against the shared contract and smoke-tested **non-live**; live validation
+against the real services is pending (see [Current status](#current-status)).
+A Microsoft Teams connector is designed but not implemented (design #20; implementation tracked as #32).
+
+See `docs/operations/CONNECTORS.md`, `EMAIL_CONNECTOR.md`, and
+`CALENDAR_CONNECTOR.md`.
 
 ## Docker
 
@@ -609,15 +705,27 @@ Do not run live validation unless you intentionally want to use configured model
 Current operational docs:
 
 - [Runtime Isolation Model](docs/operations/ISOLATION.md)
+- [Local Models Setup](docs/operations/LOCAL_MODELS.md)
 - [Gateway API Reference](docs/gateway/API_REFERENCE.md)
 - [OpenWebUI Setup Prep](docs/gateway/OPENWEBUI.md)
+- [Personas](docs/operations/PERSONAS.md) · [Skills](docs/operations/SKILLS.md) · [Knowledgebases](docs/operations/KNOWLEDGEBASES.md) · [Workflows](docs/operations/WORKFLOWS.md)
+- [Pack Authoring Guide](docs/operations/PACK_AUTHORING.md)
+- [Channel Connectors](docs/operations/CONNECTORS.md) · [Email](docs/operations/EMAIL_CONNECTOR.md) · [Calendar](docs/operations/CALENDAR_CONNECTOR.md) · [Teams (design)](docs/operations/TEAMS_CONNECTOR_DESIGN.md)
+- [App Engine & Agent Mesh](docs/operations/APP_ENGINE.md)
+- [Live UAT Runbook](docs/operations/LIVE_UAT_RUNBOOK.md)
 - [Upstream Pi Strategy](docs/upstream/PI_BASE_STRATEGY.md)
 
 Additional design and planning notes live under `docs/`.
 
 ## License
 
-See [LICENSE](LICENSE).
+MindStone-Agent is **source-available** under the **Business Source License 1.1 (BSL 1.1)** — see [LICENSE](LICENSE).
+
+In plain terms: you may use, modify, and self-host MindStone-Agent for free, including for internal and commercial purposes. You may **not** repackage, resell, redistribute for a fee, or offer it to third parties as a paid or hosted service without a separate commercial license. On the Change Date (2030-07-14), each released version converts to the Apache License 2.0.
+
+For commercial or resale licensing, contact the Licensor, Clint Bodungen.
+
+Vendored third-party components keep their own licenses — the bundled Pi base under `vendor/pi/` is MIT (© 2025 Mario Zechner).
 
 ---
 

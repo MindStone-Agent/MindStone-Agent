@@ -1,7 +1,8 @@
 {
   "name": "mindstone-agent",
-  "version": "0.0.0",
+  "version": "0.1.0-beta",
   "private": true,
+  "license": "BUSL-1.1",
   "type": "module",
   "description": "MindStone proper rebuild on a vendored current Pi base with isolated runtime state.",
   "bin": {
