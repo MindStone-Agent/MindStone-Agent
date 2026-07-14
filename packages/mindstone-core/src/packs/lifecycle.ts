@@ -282,26 +282,38 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
   // Refuse a malformed archive where one entry is a file AND a directory
   // prefix of another (e.g. `personas/foo` alongside `personas/foo/PERSONA.md`)
   // — those cannot coexist on a filesystem and would throw mid-COMMIT
-  // (adversarial QA #28, Finding 3). Scan ALL archive paths, not just the
-  // artifact install plan: the same collision in a memory-seed path or the
-  // payload mirror also throws mid-COMMIT (round-2 QA), so catch every case
-  // here, before we ever touch live stores.
-  const allPaths = files.map((file) => file.path).sort();
-  for (let i = 0; i < allPaths.length - 1; i += 1) {
-    if (allPaths[i + 1].startsWith(`${allPaths[i]}/`)) {
-      return { ok: false, errors: [`malformed archive: "${allPaths[i]}" is both a file and a directory prefix of "${allPaths[i + 1]}"`] };
+  // (adversarial QA #28, Finding 3). Test each path against ALL its ancestor
+  // directories, not just its sorted neighbor: `a.md` sorts BETWEEN `a` and
+  // `a/b` ('.' < '/'), so an adjacent-pair scan misses the `a` vs `a/b`
+  // collision (round-3 QA). Scanning every archive path (not just the artifact
+  // install plan) also covers memory-seed and payload-mirror collisions.
+  const filePathSet = new Set(files.map((file) => file.path));
+  for (const path of filePathSet) {
+    const segments = path.split("/");
+    for (let i = 1; i < segments.length; i += 1) {
+      const ancestor = segments.slice(0, i).join("/");
+      if (filePathSet.has(ancestor)) {
+        return { ok: false, errors: [`malformed archive: "${ancestor}" is both a file and a directory prefix of "${path}"`] };
+      }
     }
   }
 
-  // Forbid a pre-built knowledgebase index (round-2 QA residual): a shipped
-  // `knowledgebases/<id>/index.json` carries recall-injected summary/text that
-  // bypasses source review entirely — a reviewer signing off on the enumerated
-  // `sources/*.md` never sees it. The index must be BUILT post-install from the
-  // reviewed, digest-covered, surface-enumerated sources (`mindstone kb ingest`),
-  // so the only KB content that reaches the model derives from reviewed sources.
-  const shippedIndex = files.find((file) => /^knowledgebases\/[^/]+\/index\.json$/.test(file.path));
-  if (shippedIndex) {
-    return { ok: false, errors: [`pack ships a pre-built knowledgebase index (${shippedIndex.path}); ship only kb.json + sources/ and build the index post-install with 'mindstone kb ingest' (a shipped index is unreviewed recall-injected content)`] };
+  // Whitelist knowledgebase pack contents (round-3 QA — the case-sensitive
+  // index.json refusal was bypassable by `INDEX.JSON` on a case-insensitive
+  // filesystem, which the KB loader resolves). A shipped KB dir may contain
+  // ONLY `kb.json` and files under `sources/` — the exact set the loader reads
+  // as reviewed content. Anything else (a pre-built `index.json` in any casing,
+  // or a novel filename) is refused: the index MUST be built post-install from
+  // the reviewed, digest-covered, surface-enumerated sources
+  // (`mindstone kb ingest`), so all KB content reaching the model derives from
+  // reviewed sources. A whitelist is casing-robust where a denylist regex was not.
+  for (const file of files) {
+    const kbMatch = /^knowledgebases\/[^/]+\/(.+)$/.exec(file.path);
+    if (!kbMatch) continue;
+    const withinKb = kbMatch[1];
+    if (withinKb !== "kb.json" && !withinKb.startsWith("sources/")) {
+      return { ok: false, errors: [`knowledgebase pack file not allowed: ${file.path} — a KB pack may ship only kb.json and sources/**; the index is built post-install via 'mindstone kb ingest' (a shipped index or stray file is unreviewed recall-injected content)`] };
+    }
   }
 
   return { ok: true, staged: { manifest, files, archiveDigest, trusted, installPlan }, warnings };
