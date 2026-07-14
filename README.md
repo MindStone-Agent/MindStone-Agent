@@ -547,6 +547,30 @@ npm run smoke:memory-backfill
 npm run smoke:pi-session-runner
 ```
 
+### Definition of done: the adversarial QA gate (canon)
+
+Mandatory for critical outcomes — deploys, customer-facing changes,
+migrations, security-adjacent code, and anything that alters a live agent's
+recall/identity path (canon ruling 2026-07-07; full definition and evidence
+chain: `mindstone-for-claude-code#62`, tracked here as #35):
+
+1. Before critical work is declared done, an **independent agent context**
+   (separate agent or subagent — on this repo, the Slate-as-QA protocol) runs
+   adversarial verification with a **refute-don't-confirm** brief. Findings are
+   ranked and CONFIRMED with file:line + a concrete failure scenario;
+   "nothing real found" is a valid outcome.
+2. Confirmed defects **block the ship**; residuals are ticketed.
+3. The QA outcome is recorded in the ship receipt (commit / PR / issue
+   comment) so it is auditable.
+4. **Self-review does not satisfy the gate**, regardless of model tier — the
+   author's context carries the reasoning that produced the bug.
+5. The gate binds the orchestrator AND any subagent producing the work:
+   include it verbatim in delegation prompts.
+
+This formalizes what the wishlist-sprint QA protocol already practiced: the
+builder never self-certifies. Pairs with the claim taxonomy above — nothing
+advances past **smoke-tested** into a live substrate without the gate.
+
 Port-binding smokes derive their listen ports from `MINDSTONE_SMOKE_PORT_BASE`
 (default `19800`, which reproduces the historical fixed ports exactly). Two
 lanes — e.g. a dev checkout and a pinned QA worktree — can run port smokes
