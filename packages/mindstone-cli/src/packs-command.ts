@@ -5,7 +5,7 @@
  * exit 0 success / 1 operational failure / 2 usage error, transcript audit
  * events via appendTranscriptEntry (the persona_activated pattern).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
 import {
@@ -33,7 +33,7 @@ import {
   type PackOperationResult,
   type PackSafetySummary,
 } from "@mindstone-agent/core";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const gold = (text: string) => `\x1b[38;5;220m${text}\x1b[0m`;
 const dim = (text: string) => `\x1b[2m${text}\x1b[0m`;
@@ -56,7 +56,7 @@ function usage(): string {
     "  packs verify [id] [--json]                Offline integrity re-check (receipts vs disk, payload vs digests)",
     "  packs status [--json]                     Counts, pending conflicts, unsigned installs, stale staging",
     "  packs build <sourceDir> [--out <dir>] [--key <ed25519-priv:...>] [--derive-surfaces] [--json]",
-    "  packs keygen [--json]                     Generate a dev signing keypair (build tooling)",
+    "  packs keygen [--out <file>] [--json]      Generate a signing keypair; --out writes the private key to a chmod-600 file and prints only the public key",
     "  packs trust-add <publisherId> <ed25519:...> [--key-id <label>] [--json]",
     "",
     "Local-first: no subcommand contacts a network. Registry commands arrive with Phase 2 of the design.",
@@ -315,8 +315,23 @@ export async function runPacksCommand(argv: string[]): Promise<void> {
 
   if (sub === "keygen") {
     const keypair = generatePackKeypair();
+    // --out writes the PRIVATE key to a chmod-600 file and prints ONLY the public
+    // key. Use this for a real publisher key: the private key never touches stdout
+    // (so it can't leak into a terminal log, CI output, or an agent transcript).
+    const outPath = optionValue(argv, "--out");
+    if (outPath) {
+      if (existsSync(outPath)) throw new Error(`refusing to overwrite existing key file: ${outPath}`);
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, `${keypair.privateKey}\n`, { mode: 0o600 });
+      if (json) { output.write(`${JSON.stringify({ publicKey: keypair.publicKey, privateKeyFile: outPath }, null, 2)}\n`); return; }
+      output.write(`${gold("🔶")} Publisher keypair generated.\n`);
+      output.write(`  ${bold("public key")} (share this / pin it in the trust store):\n    ${keypair.publicKey}\n`);
+      output.write(`  ${bold("PRIVATE key")} written to ${outPath} (chmod 600).\n`);
+      output.write(`  ${dim("Move it to a password manager or offline store. NEVER commit it, NEVER paste it into chat/logs. It is your release-signing key.")}\n`);
+      return;
+    }
     if (json) { output.write(`${JSON.stringify(keypair, null, 2)}\n`); return; }
-    output.write(`${gold("🔶")} Dev signing keypair (store the private key OUTSIDE any pack source dir):\n`);
+    output.write(`${gold("🔶")} Dev signing keypair (store the private key OUTSIDE any pack source dir; use --out <file> for a real publisher key):\n`);
     output.write(`  public:  ${keypair.publicKey}\n  private: ${keypair.privateKey}\n`);
     return;
   }

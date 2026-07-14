@@ -215,13 +215,17 @@ first try:
 Phase 1 is fully local. No network, no registry.
 
 ```bash
-# 1. Generate a signing keypair (dev/first-party; store the private key OUTSIDE the pack dir)
-mindstone packs keygen
-#   → public:  ed25519:...
-#     private: ed25519-priv:...
+# 1. Generate a signing keypair. For a real PUBLISHER key, use --out: the private
+#    key is written to a chmod-600 file (never printed), only the public key shows.
+mindstone packs keygen --out ~/.mindstone/<publisher>.key
+#   → public key printed (share/pin this); private key in the file (keep it OFFLINE)
+#   (Bare `mindstone packs keygen` prints both — dev/throwaway keys only.)
 
-# 2. Trust your public key so signed installs verify (publisher = first id segment)
-mindstone packs trust-add mindstone ed25519:<pub> --key-id my-key
+# 2. Trust your public key so signed installs verify (publisher = first id segment).
+#    NOTE: first-party `mindstone/...` packs are signed with the mindstone release
+#    key, whose PUBLIC half is shipped in the harness trust seed — they verify out
+#    of the box, no trust-add needed. Only add a key for your OWN publisher id.
+mindstone packs trust-add <publisher> ed25519:<pub> --key-id my-key
 
 # 3. Build a signed archive (derive prompt surfaces automatically)
 mindstone packs build ./my-pack --out ./dist --key 'ed25519-priv:<priv>' --derive-surfaces

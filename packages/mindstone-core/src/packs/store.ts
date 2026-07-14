@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { dirname, join, resolve } from "node:path";
 import type { MindStoneConfig } from "../config/types.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
-import type { PackLock, PackReceipt, PackTrustStore } from "./types.js";
+import type { PackLock, PackReceipt, PackTrustStore, PublisherKey } from "./types.js";
 
 export type PackPaths = {
   packsDir: string;
@@ -55,10 +55,24 @@ export function writePackLock(paths: PackPaths, lock: PackLock): void {
 }
 
 /**
- * Trust store. There is no harness-shipped key yet (first-party publishing
- * starts with Phase 2), so an absent store means NO keys are trusted — every
- * signed verification fails until the operator seeds a key (packs trust-add
- * via CLI or by editing publishers.json). Fail closed by default.
+/**
+ * Harness-shipped publisher trust seed. The harness distribution channel is the
+ * root of trust (design D4): these keys are compiled into the harness, so a
+ * fresh install verifies first-party ("mindstone") signed packs out of the box
+ * — no manual `packs trust-add` needed. Operators pin ADDITIONAL keys on disk
+ * (`packs trust-add`), which MERGE with these at verification time; they never
+ * replace them. A shipped key is rotated/revoked only through a harness update.
+ * The matching PRIVATE key is held offline by the publisher and never appears
+ * anywhere in this tree.
+ */
+export const SHIPPED_PUBLISHER_KEYS: PublisherKey[] = [
+  { keyId: "mindstone-2026a", publisherId: "mindstone", publicKey: "ed25519:oSNR/I0GfZzkJh6xpkpFjHtJgwLnQ0VOol2OGQ4k27E=" },
+];
+
+/**
+ * Trust store. An absent on-disk store is fine now — the shipped seed above
+ * covers first-party packs; the on-disk store holds only operator-added keys.
+ * Fail closed for any publisher with no shipped and no on-disk key.
  */
 export function readTrustStore(paths: PackPaths): PackTrustStore {
   return readJson<PackTrustStore>(paths.trustPath, "trust/publishers.json") ?? { schemaVersion: 1, publishers: [] };
@@ -69,11 +83,15 @@ export function writeTrustStore(paths: PackPaths, store: PackTrustStore): void {
 }
 
 export function trustedKeysForPublisher(store: PackTrustStore, publisherId: string, now = new Date()): string[] {
-  return store.publishers
+  // Shipped seed + operator-added on-disk keys, deduped by public key.
+  const all = [...SHIPPED_PUBLISHER_KEYS, ...store.publishers];
+  const seen = new Set<string>();
+  return all
     .filter((key) => key.publisherId === publisherId)
     .filter((key) => !key.revoked)
     .filter((key) => !key.expiresAt || Date.parse(key.expiresAt) > now.getTime())
-    .map((key) => key.publicKey);
+    .map((key) => key.publicKey)
+    .filter((publicKey) => (seen.has(publicKey) ? false : (seen.add(publicKey), true)));
 }
 
 export function receiptPath(paths: PackPaths, packId: string): string {
