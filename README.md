@@ -90,11 +90,16 @@ whole-suite number.
 - local/OpenAI-compatible model route end-to-end: fresh runtime → isolated `models.json` provider → pi-session `AgentSession` → live local HTTP endpoint → response in the canonical transcript (`smoke:local-route`);
 - Ollama local probe (real Ollama daemon model listing) and Ollama Cloud model listing (`https://ollama.com/v1/models`).
 
+**Live-validated (2026-08-05), all three unblocked by connecting the first authenticated provider:**
+
+- Ollama Cloud live chat, on aarch64 (Debian 11, Node 24): isolated `models.json` provider → pi-session route → `deepseek-v4-pro:cloud` → real answer with tool use, persisted to the canonical transcript, reachable identically through `mindstone chat --once` and the Gateway REST surface, and surviving a reboot under systemd (issue #3 residual);
+- live authenticated Pi-session prompt/**stream** validation (issue #7): `smoke:pi-session-live` exit 0, `ok: true`, 25 stream events with 24 persisted;
+- live **compaction** validation (issue #8): `smoke:pi-session-live` with `MINDSTONE_PI_SESSION_LIVE_COMPACT=1`, exit 0, a real `AgentSession.compact()` summary. The probe session was 4 entries, so this proves the mechanism, not summary quality on a long conversation.
+
+Bounds and what remains untested for these three: `docs/operations/LOCAL_MODELS.md`.
+
 **Pending (documented, not claimed):**
 
-- live authenticated Pi-session prompt/stream validation (issue #7 — exact steps documented);
-- live compaction validation (issue #8 — after #7);
-- Ollama Cloud live chat (needs an ollama.com API key — steps in `docs/operations/LOCAL_MODELS.md`);
 - native `sqlite-vec` nearest-neighbor backend (current fallback: `js-cosine`);
 - human-at-keyboard TUI `/quit` spot-check (pty-verified already);
 - live validation of the production channel connectors against real Telegram / Slack / Discord / email / calendar services (the framework and connectors are smoke-tested non-live only);

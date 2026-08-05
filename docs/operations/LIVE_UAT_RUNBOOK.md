@@ -6,8 +6,14 @@ lot. Each item says what "pass" looks like and which claim it upgrades.
 Maintained continuously during the wishlist sprint — new items are appended as
 issues ship, so check the tail before starting.
 
-_Last updated: 2026-07-02 (post-#14). Items 1–5 cover the MVP marathon; the
+_Last updated: 2026-08-05. Items 1–5 cover the MVP marathon; the
 appendix accumulates wishlist-sprint additions._
+
+> **Items 1, 2 and 3 are DONE as of 2026-08-05.** All three were run against an
+> Ollama Cloud key (`ollama-cloud/deepseek-v4-pro:cloud`) on a Radxa Cubie A7Z,
+> aarch64 / Debian 11 / Node 24. None of them needed `openai-codex`; any
+> authenticated provider satisfies the prereq in section 0. Results and bounds:
+> [`LOCAL_MODELS.md`](LOCAL_MODELS.md). Items 4 and 5 still need a human.
 
 ## 0. Prereq — connect auth into the ISOLATED runtime (~1 min)
 
@@ -19,11 +25,11 @@ cd /Users/clint/Projects/MindStone-Agent
 Never touches global `~/.pi/agent`. Any subscription/OAuth provider works;
 adjust the model ids below to match.
 
-## 1. Issue #7 — live Pi-session prompt/stream (runbook Gate 6, ~3 min)
+## 1. Issue #7 — live Pi-session prompt/stream (runbook Gate 6, ~3 min) — ✅ DONE 2026-08-05
 
 ```bash
 MINDSTONE_PI_SESSION_LIVE=1 \
-MINDSTONE_PI_SESSION_LIVE_MODEL='openai-codex/openai-codex/gpt-5.4-mini' \
+MINDSTONE_PI_SESSION_LIVE_MODEL='ollama-cloud/deepseek-v4-pro:cloud' \
   npm run smoke:pi-session-live
 ```
 
@@ -31,19 +37,26 @@ MINDSTONE_PI_SESSION_LIVE_MODEL='openai-codex/openai-codex/gpt-5.4-mini' \
 canonical transcript. Upgrades #7 to live-validated; close it with the output
 pasted in a comment.
 
-## 2. Issue #8 — live Pi-session compaction (~3 min)
+**Result 2026-08-05:** exit 0, `ok: true`, `runnerStream.eventCount: 25`,
+`persistedEventCount: 24`, `durationMs: 4700`.
+
+## 2. Issue #8 — live Pi-session compaction (~3 min) — ✅ DONE 2026-08-05
 
 ```bash
 MINDSTONE_PI_SESSION_LIVE=1 \
 MINDSTONE_PI_SESSION_LIVE_COMPACT=1 \
-MINDSTONE_PI_SESSION_LIVE_MODEL='openai-codex/openai-codex/gpt-5.4-mini' \
+MINDSTONE_PI_SESSION_LIVE_MODEL='ollama-cloud/deepseek-v4-pro:cloud' \
   npm run smoke:pi-session-live
 ```
 
 **Pass:** an authenticated `AgentSession.compact()` produces a real summary.
 Upgrades #8; public docs then drop "compaction: live validation pending".
 
-## 3. Issue #3 residual — Ollama Cloud live chat (~3 min, needs ollama.com key)
+**Result 2026-08-05:** exit 0, real summary returned, `tokensBefore: 2243`,
+`resumeCap.action: noop` (4-entry branch, nothing dropped). Caveat: the probe
+session was short, so this proves the mechanism, not summary quality at length.
+
+## 3. Issue #3 residual — Ollama Cloud live chat (~3 min, needs ollama.com key) — ✅ DONE 2026-08-05
 
 Steps in [`LOCAL_MODELS.md`](LOCAL_MODELS.md): register the Ollama Cloud
 provider through onboarding or `mindstone config --section routing`, supply the
@@ -55,6 +68,11 @@ API key, then:
 
 **Pass:** a real completion from `https://ollama.com/v1`. Upgrades the #3
 Ollama Cloud lane from pending to live-validated.
+
+**Result 2026-08-05:** real completion in 8.8 s, including tool use. Caveat: the
+provider entry was written directly rather than through
+`mindstone config --section routing`, so the **wizard** path remains undriven
+against a live key. That is now the only untested part of this lane.
 
 ## 4. Issue #6 residual — human-keyboard TUI check (~2 min)
 
