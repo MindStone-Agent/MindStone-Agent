@@ -826,6 +826,11 @@ async function runConfiguredRoute(input: {
           documents: [...(input.config?.memory?.localDocuments ?? []), ...fileMemoryDocuments],
           maxPromptTokens: input.config?.memory?.invariants?.maxPromptTokens,
         },
+        memoryIndex: {
+          enabled: input.config?.memory?.index?.enabled !== false,
+          documents: fileMemoryDocuments,
+          maxPromptTokens: input.config?.memory?.index?.maxPromptTokens,
+        },
         signal: run.abortController.signal,
         metadata: input.metadata,
         runContext: {
@@ -916,6 +921,26 @@ async function runConfiguredRoute(input: {
           total,
           promptTokens: route.invariants.tokens,
           admissions: route.invariants.admissions,
+        },
+      });
+    }
+
+    if (route.memoryIndex && route.memoryIndex.total > 0) {
+      const { full, degraded, omitted, total } = route.memoryIndex;
+      appendTranscriptEntry({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        role: "event",
+        text: `Injected the memory index: ${full} of ${total} entries in full${degraded ? `, ${degraded} shortened` : ""}${omitted ? `, ${omitted} omitted` : ""}.`,
+        runId: run.id,
+        source,
+        metadata: {
+          event: "memory_index_injected",
+          full,
+          degraded,
+          omitted,
+          total,
+          promptTokens: route.memoryIndex.tokens,
         },
       });
     }

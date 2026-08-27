@@ -41,6 +41,8 @@ export type MindStoneMemoryConfig = {
   autoRecall?: boolean;
   /** Always-in-force rules, injected with no query and no relevance ranking. */
   invariants?: MindStoneInvariantConfig;
+  /** The memory index, injected with no query so the agent can see what it knows. */
+  index?: MindStoneInvariantConfig;
   vectorStore?: "lancedb" | "sqlite-vec" | "memory";
   /** Embedding provider spec, e.g. ollama:nomic-embed-text or openai:text-embedding-3-small. */
   embeddingProvider?: string;

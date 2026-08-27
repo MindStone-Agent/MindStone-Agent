@@ -2,9 +2,12 @@ import { buildPromptWindow, estimatePromptTokens, type PromptWindowBuildResult }
 import type { ContextManagementPolicy } from "../context/index.js";
 import {
   buildInvariantPromptFromDocuments,
+  buildMemoryIndexPromptFromDocuments,
   defaultInvariantBudgetTokens,
+  defaultMemoryIndexBudgetTokens,
   recallMindStoneMemory,
   type InvariantPromptResult,
+  type MemoryIndexPromptResult,
   type MemoryDocument,
   type MemoryRecallConfig,
   type MemoryRecallProvider,
@@ -73,6 +76,16 @@ export type MindStoneRouteInput = {
     documents?: MemoryDocument[];
     maxPromptTokens?: number;
   };
+  /**
+   * The memory index. Same reasoning as invariants: it is the map of what the
+   * agent knows, so gating it on similarity to the current turn is what makes
+   * an agent confidently report absence.
+   */
+  memoryIndex?: {
+    enabled?: boolean;
+    documents?: MemoryDocument[];
+    maxPromptTokens?: number;
+  };
   signal?: AbortSignal;
   metadata?: Record<string, unknown>;
 };
@@ -88,6 +101,7 @@ export type MindStoneRoutePlan = {
   identityFormation?: MindStoneIdentityFormationPrompt;
   memoryRecall?: MemoryRecallResult;
   invariants?: InvariantPromptResult;
+  memoryIndex?: MemoryIndexPromptResult;
   handoffReplay?: MindStoneHandoffReplay;
 };
 
@@ -155,11 +169,16 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     : buildInvariantPromptFromDocuments(input.invariants.documents, {
         maxPromptTokens: input.invariants.maxPromptTokens ?? defaultInvariantBudgetTokens(contextWindowTokens),
       });
+  const memoryIndex = input.memoryIndex?.enabled === false || !input.memoryIndex?.documents?.length
+    ? undefined
+    : buildMemoryIndexPromptFromDocuments(input.memoryIndex.documents, {
+        maxPromptTokens: input.memoryIndex.maxPromptTokens ?? defaultMemoryIndexBudgetTokens(contextWindowTokens),
+      });
   const promptWindow = buildPromptWindow({
     entries: input.entries,
     contextWindowTokens,
     policy: input.contextManagement,
-    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (personaContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (invariants?.tokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0),
+    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (personaContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (invariants?.tokens ?? 0) + (memoryIndex?.tokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0),
     protectedEntryIds: input.protectedEntryIds,
   });
   const messages = promptWindow.promptEntries.map(transcriptEntryToChatMessage).filter((message): message is MindStoneChatMessage => Boolean(message));
@@ -181,8 +200,12 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
   if (personaPromptText) {
     messages.unshift({ role: "system", text: personaPromptText });
   }
-  // Directly below identity and above everything query-dependent. A rule that
-  // sits under recall is a rule the model reads as one more retrieved snippet.
+  // Identity, then the rules that bind, then the map of what is knowable, then
+  // everything query-dependent. A rule that sits under recall is a rule the
+  // model reads as one more retrieved snippet.
+  if (memoryIndex?.promptText) {
+    messages.unshift({ role: "system", text: memoryIndex.promptText });
+  }
   if (invariants?.promptText) {
     messages.unshift({ role: "system", text: invariants.promptText });
   }
@@ -200,6 +223,7 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     identityFormation: input.identityFormation?.enabled ? input.identityFormation : undefined,
     memoryRecall: input.memoryRecall,
     invariants,
+    memoryIndex,
     handoffReplay: input.handoffReplay,
   };
 }

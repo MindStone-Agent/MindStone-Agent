@@ -75,6 +75,15 @@ invariant: >-
 Not binding. Recorded for consistency only.
 MD
 
+cat >>"${MEMORY_DIR}/MEMORY.md" <<'MD'
+
+## Fixtures
+
+- [reference_deploy_freeze](reference_deploy_freeze.md) — release windows for the shared cluster
+- [reference_not_binding](reference_not_binding.md) — a preference, recorded but not binding
+- [reference_no_invariant](reference_no_invariant.md) — critical, rule not yet authored
+MD
+
 # Negative control two: critical, but no authored invariant. Nothing to inject.
 cat >"${MEMORY_DIR}/reference_no_invariant.md" <<'MD'
 ---
@@ -188,6 +197,70 @@ console.log(`        admissions: ${mixed.admissions.map((entry) => entry.admissi
 check("a rule too long even to degrade is omitted", mixed.omitted === 1, JSON.stringify({ full: mixed.full, degraded: mixed.degraded, omitted: mixed.omitted }));
 check("an omitted rule does not abort the loop", (mixed.promptText ?? "").includes("last_short"), String(mixed.promptText));
 
+// --- memory index tier ---
+const { selectMemoryIndexDocument, buildMemoryIndexPrompt, buildMemoryIndexPromptFromDocuments } =
+  await import("./packages/mindstone-core/dist/memory/memory-index.js");
+
+const indexDoc = selectMemoryIndexDocument(docs);
+check("index document found", Boolean(indexDoc), String(docs.map((d) => d.kind)));
+
+const wideIndex = buildMemoryIndexPromptFromDocuments(docs, { maxPromptTokens: 4000 });
+check("index entries injected in full", wideIndex.full >= 3, JSON.stringify({ full: wideIndex.full, total: wideIndex.total }));
+check("index hooks survive at a sane budget", (wideIndex.promptText ?? "").includes("release windows for the shared cluster"), String(wideIndex.promptText).slice(0, 200));
+
+// The structural failure this tier exists to fix: an index larger than any
+// per-hit budget is not merely unlikely to be recalled, it can never be
+// admitted at all, so the agent loses its map of what it knows entirely.
+// Degrading line by line must leave pointers behind rather than nothing.
+const fatIndex = {
+  id: "memory:MEMORY.md",
+  kind: "index",
+  text: ["# Index", "", ...Array.from({ length: 60 }, (_, i) => `- [entry_${i}](entry_${i}.md) — ${"h".repeat(200)}`)].join("\n"),
+};
+// Pass 2: too big for hooks, big enough for every pointer. Coverage must be
+// total. A single greedy loop cannot reach this state — it spends the budget on
+// detail for the first few entries and then drops the existence of the rest,
+// which measured 9 full / 1 degraded / 50 omitted before this was fixed.
+const allPointers = buildMemoryIndexPrompt(fatIndex, { maxPromptTokens: 900 });
+console.log(`        index pass2: full=${allPointers.full} degraded=${allPointers.degraded} omitted=${allPointers.omitted} total=${allPointers.total}`);
+check("no entry is lost when pointers alone fit", allPointers.omitted === 0, JSON.stringify(allPointers));
+check("every entry degraded rather than a few kept fat", allPointers.degraded === 60, JSON.stringify(allPointers));
+check("hooks are gone once degraded", !(allPointers.promptText ?? "").includes("h".repeat(200)), "hook text still present");
+check("pointers survive when hooks do not", (allPointers.promptText ?? "").includes("](entry_59.md)"), String(allPointers.promptText).slice(-200));
+check("index loss is reported in band", (allPointers.promptText ?? "").includes("NOTE:"), String(allPointers.promptText).slice(-200));
+// Headings are what an index's grouping is made of, and grouping is
+// information. They survive as long as the pointers do; only the last-resort
+// pass spends them, and then only because a heading costs an entry its
+// existence. Asserted because without it a fallthrough to that last pass looks
+// identical from the outside: same counts, quietly less usable list.
+check("section structure survives while pointers fit", (allPointers.promptText ?? "").includes("# Index"), String(allPointers.promptText).slice(0, 300));
+
+// Pass 3: not even every pointer fits. Coverage should still be most of the
+// list, not a tenth of it, and the shortfall must be stated.
+const squeezedIndex = buildMemoryIndexPrompt(fatIndex, { maxPromptTokens: 700 });
+console.log(`        index pass3: full=${squeezedIndex.full} degraded=${squeezedIndex.degraded} omitted=${squeezedIndex.omitted} total=${squeezedIndex.total}`);
+check("an oversized index still yields something", Boolean(squeezedIndex.promptText), "empty promptText");
+check("most of the list survives as pointers", squeezedIndex.degraded >= 40, JSON.stringify(squeezedIndex));
+check("every index entry accounted for", squeezedIndex.full + squeezedIndex.degraded + squeezedIndex.omitted === 60, JSON.stringify(squeezedIndex));
+check("the shortfall is stated", (squeezedIndex.promptText ?? "").includes("left out of this turn's budget"), String(squeezedIndex.promptText).slice(-200));
+
+// Force the OMIT branch and require a later entry through it. Written this way
+// from the start because the invariant tier's equivalent assertion only ever
+// reached the degrade branch, so a `break` on the omit branch went undetected
+// until the module was mutated.
+const mixedIndex = buildMemoryIndexPrompt({
+  id: "memory:MEMORY.md",
+  kind: "index",
+  text: [
+    "- [short_first](a.md) — hook",
+    `- [${"L".repeat(600)}](b.md) — hook`,
+    "- [short_last](c.md) — hook",
+  ].join("\n"),
+}, { maxPromptTokens: 190 });
+console.log(`        index mixed: full=${mixedIndex.full} degraded=${mixedIndex.degraded} omitted=${mixedIndex.omitted}`);
+check("an index entry too long to degrade is omitted", mixedIndex.omitted === 1, JSON.stringify(mixedIndex));
+check("an omitted index entry does not abort the loop", (mixedIndex.promptText ?? "").includes("short_last"), String(mixedIndex.promptText));
+
 if (failures > 0) {
   console.log(`Part A: ${failures} failing assertion(s).`);
   process.exit(1);
@@ -229,12 +302,24 @@ if (event.metadata.full !== 1 || event.metadata.total !== 1) {
 }
 console.log("  pass  exactly the binding rule was injected, with autoRecall off");
 
+const indexEvent = history.entries.find((entry) => entry.metadata?.event === "memory_index_injected");
+if (!indexEvent) {
+  console.log("  FAIL  no memory_index_injected event on an unrelated query");
+  process.exit(1);
+}
+console.log(`  pass  index injected: ${JSON.stringify({ full: indexEvent.metadata.full, degraded: indexEvent.metadata.degraded, omitted: indexEvent.metadata.omitted, total: indexEvent.metadata.total })}`);
+if (indexEvent.metadata.omitted !== 0) {
+  console.log("  FAIL  index entries omitted at the default budget on a three-file runtime");
+  process.exit(1);
+}
+console.log("  pass  the whole index fit, so nothing was silently lost");
+
 const recall = history.entries.find((entry) => entry.metadata?.event === "memory_recall_injected");
 if (recall) {
   console.log("  FAIL  recall fired with autoRecall off — the tier under test is not isolated");
   process.exit(1);
 }
-console.log("  pass  no recall event, so the injection came from the tier and not from search");
+console.log("  pass  no recall event, so both injections came from tiers and not from search");
 NODE
 
 kill "${gateway_pid}" >/dev/null 2>&1 || true
@@ -292,6 +377,26 @@ mustFail("total loss is reported as an empty tier", () => {
   const rules = selectInvariantRules([doc({ critical: "true", invariant: "z".repeat(900) })]);
   const block = buildInvariantPrompt(rules, { maxPromptTokens: 1 });
   return block.total === 0;
+});
+
+const { buildMemoryIndexPrompt: buildIndex } = await import("./packages/mindstone-core/dist/memory/memory-index.js");
+const fatIndex = (count, hookLength) => ({
+  id: "memory:MEMORY.md",
+  kind: "index",
+  text: Array.from({ length: count }, (_, i) => `- [entry_${i}](entry_${i}.md) — ${"h".repeat(hookLength)}`).join("\n"),
+});
+
+// All-or-nothing admission: the shape where an index larger than the budget is
+// dropped whole and the agent silently loses its map.
+mustFail("an oversized index survives whole-document admission", () => {
+  const block = buildIndex(fatIndex(60, 200), { maxPromptTokens: 700 });
+  return !block.promptText;
+});
+
+// Degradation that keeps the hook buys nothing and would report success.
+mustFail("hooks are still present after degradation", () => {
+  const block = buildIndex(fatIndex(60, 200), { maxPromptTokens: 700 });
+  return (block.promptText ?? "").includes("h".repeat(200));
 });
 
 if (undetected > 0) {

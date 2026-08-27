@@ -4,5 +4,6 @@ export * from "./recall-usage.js";
 export * from "./scri-ranking.js";
 export * from "./file-memory.js";
 export * from "./invariants.js";
+export * from "./memory-index.js";
 export * from "./embedding.js";
 export * from "./sqlite-memory.js";
