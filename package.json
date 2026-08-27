@@ -63,6 +63,7 @@
     "smoke:reset": "./scripts/smoke-reset.sh",
     "smoke:auto-recall": "./scripts/smoke-auto-recall.sh",
     "smoke:file-memory": "./scripts/smoke-file-memory.sh",
+    "smoke:memory-invariants": "./scripts/smoke-memory-invariants.sh",
     "smoke:memory-backfill": "./scripts/smoke-memory-backfill.sh",
     "smoke:memory-maintenance": "./scripts/smoke-memory-maintenance.sh",
     "smoke:embedding-memory": "./scripts/smoke-embedding-memory.sh",

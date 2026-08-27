@@ -769,6 +769,9 @@ async function runConfiguredRoute(input: {
   }
 
   try {
+    // Walked once and shared: the recall provider and the invariant tier both
+    // read the same files, and the tier must not depend on the vector store.
+    const fileMemoryDocuments = discoverFileMemoryDocuments({ config: input.config });
     const runner = resolveRunner(input.config, provider);
     const streamOptions = resolveRunnerStreamOptions(input.config);
     const { route, streamEvents } = await runGatewayRunner({
@@ -807,16 +810,21 @@ async function runConfiguredRoute(input: {
           provider: input.config?.memory?.vectorStore === "sqlite-vec"
             ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
                 ...(input.config?.memory?.localDocuments ?? []),
-                ...discoverFileMemoryDocuments({ config: input.config }),
+                ...fileMemoryDocuments,
                 ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
               ])
             : createLocalMemoryRecallProvider([
                 ...(input.config?.memory?.localDocuments ?? []),
-                ...discoverFileMemoryDocuments({ config: input.config }),
+                ...fileMemoryDocuments,
                 ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
               ]),
           config: input.config?.memory?.recall,
           scope: input.recallScope ?? input.scope,
+        },
+        invariants: {
+          enabled: input.config?.memory?.invariants?.enabled !== false,
+          documents: [...(input.config?.memory?.localDocuments ?? []), ...fileMemoryDocuments],
+          maxPromptTokens: input.config?.memory?.invariants?.maxPromptTokens,
         },
         signal: run.abortController.signal,
         metadata: input.metadata,
@@ -888,6 +896,27 @@ async function runConfiguredRoute(input: {
         runner,
         model,
         signal: run.abortController.signal,
+      });
+    }
+
+    if (route.invariants && route.invariants.total > 0) {
+      const { full, degraded, omitted, total } = route.invariants;
+      appendTranscriptEntry({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        role: "event",
+        text: `Injected ${full} of ${total} always-in-force rule(s) in full${degraded ? `, ${degraded} shortened` : ""}${omitted ? `, ${omitted} omitted` : ""}.`,
+        runId: run.id,
+        source,
+        metadata: {
+          event: "memory_invariants_injected",
+          full,
+          degraded,
+          omitted,
+          total,
+          promptTokens: route.invariants.tokens,
+          admissions: route.invariants.admissions,
+        },
       });
     }
 

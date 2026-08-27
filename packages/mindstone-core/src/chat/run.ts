@@ -435,6 +435,10 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
         sourceSubstrate: input.source?.substrate,
       });
 
+  // Walked once and shared: the recall provider and the invariant tier both read
+  // the same files, and the tier must not depend on the vector store being up.
+  const fileMemoryDocuments = discoverFileMemoryDocuments({ config: input.config });
+
   const runner = input.runner ?? createProviderRouteAgentRunner();
   const streamOptions = resolveRunnerStreamOptions(input);
   const { route, streamEvents } = await runAgentRunner({
@@ -458,16 +462,21 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
         provider: input.config?.memory?.vectorStore === "sqlite-vec"
           ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
               ...(input.config?.memory?.localDocuments ?? []),
-              ...discoverFileMemoryDocuments({ config: input.config }),
+              ...fileMemoryDocuments,
               ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
             ])
           : createLocalMemoryRecallProvider([
               ...(input.config?.memory?.localDocuments ?? []),
-              ...discoverFileMemoryDocuments({ config: input.config }),
+              ...fileMemoryDocuments,
               ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
             ]),
         config: input.config?.memory?.recall,
         scope: input.recallScope ?? input.scope,
+      },
+      invariants: {
+        enabled: input.config?.memory?.invariants?.enabled !== false,
+        documents: [...(input.config?.memory?.localDocuments ?? []), ...fileMemoryDocuments],
+        maxPromptTokens: input.config?.memory?.invariants?.maxPromptTokens,
       },
       signal: input.signal,
       metadata: input.metadata,
@@ -545,6 +554,27 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     source: input.source,
     route,
   }));
+
+  if (route.invariants && route.invariants.total > 0) {
+    const { full, degraded, omitted, total } = route.invariants;
+    events.push(appendTranscriptEntry({
+      sessionKey: input.sessionKey,
+      agentId: input.agentId,
+      role: "event",
+      text: `Injected ${full} of ${total} always-in-force rule(s) in full${degraded ? `, ${degraded} shortened` : ""}${omitted ? `, ${omitted} omitted` : ""}.`,
+      runId,
+      source: input.source,
+      metadata: {
+        event: "memory_invariants_injected",
+        full,
+        degraded,
+        omitted,
+        total,
+        promptTokens: route.invariants.tokens,
+        admissions: route.invariants.admissions,
+      },
+    }));
+  }
 
   if (route.memoryRecall?.hits.length) {
     events.push(appendTranscriptEntry({

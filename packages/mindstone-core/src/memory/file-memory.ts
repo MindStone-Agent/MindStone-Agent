@@ -19,7 +19,8 @@ function resolveConfiguredPath(defaultPath: string, dataDir: string, value: stri
   return isAbsolute(value) ? value : resolve(dataDir, value);
 }
 
-function parseMarkdown(raw: string): ParsedMarkdown {
+/** Exported for test: the frontmatter contract is load-bearing and must be verifiable. */
+export function parseMarkdown(raw: string): ParsedMarkdown {
   const normalized = raw.replace(/\r\n/g, "\n");
   if (!normalized.startsWith("---\n")) return { frontmatter: {}, body: normalized.trim() };
   const end = normalized.indexOf("\n---", 4);
@@ -27,10 +28,54 @@ function parseMarkdown(raw: string): ParsedMarkdown {
   const frontmatterText = normalized.slice(4, end).trim();
   const body = normalized.slice(end + "\n---".length).trim();
   const frontmatter: Record<string, string> = {};
-  for (const line of frontmatterText.split("\n")) {
+  const lines = frontmatterText.split("\n");
+
+  // Three behaviours this parser needs and did not have. Each was verified
+  // against the real loop before being fixed, and each fails SILENTLY:
+  //
+  //  1. Block scalars. `invariant: >-` captured the literal ">-" as the value.
+  //     A field that exists and says ">-" is worse than an absent one: it
+  //     reports as covered, injects as present, and carries no rule.
+  //
+  //  2. Top-level precedence. Lines were trimmed before matching, so an
+  //     indented `critical: false` under a `metadata:` block OVERWROTE a
+  //     top-level `critical: true` on a later line. Last-wins silently
+  //     demoted binding rules. Top level must win.
+  //
+  //  3. Container keys. `metadata:` itself matched with an empty value and
+  //     landed in the map as noise.
+  const topLevel = new Set<string>();
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const indented = /^\s/.test(line);
     const match = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line.trim());
     if (!match) continue;
-    frontmatter[match[1]] = match[2].replace(/^['\"]|['\"]$/g, "").trim();
+
+    const key = match[1];
+    let value = match[2].trim();
+
+    // A block scalar indicator means the value is the following indented lines.
+    if (value === ">" || value === ">-" || value === "|" || value === "|-") {
+      const fold = value.startsWith(">");
+      const collected: string[] = [];
+      for (let j = i + 1; j < lines.length; j += 1) {
+        if (lines[j].trim() === "") { collected.push(""); continue; }
+        if (!/^\s/.test(lines[j])) break;
+        collected.push(lines[j].trim());
+        i = j;
+      }
+      value = fold ? collected.join(" ").trim() : collected.join("\n").trim();
+    } else {
+      value = value.replace(/^['"]|['"]$/g, "").trim();
+    }
+
+    // A container key (`metadata:` with nothing after it) is structure, not data.
+    if (value === "" && !indented) { topLevel.add(key); continue; }
+
+    if (indented && topLevel.has(key)) continue; // top level wins
+    if (!indented) topLevel.add(key);
+    frontmatter[key] = value;
   }
   return { frontmatter, body };
 }
@@ -74,6 +119,7 @@ function readMarkdownDocument(params: {
       name: parsed.frontmatter.name,
       description: parsed.frontmatter.description,
       critical: parsed.frontmatter.critical,
+      invariant: parsed.frontmatter.invariant,
       evergreen: parsed.frontmatter.evergreen,
       hits: parsed.frontmatter.hits,
       prevented: parsed.frontmatter.prevented,

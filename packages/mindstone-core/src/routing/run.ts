@@ -1,6 +1,15 @@
 import { buildPromptWindow, estimatePromptTokens, type PromptWindowBuildResult } from "../context/index.js";
 import type { ContextManagementPolicy } from "../context/index.js";
-import { recallMindStoneMemory, type MemoryRecallConfig, type MemoryRecallProvider, type MemoryRecallResult } from "../memory/index.js";
+import {
+  buildInvariantPromptFromDocuments,
+  defaultInvariantBudgetTokens,
+  recallMindStoneMemory,
+  type InvariantPromptResult,
+  type MemoryDocument,
+  type MemoryRecallConfig,
+  type MemoryRecallProvider,
+  type MemoryRecallResult,
+} from "../memory/index.js";
 import type { MindStoneIdentity } from "../identity/index.js";
 import type { MindStoneChatMessage, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider } from "../provider/index.js";
 import type { MindStoneRoutePersonaContext, MindStoneRoutePersonaContextSummary } from "../persona/types.js";
@@ -53,6 +62,17 @@ export type MindStoneRouteInput = {
     /** App Engine / Agent Mesh scope filter — scoped documents recall only at their exact scope. */
     scope?: Record<string, string>;
   };
+  /**
+   * Always-in-force rules. Sourced from memory FILES rather than the vector
+   * store on purpose: an invariant is a frontmatter fact, so the constitution
+   * still loads when the embedder is down.
+   */
+  invariants?: {
+    /** Defaults to enabled when documents are supplied. */
+    enabled?: boolean;
+    documents?: MemoryDocument[];
+    maxPromptTokens?: number;
+  };
   signal?: AbortSignal;
   metadata?: Record<string, unknown>;
 };
@@ -67,6 +87,7 @@ export type MindStoneRoutePlan = {
   personaContext?: MindStoneRoutePersonaContextSummary;
   identityFormation?: MindStoneIdentityFormationPrompt;
   memoryRecall?: MemoryRecallResult;
+  invariants?: InvariantPromptResult;
   handoffReplay?: MindStoneHandoffReplay;
 };
 
@@ -128,11 +149,17 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
         tokenEstimate: estimatePromptTokens(personaPromptText),
       }
     : undefined;
+  const contextWindowTokens = input.model.contextWindowTokens ?? 128_000;
+  const invariants = input.invariants?.enabled === false || !input.invariants?.documents?.length
+    ? undefined
+    : buildInvariantPromptFromDocuments(input.invariants.documents, {
+        maxPromptTokens: input.invariants.maxPromptTokens ?? defaultInvariantBudgetTokens(contextWindowTokens),
+      });
   const promptWindow = buildPromptWindow({
     entries: input.entries,
-    contextWindowTokens: input.model.contextWindowTokens ?? 128_000,
+    contextWindowTokens,
     policy: input.contextManagement,
-    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (personaContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0),
+    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (personaContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (invariants?.tokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0),
     protectedEntryIds: input.protectedEntryIds,
   });
   const messages = promptWindow.promptEntries.map(transcriptEntryToChatMessage).filter((message): message is MindStoneChatMessage => Boolean(message));
@@ -154,6 +181,11 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
   if (personaPromptText) {
     messages.unshift({ role: "system", text: personaPromptText });
   }
+  // Directly below identity and above everything query-dependent. A rule that
+  // sits under recall is a rule the model reads as one more retrieved snippet.
+  if (invariants?.promptText) {
+    messages.unshift({ role: "system", text: invariants.promptText });
+  }
   if (identityPromptText) {
     messages.unshift({ role: "system", text: identityPromptText });
   }
@@ -167,6 +199,7 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     personaContext,
     identityFormation: input.identityFormation?.enabled ? input.identityFormation : undefined,
     memoryRecall: input.memoryRecall,
+    invariants,
     handoffReplay: input.handoffReplay,
   };
 }
