@@ -30,8 +30,19 @@ export type MindStoneFileMemoryConfig = {
   includeLog?: boolean;
 };
 
+export type MindStoneInvariantConfig = {
+  /** Defaults to true. The tier is the agent's constitution; opting out is deliberate. */
+  enabled?: boolean;
+  /** Hard ceiling for the always-in-force block. Defaults to a share of the model window. */
+  maxPromptTokens?: number;
+};
+
 export type MindStoneMemoryConfig = {
   autoRecall?: boolean;
+  /** Always-in-force rules, injected with no query and no relevance ranking. */
+  invariants?: MindStoneInvariantConfig;
+  /** The memory index, injected with no query so the agent can see what it knows. */
+  index?: MindStoneInvariantConfig;
   vectorStore?: "lancedb" | "sqlite-vec" | "memory";
   /** Embedding provider spec, e.g. ollama:nomic-embed-text or openai:text-embedding-3-small. */
   embeddingProvider?: string;
