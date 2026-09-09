@@ -59,7 +59,9 @@ The wizard:
 `https://ollama.com/v1/models` was verified live on 2026-07-01 (model listing responds).
 
 A live **chat** turn through Ollama Cloud was validated on **2026-08-05** with a real
-ollama.com key. Every expectation this section previously predicted held, including the
+ollama.com key. A second live validation on **2026-09-09** (macOS, Node 24) ran
+`qwen3.5:397b` through the same path; the one-model walkthrough is `OLLAMA_CLOUD_QWEN3.5.md`
+at the repository root. Every expectation this section previously predicted held, including the
 `doctor` auth summary.
 
 **Environment:** Radxa Cubie A7Z, aarch64, Debian 11 (bullseye), Node 24.19.0, 961 MB RAM.
