@@ -136,8 +136,13 @@ the employee's own mail would not surface), because the scope filter (`app-engin
 `scopeMatchesRecallFilter`) requires an exact match on every dimension a document carries and a
 human sender's turn would otherwise reject the employee's own mail; `userId` is stamped only
 for a delegated mailbox owned by a person, and such an entry is then recalled only in that
-person's turns, not in the employee's application-only runs, which is intended. The intent is
-that mail is the employee's memory, not one person's. An `engagement`
+person's turns, not in the employee's application-only runs, which is intended. The same rule
+governs Teams: a connector turn sets `tenantId` and `agentId`, records the sender's AAD object
+id in `source.senderId`, and leaves `scope.userId` unset, because a correction given in Teams
+has to be recallable in the employee's own scheduled runs and in every other person's turns; a
+`userId`-stamped Teams entry would be visible to its sender only. `userId` scope stays
+reserved for delegated mailboxes and for per-person App Engine runs. The intent is that the
+employee's channels are the employee's memory, not one person's. An `engagement`
 dimension (client engagement id) is added as a first-class scope so client context is filtered
 on every recall, not only by convention (W8).
 
@@ -180,7 +185,7 @@ below is **pending** today. "Ceiling" is the highest claim reachable without a r
 
 | # | Item | What exists | What changes | Ceiling without a tenant | Depends on |
 |---|---|---|---|---|---|
-| W1 | Teams connector (#32) | Design #20; catalog entry `planned` | `connectors/teams.ts` per #20 I1–I3: `/api/messages` route on the gateway, JWT validation, `message` activity ⇄ inbound mapping (the `adaptiveCard/action` invoke mapping is W6's), serviceUrl replies, conversation-reference cache, scope set on the turn (`tenantId`, `agentId`, `userId`), which stamps entries and feeds the recall filter; outbound token from either the secret-ref path (tunnel) or the managed-identity endpoint (tenant, D2); stub Bot Connector; Agents Playground leg | smoke-tested | none (the managed-identity path live-validates in the L1 leg, `TEAMS_CONNECTOR_DESIGN.md` §7 as extended in §3) |
+| W1 | Teams connector (#32) | Design #20; catalog entry `planned` | `connectors/teams.ts` per #20 I1–I3: `/api/messages` route on the gateway, JWT validation, `message` activity ⇄ inbound mapping (the `adaptiveCard/action` invoke mapping is W6's), serviceUrl replies, conversation-reference cache, scope set on the turn (`tenantId`, `agentId`; sender in `source.senderId`, `userId` unset, per D4), which stamps entries and feeds the recall filter; outbound token from either the secret-ref path (tunnel) or the managed-identity endpoint (tenant, D2); stub Bot Connector; Agents Playground leg | smoke-tested | none (the managed-identity path live-validates in the L1 leg, `TEAMS_CONNECTOR_DESIGN.md` §7 as extended in §3) |
 | W2 | Azure OpenAI embedding route | Chat on Azure exists: the vendored Pi ships an `azure-openai-responses` provider (`AZURE_OPENAI_API_KEY`, base URL normalized to `.../openai/v1`, Responses API). Embedder in `memory/embedding.ts` (ids `ollama`, `openai`, `openai-compatible`, `http`) sends `Authorization: Bearer` only; Microsoft's REST sample uses an `api-key` header and Bearer for Entra tokens, and Bearer-with-key is implied only through the OpenAI SDK client | Embedder: confirm Bearer-with-key against an Azure embedding deployment, else add an `api-key` header option; add an Entra bearer option (token provider, audience `https://ai.azure.com/.default`) so the pilot's embeddings run without a key. Chat: Pi resolves the provider's key from `AZURE_OPENAI_API_KEY` (`env-api-keys.ts`) and its provider wrapper passes an API key only to the SDK client, which itself accepts an Entra token provider Pi does not expose, so an Entra token option for it is a second, small wrapper change; until it lands, chat inference in a tenant runs on a key and sits outside Conditional Access, which the deployment records | smoke-tested against a stub; live needs a deployment | none for the key path; W4 for the Entra path |
 | W3a | Blob transcript store | Local JSONL transcript store (`transcript/store.ts`) | `BlobTranscriptStore`: append blob per session, daily rotation, append-only API with no rewrite path. The immutability policy itself (D3) is a tenant setting the store assumes; Azurite does not implement immutability policies, so the policy is exercised only in the live leg; Azurite's README is internally inconsistent on append-blob creation (its Put Blob note says unsupported, its own list says Create Append Blob and Append Block are supported, and the SDK's create call is a Put Blob with the append type), and it lists concurrent append as unsupported, so the smoke leg verifies `AppendBlobClient.create()` and single-writer appends against the Azurite version the smoke leg will pin in its compose file | smoke-tested against Azurite (store behavior only) | W4 |
 | W3b | AI Search recall provider | SQLite memory index (`js-cosine`, `sqlite-vec` pending); scope lives in `metadata_json` and is filtered client-side after an unscoped top-k (D4) | `AzureAISearchRecallProvider` implementing `MemoryRecallProvider`; scope fields (app, tenant, user, agent, engagement from W8) become indexed fields and the provider filters on them in the query; embedding pipeline writes to Search; auth via W4's identity or a key ref. Local backends remain the default | smoke-tested against a Search stub | W2, W8; W4 for the identity path (key ref otherwise) |
@@ -213,7 +218,8 @@ the shared record (an Azure Files mount the job can read is the interim); W6 dep
   (to be added to `LIVE_UAT_RUNBOOK.md` at implementation) passes in a real tenant, and then the
   claim is exactly what the leg validated. This design extends that leg to cover D2's bot
   registration on a user-assigned managed identity and W4's agent-identity token acquisition
-  against real Graph, Storage, Search, and Azure OpenAI (Foundry) audiences.
+  against real Graph, Storage, Search, and Azure OpenAI (Foundry) audiences, the gateway's own
+  audience (W5), and the Agent 365 registry (W11).
 
 ---
 
