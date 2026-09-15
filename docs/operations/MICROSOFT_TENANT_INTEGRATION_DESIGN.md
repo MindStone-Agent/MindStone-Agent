@@ -12,11 +12,19 @@ pass), `APP_ENGINE.md` (scope model and Agent Mesh), `../refactor/MEMORY_STRATEG
 ## 0. The target
 
 One MindStone-Agent gateway, running as a container inside an enterprise Microsoft 365 tenant,
-is one Digital Employee: an Entra-governed identity, addressable in Teams, reading and sending
-mail, with the LCA layers intact (append-only record, structured memory and index, auto recall,
+is one Digital Employee: an Entra-governed directory identity, addressable in Teams, reading and
+sending mail, with the LCA layers intact (append-only record, structured memory and index, auto recall,
 live context, consolidation with a human on the approved tier) and every action attributable to
 the identity that performed it. A second and third employee run either as more containers or as
 logically isolated agents in one gateway (Agent Mesh).
+
+Two senses of "identity" run through this document. **Directory identity** is the Entra object
+family (agent identity blueprint, agent identity, agent's user account, managed identity), what a
+tenant's IAM owns and its audit log names; Microsoft's own noun for the service principal is
+"agent identity" and it is kept in that sense. **Persistent identity** is what the harness
+provides: `IDENTITY.md`, `USER.md`, the persona overlay, skills, workflows, and the accumulated
+record, the continuous professional self that survives sessions and surfaces. Unqualified
+"identity" below means directory identity.
 
 Microsoft's stack, as of the pages dated in §7, provides the pieces around the harness:
 
@@ -61,7 +69,7 @@ that the platform provisions the bot registration and the Activity bridge to Tea
 Microsoft 365 Copilot itself; that is worth a spike once the gateway's existing OpenResponses-compatible endpoint
 can be tested against the platform's contract (W10).
 
-### D2. Identity: one blueprint per employee class, one agent identity per employee, runtime auth by federated credential
+### D2. Directory identity: one blueprint per employee class, one agent identity per employee, runtime auth by federated credential
 
 The container's managed identity is the federated credential on the blueprint; at runtime the
 gateway acquires a token for its agent identity and exchanges it for scoped tokens (Graph,
@@ -210,7 +218,7 @@ the shared record (an Azure Files mount the job can read is the interim); W6 dep
 
 - Transcript authority: the record is never rewritten. Redaction (W8) appends and re-derives; it
   does not edit. A locked Blob immutability policy enforces the same rule at the platform.
-- Identity precedence: `IDENTITY.md`/`USER.md` first, persona overlay below, never overriding
+- Persistent-identity precedence: `IDENTITY.md`/`USER.md` first, persona overlay below, never overriding
   identity, user boundaries, or safety (`PERSONAS.md`).
 - Auto recall runs inside the harness on every turn; the recall-usage log records, it does not weight.
 - Approvals are fail-closed and auditable; `connector_mutation` has no auto path.
