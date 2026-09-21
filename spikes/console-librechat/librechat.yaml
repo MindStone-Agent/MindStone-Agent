@@ -18,4 +18,8 @@ endpoints:
         fetch: true
       titleConvo: false
       modelDisplayLabel: 'MindStone'
+      headers:
+        x-mindstone-user-id: '{{LIBRECHAT_USER_ID}}'
+        x-mindstone-user-role: '{{LIBRECHAT_USER_ROLE}}'
+        x-mindstone-conversation-id: '{{LIBRECHAT_BODY_CONVERSATIONID}}'
       forcePrompt: false

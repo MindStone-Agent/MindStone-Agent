@@ -40,4 +40,9 @@ tail -c 20 /tmp/mindstone-agent-sse-body.txt | grep -q 'data: \[DONE\]' || { ech
 NS="$(curl -s -D - -o /tmp/mindstone-agent-sse-ns.txt -H 'Content-Type: application/json' -d '{"model":"mindstone/default","messages":[{"role":"user","content":"plain"}]}' "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions")"
 echo "${NS}" | grep -qi '^content-type: application/json' || { echo "FAIL: non-stream request did not return JSON"; exit 1; }
 grep -q '"object": "chat.completion"' /tmp/mindstone-agent-sse-ns.txt || { echo "FAIL: non-stream body is not a chat.completion"; exit 1; }
-echo "PASS: stream:true -> SSE chunks + [DONE]; stream absent -> JSON"
+MODELS="$(curl -s "http://127.0.0.1:${GATEWAY_PORT}/v1/models")"
+echo "${MODELS}" | grep -Eq '"id": ?"mindstone/default"' || { echo "FAIL: /v1/models does not list mindstone/default (persona as model)"; echo "${MODELS}"; exit 1; }
+HB="$(curl -s -H 'Content-Type: application/json' -H 'x-mindstone-user-id: smoke-user-7' -H 'x-mindstone-user-role: admin' -H 'x-mindstone-conversation-id: conv-42' -d '{"model":"mindstone/default","messages":[{"role":"user","content":"who"}]}' "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions")"
+echo "${HB}" | grep -q '"senderId": "smoke-user-7"' || { echo "FAIL: forwarded x-mindstone-user-id did not become the senderId"; echo "${HB}" | head -c 800; exit 1; }
+echo "${HB}" | grep -Eq '"conversationId": ?"conv-42"' || { echo "FAIL: forwarded conversation id not recorded on the transcript entry"; exit 1; }
+echo "PASS: stream:true -> SSE chunks + [DONE]; stream absent -> JSON; personas listed as models; forwarded user id honored"
