@@ -175,6 +175,20 @@ function loadGatewayConfig(): ReturnType<typeof loadMindStoneConfig> {
   return loadMindStoneConfig(configPath);
 }
 
+/** Write one OpenAI-style streamed chat completion: a content chunk, a stop chunk, then [DONE]. */
+export function openAiStreamFrames(input: { id: string; model: string; content: string }): string[] {
+  const created = Math.floor(Date.now() / 1000);
+  const chunk = (delta: Record<string, unknown>, finish: string | null): string =>
+    `data: ${JSON.stringify({ id: input.id, object: "chat.completion.chunk", created, model: input.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+  return [chunk({ role: "assistant", content: input.content }, null), chunk({}, "stop"), "data: [DONE]\n\n"];
+}
+
+function sendOpenAiStream(res: ServerResponse, input: { id: string; model: string; content: string }): void {
+  res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive" });
+  for (const frame of openAiStreamFrames(input)) res.write(frame);
+  res.end();
+}
+
 function openAiError(message: string, type: string, code: string): { error: { message: string; type: string; code: string } } {
   return { error: { message, type, code } };
 }
@@ -1802,6 +1816,19 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       });
     });
     const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    if (routed.routed && routed.status === 200 && input.stream === true) {
+      // OpenAI-compatible server-sent events. LibreChat (and the openai/langchain clients generally)
+      // send `stream: true` unconditionally and cannot parse a plain chat.completion body, so a
+      // streaming client gets the routed answer as one content chunk, a stop chunk, and [DONE].
+      // Token-level deltas from the runner's stream are a follow-up; the wire format is final.
+      const routedBody = routed.body as { entry?: TranscriptEntry; runId?: string };
+      sendOpenAiStream(res, {
+        id: `chatcmpl-${routedBody.runId ?? Date.now().toString(36)}`,
+        model,
+        content: routedBody.entry?.text ?? "",
+      });
+      return;
+    }
     if (routed.routed && routed.status === 200) {
       const routedBody = routed.body as { entry?: TranscriptEntry; identityContext?: unknown; promptWindow?: unknown; runId?: string };
       sendJson(res, 200, {

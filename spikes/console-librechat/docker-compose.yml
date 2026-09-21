@@ -1,0 +1,32 @@
+# Minimal LibreChat for the Console spike: api + mongodb only. No meilisearch, no rag_api, no vectordb.
+services:
+  api:
+    container_name: mindstone-console-spike
+    image: ghcr.io/danny-avila/librechat:v0.8.8-rc3
+    ports:
+      - "3080:3080"
+    depends_on:
+      - mongodb
+    user: "${UID}:${GID}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file: .env
+    environment:
+      - HOST=0.0.0.0
+      - MONGO_URI=mongodb://mongodb:27017/LibreChat
+      - NO_PROXY=localhost,127.0.0.1,mongodb,host.docker.internal
+    volumes:
+      - ./.env:/app/.env
+      - ./librechat.yaml:/app/librechat.yaml
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      - spike-data:/app/data
+  mongodb:
+    container_name: mindstone-console-spike-mongo
+    image: mongo:8.0.20
+    user: "${UID}:${GID}"
+    volumes:
+      - ./data-node:/data/db
+    command: mongod --noauth
+volumes:
+  spike-data:

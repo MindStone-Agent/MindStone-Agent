@@ -1,0 +1,21 @@
+# LibreChat config for the MindStone Console spike. The only endpoint is the gateway.
+version: 1.2.8
+cache: true
+interface:
+  endpointsMenu: true
+  modelSelect: true
+  parameters: false
+  presets: false
+  agents: false
+  memories: false
+endpoints:
+  custom:
+    - name: 'MindStone'
+      apiKey: '${MINDSTONE_GATEWAY_TOKEN}'
+      baseURL: 'http://host.docker.internal:19790/v1'
+      models:
+        default: ['mindstone/default']
+        fetch: true
+      titleConvo: false
+      modelDisplayLabel: 'MindStone'
+      forcePrompt: false
