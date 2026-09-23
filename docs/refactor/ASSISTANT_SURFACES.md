@@ -53,9 +53,18 @@ Each item says what it is, where the work lives, and what the Console shows. Ite
 - *Across machines:* Synapse. The original MindStone has a working Synapse channel client (`extensions/synapse-client/`: a bearer token per identity, several accounts per gateway, and a chain limit of N autonomous replies per thread before a human must take part, default 1); port it as a connector, so an agent on one box and an agent on another use the same primitive. #39 continues to decide Synapse's own future.
 - The #41 clean-room review session is the first consumer: a reviewer agent with no memory injection, reached through the same send primitive.
 
-**Design rule.** Waking an agent for a message from another agent must not mean replaying its whole conversation. A wake turn gets its own small context budget: the message, the recent part of its thread, and LCA recall for that message, rather than the agent's full sliding window. Agent-to-agent threads get an explicit budget of autonomous turns per root message, and a loop guard; the Synapse chain limit is the model, generalized so that delegation with no human in the thread still completes inside the budget.
+**Design rule.** Waking an agent for a message from another agent must not mean replaying its whole conversation. A wake turn gets its own small context budget: the message, the work item it points to, the recent part of its thread, and LCA recall for that message, rather than the agent's full sliding window. Agent-to-agent threads get an explicit budget of autonomous turns per root message, and a loop guard; the Synapse chain limit is the model, generalized so that delegation with no human in the thread still completes inside the budget.
 
-**Console.** An Agents panel (roster, description, persona, status; sandbox status once sandboxes land) and agent threads rendered as conversations the person can read and join. LibreChat conversations have one owner (`CONSOLE_DESIGN.md` §9), so multi-agent threads are a MindStone panel backed by gateway data, not LibreChat conversations.
+**Reliable delegation (ideas from OpenRig).** OpenRig (`mvschwarz/openrig`, Apache-2.0, v0.5.14 read 2026-09-23) is a multi-agent harness, in its own words, for Claude Code, Codex, and Pi coding-agent sessions across one operator's machines. We do not adopt it: its agents receive messages from each other as pasted terminal input, which fits terminal programs rather than a gateway with an HTTP API, and sender identity comes from the calling session's environment, labeled with its provenance, rather than being checked against a credential per agent, where Synapse already gives each identity its own token. Its coordination model is worth borrowing in the send primitive, and worth proposing to #39 for Synapse:
+
+- **Owned work, separate from chat.** Three things kept apart: conversation (threads), intake (an append-only stream of requests), and owned work items with states (pending, in progress, blocked, and terminal states such as done, handed off, canceled, and failed) and an append-only log of transitions. In our design the send primitive creates the work item when one agent asks another to do something, and the recipient's wake turn must accept or decline it, so a request cannot be dropped silently.
+- **No closing without a reason.** In OpenRig, marking an item done requires a reason from a fixed list (handed off, blocked on, escalation, denied, canceled, no follow-on, superseded); handed off, blocked on, escalation, and superseded also require a target: the new owner, the blocking item, the escalation target, or the replacement. It is enforced where the item is stored. We would extend the rule to every terminal state, including cancel.
+- **Handoff as one step.** Handing work to another agent closes the sender's item and creates the recipient's in one transaction. Across machines, where there is no shared transaction, create the successor first and close the source second, with deterministic item ids so a retry does not duplicate work.
+- **Wake with a pointer.** The notification that wakes an agent points to the stored work item; the item, not the message, is the record. This fits a Synapse mention and the wake-turn budget above.
+- **Honest delivery states.** Delivered, indeterminate (sent but not confirmed, or timed out), and failed are different states, and "posted" is not "read". The Console shows which one applies.
+- **Durable reminders.** Periodic reminders and keep-alive checks are stored jobs that survive a restart, and a check that finds nothing does not wake an agent. These share the scheduler with routines (3.1).
+
+**Console.** An Agents panel (roster, description, persona, status; sandbox status once sandboxes land), agent threads rendered as conversations the person can read and join, and work items with owner, state, and delivery state. LibreChat conversations have one owner (`CONSOLE_DESIGN.md` §9), so multi-agent threads are a MindStone panel backed by gateway data, not LibreChat conversations.
 
 ### 3.3 An execution sandbox per agent, and tool permissions
 
@@ -128,7 +137,7 @@ These are the reasons an organization would choose it, and the adoption work abo
 | 3.6 Secret request form | agent entry point to the secrets API (§4.3 of `CONSOLE_DESIGN.md`) | form in chat | P4 |
 | 3.1 Routines | scheduler (#29) plus triggers | Routines panel | P4 |
 | 3.4 Self-setup with review | propose tools, reviewer session (#41), new pending kinds, configuration events (3.6) | Approvals center with verdicts | P4 |
-| 3.2 Agent-to-agent | send primitive, router, Synapse connector port | Agents panel, agent threads | P4 |
+| 3.2 Agent-to-agent | send primitive, router, work items with transition log and closure reasons, delivery states, Synapse connector port | Agents panel, agent threads, work items | P4 |
 | 3.3 Sandboxes | sandbox per agent, network policy, browser | agent sandbox view, take-over | P5 |
 | 3.5 MCP | MCP client in the gateway | Integrations panel | P5 |
 
@@ -158,5 +167,7 @@ SpaceXAI and Cursor pages, read 2026-09-23:
 - Documentation: https://docs.x.ai/grok-bot/overview, `/bots`, `/chat-and-collaboration`, `/computer-and-apps`, `/skills-routines-and-automations`, `/files-and-results`, `/approvals-security-and-privacy`, `/security`, `/security-faq`, `/teams-and-enterprises`, `/faq`
 - Plans: https://cursor.com/help/grok-bot/plans
 - Cursor staff answers on the Cursor forum (memory files, memory scope, transcript re-reads): https://forum.cursor.com/t/170714, https://forum.cursor.com/t/170523, https://forum.cursor.com/t/168333, https://forum.cursor.com/t/172705
+
+OpenRig, code read at v0.5.14 (`cc75efd`) on 2026-09-23: https://github.com/mvschwarz/openrig (README; `CHANGELOG.md`; `docs/as-built/architecture/coordination-primitive.md` and `transport-and-transcripts.md`, which were verified by their authors at v0.3.1; `packages/daemon/src/adapters/tmux.ts`; `packages/daemon/src/domain/hot-potato-enforcer.ts`; `queue-repository.ts`; `watchdog-scheduler.ts`; `watchdog-policy-engine.ts`; `packages/daemon/src/routes/require-sender-identity.ts`).
 
 MindStone-Agent state is from the repository at `beb5502a` and the issue tracker, 2026-09-23.
