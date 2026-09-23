@@ -1,7 +1,7 @@
 # MindStone Console: web UI on a LibreChat fork
 
 **Status:** Design draft, 2026-09-17. Bookmarked, not scheduled. No integration code has been written.
-**Decides:** #38 (candidate UI), and gives #15 (MindStone Console) its shape. Touches #24 (approvals) and #25 (observability).
+**Decides:** #38 (candidate UI), and gives #15 (MindStone Console) its shape. Touches #24 (approvals) and #25 (observability). Assistant features after the beta (routines, agent-to-agent, sandboxes, self-setup with review, MCP) are in `ASSISTANT_SURFACES.md`.
 **Owner:** Product decision by Clint, 2026-09-17. Engineering design by Cairn.
 
 ## 1. Decision
@@ -113,6 +113,8 @@ Phase 1 uses LibreChat's own knobs and assets: `APP_TITLE`, `CUSTOM_FOOTER`, `HE
 | P2 | Config API and onboarding: admin API, schema validation, safe reload, secret handling, onboarding flow, TUI on the same API | Gateway (largest piece), Console panels | Fresh install configured entirely from the browser |
 | P3 | Visibility and approvals: status, personas, sessions, memory writes, recall, approval decisions | Gateway admin API, Console panels | Approval answered from the browser |
 | Beta | Open the beta | | P2 done plus the approvals part of P3 |
+| P4 | Assistant: routines, agent-to-agent threads, self-setup with an independent reviewer (`ASSISTANT_SURFACES.md` §3.1, 3.2, 3.4) | Gateway and core (largest), Console panels | A routine created from chat, reviewed, approved, and run |
+| P5 | Isolation and reach: sandbox per agent, tool permissions, browser take-over, MCP (`ASSISTANT_SURFACES.md` §3.3, 3.5) | Gateway, sandbox runtime, Console panels | Two agents with separate sandboxes and permissions |
 
 The beta gate includes approvals because a tester who cannot answer an approval prompt is stuck.
 
@@ -139,4 +141,5 @@ The beta gate includes approvals because a tester who cannot answer an approval 
 - #38 candidate evaluation and license cutover facts; #15 Console surfaces; #24 approvals; #25 observability; #39 LibreChat as a Synapse candidate (rejected for that role).
 - `docs/gateway/OPENWEBUI.md` current OpenAI-compatible surface.
 - `docs/operations/MICROSOFT_TENANT_INTEGRATION_DESIGN.md` D4 scope, D5 approval gate, W9 recall endpoint.
+- `ASSISTANT_SURFACES.md` what MindStone-Agent adopts from Grok Bot (2026-09-23) and where each piece lands in P4 and P5.
 - LibreChat: `LICENSE` (MIT), `.env.example` (auth and branding knobs), `librechat.example.yaml` (`endpoints.custom`), `packages/data-schemas/src/schema/user.ts` (roles), `api/server/services/AuthService.js` (first user admin). All read 2026-09-15 to 2026-09-17.
