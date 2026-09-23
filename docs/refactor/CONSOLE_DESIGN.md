@@ -94,6 +94,7 @@ LibreChat duplicates parts of the gateway. For one brain, these are off in the f
 - **Presets** and per-user model parameters: parameters belong to the persona and the routing config.
 - **RAG API and file indexing**: knowledge bases are MindStone's. File upload stays, forwarded to the gateway as knowledge base ingest in a later phase.
 - **Title generation** unless routed to a cheap model through the gateway.
+- **MCP servers**: tools belong to the agent, configured in the gateway (see `ASSISTANT_SURFACES.md` §3.5), not to the chat window.
 - Every built-in provider endpoint. The only endpoint is the MindStone custom endpoint.
 
 ## 6. Two stores, one truth
@@ -102,7 +103,7 @@ LibreChat keeps conversations in MongoDB. MindStone keeps transcripts. **MindSto
 
 ## 7. Branding
 
-Phase 1 uses LibreChat's own knobs and assets: `APP_TITLE`, `CUSTOM_FOOTER`, `HELP_AND_FAQ_URL`, logo and favicon assets, theme colours. Deeper rebrand (component names, package names, docs links) is patch work and is done once, in one commit, so it rebases as a unit.
+Phase 1 uses LibreChat's own knobs and assets: `APP_TITLE`, `CUSTOM_FOOTER`, `HELP_AND_FAQ_URL`, logo and favicon assets, theme colors. Deeper rebrand (component names, package names, docs links) is patch work and is done once, in one commit, so it rebases as a unit.
 
 ## 8. Phases
 
@@ -113,8 +114,8 @@ Phase 1 uses LibreChat's own knobs and assets: `APP_TITLE`, `CUSTOM_FOOTER`, `HE
 | P2 | Config API and onboarding: admin API, schema validation, safe reload, secret handling, onboarding flow, TUI on the same API | Gateway (largest piece), Console panels | Fresh install configured entirely from the browser |
 | P3 | Visibility and approvals: status, personas, sessions, memory writes, recall, approval decisions | Gateway admin API, Console panels | Approval answered from the browser |
 | Beta | Open the beta | | P2 done plus the approvals part of P3 |
-| P4 | Assistant: routines, agent-to-agent threads, self-setup with an independent reviewer (`ASSISTANT_SURFACES.md` §3.1, 3.2, 3.4) | Gateway and core (largest), Console panels | A routine created from chat, reviewed, approved, and run |
-| P5 | Isolation and reach: sandbox per agent, tool permissions, browser take-over, MCP (`ASSISTANT_SURFACES.md` §3.3, 3.5) | Gateway, sandbox runtime, Console panels | Two agents with separate sandboxes and permissions |
+| P4 | Assistant: per-agent tool permissions, routines, agent-to-agent threads, self-setup with an independent reviewer, drafts with Send and Discard, secret request form (`ASSISTANT_SURFACES.md` §3.1, 3.2, 3.3 (tool permissions), 3.4, 3.6) | Gateway and core (largest), Console panels | A routine created from chat, reviewed, approved, and run under its agent's tool permissions |
+| P5 | Isolation and reach: sandbox per agent, network policy, browser take-over, MCP (`ASSISTANT_SURFACES.md` §3.3 (sandboxes), 3.5) | Gateway, sandbox runtime, Console panels | Two agents with separate sandboxes and network policies |
 
 The beta gate includes approvals because a tester who cannot answer an approval prompt is stuck.
 
