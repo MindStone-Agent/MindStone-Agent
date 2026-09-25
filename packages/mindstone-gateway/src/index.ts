@@ -175,6 +175,20 @@ function loadGatewayConfig(): ReturnType<typeof loadMindStoneConfig> {
   return loadMindStoneConfig(configPath);
 }
 
+/** Write one OpenAI-style streamed chat completion: a content chunk, a stop chunk, then [DONE]. */
+export function openAiStreamFrames(input: { id: string; model: string; content: string }): string[] {
+  const created = Math.floor(Date.now() / 1000);
+  const chunk = (delta: Record<string, unknown>, finish: string | null): string =>
+    `data: ${JSON.stringify({ id: input.id, object: "chat.completion.chunk", created, model: input.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+  return [chunk({ role: "assistant", content: input.content }, null), chunk({}, "stop"), "data: [DONE]\n\n"];
+}
+
+function sendOpenAiStream(res: ServerResponse, input: { id: string; model: string; content: string }): void {
+  res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", connection: "keep-alive" });
+  for (const frame of openAiStreamFrames(input)) res.write(frame);
+  res.end();
+}
+
 function openAiError(message: string, type: string, code: string): { error: { message: string; type: string; code: string } } {
   return { error: { message, type, code } };
 }
@@ -502,18 +516,32 @@ function maybeRecordPromptWindowEvent(input: {
   return result;
 }
 
+/** Personas as models: one entry per configured agent, `mindstone/<agentId>`, so an OpenAI-compatible
+ *  client's model picker is the persona selector. An agent's `defaultModel` and `routing.defaultModel`
+ *  are listed too when they differ, for clients that were configured against them. */
 function openAiModels(config: MindStoneConfig | undefined): unknown {
   const agents = config?.agents ?? {};
-  const data = Object.entries(agents).map(([agentId, agent]) => ({
-    id: agent.defaultModel ?? `mindstone/${agentId}`,
-    object: "model",
-    created: 0,
-    owned_by: "mindstone-agent",
-  }));
-  return {
-    object: "list",
-    data: data.length > 0 ? data : [{ id: "mindstone/default", object: "model", created: 0, owned_by: "mindstone-agent" }],
-  };
+  const ids: string[] = [];
+  const push = (id: string | undefined): void => { if (id && !ids.includes(id)) ids.push(id); };
+  for (const [agentId, agent] of Object.entries(agents)) { push(`mindstone/${agentId}`); push(agent.defaultModel); }
+  push(config?.routing?.defaultModel);
+  if (ids.length === 0) ids.push("mindstone/default");
+  return { object: "list", data: ids.map((id) => ({ id, object: "model", created: 0, owned_by: "mindstone-agent" })) };
+}
+
+/** `mindstone/<agentId>` names a configured agent; anything else falls back to the metadata or the default. */
+export function agentIdFromModel(config: MindStoneConfig | undefined, model: string, metadataAgentId: unknown): string {
+  if (typeof metadataAgentId === "string" && metadataAgentId) return metadataAgentId;
+  const m = /^mindstone\/([A-Za-z0-9_.-]+)$/.exec(model);
+  if (m && config?.agents && Object.prototype.hasOwnProperty.call(config.agents, m[1])) return m[1];
+  return "default";
+}
+
+/** Identity a front end forwards on behalf of its logged-in user (LibreChat can set these from
+ *  {{LIBRECHAT_USER_ID}} / {{LIBRECHAT_USER_ROLE}} / {{LIBRECHAT_BODY_CONVERSATIONID}} placeholders). */
+function forwardedUser(req: IncomingMessage): { userId?: string; userRole?: string; conversationId?: string } {
+  const h = (name: string): string | undefined => { const v = req.headers[name]; const s = Array.isArray(v) ? v[0] : v; return s && s.trim() ? s.trim() : undefined; };
+  return { userId: h("x-mindstone-user-id"), userRole: h("x-mindstone-user-role"), conversationId: h("x-mindstone-conversation-id") };
 }
 
 function isTranscriptRole(value: unknown): value is TranscriptRole {
@@ -1824,9 +1852,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
 
-    const metadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
+    const forwarded = forwardedUser(req);
+    const metadata0 = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
+    const metadata: Record<string, unknown> = { ...metadata0, ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}), ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}) };
     const model = typeof input.model === "string" ? input.model : "mindstone/default";
-    const agentId = typeof metadata.agentId === "string" ? metadata.agentId : "default";
+    const agentId = agentIdFromModel(loadedConfig.config, model, metadata.agentId);
+    const senderId = forwarded.userId ?? (typeof input.user === "string" ? input.user : model);
     const sessionKey = gatewaySessionKey({
       config: loadedConfig.config,
       explicitSessionKey: metadata.sessionKey,
@@ -1834,10 +1865,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       substrate: "openai",
       channel: "openai-chat-completions",
       chatType: "internal",
-      senderId: typeof input.user === "string" ? input.user : model,
+      senderId,
     });
 
-    const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-chat-completions", chatType: "internal", senderId: typeof input.user === "string" ? input.user : model });
+    const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-chat-completions", chatType: "internal", senderId });
     const persistedEntries = messages.map((message, index) => {
       const record = typeof message === "object" && message !== null ? message as Record<string, unknown> : {};
       return appendTranscriptEntry({
@@ -1852,10 +1883,25 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           model,
           messageIndex: index,
           originalRole: record.role,
+          ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}),
+          ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}),
         },
       });
     });
     const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    if (routed.routed && routed.status === 200 && input.stream === true) {
+      // OpenAI-compatible server-sent events. LibreChat (and the openai/langchain clients generally)
+      // send `stream: true` unconditionally and cannot parse a plain chat.completion body, so a
+      // streaming client gets the routed answer as one content chunk, a stop chunk, and [DONE].
+      // Token-level deltas from the runner's stream are a follow-up; the wire format is final.
+      const routedBody = routed.body as { entry?: TranscriptEntry; runId?: string };
+      sendOpenAiStream(res, {
+        id: `chatcmpl-${routedBody.runId ?? Date.now().toString(36)}`,
+        model,
+        content: routedBody.entry?.text ?? "",
+      });
+      return;
+    }
     if (routed.routed && routed.status === 200) {
       const routedBody = routed.body as { entry?: TranscriptEntry; identityContext?: unknown; promptWindow?: unknown; runId?: string };
       sendJson(res, 200, {
