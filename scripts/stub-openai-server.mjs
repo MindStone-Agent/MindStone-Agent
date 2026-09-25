@@ -1,9 +1,12 @@
 // Minimal OpenAI-compatible stub server for local-model route smokes.
 // Serves GET /v1/models and POST /v1/chat/completions (SSE + non-streaming).
 // Prints {"port": N} on stdout once listening; keeps running until killed.
+import { appendFileSync } from "node:fs";
 import { createServer } from "node:http";
 
 const SENTINEL = process.env.STUB_OPENAI_SENTINEL ?? "STUB-OK local route verified";
+// Optional: append the tool names offered in each chat request, one JSON array per line.
+const RECORD_TOOLS = process.env.STUB_OPENAI_RECORD_TOOLS;
 
 const server = createServer((req, res) => {
   let body = "";
@@ -22,6 +25,10 @@ const server = createServer((req, res) => {
         parsed = JSON.parse(body || "{}");
       } catch {
         // fall through with empty body
+      }
+      if (RECORD_TOOLS) {
+        const names = (Array.isArray(parsed.tools) ? parsed.tools : []).map((tool) => tool?.function?.name ?? tool?.name ?? "?");
+        appendFileSync(RECORD_TOOLS, `${JSON.stringify(names)}\n`);
       }
       const created = Math.floor(Date.now() / 1000);
       const model = typeof parsed.model === "string" ? parsed.model : "stub-model";

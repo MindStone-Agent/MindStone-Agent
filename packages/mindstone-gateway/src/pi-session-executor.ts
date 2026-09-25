@@ -20,6 +20,21 @@ export type PiSessionResourceLoaderOptions = {
   extensionFactories?: MindStonePiExtensionFactory[];
 };
 
+/** Every Pi built-in tool name (vendor/pi coding-agent src/core/tools/index.ts, allToolNames). */
+export const PI_BUILTIN_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+/** The built-ins `builtinTools` can re-enable: Pi's default active set (sdk.ts defaultActiveToolNames). */
+export const PI_ENABLEABLE_BUILTIN_TOOL_NAMES = ["read", "bash", "edit", "write"] as const;
+
+/**
+ * Pi built-in tools to exclude from a session. Built-ins are off unless named in `builtinTools`,
+ * because they run unsandboxed as the gateway user and bypass MindStone approvals
+ * (GHSA-c6pf-xqf8-mf2q). Extension and custom tools are not affected.
+ */
+export function piSessionExcludedBuiltinTools(builtinTools?: readonly string[]): string[] {
+  const enabled = new Set((builtinTools ?? []).filter((name) => (PI_ENABLEABLE_BUILTIN_TOOL_NAMES as readonly string[]).includes(name)));
+  return PI_BUILTIN_TOOL_NAMES.filter((name) => !enabled.has(name));
+}
+
 export type PiSessionExecutorOptions = PiSessionResourceLoaderOptions & {
   /** MindStone context policy used to derive safe Pi-side inline extension parity. */
   contextManagement?: ContextManagementPolicy;
@@ -33,6 +48,8 @@ export type PiSessionExecutorOptions = PiSessionResourceLoaderOptions & {
   cwd?: string;
   defaultProvider?: string;
   defaultModel?: string;
+  /** Pi built-in tools to enable. Defaults to none; see piSessionExcludedBuiltinTools. */
+  builtinTools?: string[];
 };
 
 type PiModel = {
@@ -696,6 +713,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
   readonly #compactionOptions?: MindStonePiCompactionConfig;
   readonly #resumeCapOptions?: MindStonePiResumeCapConfig;
   readonly #resourceOptions: PiSessionResourceLoaderOptions;
+  readonly #excludeTools: string[];
   #modules?: PiSessionModules;
   #registry?: PiRegistry;
 
@@ -708,6 +726,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     this.#defaultModel = options.defaultModel;
     this.#compactionOptions = options.compaction;
     this.#resumeCapOptions = options.resumeCap;
+    this.#excludeTools = piSessionExcludedBuiltinTools(options.builtinTools);
     this.#resourceOptions = {
       additionalExtensionPaths: options.additionalExtensionPaths,
       additionalSkillPaths: options.additionalSkillPaths,
@@ -831,6 +850,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
         sessionManager,
         settingsManager,
         resourceLoader,
+        excludeTools: this.#excludeTools,
         sessionStartEvent: { type: "session_start", reason: "startup" },
       });
       const abortSession = (): void => {
@@ -904,6 +924,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
         sessionManager,
         settingsManager,
         resourceLoader,
+        excludeTools: this.#excludeTools,
         sessionStartEvent: { type: "session_start", reason: "startup" },
       });
 

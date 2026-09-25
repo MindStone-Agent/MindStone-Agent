@@ -116,6 +116,13 @@ export type MindStoneRoutingConfig = {
     noThemes?: boolean;
     /** Disable Pi context-file loading for this route. */
     noContextFiles?: boolean;
+    /**
+     * Pi built-in tools to enable: any of read, bash, edit, write (Pi's default set). Defaults to none.
+     * grep, find and ls stay off: Pi does not activate them by default, and they are always excluded here.
+     * Built-in tools run unsandboxed as the gateway user and do not pass through MindStone
+     * approvals, so each one is an explicit opt-in. MindStone's own extension tools are unaffected.
+     */
+    builtinTools?: string[];
   };
 };
 

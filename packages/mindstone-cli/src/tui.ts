@@ -450,6 +450,7 @@ function resolveTuiProvider(config: ReturnType<typeof loadMindStoneConfig>["conf
       noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
       noThemes: config?.routing?.pi?.noThemes,
       noContextFiles: config?.routing?.pi?.noContextFiles,
+      builtinTools: config?.routing?.pi?.builtinTools,
     });
   }
   if (mode === "pi") {
@@ -483,6 +484,7 @@ function resolveTuiRunner(config: ReturnType<typeof loadMindStoneConfig>["config
     noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
     noThemes: config?.routing?.pi?.noThemes,
     noContextFiles: config?.routing?.pi?.noContextFiles,
+    builtinTools: config?.routing?.pi?.builtinTools,
   });
 }
 
