@@ -44,6 +44,11 @@ export {
   type PiSessionFileLockOptions,
   type PiSessionFileRepairResult,
   type PiSessionResourceLoaderOptions,
+  assertNoUnexpectedPiBuiltinTools,
+  piSessionEnabledBuiltinTools,
+  piSessionExcludedBuiltinTools,
+  PI_BUILTIN_TOOL_NAMES,
+  PI_ENABLEABLE_BUILTIN_TOOL_NAMES,
 } from "./pi-session-executor.js";
 export {
   capPiSessionManagerOnLoad,
@@ -367,6 +372,7 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
       noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
       noThemes: config?.routing?.pi?.noThemes,
       noContextFiles: config?.routing?.pi?.noContextFiles,
+      builtinTools: config?.routing?.pi?.builtinTools,
     });
   }
   if (mode === "pi") {
@@ -400,6 +406,7 @@ function resolveRunner(config: MindStoneConfig | undefined, provider: MindStoneM
       noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
       noThemes: config?.routing?.pi?.noThemes,
       noContextFiles: config?.routing?.pi?.noContextFiles,
+      builtinTools: config?.routing?.pi?.builtinTools,
     });
   }
   void provider;

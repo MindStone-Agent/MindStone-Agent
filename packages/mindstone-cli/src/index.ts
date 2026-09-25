@@ -714,6 +714,7 @@ function resolveChatProvider(config: ReturnType<typeof loadMindStoneConfig>["con
       noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
       noThemes: config?.routing?.pi?.noThemes,
       noContextFiles: config?.routing?.pi?.noContextFiles,
+      builtinTools: config?.routing?.pi?.builtinTools,
     });
   }
   if (mode === "pi") {
@@ -747,6 +748,7 @@ function resolveChatRunner(config: ReturnType<typeof loadMindStoneConfig>["confi
     noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
     noThemes: config?.routing?.pi?.noThemes,
     noContextFiles: config?.routing?.pi?.noContextFiles,
+    builtinTools: config?.routing?.pi?.builtinTools,
   });
 }
 

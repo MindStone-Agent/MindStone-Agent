@@ -77,6 +77,7 @@
     "smoke:cli-chat-recall": "./scripts/smoke-cli-chat-recall.sh",
     "smoke:pi-session-runner": "./scripts/smoke-pi-session-runner.sh",
     "smoke:pi-session-live": "./scripts/smoke-pi-session-live.sh",
+    "smoke:pi-session-tools": "./scripts/smoke-pi-session-tools.sh",
     "smoke:pi-adapter": "./scripts/smoke-pi-adapter.sh",
     "smoke:pi-config-sections": "./scripts/smoke-pi-config-sections.sh",
     "smoke:core-boundary": "./scripts/smoke-core-boundary.sh",
