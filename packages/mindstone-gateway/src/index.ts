@@ -44,6 +44,11 @@ export {
   type PiSessionFileLockOptions,
   type PiSessionFileRepairResult,
   type PiSessionResourceLoaderOptions,
+  assertNoUnexpectedPiBuiltinTools,
+  piSessionEnabledBuiltinTools,
+  piSessionExcludedBuiltinTools,
+  PI_BUILTIN_TOOL_NAMES,
+  PI_ENABLEABLE_BUILTIN_TOOL_NAMES,
 } from "./pi-session-executor.js";
 export {
   capPiSessionManagerOnLoad,

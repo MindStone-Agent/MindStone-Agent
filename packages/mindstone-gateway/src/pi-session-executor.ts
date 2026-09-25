@@ -30,9 +30,34 @@ export const PI_ENABLEABLE_BUILTIN_TOOL_NAMES = ["read", "bash", "edit", "write"
  * because they run unsandboxed as the gateway user and bypass MindStone approvals
  * (GHSA-c6pf-xqf8-mf2q). Extension and custom tools are not affected.
  */
-export function piSessionExcludedBuiltinTools(builtinTools?: readonly string[]): string[] {
-  const enabled = new Set((builtinTools ?? []).filter((name) => (PI_ENABLEABLE_BUILTIN_TOOL_NAMES as readonly string[]).includes(name)));
+export function piSessionExcludedBuiltinTools(builtinTools?: unknown): string[] {
+  const enabled = new Set(piSessionEnabledBuiltinTools(builtinTools));
   return PI_BUILTIN_TOOL_NAMES.filter((name) => !enabled.has(name));
+}
+
+/** The built-ins actually enabled: known, enableable names only. Anything else (a non-array, a typo) enables nothing. */
+export function piSessionEnabledBuiltinTools(builtinTools?: unknown): string[] {
+  if (!Array.isArray(builtinTools)) return [];
+  return builtinTools.filter((name): name is string => (PI_ENABLEABLE_BUILTIN_TOOL_NAMES as readonly string[]).includes(name as string));
+}
+
+type PiToolInfoLike = { name: string; sourceInfo?: { source?: string } };
+
+/**
+ * Fail closed if a session offers a Pi built-in that was not enabled. Guards against a vendor
+ * bump adding a built-in or renaming the excludeTools option, which Pi would otherwise ignore silently.
+ */
+export function assertNoUnexpectedPiBuiltinTools(session: { getAllTools?(): PiToolInfoLike[] }, builtinTools?: unknown): void {
+  if (typeof session.getAllTools !== "function") {
+    throw new Error("Pi session has no getAllTools(); cannot verify that built-in tools are excluded");
+  }
+  const enabled = new Set(piSessionEnabledBuiltinTools(builtinTools));
+  const unexpected = session.getAllTools()
+    .filter((tool) => (tool.sourceInfo?.source === "builtin" || (PI_BUILTIN_TOOL_NAMES as readonly string[]).includes(tool.name)) && !enabled.has(tool.name))
+    .map((tool) => tool.name);
+  if (unexpected.length > 0) {
+    throw new Error(`Pi session offers built-in tools that are not enabled: ${unexpected.join(", ")}`);
+  }
 }
 
 export type PiSessionExecutorOptions = PiSessionResourceLoaderOptions & {
@@ -49,7 +74,7 @@ export type PiSessionExecutorOptions = PiSessionResourceLoaderOptions & {
   defaultProvider?: string;
   defaultModel?: string;
   /** Pi built-in tools to enable. Defaults to none; see piSessionExcludedBuiltinTools. */
-  builtinTools?: string[];
+  builtinTools?: unknown;
 };
 
 type PiModel = {
@@ -714,6 +739,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
   readonly #resumeCapOptions?: MindStonePiResumeCapConfig;
   readonly #resourceOptions: PiSessionResourceLoaderOptions;
   readonly #excludeTools: string[];
+  readonly #builtinTools?: unknown;
   #modules?: PiSessionModules;
   #registry?: PiRegistry;
 
@@ -726,6 +752,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     this.#defaultModel = options.defaultModel;
     this.#compactionOptions = options.compaction;
     this.#resumeCapOptions = options.resumeCap;
+    this.#builtinTools = options.builtinTools;
     this.#excludeTools = piSessionExcludedBuiltinTools(options.builtinTools);
     this.#resourceOptions = {
       additionalExtensionPaths: options.additionalExtensionPaths,
@@ -853,6 +880,12 @@ export class PiSessionExecutor implements MindStoneModelProvider {
         excludeTools: this.#excludeTools,
         sessionStartEvent: { type: "session_start", reason: "startup" },
       });
+      try {
+        assertNoUnexpectedPiBuiltinTools(session as { getAllTools?(): PiToolInfoLike[] }, this.#builtinTools);
+      } catch (error) {
+        session.dispose();
+        throw error;
+      }
       const abortSession = (): void => {
         void session.abort?.().catch(() => undefined);
       };
@@ -927,6 +960,12 @@ export class PiSessionExecutor implements MindStoneModelProvider {
         excludeTools: this.#excludeTools,
         sessionStartEvent: { type: "session_start", reason: "startup" },
       });
+      try {
+        assertNoUnexpectedPiBuiltinTools(session as { getAllTools?(): PiToolInfoLike[] }, this.#builtinTools);
+      } catch (error) {
+        session.dispose();
+        throw error;
+      }
 
       const { capture, record } = createPiSessionEventCapture();
       const onEvent = piSessionEventCallbackFromMetadata(request.metadata);

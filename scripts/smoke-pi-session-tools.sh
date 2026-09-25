@@ -102,4 +102,24 @@ check "$(run_turn none)" "" "default config"
 check "$(run_turn '["read"]')" "read" "builtinTools [read]"
 check "$(run_turn '["read","bash","edit","write","grep","find","ls"]')" "read bash edit write" "builtinTools all seven"
 
+check "$(run_turn '"bash"')" "" "builtinTools as a string"
+check "$(run_turn '["BASH","bash "]')" "" "builtinTools with near-miss names"
+
+# The fail-closed guard: a session that offers a built-in that was not enabled must throw.
+node --input-type=module <<'NODE'
+import { assertNoUnexpectedPiBuiltinTools } from "./packages/mindstone-gateway/dist/index.js";
+const builtin = (name) => ({ name, sourceInfo: { source: "builtin" } });
+const expectThrow = (label, fn) => {
+  try { fn(); } catch { console.log(`ok: guard: ${label}`); return; }
+  console.error(`FAIL: guard: ${label} did not throw`); process.exit(1);
+};
+const expectPass = (label, fn) => {
+  try { fn(); console.log(`ok: guard: ${label}`); } catch (e) { console.error(`FAIL: guard: ${label}: ${e.message}`); process.exit(1); }
+};
+expectThrow("bash offered, none enabled", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [builtin("bash")] }, undefined));
+expectThrow("unknown future built-in offered", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [builtin("newtool")] }, ["read"]));
+expectThrow("no getAllTools", () => assertNoUnexpectedPiBuiltinTools({}, undefined));
+expectPass("read offered and enabled", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [builtin("read"), { name: "mindstone_memory_read", sourceInfo: { source: "extension" } }] }, ["read"]));
+NODE
+
 echo "Pi session built-in tool allowlist smoke test passed."
