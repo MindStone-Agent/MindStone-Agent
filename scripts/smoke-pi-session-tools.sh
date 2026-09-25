@@ -110,7 +110,10 @@ node --input-type=module <<'NODE'
 import { assertNoUnexpectedPiBuiltinTools } from "./packages/mindstone-gateway/dist/index.js";
 const builtin = (name) => ({ name, sourceInfo: { source: "builtin" } });
 const expectThrow = (label, fn) => {
-  try { fn(); } catch { console.log(`ok: guard: ${label}`); return; }
+  try { fn(); } catch (e) {
+    if (/built-in tools|getAllTools/.test(String(e?.message))) { console.log(`ok: guard: ${label}`); return; }
+    console.error(`FAIL: guard: ${label} threw the wrong error: ${e?.message}`); process.exit(1);
+  }
   console.error(`FAIL: guard: ${label} did not throw`); process.exit(1);
 };
 const expectPass = (label, fn) => {
@@ -119,6 +122,9 @@ const expectPass = (label, fn) => {
 expectThrow("bash offered, none enabled", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [builtin("bash")] }, undefined));
 expectThrow("unknown future built-in offered", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [builtin("newtool")] }, ["read"]));
 expectThrow("no getAllTools", () => assertNoUnexpectedPiBuiltinTools({}, undefined));
+expectThrow("bash by name only, labelled extension", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [{ name: "bash", sourceInfo: { source: "extension" } }] }, undefined));
+expectThrow("read offered, config is a string", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [builtin("read")] }, "read"));
+expectThrow("new built-in with a relabelled source", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [{ name: "newtool", sourceInfo: { source: "core", path: "<builtin:newtool>" } }] }, undefined));
 expectPass("read offered and enabled", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [builtin("read"), { name: "mindstone_memory_read", sourceInfo: { source: "extension" } }] }, ["read"]));
 NODE
 

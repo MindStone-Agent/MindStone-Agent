@@ -41,7 +41,7 @@ export function piSessionEnabledBuiltinTools(builtinTools?: unknown): string[] {
   return builtinTools.filter((name): name is string => (PI_ENABLEABLE_BUILTIN_TOOL_NAMES as readonly string[]).includes(name as string));
 }
 
-type PiToolInfoLike = { name: string; sourceInfo?: { source?: string } };
+type PiToolInfoLike = { name: string; sourceInfo?: { source?: string; path?: string } };
 
 /**
  * Fail closed if a session offers a Pi built-in that was not enabled. Guards against a vendor
@@ -53,7 +53,9 @@ export function assertNoUnexpectedPiBuiltinTools(session: { getAllTools?(): PiTo
   }
   const enabled = new Set(piSessionEnabledBuiltinTools(builtinTools));
   const unexpected = session.getAllTools()
-    .filter((tool) => (tool.sourceInfo?.source === "builtin" || (PI_BUILTIN_TOOL_NAMES as readonly string[]).includes(tool.name)) && !enabled.has(tool.name))
+    .filter((tool) => (tool.sourceInfo?.source === "builtin"
+      || (tool.sourceInfo as { path?: string } | undefined)?.path?.startsWith("<builtin:")
+      || (PI_BUILTIN_TOOL_NAMES as readonly string[]).includes(tool.name)) && !enabled.has(tool.name))
     .map((tool) => tool.name);
   if (unexpected.length > 0) {
     throw new Error(`Pi session offers built-in tools that are not enabled: ${unexpected.join(", ")}`);
@@ -739,7 +741,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
   readonly #resumeCapOptions?: MindStonePiResumeCapConfig;
   readonly #resourceOptions: PiSessionResourceLoaderOptions;
   readonly #excludeTools: string[];
-  readonly #builtinTools?: unknown;
+  readonly #builtinTools: string[];
   #modules?: PiSessionModules;
   #registry?: PiRegistry;
 
@@ -752,7 +754,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     this.#defaultModel = options.defaultModel;
     this.#compactionOptions = options.compaction;
     this.#resumeCapOptions = options.resumeCap;
-    this.#builtinTools = options.builtinTools;
+    this.#builtinTools = piSessionEnabledBuiltinTools(options.builtinTools);
     this.#excludeTools = piSessionExcludedBuiltinTools(options.builtinTools);
     this.#resourceOptions = {
       additionalExtensionPaths: options.additionalExtensionPaths,
