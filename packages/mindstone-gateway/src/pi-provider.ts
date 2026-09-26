@@ -6,9 +6,19 @@ import type { MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, Min
 type PiModel = {
   id: string;
   name: string;
+  api: string;
   provider: string;
   contextWindow: number;
   maxTokens: number;
+};
+
+const EMPTY_USAGE = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
 type PiAuthStatus = {
@@ -191,12 +201,36 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
     const auth = await registry.getApiKeyAndHeaders(piModel);
     if (!auth.ok) throw new Error(auth.error);
 
-    const messages = request.messages.map((message) => ({
-      role: message.role === "tool" ? "user" : message.role,
-      content: message.text ?? (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")),
-      timestamp: Date.now(),
-    }));
-    const context = { messages, tools: [] };
+    // Pi's Context carries system text in `systemPrompt`; its Message union has
+    // no system role, and every provider converter skips (or, on Mistral, throws
+    // on) a `role: "system"` message. Recall, identity, invariants, the memory
+    // index and the handoff all arrive here as system messages, so they must be
+    // lifted out, in order. Assistant history must be a real AssistantMessage
+    // (content blocks): a bare string makes transformMessages throw
+    // `content.flatMap is not a function`, which surfaced as an empty reply.
+    const now = Date.now();
+    const systemParts: string[] = [];
+    const messages: unknown[] = [];
+    for (const message of request.messages) {
+      const text = message.text ?? (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? ""));
+      if (message.role === "system") {
+        if (text) systemParts.push(text);
+      } else if (message.role === "assistant") {
+        messages.push({
+          role: "assistant",
+          content: [{ type: "text", text }],
+          api: piModel.api,
+          provider: piModel.provider,
+          model: piModel.id,
+          usage: EMPTY_USAGE,
+          stopReason: "stop",
+          timestamp: now,
+        });
+      } else {
+        messages.push({ role: "user", content: text, timestamp: now });
+      }
+    }
+    const context = { ...(systemParts.length > 0 ? { systemPrompt: systemParts.join("\n\n") } : {}), messages, tools: [] };
     const assistant = await modules.completeSimple(piModel, context, {
       signal: request.signal,
       apiKey: auth.apiKey,
@@ -204,6 +238,12 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
       env: auth.env,
       sessionId: request.sessionKey,
     });
+    // Pi reports provider failures as a message with stopReason "error" rather
+    // than throwing. Passing that through as an empty reply hides the failure.
+    const failure = assistant as { stopReason?: string; errorMessage?: string };
+    if (failure?.stopReason === "error") {
+      throw new Error(`Pi provider request failed: ${failure.errorMessage ?? "unknown error"}`);
+    }
 
     return {
       role: "assistant",

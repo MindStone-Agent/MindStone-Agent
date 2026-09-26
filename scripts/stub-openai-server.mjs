@@ -7,6 +7,9 @@ import { createServer } from "node:http";
 const SENTINEL = process.env.STUB_OPENAI_SENTINEL ?? "STUB-OK local route verified";
 // Optional: append the tool names offered in each chat request, one JSON array per line.
 const RECORD_TOOLS = process.env.STUB_OPENAI_RECORD_TOOLS;
+// Optional: append each chat request's full JSON body, one per line — lets a smoke
+// assert what actually reached the provider, not what the caller logged.
+const RECORD_BODIES = process.env.STUB_OPENAI_RECORD_BODIES;
 
 const server = createServer((req, res) => {
   let body = "";
@@ -26,6 +29,7 @@ const server = createServer((req, res) => {
       } catch {
         // fall through with empty body
       }
+      if (RECORD_BODIES) appendFileSync(RECORD_BODIES, `${JSON.stringify(parsed)}\n`);
       if (RECORD_TOOLS) {
         const names = (Array.isArray(parsed.tools) ? parsed.tools : []).map((tool) => tool?.function?.name ?? tool?.name ?? "?");
         appendFileSync(RECORD_TOOLS, `${JSON.stringify(names)}\n`);
