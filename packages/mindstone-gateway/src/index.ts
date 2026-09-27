@@ -603,18 +603,25 @@ function transcriptTextFromOpenAiContent(content: unknown): string | undefined {
   return undefined;
 }
 
+/** Session key for one MindStone Console conversation (#38). */
+export function consoleConversationSessionKey(agentId: string, userId: string, conversationId: string): string {
+  return ["agent", agentId, "console", userId, conversationId].map((part) => encodeURIComponent(part)).join(":");
+}
+
 /**
  * Index of the first message of the new turn in an OpenAI-style messages
- * array: the user messages after the last assistant message (#38). Everything
- * before it is history the gateway already has. Returns messages.length when
- * the array doesn't end in user messages.
+ * array: the trailing run of user messages (#38). Everything before it is
+ * history the gateway already has, apart from client system prompts, which
+ * are handled separately. Returns messages.length when the array doesn't end
+ * in a user message.
  */
 export function newChatCompletionsTurnStart(messages: unknown[]): number {
   let start = messages.length;
   while (start > 0) {
     const record = messages[start - 1];
     const role = typeof record === "object" && record !== null ? (record as Record<string, unknown>).role : undefined;
-    if (role !== "user") break;
+    // A message with no role is a user message, as openAiRoleToTranscriptRole treats it.
+    if (role !== "user" && role !== undefined) break;
     start -= 1;
   }
   return start;
@@ -1943,9 +1950,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const model = typeof input.model === "string" ? input.model : "mindstone/default";
     const agentId = agentIdFromModel(loadedConfig.config, model, metadata.agentId);
     const senderId = forwarded.userId ?? (typeof input.user === "string" ? input.user : model);
+    // Each Console conversation is its own session (#38), so separate chats don't
+    // share a context window. They are all the same agent's transcripts, so the
+    // memory backfill indexes every one into that agent's memory.
     const sessionKey = gatewaySessionKey({
       config: loadedConfig.config,
-      explicitSessionKey: metadata.sessionKey,
+      explicitSessionKey: metadata.sessionKey ?? (forwarded.conversationId ? consoleConversationSessionKey(agentId, senderId, forwarded.conversationId) : undefined),
       agentId,
       substrate: "openai",
       channel: "openai-chat-completions",
@@ -1956,12 +1966,53 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-chat-completions", chatType: "internal", senderId });
     // The gateway already holds the conversation (#38): clients such as LibreChat
     // resend the whole history every turn, so only the new turn is stored: the
-    // user messages after the last assistant message. Resent history and client
-    // system prompts are not written again.
+    // trailing user messages. Client system prompts follow CONSOLE_DESIGN §4.2:
+    // ignored for a Console "user", kept for an admin or a direct API caller
+    // (service token, no forwarded role), stored once per session, always logged.
     const newTurnStart = newChatCompletionsTurnStart(messages);
-    const persistedEntries = messages.slice(newTurnStart).map((message, offset) => {
+    const records = messages.map((message) => (typeof message === "object" && message !== null ? message as Record<string, unknown> : {}));
+    const clientSystemTexts = records
+      .filter((record) => record.role === "system" || record.role === "developer")
+      .map((record) => transcriptTextFromOpenAiContent(record.content)?.trim())
+      .filter((text): text is string => Boolean(text));
+    const keepClientSystem = !forwarded.userRole || forwarded.userRole.toLowerCase() === "admin";
+    const keptSystemEntries: TranscriptEntry[] = [];
+    const commonMetadata = {
+      source: "openai-chat-completions",
+      model,
+      ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}),
+      ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}),
+    };
+    if (newTurnStart < messages.length && clientSystemTexts.length > 0) {
+      const existing = readTranscriptEntries(sessionKey);
+      const stored = new Set(existing.filter((entry) => entry.role === "system").map((entry) => entry.text?.trim()));
+      const ignored = new Set(
+        existing.filter((entry) => entry.metadata?.event === "client_system_prompt_ignored").map((entry) => entry.metadata?.promptHash),
+      );
+      for (const text of clientSystemTexts) {
+        if (keepClientSystem && stored.has(text)) continue;
+        const promptHash = createHash("sha256").update(text).digest("hex").slice(0, 16);
+        if (!keepClientSystem && ignored.has(promptHash)) continue;
+        if (keepClientSystem) {
+          keptSystemEntries.push(appendTranscriptEntry({ sessionKey, agentId, role: "system", text, source, metadata: { ...commonMetadata, clientSystemPrompt: "kept" } }));
+          stored.add(text);
+        } else {
+          appendTranscriptEntry({
+            sessionKey,
+            agentId,
+            role: "event",
+            text: `A client system prompt (${text.length} characters) was ignored: the ${forwarded.userRole} role can't set one.`,
+            source,
+            metadata: { ...commonMetadata, event: "client_system_prompt_ignored", length: text.length, promptHash },
+          });
+          ignored.add(promptHash);
+        }
+      }
+    }
+    const resentSkipped = records.slice(0, newTurnStart).filter((record) => record.role !== "system" && record.role !== "developer").length;
+    const turnEntries = messages.slice(newTurnStart).map((message, offset) => {
       const index = newTurnStart + offset;
-      const record = typeof message === "object" && message !== null ? message as Record<string, unknown> : {};
+      const record = records[index]!;
       return appendTranscriptEntry({
         sessionKey,
         agentId,
@@ -1970,17 +2021,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         content: record.content,
         source,
         metadata: {
-          source: "openai-chat-completions",
-          model,
+          ...commonMetadata,
           messageIndex: index,
           originalRole: record.role,
-          ...(index === newTurnStart && newTurnStart > 0 ? { resentMessagesSkipped: newTurnStart } : {}),
-          ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}),
-          ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}),
+          ...(offset === 0 && resentSkipped > 0 ? { resentMessagesSkipped: resentSkipped } : {}),
         },
       });
     });
-    if (persistedEntries.length === 0) {
+    const persistedEntries = [...keptSystemEntries, ...turnEntries];
+    if (turnEntries.length === 0) {
       sendJson(res, 400, openAiError("the last message must be a user message", "invalid_request_error", "invalid_messages"));
       return;
     }

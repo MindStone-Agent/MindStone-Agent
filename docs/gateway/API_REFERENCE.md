@@ -334,14 +334,18 @@ Optional fields:
 | `metadata.agentId` | Optional MindStone agent ID. Defaults to `default`. |
 | `metadata.sessionKey` | Optional explicit MindStone session key. |
 
-Input message roles map to transcript roles. `system`, `assistant`, and `tool` are preserved; other roles default to `user`. String content and text-like content array parts are extracted for transcript text.
+Only the new turn is stored: the trailing run of user messages (a message with no role counts as user). Clients such as the MindStone Console resend the whole conversation every turn; the gateway already has it, so earlier messages are not stored again, and a request that doesn't end with a user message is a `400 invalid_messages`. String content and text-like content array parts are extracted for transcript text.
+
+Client `system` (and `developer`) messages follow the Console design (§4.2): with the forwarded role `user` they are ignored and logged once per session as a `client_system_prompt_ignored` event (length and hash, not the text); for an `admin` or a caller with no forwarded role they are stored once per session as a `system` entry.
+
+A request with an `x-mindstone-conversation-id` header (the Console) gets its own session, `agent:<agentId>:console:<userId>:<conversationId>`, unless `metadata.sessionKey` names one. Every conversation is still that agent's transcript, so the memory backfill indexes all of them into the agent's memory.
 
 Behavior:
 
-- Persists compatible input messages to the canonical transcript.
+- Persists the new turn (and any kept client system prompt) to the canonical transcript.
 - In routed modes, returns a non-streaming `chat.completion` response and includes a `mindstone` metadata object.
 - Without a configured provider, returns `501 not_implemented` with `mindstone.persisted: true` and transcript entries.
-- Streaming is not implemented.
+- With `stream: true`, the routed answer is sent as server-sent events: one content chunk, a stop chunk, then `[DONE]`.
 
 Example:
 

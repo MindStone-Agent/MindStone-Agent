@@ -339,7 +339,7 @@ chat.send
 chat.abort
 ```
 
-`POST /v1/chat/completions` stores only the new turn: the user messages after the last assistant message. Clients such as LibreChat resend the whole conversation every turn; the gateway already has it, so resent history and client system prompts are not stored again. A request must end with a user message.
+`POST /v1/chat/completions` stores only the new turn: the trailing user messages. Clients such as LibreChat resend the whole conversation every turn and the gateway already has it. A request must end with a user message. Each Console conversation gets its own session, and all of them feed the agent's memory. Client system prompts are ignored for the Console's `user` role and kept once for an admin; see `docs/gateway/API_REFERENCE.md`.
 
 Gateway authentication supports `none`, `token`, and `password`. `/health` remains unauthenticated for liveness checks; other endpoints enforce the configured auth mode.
 
