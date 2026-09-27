@@ -96,7 +96,7 @@ assert.ok(prefixed.respond && prefixed.text === "run report", "trigger prefix mu
 
 // Session mapping: single mode collapses to canonical; per_surface keys threads separately.
 const single = connectorSessionKey({
-  config: { session: { mode: "single", defaultSessionKey: "agent:default:main" } },
+  config: { session: { mode: "single", defaultSessionKey: "agent:default:main" }, channels: { loopback: { ownerSenders: ["clint"] } } },
   connectorId: "loopback",
   message: { text: "hi", senderId: "clint", chatId: "dm", chatType: "direct" },
 });
@@ -143,7 +143,7 @@ config.routing = { mode: "mock", defaultAgentId: "default", defaultModel: "minds
 config.gateway = { ...(config.gateway ?? {}), auth: { mode: "none" } };
 config.session = { mode: "per_surface" };
 config.channels = {
-  loopback: { enabled: true, allowedSenders: ["clint"], triggerPrefix: "!ms", pollMs: 100 },
+  loopback: { enabled: true, allowedSenders: ["clint"], ownerSenders: ["clint"], triggerPrefix: "!ms", pollMs: 100 },
   "ghost-connector": { enabled: true },
 };
 writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
@@ -256,6 +256,8 @@ DOCTOR_OUT="$(./scripts/mindstone doctor 2>&1 || true)"
 grep -q "connectors.catalog" <<<"${DOCTOR_OUT}"
 grep -q "loopback" <<<"${DOCTOR_OUT}"
 grep -q "credential unresolved" <<<"${DOCTOR_OUT}"
+# Phase 2's loopback has no ownerSenders: doctor says nobody there is the owner (#61).
+grep -q "connectors.owner" <<<"${DOCTOR_OUT}"
 
 # Status exposes consolidated, secret-free connector rows.
 STATUS_JSON="$(./scripts/mindstone status --json)"

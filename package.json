@@ -59,6 +59,7 @@
     "smoke:kb-sources": "./scripts/smoke-kb-sources.sh",
     "smoke:app-engine": "./scripts/smoke-app-engine.sh",
     "smoke:connector": "./scripts/smoke-connector.sh",
+    "smoke:channel-trust": "./scripts/smoke-channel-trust.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",
     "smoke:reset": "./scripts/smoke-reset.sh",
     "smoke:auto-recall": "./scripts/smoke-auto-recall.sh",

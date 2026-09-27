@@ -108,6 +108,118 @@ export function gmailMessageBody(message: GmailMessage, maxBodyChars: number): s
 }
 
 /**
+ * Strip RFC 8601 / RFC 5322 comments and quoted strings, so text a sender
+ * controls (an SPF comment echoing MAIL FROM, a quoted local part) can never
+ * be read as a result of its own (#61). They collapse to nothing, not a
+ * space: a comment must not supply the separator a forged
+ * "dkim=pass header.d=..." needs.
+ */
+function stripCommentsAndQuotes(value: string): string | undefined {
+  let output = "";
+  let depth = 0;
+  let quoted = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]!;
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (quoted) {
+      if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"' && depth === 0) {
+      quoted = true;
+      output += "";
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")") {
+      if (depth === 0) return undefined;
+      depth -= 1;
+      output += "";
+      continue;
+    }
+    if (depth === 0) output += char;
+  }
+  // Ending inside a comment or a quote means the structure was tampered with.
+  return depth === 0 && !quoted ? output : undefined;
+}
+
+/**
+ * Whether Gmail authenticated the From address (#61). Reads only the topmost
+ * Authentication-Results header, the one Gmail's own receiving server
+ * prepends (authserv-id mx.google.com); a sender can add their own copies
+ * lower down, so later ones are ignored. Comments and quoted strings are
+ * removed before parsing. Any DMARC result other than pass for the From
+ * domain is final. Otherwise verified means DMARC passed for the From domain,
+ * or DKIM passed with a signing domain (header.d, else header.i) equal to it
+ * or a parent of it. SPF alone does not count: it checks the envelope sender,
+ * not From. This authenticates the domain, not the mailbox, so it is never
+ * enough to be the owner on its own: see ownerSenders.
+ */
+export function emailSenderVerified(message: GmailMessage, fromAddress: string): boolean {
+  const fromDomain = fromAddress.split("@").pop()?.trim().toLowerCase();
+  if (!fromDomain) return false;
+  const results = header(message, "Authentication-Results");
+  if (!results) return false;
+  // Gmail's own results never contain quotes or backslashes; those only get
+  // in through sender-controlled text (a quoted MAIL FROM local part) that can
+  // close or open a comment and hide or forge a result. Fail closed (#61).
+  if (/["\\]/.test(results)) return false;
+  // Only printable ASCII and folding whitespace: a non-breaking space would
+  // otherwise act as a separator the sender could smuggle in.
+  if (/[^\x09\x0a\x0d\x20-\x7e]/.test(results)) return false;
+  const stripped = stripCommentsAndQuotes(results);
+  if (stripped === undefined) return false;
+  const [authservId, ...resinfos] = stripped.split(";").map((part) => part.trim());
+  if (authservId?.split(/\s+/)[0]?.toLowerCase() !== "mx.google.com") return false;
+  const aligned = (domain: string | undefined): boolean => {
+    const d = (domain ?? "").trim().replace(/^@/, "").toLowerCase();
+    return d.includes(".") && (fromDomain === d || fromDomain.endsWith(`.${d}`));
+  };
+  const property = (resinfo: string, name: string) =>
+    new RegExp(`(?:^|\\s)${name.replace(/\./g, "\\.")}=([^\\s;]+)`, "i").exec(resinfo)?.[1];
+  // Every result token in the raw text must be one this parse saw, and there
+  // is at most one DMARC result: anything else means text was hidden (#61).
+  // Counted only where a result starts (after ";"), so the dkim=/dmarc= inside
+  // Gmail's own ARC comment (arc=pass (i=1 ... dkim=pass ... dmarc=pass ...))
+  // don't count, while one moved out of or into a comment still does.
+  const rawResults = (results.match(/(?:^|;)\s*(?:dmarc|dkim)\s*=/gi) ?? []).length;
+  const parsedResults = resinfos.filter((resinfo) => /^(dmarc|dkim)\s*=/i.test(resinfo)).length;
+  if (rawResults !== parsedResults) return false;
+  if (resinfos.filter((resinfo) => /^dmarc\s*=/i.test(resinfo)).length > 1) return false;
+  let dmarcPass = false;
+  let dkimPass = false;
+  for (const resinfo of resinfos) {
+    const method = /^(dmarc|dkim)\s*=\s*(\w+)/i.exec(resinfo);
+    if (!method) continue;
+    const kind = method[1]!.toLowerCase();
+    const result = method[2]!.toLowerCase();
+    if (kind === "dmarc") {
+      const dmarcDomain = property(resinfo, "header.from")?.toLowerCase();
+      // A non-pass whose domain can't be read still vetoes: fail closed.
+      if (result !== "pass" && (dmarcDomain === undefined || dmarcDomain === fromDomain)) return false;
+      if (dmarcDomain !== fromDomain) continue;
+      dmarcPass = true;
+    } else if (result === "pass") {
+      const signer = property(resinfo, "header.d") ?? property(resinfo, "header.i")?.split("@").pop();
+      if (aligned(signer)) dkimPass = true;
+    }
+  }
+  return dmarcPass || dkimPass;
+}
+
+/** True when a From header names more than one address (#61): never verified. */
+function hasMultipleAddresses(raw: string | undefined): boolean {
+  const stripped = stripCommentsAndQuotes(raw ?? "");
+  return stripped === undefined || (stripped.match(/@/g) ?? []).length > 1;
+}
+
+/**
  * Map a Gmail message to the connector inbound shape. The text is the #21
  * envelope: header line + optional thread digest + body. senderId is the bare
  * lower-cased address so allowedSenders/allowedSenderDomains match naturally.
@@ -137,6 +249,8 @@ export function gmailMessageToInbound(
     senderLabel: from.label ?? from.address,
     chatId: message.threadId ?? message.id,
     chatType: "direct",
+    // An unauthenticated From header is spoofable, so it never counts as the owner (#61).
+    senderVerified: !hasMultipleAddresses(header(message, "From")) && emailSenderVerified(message, from.address),
     threadId: message.threadId,
     timestamp: message.internalDate ? new Date(Number(message.internalDate)).toISOString() : undefined,
     metadata: { subject, sensitiveSource: "email" },

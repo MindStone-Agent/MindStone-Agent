@@ -115,6 +115,7 @@ import {
   readConnectorRuntimeStatus,
   resolveConnectorCredential,
   shouldTriggerConnectorReply,
+  isConnectorOwnerMessage,
   writeConnectorRuntimeStatus,
   type ConnectorContext,
   type ConnectorInboundHandle,
@@ -384,31 +385,59 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
   return undefined;
 }
 
-function resolveRunner(config: MindStoneConfig | undefined, provider: MindStoneModelProvider): AgentRunner {
-  const mode = resolveRoutingMode(config);
-  if (mode === "pi-session") {
-    const paths = runtimePathsFromEnv();
-    return new PiSessionAgentRunner({
-      projectRoot: paths.root,
-      agentDir: config?.routing?.pi?.agentDir ?? paths.piAgentDir,
-      sessionDir: paths.piSessionDir,
-      cwd: config?.workspace?.root,
-      defaultModel: config?.routing?.defaultModel,
-      contextManagement: config?.contextManagement,
-      compaction: config?.routing?.pi?.compaction,
-      resumeCap: config?.routing?.pi?.resumeCap,
-      additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
-      additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
-      additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
-      additionalThemePaths: config?.routing?.pi?.additionalThemePaths,
-      noExtensions: config?.routing?.pi?.noExtensions,
-      noSkills: config?.routing?.pi?.noSkills,
-      noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
-      noThemes: config?.routing?.pi?.noThemes,
-      noContextFiles: config?.routing?.pi?.noContextFiles,
-      builtinTools: config?.routing?.pi?.builtinTools,
-    });
-  }
+/**
+ * PiSessionAgentRunner options for one turn. A non-owner turn gets none of
+ * the owner's Pi resources (#61): no installed or extra extensions (the
+ * MindStone adapter injects USER.md, recall and memory tools), skills, prompt
+ * templates (a `/name` message would expand the owner's), context files or
+ * built-in tools. MindStone's own pruning/compaction extensions still
+ * run.
+ */
+export function piSessionRunnerOptions(
+  config: MindStoneConfig | undefined,
+  audience: "owner" | "non_owner",
+): ConstructorParameters<typeof PiSessionAgentRunner>[0] {
+  const paths = runtimePathsFromEnv();
+  const options: ConstructorParameters<typeof PiSessionAgentRunner>[0] = {
+    projectRoot: paths.root,
+    agentDir: config?.routing?.pi?.agentDir ?? paths.piAgentDir,
+    sessionDir: paths.piSessionDir,
+    cwd: config?.workspace?.root,
+    defaultModel: config?.routing?.defaultModel,
+    contextManagement: config?.contextManagement,
+    compaction: config?.routing?.pi?.compaction,
+    resumeCap: config?.routing?.pi?.resumeCap,
+    additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
+    additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
+    additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
+    additionalThemePaths: config?.routing?.pi?.additionalThemePaths,
+    noExtensions: config?.routing?.pi?.noExtensions,
+    noSkills: config?.routing?.pi?.noSkills,
+    noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
+    noThemes: config?.routing?.pi?.noThemes,
+    noContextFiles: config?.routing?.pi?.noContextFiles,
+    builtinTools: config?.routing?.pi?.builtinTools,
+  };
+  if (audience === "owner") return options;
+  return {
+    ...options,
+    noDiscoveredExtensions: true,
+    additionalExtensionPaths: [],
+    additionalSkillPaths: [],
+    additionalPromptTemplatePaths: [],
+    noSkills: true,
+    noPromptTemplates: true,
+    noContextFiles: true,
+    builtinTools: [],
+  };
+}
+
+function resolveRunner(
+  config: MindStoneConfig | undefined,
+  provider: MindStoneModelProvider,
+  audience: "owner" | "non_owner" = "owner",
+): AgentRunner {
+  if (resolveRoutingMode(config) === "pi-session") return new PiSessionAgentRunner(piSessionRunnerOptions(config, audience));
   void provider;
   return createProviderRouteAgentRunner();
 }
@@ -743,9 +772,25 @@ function loadRouteIdentityContext(input: {
   };
 }
 
+/** A non-owner turn keeps the agent's IDENTITY.md but not the owner's USER.md (#61). */
+function withoutOwnerProfile(
+  context: ReturnType<typeof loadRouteIdentityContext>,
+  audience: "owner" | "non_owner",
+): ReturnType<typeof loadRouteIdentityContext> {
+  if (!context || audience === "owner") return context;
+  return { ...context, userMarkdown: undefined, userPath: undefined };
+}
+
 async function runConfiguredRoute(input: {
   sessionKey: string;
   agentId: string;
+  /**
+   * Who the turn answers (#61). "owner" is the owner's own surfaces (webchat,
+   * REST, OpenAI endpoints, App Engine) and verified direct messages. Anything
+   * else is "non_owner": no autoRecall, no USER.md and no memory index. Required
+   * so no caller can leave it to a default.
+   */
+  audience: "owner" | "non_owner";
   config: MindStoneConfig | undefined;
   configPath?: string;
   metadata?: Record<string, unknown>;
@@ -766,7 +811,9 @@ async function runConfiguredRoute(input: {
   const model = resolveRouteModel(input.config, input.agentId, input.metadata);
   const entries = readTranscriptEntries(input.sessionKey);
   const currentHandoff = readCurrentHandoff();
-  const handoffReplay = currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
+  // The handoff is the verbatim tail of an owner session: never replayed into
+  // a non-owner turn (#61).
+  const handoffReplay = input.audience === "owner" && currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
     ? {
         path: currentHandoff.path,
         sha256: currentHandoff.sha256,
@@ -807,7 +854,7 @@ async function runConfiguredRoute(input: {
     // Walked once and shared: the recall provider and the invariant tier both
     // read the same files, and the tier must not depend on the vector store.
     const fileMemoryDocuments = discoverFileMemoryDocuments({ config: input.config });
-    const runner = resolveRunner(input.config, provider);
+    const runner = resolveRunner(input.config, provider, input.audience);
     const streamOptions = resolveRunnerStreamOptions(input.config);
     const { route, streamEvents } = await runGatewayRunner({
       runner,
@@ -818,7 +865,10 @@ async function runConfiguredRoute(input: {
         entries,
         model,
         provider,
-        identityContext: loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
+        identityContext: withoutOwnerProfile(
+          loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
+          input.audience,
+        ),
         personaContext: (input.route?.personaId
           ? loadRoutePersonaContextById({
               config: input.config,
@@ -841,7 +891,7 @@ async function runConfiguredRoute(input: {
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
         memoryRecall: {
-          enabled: input.config?.memory?.autoRecall === true,
+          enabled: input.audience === "owner" && input.config?.memory?.autoRecall === true,
           provider: input.config?.memory?.vectorStore === "sqlite-vec"
             ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
                 ...(input.config?.memory?.localDocuments ?? []),
@@ -858,11 +908,15 @@ async function runConfiguredRoute(input: {
         },
         invariants: {
           enabled: input.config?.memory?.invariants?.enabled !== false,
-          documents: [...(input.config?.memory?.localDocuments ?? []), ...fileMemoryDocuments],
+          // Owner-authored rules reach a non-owner turn only when marked
+          // `invariant_audience: all` (#61).
+          documents: [...(input.config?.memory?.localDocuments ?? []), ...fileMemoryDocuments].filter(
+            (document) => input.audience === "owner" || document.metadata?.invariantAudience === "all",
+          ),
           maxPromptTokens: input.config?.memory?.invariants?.maxPromptTokens,
         },
         memoryIndex: {
-          enabled: input.config?.memory?.index?.enabled !== false,
+          enabled: input.audience === "owner" && input.config?.memory?.index?.enabled !== false,
           documents: fileMemoryDocuments,
           maxPromptTokens: input.config?.memory?.index?.maxPromptTokens,
         },
@@ -928,7 +982,10 @@ async function runConfiguredRoute(input: {
       await appendAutoCompactTranscriptEvent({
         sessionKey: input.sessionKey,
         agentId: input.agentId,
-        event: route.promptWindow.autoCompactEvent,
+        // A non-owner session never writes the shared handoff file (#61).
+        event: input.audience === "owner"
+          ? route.promptWindow.autoCompactEvent
+          : { ...route.promptWindow.autoCompactEvent, emergencyAutoHandoff: false },
         entries: route.promptWindow.entries,
         runId: run.id,
         source,
@@ -1185,7 +1242,7 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
       source,
       metadata: { source: "gateway-rpc", method: "chat.send", threadId: stringParam(params.threadId) },
     });
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path });
     if (routed.routed) {
       return { status: routed.status, body: rpcSuccess(id, { persisted: true, userEntry, ...routed.body as Record<string, unknown> }) };
     }
@@ -1544,6 +1601,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const routed = await runConfiguredRoute({
       sessionKey,
       agentId,
+      audience: "owner",
       config,
       configPath: loadedConfig.path,
       metadata: { ...(metadata ?? {}), appEngine: true, memoryScope },
@@ -1595,7 +1653,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       source,
       metadata: { ...(metadata ?? {}), threadId: stringParam(input.threadId) },
     });
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata });
     if (routed.routed) {
       sendJson(res, routed.status, { persisted: true, userEntry, ...(routed.body as Record<string, unknown>) });
       return;
@@ -1765,7 +1823,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       },
     }));
 
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
     if (routed.routed && routed.status === 200) {
       const routedBody = routed.body as { entry?: TranscriptEntry; identityContext?: unknown; promptWindow?: unknown; runId?: string };
       const outputText = routedBody.entry?.text ?? "";
@@ -1895,7 +1953,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         },
       });
     });
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
     if (routed.routed && routed.status === 200 && input.stream === true) {
       // OpenAI-compatible server-sent events. LibreChat (and the openai/langchain clients generally)
       // send `stream: true` unconditionally and cannot parse a plain chat.completion body, so a
@@ -2053,6 +2111,7 @@ async function handleConnectorInbound(params: {
   const routed = await runConfiguredRoute({
     sessionKey,
     agentId,
+    audience: isConnectorOwnerMessage({ config: ctx.config, connectorId, message }) ? "owner" : "non_owner",
     config: loadedConfig.config,
     configPath: loadedConfig.path,
     metadata: { connector: connectorId },
@@ -2070,7 +2129,7 @@ async function handleConnectorInbound(params: {
     chatId: message.chatId,
     threadId: message.threadId,
     inReplyToMessageId: message.messageId,
-    metadata: { chatType: message.chatType ?? "direct" },
+    metadata: message.chatType ? { chatType: message.chatType } : {},
   };
   const connector = getConnector(connectorId);
 

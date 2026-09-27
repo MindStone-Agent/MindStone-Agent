@@ -53,7 +53,8 @@ export function resolveSessionKey(input: SessionRouteInput): string {
   const explicit = canonicalizeSessionKey(input.explicitSessionKey, input.agentId);
   if (explicit) return explicit;
   const surface = input.channel ?? input.substrate ?? "internal";
-  const chatType = input.chatType ?? "direct";
+  // A missing chat type is unknown, never assumed direct (#61).
+  const chatType = input.chatType ?? "unknown";
   const peer = input.threadId ?? input.senderId ?? DEFAULT_MAIN_SESSION_KEY;
   return ["agent", normalizeSessionAgentId(input.agentId), surface, chatType, peer]
     .map((part) => encodeURIComponent(part))

@@ -75,6 +75,24 @@ runtime-status) by extending the #16 access policy:
 - `allowedSenderDomains` — **new, generic policy field**: a sender whose
   address ends in `@<domain>` is allowed. Empty/missing = no domain grants.
 - Everything else fails closed exactly as before: no policy ⇒ nobody.
+- Passing these lists lets a sender talk to the agent; it never makes them
+  the owner (#61). A message is the owner's only when its From address is in
+  `ownerSenders` **and** Gmail authenticated it: the topmost
+  `Authentication-Results` header (authserv-id `mx.google.com`), read with
+  comments removed, shows DMARC pass for the From domain, or DKIM pass with a
+  signing domain equal to it or a parent of it. Any other DMARC result for
+  the From domain is final. The header is rejected outright if it contains a
+  quote or backslash, has unbalanced comments, more than one DMARC result, or
+  a result hidden inside a comment. SPF alone does not count, and a From
+  header with more than one address is never verified.
+- Know the limit: DKIM and DMARC authenticate the **domain**, not the
+  mailbox. Anyone who can send DKIM-aligned mail for your domain (a colleague
+  on the same domain, a service allowed to send as it) can put your address
+  in From and pass both checks. On a shared domain, don't rely on the email
+  connector alone to identify you; replies still go only to the From address
+  and need approval.
+  Any other message is still answered, in its own session, without autoRecall,
+  `USER.md` or the memory index.
 
 Outbound trust is structural: **reply-only**. The MVP cannot compose to
 arbitrary recipients — every outbound is a reply on an inbound thread, to the
