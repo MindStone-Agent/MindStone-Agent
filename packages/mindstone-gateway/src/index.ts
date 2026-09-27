@@ -1592,7 +1592,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const memoryScope = memoryScopeRaw as "app" | "tenant" | "user" | "agent" | "none";
     // A present but non-string or blank app/tenant/user id would be dropped and
     // the run would fall back to the owner (#70): refuse it.
-    const badScopeFields = invalidScopeFields(input as Record<string, unknown>);
+    const badScopeFields = invalidScopeFields({ ...(input as Record<string, unknown>), agentId });
     if (badScopeFields.length) {
       sendJson(res, 400, { ok: false, error: `${badScopeFields.join(", ")} must be non-empty strings without ":" when given` });
       return;

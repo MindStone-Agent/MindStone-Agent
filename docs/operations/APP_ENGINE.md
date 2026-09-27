@@ -55,8 +55,9 @@ with `<scope>:agent:<agentId>:` (for example
 `tenant:t1:agent:analyst:thread-7`). Any other key, including the owner's
 `agent:default:main` and another tenant's keys, is refused (HTTP 403 from the
 Gateway; an error from `runMindStone`). Scope fields must be non-empty strings
-without `:`; `null`, blanks, non-strings and values containing `:` are refused
-(HTTP 400). Scoped runs are not the owner's: they get no USER.md, no memory
+without `:` (surrounding spaces are trimmed); `null`, blanks, non-strings and
+values containing `:` are refused (HTTP 400), as is a scoped run on an agent id
+containing `:`. Scoped runs are not the owner's: they get no USER.md, no memory
 index, no owner-only invariants, no handoff replay and no onboarding seed.
 
 ## Scope model (prevents cross-tenant/cross-agent recall)

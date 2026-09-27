@@ -65,9 +65,9 @@ export const SCOPE_DIMENSIONS = ["appId", "tenantId", "userId", "agentId"] as co
 
 export function scopeFromRequest(request: Pick<MindStoneRunRequest, "appId" | "tenantId" | "userId" | "agentId">): MindStoneRunScope {
   return {
-    ...(request.appId ? { appId: request.appId } : {}),
-    ...(request.tenantId ? { tenantId: request.tenantId } : {}),
-    ...(request.userId ? { userId: request.userId } : {}),
+    ...(request.appId?.trim() ? { appId: request.appId.trim() } : {}),
+    ...(request.tenantId?.trim() ? { tenantId: request.tenantId.trim() } : {}),
+    ...(request.userId?.trim() ? { userId: request.userId.trim() } : {}),
     agentId: request.agentId,
   };
 }
@@ -107,12 +107,18 @@ export function scopeSessionKeyAllowed(scope: MindStoneRunScope, sessionKey: str
  * the owner's context and main session.
  */
 export function invalidScopeFields(request: Record<string, unknown>): string[] {
-  return (["appId", "tenantId", "userId"] as const).filter((field) => {
+  return (["appId", "tenantId", "userId"] as string[]).filter((field) => {
     const value = request[field];
     // null is refused rather than read as absent: a nullable tenant column must not become an owner run.
     // ":" is refused because it separates the parts of a scoped session key.
     return value !== undefined && (typeof value !== "string" || value.trim() === "" || value.includes(":"));
-  });
+  }).concat(
+    // For a scoped run the agent id is part of the scoped key too.
+    ["appId", "tenantId", "userId"].some((field) => request[field] !== undefined)
+      && typeof request.agentId === "string" && request.agentId.includes(":")
+      ? ["agentId"]
+      : [],
+  );
 }
 
 /**

@@ -78,6 +78,7 @@ code() { curl -s -o "${TEMP_RUNTIME}/code.json" -w '%{http_code}' -X POST -H "Au
 [[ "$(code '{"text":"hi","appId":"  "}')" == "400" ]] || { echo "a blank appId must be refused" >&2; exit 1; }
 [[ "$(code '{"text":"hi","tenantId":null}')" == "400" ]] || { echo "a null tenantId must be refused, not read as an owner run" >&2; exit 1; }
 [[ "$(code '{"text":"hi","tenantId":"t1:user:u1"}')" == "400" ]] || { echo "a tenantId containing a colon must be refused" >&2; exit 1; }
+[[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${AE_TOKEN}" -H 'content-type: application/json' -d '{"text":"hi","tenantId":"t1"}' "http://127.0.0.1:${GATEWAY_PORT}/agents/a%3Ab/runs")" == "400" ]] || { echo "a scoped run on an agent id containing a colon must be refused" >&2; exit 1; }
 
 # The in-process API (runMindStone) applies the same audience.
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
@@ -114,6 +115,11 @@ await assert.rejects(run({ tenantId: "t1", sessionKey: "agent:default:main" }), 
 await assert.rejects(run({ tenantId: 7 }), /must be non-empty strings/);
 await assert.rejects(run({ tenantId: null }), /must be non-empty strings/);
 await assert.rejects(run({ tenantId: "t1:user:u1" }), /must be non-empty strings/);
+await assert.rejects(run({ tenantId: "t1", agentId: "a:b" }), /agentId must be non-empty strings/);
+{
+  const padded = await run({ tenantId: " t1 " });
+  assert.equal(padded.sessionKey, "tenant:t1:agent:default:main", "core trims scope ids the way the gateway does");
+}
 const tenantPi = piSessionRunnerOptions({ routing: { mode: "pi-session", pi: { builtinTools: ["bash"] } } } as never, "tenant");
 assert.deepEqual(tenantPi.builtinTools, [], "tenant Pi turns get no built-in tools");
 assert.equal(tenantPi.noSkills, true);
