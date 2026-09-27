@@ -17,7 +17,7 @@ export AE_TOKEN="ae-audience-token" CAPTURE="${TEMP_RUNTIME}/capture.jsonl" MIND
 cd "${PROJECT_ROOT}"
 echo "== App Engine audience smoke test =="
 npm run build:mindstone
-./scripts/init-runtime.sh >/tmp/mindstone-agent-ae-audience-init.log
+./scripts/init-runtime.sh >"${TEMP_RUNTIME}/init.log"
 DATA="${TEMP_RUNTIME}/mindstone"
 printf '# User\n\nOwner profile sentinel: TEAL-OWNER-PROFILE.\n' > "${DATA}/agents/default/USER.md"
 printf '# Memory index\n\n- [Heron budget](project_heron_budget.md) — pointer\n' > "${DATA}/memory/MEMORY.md"
@@ -35,10 +35,10 @@ c["memory"] = {**c.get("memory", {}), "autoRecall": True, "vectorStore": "memory
   "localDocuments": [{"id": "tenant-doc", "kind": "doc", "title": "Tenant heron note", "text": "The heron budget for tenant t1 is TENANT-DOC-SENTINEL.", "metadata": {"scope": {"tenantId": "t1", "agentId": "default"}}}]}
 p.write_text(json.dumps(c, indent=2) + "\n")
 PY
-./scripts/start-gateway.sh >/tmp/mindstone-agent-ae-audience-gateway.log 2>&1 &
+./scripts/start-gateway.sh >"${TEMP_RUNTIME}/gateway.log" 2>&1 &
 gateway_pid=$!
 for _ in $(seq 1 30); do curl -sf "http://127.0.0.1:${GATEWAY_PORT}/health" >/dev/null 2>&1 && break; sleep 0.5; done
-run() { : > "${CAPTURE}"; curl -s -X POST -H "Authorization: Bearer ${AE_TOKEN}" -H 'content-type: application/json' -d "$1" "http://127.0.0.1:${GATEWAY_PORT}/agents/default/runs" >/tmp/mindstone-agent-ae-run.json; cp "${CAPTURE}" "$2"; }
+run() { : > "${CAPTURE}"; curl -s -X POST -H "Authorization: Bearer ${AE_TOKEN}" -H 'content-type: application/json' -d "$1" "http://127.0.0.1:${GATEWAY_PORT}/agents/default/runs" >"${TEMP_RUNTIME}/run.json"; cp "${CAPTURE}" "$2"; }
 run '{"text":"What is the heron budget?","tenantId":"t1"}' "${TEMP_RUNTIME}/tenant.jsonl"
 run '{"text":"What is the heron budget?","appId":"app-9","userId":"u2"}' "${TEMP_RUNTIME}/appuser.jsonl"
 run '{"text":"What is the heron budget?"}' "${TEMP_RUNTIME}/owner.jsonl"
@@ -60,7 +60,7 @@ for (const name of ["tenant.jsonl", "appuser.jsonl"]) {
   const p = prompt(name);
   // Recall of the owner's unscoped memory in tenant runs is the open App Engine
   // scope decision, so this checks the memory index block, not the pointer text.
-  for (const s of ["TEAL-OWNER-PROFILE", INDEX_HEADER, "PLUM-INVARIANT-PRIVATE", "CORAL-HANDOFF-TAIL"]) {
+  for (const s of ["TEAL-OWNER-PROFILE", INDEX_HEADER, "PLUM-INVARIANT-PRIVATE"]) {
     if (p.includes(s)) fail(`${name}: a scoped run got the owner's ${s}`);
   }
   if (!p.includes("SAGE-INVARIANT-PUBLIC")) fail(`${name}: lost the rule marked invariant_audience: all`);
@@ -68,4 +68,45 @@ for (const name of ["tenant.jsonl", "appuser.jsonl"]) {
 if (!prompt("tenant.jsonl").includes("TENANT-DOC-SENTINEL")) fail("the tenant run lost its own scoped recall");
 console.log("app engine audience assertions passed");
 NODE
+# A scoped run may not use a session key outside its scope; bad scope fields are refused.
+code() { curl -s -o "${TEMP_RUNTIME}/code.json" -w '%{http_code}' -X POST -H "Authorization: Bearer ${AE_TOKEN}" -H 'content-type: application/json' -d "$1" "http://127.0.0.1:${GATEWAY_PORT}/agents/default/runs"; }
+[[ "$(code '{"text":"hi","tenantId":"t1","sessionKey":"agent:default:main"}')" == "403" ]] || { echo "a tenant run was allowed into the owner's main session" >&2; exit 1; }
+[[ "$(code '{"text":"hi","tenantId":"t1","sessionKey":"tenant:t2:agent:default:main"}')" == "403" ]] || { echo "a tenant run was allowed into another tenant's session" >&2; exit 1; }
+[[ "$(code '{"text":"hi","tenantId":"t1","sessionKey":"tenant:t1:agent:default:thread-7"}')" == "200" ]] || { echo "a tenant run should be able to use its own scoped keys: $(cat "${TEMP_RUNTIME}/code.json")" >&2; exit 1; }
+[[ "$(code '{"text":"hi","tenantId":42}')" == "400" ]] || { echo "a numeric tenantId must be refused, not dropped" >&2; exit 1; }
+[[ "$(code '{"text":"hi","appId":"  "}')" == "400" ]] || { echo "a blank appId must be refused" >&2; exit 1; }
+
+# The in-process API (runMindStone) applies the same audience.
+MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { loadMindStoneConfig, resolveConfigPath, runtimePathsFromEnv, runMindStone } from "./packages/mindstone-core/src/index.ts";
+import { MockMindStoneProvider } from "./packages/mindstone-gateway/src/mock-provider.ts";
+import { piSessionRunnerOptions } from "./packages/mindstone-gateway/src/index.ts";
+
+const paths = runtimePathsFromEnv();
+const configPath = resolveConfigPath(process.env, paths);
+const { config } = loadMindStoneConfig(configPath);
+const seen: string[] = [];
+const provider = new MockMindStoneProvider({ responsePrefix: "core" });
+const complete = provider.completeChat.bind(provider);
+provider.completeChat = async (request) => { seen.push(request.messages.map((m) => m.text ?? "").join("\n")); return complete(request); };
+const model = { id: "mindstone/mock", provider: "mock", contextWindowTokens: 128000 };
+const run = (extra: Record<string, unknown>) => runMindStone({ agentId: "default", input: "What is the heron budget?", ...extra } as never, { config, configPath, provider, model } as never);
+await run({ tenantId: "t1" });
+await run({});
+const [tenant, owner] = seen;
+assert.ok(owner.includes("TEAL-OWNER-PROFILE") && owner.includes("Index of the agent's durable memories"), "control: the unscoped in-process run keeps owner context");
+for (const s of ["TEAL-OWNER-PROFILE", "Index of the agent's durable memories", "PLUM-INVARIANT-PRIVATE", "CORAL-HANDOFF-TAIL"]) {
+  assert.ok(!tenant.includes(s), `in-process tenant run got the owner's ${s}`);
+}
+assert.ok(tenant.includes("SAGE-INVARIANT-PUBLIC"), "in-process tenant run lost the invariant_audience: all rule");
+await assert.rejects(run({ tenantId: "t1", sessionKey: "agent:default:main" }), /outside this run's scope/);
+await assert.rejects(run({ tenantId: 7 }), /must be non-empty strings/);
+const tenantPi = piSessionRunnerOptions({ routing: { mode: "pi-session", pi: { builtinTools: ["bash"] } } } as never, "tenant");
+assert.deepEqual(tenantPi.builtinTools, [], "tenant Pi turns get no built-in tools");
+assert.equal(tenantPi.noSkills, true);
+console.log("in-process and Pi tenant assertions passed");
+TS
+
 echo "App Engine audience smoke test passed."

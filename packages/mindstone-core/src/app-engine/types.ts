@@ -82,6 +82,33 @@ export function scopedSessionKey(scope: MindStoneRunScope, suffix = "main"): str
   return parts.join(":");
 }
 
+/** A run scoped to an app, tenant or user: not the owner's (#70). */
+export function isScopedRun(scope: MindStoneRunScope): boolean {
+  return Boolean(scope.appId || scope.tenantId || scope.userId);
+}
+
+/**
+ * Whether a caller-chosen session key is inside the run's scope (#70). A
+ * scoped run may only use its own scoped keys (`<scope>:agent:<id>:…`), never
+ * the owner's main session or another tenant's. Unscoped runs are the owner's.
+ */
+export function scopeSessionKeyAllowed(scope: MindStoneRunScope, sessionKey: string): boolean {
+  if (!isScopedRun(scope)) return true;
+  return sessionKey === scopedSessionKey(scope) || sessionKey.startsWith(scopedSessionKey(scope, ""));
+}
+
+/**
+ * Scope fields that are present but not a non-empty string (#70): a numeric
+ * tenant id would otherwise be dropped silently and the run would fall back to
+ * the owner's context and main session.
+ */
+export function invalidScopeFields(request: Record<string, unknown>): string[] {
+  return (["appId", "tenantId", "userId"] as const).filter((field) => {
+    const value = request[field];
+    return value !== undefined && value !== null && (typeof value !== "string" || value.trim() === "");
+  });
+}
+
 /**
  * The scope filter recall enforces for a given memoryScope level: which
  * dimensions of the request scope participate in matching.

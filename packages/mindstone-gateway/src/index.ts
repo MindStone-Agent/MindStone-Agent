@@ -100,6 +100,8 @@ import {
   recallScopeForMemoryScope,
   scopeFromRequest,
   scopedSessionKey,
+  invalidScopeFields,
+  scopeSessionKeyAllowed,
   ApprovalStore,
   ConnectorDeliveryQueue,
   applyActionProposalDiscipline,
@@ -796,10 +798,12 @@ async function runConfiguredRoute(input: {
   sessionKey: string;
   agentId: string;
   /**
-   * Who the turn answers (#61). "owner" is the owner's own surfaces (webchat,
-   * REST, OpenAI endpoints, App Engine) and verified direct messages. Anything
-   * else is "non_owner": no autoRecall, no USER.md and no memory index. Required
-   * so no caller can leave it to a default.
+   * Who the turn answers (#61, #70). "owner": the owner's own surfaces
+   * (webchat, REST, OpenAI endpoints, agent-only App Engine runs) and verified
+   * direct messages. "non_owner": other connector turns; no autoRecall, USER.md,
+   * memory index, owner-only invariants or handoff. "tenant": an app-, tenant-
+   * or user-scoped App Engine run; like non_owner but keeps its scoped recall.
+   * Required so no caller can leave it to a default.
    */
   audience: RouteAudience;
   config: MindStoneConfig | undefined;
@@ -1586,6 +1590,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
     const memoryScope = memoryScopeRaw as "app" | "tenant" | "user" | "agent" | "none";
+    // A present but non-string or blank app/tenant/user id would be dropped and
+    // the run would fall back to the owner (#70): refuse it.
+    const badScopeFields = invalidScopeFields(input as Record<string, unknown>);
+    if (badScopeFields.length) {
+      sendJson(res, 400, { ok: false, error: `${badScopeFields.join(", ")} must be non-empty strings when given` });
+      return;
+    }
     const scope = scopeFromRequest({
       appId: stringParam(input.appId),
       tenantId: stringParam(input.tenantId),
@@ -1593,6 +1604,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       agentId,
     });
     const sessionKey = stringParam(input.sessionKey)?.trim() || scopedSessionKey(scope);
+    if (!scopeSessionKeyAllowed(scope, sessionKey)) {
+      // A scoped run may not read or write the owner's or another tenant's session (#70).
+      sendJson(res, 403, { ok: false, error: `sessionKey ${sessionKey} is outside this run's scope` });
+      return;
+    }
     const recallScope = recallScopeForMemoryScope(scope, memoryScope);
     const loadedConfig = loadGatewayConfig();
     const config = memoryScope === "none" && loadedConfig.config?.memory?.autoRecall

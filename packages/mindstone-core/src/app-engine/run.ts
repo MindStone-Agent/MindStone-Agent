@@ -7,6 +7,9 @@ import {
   recallScopeForMemoryScope,
   scopeFromRequest,
   scopedSessionKey,
+  isScopedRun,
+  scopeSessionKeyAllowed,
+  invalidScopeFields,
   type MindStoneMemoryScope,
   type MindStoneRunRequest,
   type MindStoneRunResult,
@@ -37,8 +40,13 @@ export async function runMindStone(request: MindStoneRunRequest, options: MindSt
   if (!request.agentId?.trim()) throw new Error("agentId is required");
   if (!request.input?.trim()) throw new Error("input is required");
 
+  const badFields = invalidScopeFields(request as unknown as Record<string, unknown>);
+  if (badFields.length) throw new Error(`${badFields.join(", ")} must be non-empty strings when given`);
   const scope = scopeFromRequest(request);
   const sessionKey = request.sessionKey?.trim() || scopedSessionKey(scope);
+  if (!scopeSessionKeyAllowed(scope, sessionKey)) {
+    throw new Error(`sessionKey ${sessionKey} is outside this run's scope`);
+  }
   const memoryScope: MindStoneMemoryScope = request.memoryScope ?? "agent";
   const recallScope = recallScopeForMemoryScope(scope, memoryScope);
 
@@ -59,6 +67,8 @@ export async function runMindStone(request: MindStoneRunRequest, options: MindSt
     metadata: { ...(request.metadata ?? {}), appEngine: true, memoryScope },
     scope: scope as Record<string, string>,
     recallScope: recallScope as Record<string, string> | undefined,
+    // An app-, tenant- or user-scoped run isn't the owner's (#70).
+    ownerContext: !isScopedRun(scope),
     route: request.personaId || request.workflowId ? { personaId: request.personaId, workflowId: request.workflowId } : undefined,
     signal: options.signal,
   });

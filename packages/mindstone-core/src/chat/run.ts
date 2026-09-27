@@ -50,6 +50,12 @@ export type MindStoneChatTurnInput = {
   signal?: AbortSignal;
   /** App Engine / Agent Mesh scope — stamped on transcript entries and enforced on memory recall. */
   scope?: Record<string, string>;
+  /**
+   * False for a turn that isn't the owner's (an app-, tenant- or user-scoped
+   * App Engine run, #70): no USER.md, memory index, owner-only invariants or
+   * handoff. Scoped recall is unaffected. Defaults to true.
+   */
+  ownerContext?: boolean;
   /** Recall filter override when the memory scope is broader than the full run scope (defaults to `scope`). */
   recallScope?: Record<string, string>;
   /** Deterministic request-level routing: forced persona wins over workflow decisions and config rules; forced workflow bypasses selection. */
@@ -395,7 +401,8 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     config: input.config,
   });
   const currentHandoff = readCurrentHandoff();
-  const handoffReplay = currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
+  const ownerContext = input.ownerContext !== false;
+  const handoffReplay = ownerContext && currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
     ? {
         path: currentHandoff.path,
         sha256: currentHandoff.sha256,
@@ -451,7 +458,9 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       entries,
       model: input.model,
       provider: input.provider,
-      identityContext: loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
+      identityContext: ((context) => (ownerContext || !context ? context : { ...context, userMarkdown: undefined, userPath: undefined }))(
+        loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
+      ),
       personaContext: personaResolution.context,
       contextManagement: input.config?.contextManagement,
       reservedTokens: reservedPromptTokens(input.metadata),
@@ -475,11 +484,13 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       },
       invariants: {
         enabled: input.config?.memory?.invariants?.enabled !== false,
-        documents: [...(input.config?.memory?.localDocuments ?? []), ...fileMemoryDocuments],
+        documents: [...(input.config?.memory?.localDocuments ?? []), ...fileMemoryDocuments].filter(
+          (document) => ownerContext || document.metadata?.invariantAudience === "all",
+        ),
         maxPromptTokens: input.config?.memory?.invariants?.maxPromptTokens,
       },
       memoryIndex: {
-        enabled: input.config?.memory?.index?.enabled !== false,
+        enabled: ownerContext && input.config?.memory?.index?.enabled !== false,
         documents: fileMemoryDocuments,
         maxPromptTokens: input.config?.memory?.index?.maxPromptTokens,
       },
