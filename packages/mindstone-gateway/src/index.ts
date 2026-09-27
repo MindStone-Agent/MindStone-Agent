@@ -604,8 +604,22 @@ function transcriptTextFromOpenAiContent(content: unknown): string | undefined {
 }
 
 /** Session key for one MindStone Console conversation (#38). */
-export function consoleConversationSessionKey(agentId: string, userId: string, conversationId: string): string {
-  return ["agent", agentId, "console", userId, conversationId].map((part) => encodeURIComponent(part)).join(":");
+/**
+ * Session key for one MindStone Console conversation (#38). Keyed by user and
+ * conversation, not by persona: switching persona (model) mid-conversation
+ * keeps the conversation's history. The agent part is the default agent so the
+ * key stays in the agent:<id>:… namespace; the persona answering each turn is
+ * still recorded on every transcript entry. Ids over 64 characters are hashed
+ * so the transcript filename stays within filesystem limits.
+ */
+export function consoleConversationSessionKey(defaultAgentId: string, userId: string, conversationId: string): string {
+  const part = (value: string) => (value.length > 64 ? `h-${createHash("sha256").update(value).digest("hex").slice(0, 32)}` : value);
+  return ["agent", defaultAgentId, "console", part(userId), part(conversationId)].map((value) => encodeURIComponent(value)).join(":");
+}
+
+/** The session a handoff was written from (its "- Session: …" line), if any. */
+export function handoffSessionKey(text: string): string | undefined {
+  return /^- Session: (.+)$/m.exec(text)?.[1]?.trim();
 }
 
 /**
@@ -839,7 +853,12 @@ async function runConfiguredRoute(input: {
   const currentHandoff = readCurrentHandoff();
   // The handoff is the verbatim tail of an owner session: never replayed into
   // a non-owner turn (#61) or a scoped App Engine / tenant run (#62).
-  const handoffReplay = input.audience === "owner" && !input.scope && currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
+  // A handoff is replayed only into the session that wrote it (#38): with a
+  // session per Console conversation, a runtime-wide replay would hand one
+  // conversation's tail to every new one.
+  const handoffReplay = input.audience === "owner" && !input.scope && currentHandoff
+    && handoffSessionKey(currentHandoff.text) === input.sessionKey
+    && !hasReplayedHandoff(entries, currentHandoff.sha256)
     ? {
         path: currentHandoff.path,
         sha256: currentHandoff.sha256,
@@ -1955,7 +1974,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     // memory backfill indexes every one into that agent's memory.
     const sessionKey = gatewaySessionKey({
       config: loadedConfig.config,
-      explicitSessionKey: metadata.sessionKey ?? (forwarded.conversationId ? consoleConversationSessionKey(agentId, senderId, forwarded.conversationId) : undefined),
+      explicitSessionKey: metadata.sessionKey ?? (forwarded.conversationId
+        ? consoleConversationSessionKey(loadedConfig.config?.routing?.defaultAgentId ?? "default", senderId, forwarded.conversationId)
+        : undefined),
       agentId,
       substrate: "openai",
       channel: "openai-chat-completions",
@@ -1975,7 +1996,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       .filter((record) => record.role === "system" || record.role === "developer")
       .map((record) => transcriptTextFromOpenAiContent(record.content)?.trim())
       .filter((text): text is string => Boolean(text));
-    const keepClientSystem = !forwarded.userRole || forwarded.userRole.toLowerCase() === "admin";
+    // A role header that is present but blank (LibreChat blanks a placeholder it
+    // can't fill) is an unknown user, not a trusted caller.
+    const roleHeaderSent = req.headers["x-mindstone-user-role"] !== undefined;
+    const keepClientSystem = forwarded.userRole ? forwarded.userRole.toLowerCase() === "admin" : !roleHeaderSent;
     const keptSystemEntries: TranscriptEntry[] = [];
     const commonMetadata = {
       source: "openai-chat-completions",

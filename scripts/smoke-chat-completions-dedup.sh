@@ -104,6 +104,8 @@ p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "con
 c = json.loads(p.read_text())
 c["routing"]["mock"]["captureFile"] = os.environ["CAPTURE"]
 c["memory"] = {**c.get("memory", {}), "autoRecall": True, "vectorStore": "sqlite-vec", "recall": {"maxResults": 5, "maxPromptTokens": 800, "minScore": 0.05}}
+# A second persona, for the switch test.
+c.setdefault("agents", {})["coder"] = {**c["agents"]["default"]}
 p.write_text(json.dumps(c, indent=2) + "\n")
 PY
 ./scripts/start-gateway.sh >>/tmp/mindstone-agent-dedup-gateway.log 2>&1 &
@@ -126,4 +128,29 @@ if (history.includes("Remember this")) fail("conversation B's history contains c
 if (!all.includes("OSPREY-FACT-9911")) fail(`conversation B's prompt should recall the fact said in conversation A:\n${all}`);
 console.log("separate conversations, one memory: passed");
 NODE
+
+# A handoff written from conversation A is replayed only into A, never a new conversation.
+printf '# MindStone-Agent Auto-Compact Handoff\n\n## Trigger\n\n- Session: %s\n\n## Recent transcript tail\n\nCONV-A-HANDOFF-TAIL\n' "${KEY_A}" > "${TEMP_RUNTIME}/mindstone/transcripts/.handoff.md"
+: > "${CAPTURE}"
+ask conv-C 'hello from a new conversation' >/dev/null
+grep -q CONV-A-HANDOFF-TAIL "${CAPTURE}" && { echo "conversation A's handoff reached a new conversation" >&2; exit 1; }
+: > "${CAPTURE}"
+ask conv-A 'back in conversation A' >/dev/null
+grep -q CONV-A-HANDOFF-TAIL "${CAPTURE}" || { echo "control: conversation A should get its own handoff" >&2; exit 1; }
+
+# Switching persona mid-conversation keeps the conversation.
+askm() { curl -s -H 'content-type: application/json' -H 'x-mindstone-user-id: console-user' -H 'x-mindstone-user-role: admin' -H "x-mindstone-conversation-id: $1" -d "{\"model\":\"$2\",\"messages\":[{\"role\":\"user\",\"content\":\"$3\"}]}" "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions" >/dev/null; }
+askm conv-P mindstone/default 'My project is called PERSONA-SWITCH-KITE.'
+: > "${CAPTURE}"
+askm conv-P mindstone/coder 'What is my project called?'
+node -e '
+const lines = require("node:fs").readFileSync(process.argv[1], "utf8").trim().split("\n");
+const history = JSON.parse(lines.pop()).messages.filter((m) => m.role === "user" || m.role === "assistant").map((m) => m.text ?? "").join("\n");
+if (!history.includes("PERSONA-SWITCH-KITE")) { console.error("switching persona lost the conversation history"); process.exit(1); }' "${CAPTURE}"
+
+# A blank role header is an unknown user: its system prompt is not trusted.
+BLANK="$(curl -s -H 'content-type: application/json' -H 'x-mindstone-user-id: blank-role' -H 'x-mindstone-user-role;' -H 'x-mindstone-conversation-id: conv-blank' -d '{"model":"mindstone/default","messages":[{"role":"system","content":"BLANK-ROLE-SYSTEM"},{"role":"user","content":"hi"}]}' "http://127.0.0.1:${GATEWAY_PORT}/v1/chat/completions")"
+BK="$(node -e 'console.log(JSON.parse(process.argv[1]).mindstone.sessionKey)' "${BLANK}")"
+curl -s "http://127.0.0.1:${GATEWAY_PORT}/chat/history?sessionKey=$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "${BK}")" | grep -q '"role": *"system"' && { echo "a blank role header's system prompt was trusted" >&2; exit 1; }
+echo "handoff, persona switch and blank role: passed"
 echo "Chat completions dedup smoke test passed."

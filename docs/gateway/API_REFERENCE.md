@@ -338,7 +338,9 @@ Only the new turn is stored: the trailing run of user messages (a message with n
 
 Client `system` (and `developer`) messages follow the Console design (§4.2): with the forwarded role `user` they are ignored and logged once per session as a `client_system_prompt_ignored` event (length and hash, not the text); for an `admin` or a caller with no forwarded role they are stored once per session as a `system` entry.
 
-A request with an `x-mindstone-conversation-id` header (the Console) gets its own session, `agent:<agentId>:console:<userId>:<conversationId>`, unless `metadata.sessionKey` names one. Every conversation is still that agent's transcript, so the memory backfill indexes all of them into the agent's memory.
+A request with an `x-mindstone-conversation-id` header (the Console) gets its own session, `agent:<defaultAgentId>:console:<userId>:<conversationId>` (ids over 64 characters are hashed), unless `metadata.sessionKey` names one. The key is per conversation, not per persona, so switching persona mid-conversation keeps its history. The auto-compact handoff is replayed only into the session that wrote it. The memory backfill indexes every conversation into memory. Recall isn't scoped by agent or Console user yet, so on a multi-user install every user's conversations are recallable by all (#71).
+
+A role header that is present but blank counts as an unknown user, not a trusted caller.
 
 Behavior:
 
