@@ -437,26 +437,27 @@ Manual/live validation still pending:
 
 ## Admin API (MindStone Console, #38 P2)
 
-Server to server: the MindStone Console calls these with the gateway's service credential and forwards the signed-in user's id and role (`x-mindstone-user-id`, `x-mindstone-user-role`). Rules:
+Server to server: the MindStone Console server calls these with the gateway's service credential **and** a separate admin credential, and forwards the signed-in user's id and role (`x-mindstone-user-id`, `x-mindstone-user-role`). Rules:
 
-- The admin API does not exist (`404`) unless gateway auth is `token` or `password`.
-- Every call needs the gateway credential (`401` otherwise) and the role `admin` (`403` otherwise).
-- Every write is appended to `<dataDir>/admin/audit.jsonl` with the user id and the changed paths. Secret values never reach the audit, a response or a log.
+- The admin API does not exist (`404`) unless gateway auth is `token` or `password` **and** an admin credential is configured: `gateway.admin.tokenEnv` (an environment variable name) or `gateway.admin.tokenFile` (relative to the config file). Only the Console server should hold it.
+- Every call needs the gateway credential (`401`), the admin credential in `x-mindstone-admin-token` (`401`, compared in constant time), and the role `admin` (`403`). The ordinary gateway token, which webchat and API callers hold, is not enough.
+- Every write needs `x-mindstone-user-id` (`400` otherwise). Every write, and every refused call past the credential check, is appended to `<dataDir>/admin/audit.jsonl` with the user id. Secret values never reach the audit, a response or a log.
 
 | Endpoint | What it does |
 |---|---|
 | `GET /admin/status` | Onboarding state (`onboarded`, and per step: provider, persona, memory, connectors) plus system status. The Console shows onboarding while `onboarded` is false. |
-| `GET /admin/config` | The effective config. Every secret value (any key ending in apiKey, token, password, secret, credential, privateKey, passphrase) is replaced by `{ "set": true\|false }`. References to where a secret lives (`tokenEnv`, `tokenFile`, …) are shown. |
-| `PATCH /admin/config/<section>` | JSON merge patch (RFC 7396) of one section: `null` removes a key, and a masked `{ "set": … }` sent back unchanged keeps the stored secret. The result is validated (`422` with errors) and written atomically. The response lists `changed` paths and `restartRequired` (connectors and gateway host, port and auth need a restart; everything else applies on the next message). |
-| `POST /admin/secrets/<name>` | `{ "value": "…" }` is stored in `<dataDir>/secrets/<name>` (0600) and never echoed. Reference it from config as `tokenFile: "secrets/<name>"`. |
+| `GET /admin/config` | The effective config and its `etag` (also the `ETag` header). Secrets are replaced by `{ "set": true\|false }`: the value under any key ending in key, token, password, pass, secret, credential(s), passphrase, auth, authorization, cookie, dsn or signature (case and separators ignored), whatever its type; every value in a `headers` or `env` map; and credentials inside URLs (userinfo and secret-looking query parameters). References to where a secret lives (`tokenEnv`, `tokenFile`, …) and token budgets such as `contextWindowTokens` are shown. |
+| `PATCH /admin/config/<section>` | JSON merge patch (RFC 7396) of one section: `null` removes a key, and a masked `{ "set": … }` sent back unchanged keeps the stored secret. The config and the permission are read when the body has arrived, one write at a time. `If-Match: <etag>` refuses the write with `412` if the config changed since it was read. The result is validated (`422`), checked against the advanced-settings permission (`403`) and written atomically, keeping the file's mode. Prototype keys and patches nested more than 32 deep are a `400`. The response lists `changed` paths, `restartRequired` (connectors and gateway host, port, auth and admin need a restart; everything else applies on the next message) and the new `etag`. |
+| `POST /admin/secrets/<name>` | `{ "value": "…" }` is stored in `<dataDir>/secrets/<name>` (0600, directory 0700) and never echoed. Reference it from config as `tokenFile: "secrets/<name>"`. |
 | `GET /admin/permissions` | The advanced-settings permission. |
 | `POST /admin/permissions/advanced` | `{ "enabled": true, "confirm": "enable advanced settings" }` grants it; `{ "enabled": false }` revokes it. It lives in `<dataDir>/admin/permissions.json`, not in config, so a config patch can't grant it. |
 
-**Advanced settings.** Anything that amounts to running code or reading an arbitrary file can be changed from the browser only while an admin has granted the advanced-settings permission. That covers:
+**Advanced settings (default deny).** Without the advanced-settings permission, a patch may change only these settings, and only to values that pass their check:
 
-- any key ending in `path`, `paths`, `dir`, `file` or `root`;
-- `workspace`, `packs` and `skills`;
-- `gateway.auth`, `gateway.host` and `gateway.port`;
-- Pi's `builtinTools` and its `no*` switches.
+- `routing`: `mode` (placeholder, mock, pi, pi-session), `defaultModel`, `defaultAgentId`, `mock.responsePrefix`;
+- `agents.<id>`: `id`, `defaultModel`, `contextWindowTokens`, `profileId`;
+- `memory`: `autoRecall`, `vectorStore`, the `recall` tuning numbers, `index` and `invariants` (`enabled`, `maxPromptTokens`);
+- `channels.<id>`: `enabled`; `allowedSenders` (named senders, no `*`; removing it lets nobody in); `allowedChats` and `allowedGuilds` (named, no `*`, not removable, since a missing list lets every chat in); `triggerPrefix`, `respondWithoutMention`, the poll and reconnect intervals, `maxBodyChars`; `tokenFile` only as `secrets/<name>`;
+- `session.mode`, `contextManagement` (mode and numbers), `gateway.http` endpoint switches, `personas.active`, `workflows.active` (plain ids), `knowledgebases.recall.enabled`, and `onboarding` preferences and identity notes.
 
-Without the permission, such a patch is a `403`, listing each field that needs it. Editable sections: agents, channels, contextManagement, gateway, knowledgebases, memory, observability, onboarding, packs, personas, routing, session, skills, workflows and workspace.
+Everything else needs the permission, including environment-variable references (`*Env`), URLs, paths and directories, `ownerSenders`, `memory.transcripts.includeNonOwner`, the embedding provider, Pi's built-in tools and switches, `workspace`, `packs`, `skills` and `gateway`. Such a patch is a `403` listing each field. Turning gateway auth off (`mode: "none"`) is refused (`422`) even with the permission. Editable sections: agents, channels, contextManagement, gateway, knowledgebases, memory, observability, onboarding, packs, personas, routing, session, skills, workflows and workspace.

@@ -29,11 +29,11 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 
 ### Added
 - **Admin API for the MindStone Console** (#38, P2). This is the server-to-server config API that the Console's settings and onboarding screens use.
-  - It exists only when gateway auth is on, and needs the admin role.
-  - `GET /admin/status` returns the onboarding state. `GET /admin/config` returns the config with every secret masked. `PATCH /admin/config/<section>` applies a validated, atomic merge patch.
-  - `POST /admin/secrets/<name>` stores a secret 0600 and never echoes it back.
-  - Settings that run code or read files (paths, Pi tools, workspace, gateway auth) can be changed from the browser only after an admin grants the advanced-settings permission, which takes an explicit confirmation and can be revoked.
-  - Every write is audited with the user id. See `docs/gateway/API_REFERENCE.md`.
+  - It exists only when gateway auth is on and a separate admin credential is configured (`gateway.admin.tokenEnv` or `tokenFile`). Only the Console server holds that credential; the ordinary gateway token is not enough. Calls also need the admin role.
+  - `GET /admin/status` returns the onboarding state. `GET /admin/config` returns the config with every secret masked, including secrets inside objects, lists, header and env maps and URLs, plus an `etag`. `PATCH /admin/config/<section>` applies a validated, atomic merge patch, judged against the config and permission at the moment it lands; `If-Match` refuses a stale write.
+  - `POST /admin/secrets/<name>` stores a secret 0600 in a 0700 directory and never echoes it back.
+  - Only a short list of safe settings (model choice, memory recall tuning, named senders, personas and the like) can be changed without the advanced-settings permission. Everything else, including environment-variable references, URLs, paths, who counts as the owner and wildcard access, needs an admin to grant it with an explicit confirmation; it can be revoked. Gateway auth can't be turned off from the Console at all.
+  - Every write and every refused write is audited with the user id. See `docs/gateway/API_REFERENCE.md`.
 - **OpenAI-style server-sent events for chat completions** (#47). `POST /v1/chat/completions` with `stream: true` returns the reply as one content chunk, a stop chunk and `[DONE]`. It is not streamed token by token yet. Without the flag the JSON reply is unchanged.
 - **Personas as models** (#47).
   - `/v1/models` lists `mindstone/<agentId>` for each configured agent.
