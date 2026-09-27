@@ -184,6 +184,15 @@ for (let n = 0; n < 300; n += 1) q.enqueue({ text: process.argv[2] + "-" + n });
   for (let n = 0; n < 510; n += 1) kept.enqueue({ text: `d-${n}` });
   await kept.drain(async () => {});
   assert.equal(kept.enqueueForApproval({ text: "approved" }, "approval-1").queued, false, "a pruned approval entry let the approval be queued again");
+  // Past the newest 500 delivered approvals, an approval's record keeps no message body.
+  const many = new ConnectorDeliveryQueue("unit-approval-compact");
+  for (let n = 0; n < 505; n += 1) many.enqueueForApproval({ text: `body-${n}` }, `approval-c-${n}`);
+  await many.drain(async () => {});
+  const { readFileSync: readQueue } = await import("node:fs");
+  const saved = JSON.parse(readQueue(many.path, "utf8")).entries;
+  assert.equal(saved.length, 505, "approval records must all be kept");
+  assert.equal(saved.find((e: { approvalId: string }) => e.approvalId === "approval-c-0").message.text, "", "an old approval record kept its body");
+  assert.equal(saved.find((e: { approvalId: string }) => e.approvalId === "approval-c-504").message.text, "body-504", "a recent approval record lost its body");
 }
 // 3h. Backoff doubles from 2 s and the entry dead-letters on its 8th failure (about 4.2 minutes in all).
 {
@@ -216,6 +225,63 @@ for (let n = 0; n < 300; n += 1) q.enqueue({ text: process.argv[2] + "-" + n });
   }, { sendTimeoutMs: 100 });
   assert.deepEqual(sent, ["fine"], "a hung send stalled the drain");
   assert.match(queue.pending()[0]?.lastError ?? "", /timed out/);
+}
+// 3j. A send slower than the timeout is sent once: it isn't retried while still running, and a late success counts (#77 round 3).
+{
+  const queue = new ConnectorDeliveryQueue("unit-slow");
+  queue.enqueue({ text: "slow" });
+  let sends = 0;
+  const slow = async () => {
+    sends += 1;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  };
+  let t = 2_000_000;
+  for (let n = 0; n < 6; n += 1) {
+    await queue.drain(slow, { sendTimeoutMs: 50, nowMs: t });
+    t += 300_000;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(sends, 1, `a slow send was repeated ${sends} times`);
+  assert.equal(queue.status().delivered, 1, "a slow send that succeeded late should count as delivered");
+}
+// 3k. A drain skips an entry another process delivered meanwhile (the claim re-checks it's pending).
+{
+  const queue = new ConnectorDeliveryQueue("unit-claim");
+  queue.enqueue({ text: "first" });
+  queue.enqueue({ text: "second" });
+  const other = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/claim-other.mts`;
+  writeFileSync(other, `import { ConnectorDeliveryQueue } from "${process.env.PROJECT_ROOT}/packages/mindstone-core/src/index.ts";
+await new ConnectorDeliveryQueue("unit-claim").drain(async () => {});
+`);
+  const sent: string[] = [];
+  await queue.drain(async (entry) => {
+    sent.push(entry.message.text);
+    // While this drain sends "first", another process drains the rest.
+    if (entry.message.text === "first") execFileSync("npx", ["tsx", other], { stdio: "inherit", env: process.env });
+  });
+  assert.deepEqual(sent, ["first"], `an entry another process delivered was sent again: ${sent}`);
+}
+// 3l. The approval store only changes the decision it was given (#77 round 3 mutants).
+{
+  const { ApprovalStore } = await import("./packages/mindstone-core/src/index.ts");
+  const store = new ApprovalStore();
+  const a = store.propose({ kind: "connector_send", connectorId: "unit-store", summary: "s", send: { text: "t" } });
+  assert.equal(store.markQueued(a.id, undefined), false, "a pending action can't be marked queued");
+  const decided = store.decide(a.id, { status: "approved", now: "2026-09-27T00:00:00Z", queueState: "queuing" });
+  assert.equal(store.undoApproval(a.id, "1999-01-01T00:00:00Z"), false, "undo must match the decision");
+  assert.equal(store.markQueued(a.id, "1999-01-01T00:00:00Z"), false, "markQueued must match the decision");
+  assert.equal(store.get(a.id)?.status, "approved");
+  assert.equal(store.get(a.id)?.queueState, "queuing");
+  assert.equal(store.markQueued(a.id, decided.decidedAt), true);
+  // Once queued, the approval can't be undone to pending.
+  const b = store.propose({ kind: "connector_send", connectorId: "unit-store", summary: "s", send: { text: "t" } });
+  store.decide(b.id, { status: "rejected", now: "2026-09-27T00:00:00Z" });
+  assert.equal(store.undoApproval(b.id, "2026-09-27T00:00:00Z"), false, "a rejection is not undone");
+  // A repair re-checks the approval under the queue lock.
+  const refused = new ConnectorDeliveryQueue("unit-store").enqueueForApproval({ text: "t" }, a.id, { stillApproved: () => false });
+  assert.equal(refused.refused, true);
+  assert.equal(new ConnectorDeliveryQueue("unit-store").hasApprovalEntry(a.id), false, "a refused repair queued the send");
 }
 // 3g. Queueing an approval from three processes at once queues it once.
 {
@@ -343,6 +409,50 @@ if ask_out="$(${MS} approvals approve "${ASK_ID}" </dev/null 2>&1)"; then
 fi
 [[ "$(queued SYNTHETIC-DRAFT-ASK)" == "0" ]] || { echo "the repair queued without confirmation" >&2; exit 1; }
 
+# Hearth's round-3 race: a second approve while the first still waits for the
+# lock must not repair it; when the first gives up, nothing is queued and a
+# reject really stops it (#77 round 3).
+RACE2_ID="$(propose SYNTHETIC-DRAFT-RACE2)"
+printf 'held-by-smoke' > "${QUEUE_LOCK}"
+( for _ in $(seq 1 16); do touch "${QUEUE_LOCK}" 2>/dev/null; sleep 0.5; done ) &
+toucher_pid=$!
+node "${PROJECT_ROOT}/packages/mindstone-cli/dist/index.js" approvals approve "${RACE2_ID}" --yes >"${TEMP_RUNTIME}/race2-first.log" 2>&1 &
+first_pid=$!
+sleep 2.5
+if second_out="$(${MS} approvals approve "${RACE2_ID}" --yes 2>&1)"; then
+  echo "a second approve repaired an action whose first approve was still running: ${second_out}" >&2; exit 1
+fi
+grep -q "still running" <<<"${second_out}" || { echo "expected 'still running': ${second_out}" >&2; exit 1; }
+wait "${first_pid}" 2>/dev/null || true
+kill "${toucher_pid}" 2>/dev/null || true; wait "${toucher_pid}" 2>/dev/null || true
+rm -f "${QUEUE_LOCK}"
+[[ "$(status_of "${RACE2_ID}")" == "pending" ]] || { echo "the first approve should have undone itself: $(cat "${TEMP_RUNTIME}/race2-first.log")" >&2; exit 1; }
+[[ "$(queued SYNTHETIC-DRAFT-RACE2)" == "0" ]] || { echo "an undone approval left a queued send" >&2; exit 1; }
+${MS} approvals reject "${RACE2_ID}" >/dev/null
+[[ "$(queued SYNTHETIC-DRAFT-RACE2)" == "0" ]] || { echo "a rejected action is queued" >&2; exit 1; }
+# A repair re-checks the approval under the queue lock: undone while the repair waited, nothing is queued.
+RECHECK_ID="$(propose SYNTHETIC-DRAFT-RECHECK)"
+decide_raw "${RECHECK_ID}" queuing
+printf 'held-by-smoke' > "${QUEUE_LOCK}"
+${MS} approvals approve "${RECHECK_ID}" --yes >"${TEMP_RUNTIME}/recheck.log" 2>&1 &
+recheck_pid=$!
+sleep 1
+PROJECT_ROOT="${PROJECT_ROOT}" ID="${RECHECK_ID}" npx tsx -e '
+import { ApprovalStore } from "'"${PROJECT_ROOT}"'/packages/mindstone-core/src/index.ts";
+const store = new ApprovalStore(); const a = store.get(process.env.ID);
+if (!store.undoApproval(a.id, a.decidedAt)) process.exit(1);'
+rm -f "${QUEUE_LOCK}"
+wait "${recheck_pid}" 2>/dev/null || true
+[[ "$(queued SYNTHETIC-DRAFT-RECHECK)" == "0" ]] || { echo "a repair queued an approval that was undone while it waited: $(cat "${TEMP_RUNTIME}/recheck.log")" >&2; exit 1; }
+grep -q "changed while it was being queued" "${TEMP_RUNTIME}/recheck.log" || { echo "expected the repair to say the approval changed: $(cat "${TEMP_RUNTIME}/recheck.log")" >&2; exit 1; }
+# A pending action that somehow has a queued send (a lost update) can't be "rejected" as if nothing were sent.
+LOST_ID="$(propose SYNTHETIC-DRAFT-LOSTUPDATE)"
+queue_raw "${LOST_ID}" SYNTHETIC-DRAFT-LOSTUPDATE
+if lost_out="$(${MS} approvals reject "${LOST_ID}" 2>&1)"; then
+  echo "rejecting an action whose send is queued should be refused: ${lost_out}" >&2; exit 1
+fi
+grep -q "already queued" <<<"${lost_out}" || { echo "expected 'already queued': ${lost_out}" >&2; exit 1; }
+
 # Rejected while the confirm prompt is open: approving must not queue it.
 command -v expect >/dev/null || { echo "smoke-connector-queue needs expect (install the expect package)" >&2; exit 1; }
 RACE_ID="$(propose SYNTHETIC-DRAFT-RACE)"
@@ -435,6 +545,10 @@ for _ in $(seq 1 60); do
   sleep 0.25
 done
 grep -q '"inReplyToMessageId":"r1"' "${OUTBOX}" || { echo "the refused reply was never sent after the queue recovered" >&2; tail -20 "${TEMP_RUNTIME}/gateway.log" >&2; exit 1; }
+# Once queued, the retries stop: past the next retry (5 s) the reply is still there once.
+sleep 7
+[[ "$(grep -c '"inReplyToMessageId":"r1"' "${OUTBOX}")" == "1" ]] || { echo "a retried reply was queued more than once" >&2; exit 1; }
+${MS} status 2>&1 | grep -q "queued on attempt" && { echo "a successful retry was recorded as the connector's error" >&2; exit 1; }
 # Both failures stay visible to the owner: the transcripts record them.
 failed_runs="$(cat "${TEMP_RUNTIME}"/mindstone/transcripts/*.jsonl | grep -c '"routing_failed"' || true)"
 if [[ "${failed_runs}" -lt 2 ]]; then
@@ -451,5 +565,20 @@ done
 grep -q "delivery queue: .*unreadable" "${TEMP_RUNTIME}/gateway.log" || { echo "an unreadable queue was not reported by the drain timer" >&2; tail -20 "${TEMP_RUNTIME}/gateway.log" >&2; exit 1; }
 [[ -f "${SPOOL_DIR}/queue.json" ]] || { echo "a read-only path moved the corrupt queue aside" >&2; exit 1; }
 ${MS} status 2>&1 | grep -q "queue UNREADABLE" || { echo "mindstone status should show the queue as unreadable" >&2; ${MS} status >&2; exit 1; }
+
+# Replies still waiting to be queued when the gateway stops are logged as LOST,
+# and each reply's failures are logged, not merged (#77 round 3).
+printf '{"entries": []}\n' > "${SPOOL_DIR}/queue.json"
+chmod 000 "${SPOOL_DIR}/queue.json"
+printf '%s\n' '{"messageId":"l1","text":"first while down","senderId":"clint","chatId":"dm-clint","chatType":"direct"}' >> "${INBOX}"
+printf '%s\n' '{"messageId":"l2","text":"second while down","senderId":"clint","chatId":"dm-clint","chatType":"direct"}' >> "${INBOX}"
+for _ in $(seq 1 60); do
+  [[ "$(grep -c "could not queue a reply (attempt 1)" "${TEMP_RUNTIME}/gateway.log")" -ge 3 ]] && break
+  sleep 0.25
+done
+kill -TERM "${gateway_pid}" 2>/dev/null; wait "${gateway_pid}" 2>/dev/null || true; unset gateway_pid
+chmod 600 "${SPOOL_DIR}/queue.json"
+[[ "$(grep -c "could not queue a reply (attempt 1)" "${TEMP_RUNTIME}/gateway.log")" -ge 3 ]] || { echo "each refused reply should be logged" >&2; tail -20 "${TEMP_RUNTIME}/gateway.log" >&2; exit 1; }
+[[ "$(grep -c "was LOST: the gateway stopped" "${TEMP_RUNTIME}/gateway.log")" -ge 2 ]] || { echo "replies waiting at shutdown should be logged as LOST" >&2; tail -20 "${TEMP_RUNTIME}/gateway.log" >&2; exit 1; }
 
 echo "Connector queue smoke test passed."

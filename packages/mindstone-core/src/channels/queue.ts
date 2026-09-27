@@ -68,6 +68,14 @@ const DELIVERED_KEEP = 500;
 const STALE_LOCK_MS = 2_000;
 const LOCK_WAIT_MS = 5_000;
 
+/**
+ * Sends that timed out but haven't settled, by queue file and entry id. Such
+ * an entry isn't retried until its send settles, so a slow send is never
+ * repeated in this process (#77 round 3); if it succeeds late, the entry is
+ * recorded as delivered.
+ */
+const sendsInFlight = new Map<string, Promise<void>>();
+
 /** One drain per queue file in this process; a drain requested mid-drain runs once more after it (#63). */
 const drainsInFlight = new Map<string, { promise: Promise<ConnectorQueueStatus>; again: boolean }>();
 
@@ -129,14 +137,24 @@ export class ConnectorDeliveryQueue {
   #write(file: QueueFile): void {
     mkdirSync(dirname(this.#path), { recursive: true });
     const temp = `${this.#path}.tmp-${randomUUID().slice(0, 8)}`;
-    const fd = openSync(temp, "w");
     try {
-      writeFileSync(fd, `${JSON.stringify(file, null, 2)}\n`);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
+      const fd = openSync(temp, "w");
+      try {
+        writeFileSync(fd, `${JSON.stringify(file, null, 2)}\n`);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(temp, this.#path);
+    } catch (error) {
+      // Don't leave a copy of the queue (message bodies) behind.
+      try {
+        unlinkSync(temp);
+      } catch {
+        // Never created.
+      }
+      throw error;
     }
-    renameSync(temp, this.#path);
     // Make the rename itself durable.
     try {
       const dirFd = openSync(dirname(this.#path), "r");
@@ -256,15 +274,32 @@ export class ConnectorDeliveryQueue {
   enqueueForApproval(
     message: ConnectorOutboundMessage,
     approvalId: string,
-    options: { maxAttempts?: number; now?: string } = {},
-  ): { entry: ConnectorQueueEntry; queued: boolean } {
+    options: { maxAttempts?: number; now?: string; stillApproved?: () => boolean } = {},
+  ): { entry?: ConnectorQueueEntry; queued: boolean; refused?: boolean } {
     return this.#mutate((file) => {
       const existing = file.entries.find((entry) => entry.approvalId === approvalId);
       if (existing) return { entry: { ...existing }, queued: false };
+      // Checked under the lock, just before writing: an approval undone or
+      // rejected meanwhile is never queued (#77 round 3).
+      if (options.stillApproved && !options.stillApproved()) return { queued: false, refused: true };
       const entry = { ...this.#newEntry(message, options), approvalId };
       file.entries.push(entry);
       return { entry: { ...entry }, queued: true };
     });
+  }
+
+  /**
+   * Run `decide` under the queue's lock with whether an entry for this
+   * approval exists, so an approval is undone only while nothing can queue it
+   * (#77 round 3). Nothing in the queue changes.
+   */
+  withApprovalLocked<T>(approvalId: string, decide: (queued: boolean) => T): T {
+    return this.#mutate((file) => decide(file.entries.some((entry) => entry.approvalId === approvalId)));
+  }
+
+  /** Whether an entry (any status) sends this approved action. A read outside the lock, for refusals only. */
+  hasApprovalEntry(approvalId: string): boolean {
+    return this.#read().entries.some((entry) => entry.approvalId === approvalId);
   }
 
   /** Pending entries. Throws if the queue file can't be read, rather than reading it as empty. */
@@ -316,6 +351,8 @@ export class ConnectorDeliveryQueue {
     // The clock for backoff; tests pass nowMs to step past it.
     const clock = () => options.nowMs ?? Date.now();
     for (const { id } of this.pending()) {
+      // A send of this entry that timed out is still running: don't send it again.
+      if (sendsInFlight.has(`${this.#path}\0${id}`)) continue;
       const claimed = this.#mutate((file) => {
         const entry = file.entries.find((candidate) => candidate.id === id);
         if (!entry || entry.status !== "pending") return undefined;
@@ -327,17 +364,40 @@ export class ConnectorDeliveryQueue {
       if (!claimed) continue;
       let error: unknown;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let timedOut = false;
+      const sending = deliver(claimed);
       try {
         await Promise.race([
-          deliver(claimed),
+          sending,
           new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error(`send timed out after ${timeoutMs} ms`)), timeoutMs);
+            timer = setTimeout(() => {
+              timedOut = true;
+              reject(new Error(`send timed out after ${timeoutMs} ms`));
+            }, timeoutMs);
           }),
         ]);
       } catch (caught) {
         error = caught ?? new Error("delivery failed");
       } finally {
         clearTimeout(timer);
+      }
+      if (timedOut) {
+        const key = `${this.#path}\0${id}`;
+        const settle = sending.then(
+          () =>
+            this.#mutate((file) => {
+              const entry = file.entries.find((candidate) => candidate.id === id);
+              if (entry && entry.status !== "delivered") {
+                entry.status = "delivered";
+                entry.deliveredAt = options.now;
+                entry.lastError = undefined;
+                entry.nextAttemptAt = undefined;
+              }
+            }),
+          () => undefined,
+        );
+        sendsInFlight.set(key, settle);
+        void settle.catch(() => undefined).finally(() => sendsInFlight.delete(key));
       }
       this.#mutate((file) => {
         const entry = file.entries.find((candidate) => candidate.id === id);
@@ -355,11 +415,17 @@ export class ConnectorDeliveryQueue {
             entry.nextAttemptAt = clock() + Math.min(RETRY_BASE_MS * 2 ** (entry.attempts - 1), RETRY_MAX_MS);
           }
         }
-        // Keep the file bounded: drop the oldest delivered entries.
+        // Keep the file bounded: drop the oldest delivered entries. An
+        // approval's entry stays as the record that it was queued, but past
+        // the newest DELIVERED_KEEP its message body is dropped (#77 round 3).
         const delivered = file.entries.filter((candidate) => candidate.status === "delivered" && !candidate.approvalId);
         if (delivered.length > DELIVERED_KEEP) {
           const drop = new Set(delivered.slice(0, delivered.length - DELIVERED_KEEP).map((candidate) => candidate.id));
           file.entries = file.entries.filter((candidate) => !drop.has(candidate.id));
+        }
+        const deliveredApprovals = file.entries.filter((candidate) => candidate.status === "delivered" && candidate.approvalId);
+        for (const old of deliveredApprovals.slice(0, Math.max(0, deliveredApprovals.length - DELIVERED_KEEP))) {
+          old.message = { text: "" };
         }
       });
     }

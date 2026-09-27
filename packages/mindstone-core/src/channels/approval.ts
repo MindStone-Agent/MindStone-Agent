@@ -73,6 +73,8 @@ export type ProposedAction = {
    * and are never re-queued.
    */
   queueState?: "queuing" | "queued";
+  /** The process (pid on host) that set "queuing", so a repair never runs while that approve is still going (#77 round 3). */
+  queuingBy?: { pid: number; host: string };
 };
 
 type ApprovalFile = {
@@ -151,7 +153,14 @@ export class ApprovalStore {
    */
   decide(
     id: string,
-    decision: { status: "approved" | "rejected"; decidedBy?: string; note?: string; now?: string; queueState?: "queuing" },
+    decision: {
+      status: "approved" | "rejected";
+      decidedBy?: string;
+      note?: string;
+      now?: string;
+      queueState?: "queuing";
+      queuingBy?: { pid: number; host: string };
+    },
   ): ProposedAction {
     const file = this.#read();
     const target = file.actions.find((action) => action.id === id) ?? (id.length >= 8 ? singlePrefixMatch(file.actions, id) : undefined);
@@ -161,7 +170,10 @@ export class ApprovalStore {
     target.decidedAt = decision.now;
     target.decidedBy = decision.decidedBy;
     target.decisionNote = decision.note;
-    if (decision.status === "approved" && decision.queueState) target.queueState = decision.queueState;
+    if (decision.status === "approved" && decision.queueState) {
+      target.queueState = decision.queueState;
+      if (decision.queuingBy) target.queuingBy = decision.queuingBy;
+    }
     this.#write(file);
     return target;
   }
@@ -172,6 +184,7 @@ export class ApprovalStore {
     const target = file.actions.find((action) => action.id === id);
     if (!target || target.status !== "approved" || target.decidedAt !== decidedAt) return false;
     target.queueState = "queued";
+    delete target.queuingBy;
     this.#write(file);
     return true;
   }
@@ -190,6 +203,7 @@ export class ApprovalStore {
     delete target.decidedBy;
     delete target.decisionNote;
     delete target.queueState;
+    delete target.queuingBy;
     this.#write(file);
     return true;
   }
