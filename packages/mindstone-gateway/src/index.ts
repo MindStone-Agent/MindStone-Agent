@@ -1,8 +1,20 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
-import { adminStatus, decideAdminAccess, maskConfig } from "./admin-api.js";
+import {
+  adminPermissionsPath,
+  adminStatus,
+  changedPaths,
+  decideAdminAccess,
+  EDITABLE_SECTIONS,
+  isAdvancedPath,
+  maskConfig,
+  mergeConfigPatch,
+  type AdminPermissions,
+} from "./admin-api.js";
 import { PiMindStoneProvider } from "./pi-provider.js";
 import { PiSessionMindStoneProvider } from "./pi-session-provider.js";
 import { PiSessionAgentRunner } from "./pi-session-runner.js";
@@ -124,6 +136,7 @@ import {
   getMindStoneSystemStatus,
   listTranscriptSessions,
   loadMindStoneConfig,
+  validateMindStoneConfig,
   loadMindStoneIdentity,
   readTranscriptEntries,
   resolveConfigPath,
@@ -1509,7 +1522,126 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     sendJson(res, 200, { ok: true, config: maskConfig(loadedConfig.config ?? {}) });
     return;
   }
+  const userId = forwardedUser(req).userId ?? "unknown";
+  if (req.method === "GET" && url.pathname === "/admin/permissions") {
+    sendJson(res, 200, { ok: true, permissions: readAdminPermissions(paths.dataDir) });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/admin/permissions/advanced") {
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const enabled = body.enabled === true;
+    if (enabled && body.confirm !== ADVANCED_CONFIRMATION) {
+      sendJson(res, 400, { ok: false, error: `to grant advanced settings, send confirm: "${ADVANCED_CONFIRMATION}"` });
+      return;
+    }
+    const permissions: AdminPermissions = enabled
+      ? { advancedSettings: true, grantedBy: userId, grantedAt: new Date().toISOString() }
+      : { advancedSettings: false };
+    writeFileAtomic(adminPermissionsPath(paths.dataDir), `${JSON.stringify(permissions, null, 2)}\n`, 0o600);
+    appendAdminAudit(paths.dataDir, { userId, action: enabled ? "advanced_settings_granted" : "advanced_settings_revoked" });
+    sendJson(res, 200, { ok: true, permissions });
+    return;
+  }
+  const sectionMatch = /^\/admin\/config\/([A-Za-z]+)$/.exec(url.pathname);
+  if (req.method === "PATCH" && sectionMatch) {
+    const section = sectionMatch[1]!;
+    if (!(EDITABLE_SECTIONS as readonly string[]).includes(section)) {
+      sendJson(res, 404, { ok: false, error: `unknown or read-only config section: ${section}` });
+      return;
+    }
+    if (loadedConfig.error) {
+      sendJson(res, 503, { ok: false, error: loadedConfig.error });
+      return;
+    }
+    const patch = await readAdminBody(req, res);
+    if (!patch) return;
+    const current = (loadedConfig.config ?? {}) as Record<string, unknown>;
+    const merged = mergeConfigPatch(current[section], patch, section);
+    const changed = changedPaths(current[section], merged, section);
+    if (changed.length === 0) {
+      sendJson(res, 200, { ok: true, changed: [], restartRequired: false });
+      return;
+    }
+    const permissions = readAdminPermissions(paths.dataDir);
+    const advanced = changed.filter(isAdvancedPath);
+    if (advanced.length > 0 && !permissions.advancedSettings) {
+      sendJson(res, 403, {
+        ok: false,
+        error: "these settings need the advanced-settings permission",
+        errors: advanced.map((path) => ({ path, error: "needs the advanced-settings permission" })),
+      });
+      return;
+    }
+    const next = { ...current, [section]: merged } as MindStoneConfig;
+    const issues = validateMindStoneConfig(next);
+    if (issues.length > 0) {
+      sendJson(res, 422, { ok: false, error: "the change doesn't validate", errors: issues.map((issue) => ({ error: issue })) });
+      return;
+    }
+    writeFileAtomic(configPath, `${JSON.stringify(next, null, 2)}\n`, 0o600);
+    appendAdminAudit(paths.dataDir, { userId, action: "config_patched", section, changed, advanced });
+    const restartRequired = changed.some((path) => path.startsWith("channels.") || path === "channels" || /^gateway\.(host|port|auth)/.test(path));
+    sendJson(res, 200, { ok: true, changed, restartRequired });
+    return;
+  }
+  const secretMatch = /^\/admin\/secrets\/([^/]+)$/.exec(url.pathname);
+  if (req.method === "POST" && secretMatch) {
+    const name = decodeURIComponent(secretMatch[1]!);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name) || name.includes("..")) {
+      sendJson(res, 400, { ok: false, error: "secret names are letters, digits, dot, dash and underscore (max 64)" });
+      return;
+    }
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    if (typeof body.value !== "string" || body.value.length === 0 || body.value.length > 16_384) {
+      sendJson(res, 400, { ok: false, error: "value must be a non-empty string of at most 16384 characters" });
+      return;
+    }
+    mkdirSync(`${paths.dataDir}/secrets`, { recursive: true, mode: 0o700 });
+    writeFileAtomic(`${paths.dataDir}/secrets/${name}`, body.value, 0o600);
+    appendAdminAudit(paths.dataDir, { userId, action: "secret_stored", secret: name });
+    // The value is never echoed. Reference it from config as tokenFile: "secrets/<name>".
+    sendJson(res, 200, { ok: true, name, tokenFile: `secrets/${name}` });
+    return;
+  }
   sendJson(res, 404, { ok: false, error: "unknown admin endpoint" });
+}
+
+const ADVANCED_CONFIRMATION = "enable advanced settings";
+
+function readAdminPermissions(dataDir: string): AdminPermissions {
+  try {
+    const parsed = JSON.parse(readFileSync(adminPermissionsPath(dataDir), "utf-8")) as AdminPermissions;
+    return { ...parsed, advancedSettings: parsed.advancedSettings === true };
+  } catch {
+    return { advancedSettings: false };
+  }
+}
+
+/** A JSON object body, or an error response (then undefined). */
+async function readAdminBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | undefined> {
+  try {
+    const body = await readJsonBody(req, 256 * 1024);
+    if (body && typeof body === "object" && !Array.isArray(body)) return body as Record<string, unknown>;
+    sendJson(res, 400, { ok: false, error: "the body must be a JSON object" });
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+  return undefined;
+}
+
+function writeFileAtomic(path: string, content: string, mode: number): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temp = `${path}.tmp-${randomUUID().slice(0, 8)}`;
+  writeFileSync(temp, content, { mode });
+  renameSync(temp, path);
+}
+
+/** Append-only audit of admin writes, with the deciding user id. Never holds secret values. */
+function appendAdminAudit(dataDir: string, event: Record<string, unknown>): void {
+  mkdirSync(`${dataDir}/admin`, { recursive: true });
+  appendFileSync(`${dataDir}/admin/audit.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`, { mode: 0o600 });
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {

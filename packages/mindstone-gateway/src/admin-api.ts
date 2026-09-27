@@ -42,7 +42,7 @@ export function decideAdminAccess(input: {
 const SECRET_SUFFIXES = ["apikey", "api_key", "token", "password", "secret", "credential", "credentials", "privatekey", "private_key", "passphrase"];
 const REFERENCE_SUFFIXES = ["env", "file", "path", "ref"];
 
-function isSecretKey(key: string): boolean {
+export function isSecretKey(key: string): boolean {
   const lower = key.toLowerCase();
   if (REFERENCE_SUFFIXES.some((suffix) => lower.endsWith(suffix))) return false;
   return SECRET_SUFFIXES.some((suffix) => lower.endsWith(suffix));
@@ -101,4 +101,102 @@ export function onboardingSteps(config: MindStoneConfig | undefined): {
 export function adminStatus(config: MindStoneConfig | undefined): Record<string, unknown> {
   const system = getMindStoneSystemStatus();
   return { ok: true, ...onboardingSteps(config), system };
+}
+
+// ---------------------------------------------------------------------------
+// Write side (#38, P2): section patches, secrets, and the advanced permission.
+// ---------------------------------------------------------------------------
+
+/** Top-level config sections the Console may patch. */
+export const EDITABLE_SECTIONS = [
+  "agents",
+  "channels",
+  "contextManagement",
+  "gateway",
+  "knowledgebases",
+  "memory",
+  "observability",
+  "onboarding",
+  "packs",
+  "personas",
+  "routing",
+  "session",
+  "skills",
+  "workflows",
+  "workspace",
+] as const;
+
+/**
+ * Settings that amount to running code or reading arbitrary files, which the
+ * browser may change only while the admin has granted the advanced-settings
+ * permission (Clint, 2026-09-27: allowed from the web, but by explicit
+ * permission). Any key ending in path/paths/dir/file/root (the gateway would
+ * read what it names), plus the listed sections and fields.
+ */
+const ADVANCED_KEY = /(path|paths|dir|file|root)$/i;
+const ADVANCED_PATHS = [
+  "workspace",
+  "packs",
+  "skills",
+  "gateway.auth",
+  "gateway.host",
+  "gateway.port",
+  "routing.pi.builtinTools",
+  "routing.pi.noExtensions",
+  "routing.pi.noSkills",
+  "routing.pi.noContextFiles",
+  "routing.pi.noPromptTemplates",
+];
+
+export function isAdvancedPath(path: string): boolean {
+  const parts = path.split(".");
+  if (parts.some((part) => ADVANCED_KEY.test(part))) return true;
+  return ADVANCED_PATHS.some((advanced) => path === advanced || path.startsWith(`${advanced}.`));
+}
+
+/** Dotted paths whose values differ between two values (leaf level). */
+export function changedPaths(before: unknown, after: unknown, prefix = ""): string[] {
+  const isObject = (value: unknown): value is Record<string, unknown> =>
+    Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  if (isObject(before) && isObject(after)) {
+    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+    return [...keys].flatMap((key) => changedPaths(before[key], after[key], prefix ? `${prefix}.${key}` : key));
+  }
+  if (isObject(before) || isObject(after)) {
+    const keys = new Set([...Object.keys(isObject(before) ? before : {}), ...Object.keys(isObject(after) ? after : {})]);
+    if (keys.size === 0) return JSON.stringify(before) === JSON.stringify(after) ? [] : [prefix];
+    return [...keys].flatMap((key) =>
+      changedPaths(isObject(before) ? before[key] : undefined, isObject(after) ? after[key] : undefined, prefix ? `${prefix}.${key}` : key),
+    );
+  }
+  return JSON.stringify(before) === JSON.stringify(after) ? [] : [prefix];
+}
+
+/** A masked secret as GET /admin/config returns it: `{ set: boolean }` and nothing else. */
+function isMaskedSecret(value: unknown): boolean {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value as object).length === 1 && typeof (value as { set?: unknown }).set === "boolean";
+}
+
+/**
+ * JSON merge patch (RFC 7396) of `patch` onto `target`, except that a masked
+ * secret sent back unchanged (`{ set: … }` under a secret key) keeps the
+ * stored value: the Console can round-trip what it read without wiping keys.
+ */
+export function mergeConfigPatch(target: unknown, patch: unknown, key = ""): unknown {
+  if (isSecretKey(key) && isMaskedSecret(patch)) return target;
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return patch;
+  const base: Record<string, unknown> = target && typeof target === "object" && !Array.isArray(target) ? { ...(target as Record<string, unknown>) } : {};
+  for (const [k, v] of Object.entries(patch as Record<string, unknown>)) {
+    if (v === null) delete base[k];
+    else base[k] = mergeConfigPatch(base[k], v, k);
+  }
+  return base;
+}
+
+export type AdminPermissions = { advancedSettings: boolean; grantedBy?: string; grantedAt?: string };
+
+/** Where the admin permission lives: runtime state, not config, so a config patch can't grant it. */
+export function adminPermissionsPath(dataDir: string): string {
+  return `${dataDir}/admin/permissions.json`;
 }

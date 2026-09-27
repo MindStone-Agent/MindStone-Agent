@@ -28,6 +28,12 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - A guard refuses the turn before any model call if the session offers a built-in that wasn't enabled.
 
 ### Added
+- **Admin API for the MindStone Console** (#38, P2). This is the server-to-server config API that the Console's settings and onboarding screens use.
+  - It exists only when gateway auth is on, and needs the admin role.
+  - `GET /admin/status` returns the onboarding state. `GET /admin/config` returns the config with every secret masked. `PATCH /admin/config/<section>` applies a validated, atomic merge patch.
+  - `POST /admin/secrets/<name>` stores a secret 0600 and never echoes it back.
+  - Settings that run code or read files (paths, Pi tools, workspace, gateway auth) can be changed from the browser only after an admin grants the advanced-settings permission, which takes an explicit confirmation and can be revoked.
+  - Every write is audited with the user id. See `docs/gateway/API_REFERENCE.md`.
 - **OpenAI-style server-sent events for chat completions** (#47). `POST /v1/chat/completions` with `stream: true` returns the reply as one content chunk, a stop chunk and `[DONE]`. It is not streamed token by token yet. Without the flag the JSON reply is unchanged.
 - **Personas as models** (#47).
   - `/v1/models` lists `mindstone/<agentId>` for each configured agent.

@@ -434,3 +434,29 @@ Manual/live validation still pending:
 - JSONL transcripts remain authoritative and append-only.
 - Prompt pruning and compaction affect live context only, never transcript history.
 - OpenResponses support is non-streaming compatibility, not full API parity.
+
+## Admin API (MindStone Console, #38 P2)
+
+Server to server: the MindStone Console calls these with the gateway's service credential and forwards the signed-in user's id and role (`x-mindstone-user-id`, `x-mindstone-user-role`). Rules:
+
+- The admin API does not exist (`404`) unless gateway auth is `token` or `password`.
+- Every call needs the gateway credential (`401` otherwise) and the role `admin` (`403` otherwise).
+- Every write is appended to `<dataDir>/admin/audit.jsonl` with the user id and the changed paths. Secret values never reach the audit, a response or a log.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /admin/status` | Onboarding state (`onboarded`, and per step: provider, persona, memory, connectors) plus system status. The Console shows onboarding while `onboarded` is false. |
+| `GET /admin/config` | The effective config. Every secret value (any key ending in apiKey, token, password, secret, credential, privateKey, passphrase) is replaced by `{ "set": true\|false }`. References to where a secret lives (`tokenEnv`, `tokenFile`, …) are shown. |
+| `PATCH /admin/config/<section>` | JSON merge patch (RFC 7396) of one section: `null` removes a key, and a masked `{ "set": … }` sent back unchanged keeps the stored secret. The result is validated (`422` with errors) and written atomically. The response lists `changed` paths and `restartRequired` (connectors and gateway host, port and auth need a restart; everything else applies on the next message). |
+| `POST /admin/secrets/<name>` | `{ "value": "…" }` is stored in `<dataDir>/secrets/<name>` (0600) and never echoed. Reference it from config as `tokenFile: "secrets/<name>"`. |
+| `GET /admin/permissions` | The advanced-settings permission. |
+| `POST /admin/permissions/advanced` | `{ "enabled": true, "confirm": "enable advanced settings" }` grants it; `{ "enabled": false }` revokes it. It lives in `<dataDir>/admin/permissions.json`, not in config, so a config patch can't grant it. |
+
+**Advanced settings.** Anything that amounts to running code or reading an arbitrary file can be changed from the browser only while an admin has granted the advanced-settings permission. That covers:
+
+- any key ending in `path`, `paths`, `dir`, `file` or `root`;
+- `workspace`, `packs` and `skills`;
+- `gateway.auth`, `gateway.host` and `gateway.port`;
+- Pi's `builtinTools` and its `no*` switches.
+
+Without the permission, such a patch is a `403`, listing each field that needs it. Editable sections: agents, channels, contextManagement, gateway, knowledgebases, memory, observability, onboarding, packs, personas, routing, session, skills, workflows and workspace.
