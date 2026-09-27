@@ -36,8 +36,13 @@ export type ConnectorQueueStatus = {
 };
 
 const DEFAULT_MAX_ATTEMPTS = 3;
-/** A lock older than this is from a crashed writer and is broken. */
-const STALE_LOCK_MS = 10_000;
+/**
+ * A lock older than this is from a crashed writer and is broken. The critical
+ * section is a synchronous read and write of one small file, so 2 s is far
+ * beyond any live holder; it must stay well under LOCK_WAIT_MS so a waiter
+ * breaks an orphaned lock instead of giving up first (#63).
+ */
+const STALE_LOCK_MS = 2_000;
 const LOCK_WAIT_MS = 5_000;
 
 /** One drain per queue file in this process; a drain requested mid-drain runs once more after it (#63). */
@@ -94,13 +99,20 @@ export class ConnectorDeliveryQueue {
     const lockPath = `${this.#path}.lock`;
     const deadline = Date.now() + LOCK_WAIT_MS;
     let fd: number | undefined;
+    const token = `${process.pid}:${randomUUID()}`;
     while (fd === undefined) {
       try {
         fd = openSync(lockPath, "wx");
+        writeFileSync(fd, token);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         try {
-          if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS) unlinkSync(lockPath);
+          // Break a stale lock only if it still holds the same owner we judged
+          // stale, so a waiter can't delete a lock another waiter just took.
+          const holder = readFileSync(lockPath, "utf-8");
+          if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS && readFileSync(lockPath, "utf-8") === holder) {
+            unlinkSync(lockPath);
+          }
         } catch {
           // The holder released it meanwhile; retry.
         }

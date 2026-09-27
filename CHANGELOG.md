@@ -9,7 +9,7 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ### Fixed
 - **Connector replies are no longer lost, sent twice, or replaced by error text** (#63).
   - A reply queued while the queue was being drained could be overwritten and never sent. Every queue change is now a locked read-change-write, including enqueues from the CLI when an approved send is released.
-  - The per-message drain and the periodic drain could both send the same reply. Only one drain per queue runs at a time; a drain asked for while one is running makes it do one more pass.
+  - The per-message drain and the periodic drain could both send the same reply. Only one drain per queue runs at a time within a Gateway; a drain asked for while one is running makes it do one more pass. Delivery is at-least-once: a crash between a successful send and recording it re-sends that entry on the next drain.
   - When a run failed, its error text (for example "model not available") was posted into the chat, including group chats. A failed run now posts nothing; the failure stays in the transcript and the connector's runtime status.
   - An empty reply still posts nothing, now covered by a test, and the connector smoke checks that replies go to the chat they answer.
 

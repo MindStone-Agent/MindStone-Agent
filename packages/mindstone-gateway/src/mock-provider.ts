@@ -7,7 +7,7 @@ export type MockProviderOptions = {
   captureFile?: string;
   /** Smoke tests only: throw when the last user message contains this text. */
   failWhenTextIncludes?: string;
-  /** Smoke tests only: reply with empty text when the last user message contains this text. */
+  /** Smoke tests only: reply with whitespace-only text when the last user message contains this text. */
   emptyWhenTextIncludes?: string;
 };
 
@@ -39,7 +39,8 @@ export class MockMindStoneProvider implements MindStoneModelProvider {
     if (fail && lastUser?.text?.includes(fail)) throw new Error("mock model not available");
     return {
       role: "assistant",
-      text: empty && lastUser?.text?.includes(empty) ? "" : `${this.#responsePrefix}: ${lastUser?.text ?? "no user message"}`,
+      // Whitespace only, so a check that forgets to trim is caught too.
+      text: empty && lastUser?.text?.includes(empty) ? " \n " : `${this.#responsePrefix}: ${lastUser?.text ?? "no user message"}`,
       model: request.model,
       usage: {
         inputTokens: request.messages.reduce((total, message) => total + Math.ceil(JSON.stringify(message).length / 4), 0),

@@ -6,9 +6,11 @@ set -euo pipefail
 #      the same drain call
 #   2. two concurrent drains deliver each entry once
 #   3. a stale lock from a crashed writer is broken; an enqueue from another
-#      process during a drain is kept
+#      process during a drain is kept; three processes enqueueing at once
+#      lose nothing
 #   4. through the gateway: a failed run posts nothing to the chat (DM or
-#      group) and stays recorded in the transcript; an empty reply posts nothing
+#      group) and stays recorded in the transcript; a whitespace-only reply
+#      posts nothing
 # Binds gateway port base+24 — serialize per smoke protocol.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,6 +114,23 @@ import { ConnectorDeliveryQueue } from "./packages/mindstone-core/src/index.ts";
   await draining;
   assert.deepEqual(queue.pending().map((entry) => entry.message.text), ["from-cli"], `the other process's entry was lost: ${JSON.stringify(queue.status())}`);
   assert.equal(queue.status().delivered, 1);
+}
+// 3c. Three processes enqueueing at once: every entry is kept (the lock).
+{
+  const child = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/enqueue-child.ts`;
+  writeFileSync(child, `import { ConnectorDeliveryQueue } from "${process.env.PROJECT_ROOT}/packages/mindstone-core/src/index.ts";
+const q = new ConnectorDeliveryQueue("unit-stress");
+for (let n = 0; n < 300; n += 1) q.enqueue({ text: process.argv[2] + "-" + n });
+`);
+  const { spawn } = await import("node:child_process");
+  const run = (tag: string) =>
+    new Promise<void>((resolve, reject) => {
+      const proc = spawn("npx", ["tsx", child, tag], { stdio: "inherit", env: process.env });
+      proc.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`child ${tag} exited ${code}`))));
+    });
+  await Promise.all(["a", "b", "c"].map(run));
+  const kept = new ConnectorDeliveryQueue("unit-stress").pending().length;
+  assert.equal(kept, 900, `three processes enqueued 900 entries; ${kept} were kept`);
 }
 console.log("queue unit assertions passed");
 TS

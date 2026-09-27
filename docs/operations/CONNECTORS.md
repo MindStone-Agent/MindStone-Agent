@@ -17,11 +17,11 @@ Slack, Discord, email, …) implements, plus the **loopback** reference connecto
 | Owner trust boundary | `isOwnerDirectMessage`: the owner is a `direct` message from one of `channels.<id>.ownerSenders` (exact ids; `*` and domain rules never count), sent by a sender the connector could vouch for (`senderVerified !== false`). Being allowed to talk to the agent (`allowedSenders`, pairing, domains) is not being the owner. Every other turn routes with no autoRecall, no `USER.md`, no memory index, no handoff replay, only the invariants marked `invariant_audience: all`, and in `pi-session` mode none of the owner's Pi extensions, skills, context files or built-in tools. `IDENTITY.md` still applies. With no `ownerSenders`, nobody is the owner and `mindstone doctor` warns (#61) |
 | Source metadata | `connectorTranscriptSource` → `substrate: connector:<id>`, channel/chatType/sender on every transcript entry |
 | Mention/trigger behavior | `shouldTriggerConnectorReply`: DMs always; group/channel, and a message with no chat type, need a mention or `triggerPrefix` (which strips) unless `respondWithoutMention` |
-| Delivery queue | `ConnectorDeliveryQueue` — persistent per-connector JSON queue, retry to `maxAttempts` then dead-letter with the error kept; survives Gateway restarts |
+| Delivery queue | `ConnectorDeliveryQueue` — persistent per-connector JSON queue, retry to `maxAttempts` then dead-letter with the error kept; survives Gateway restarts. Every change is a read-change-write under a lock file (stale after 2 s), so enqueues from the CLI and the Gateway never overwrite each other. One drain per queue runs at a time within a process; a drain asked for mid-drain runs one more pass. Delivery is at-least-once: a crash between a successful send and recording it re-sends on the next drain (#63) |
 | Send policy / approvals (#21) | `defaultSendPolicy: "approval_required"` on the contract diverts routed replies into the durable `ApprovalStore` (ProposedAction) instead of the queue; `mindstone approvals approve` enqueues, `reject` archives — both auditable via `approval_proposed`/`approval_decided` transcript events. Chat connectors stay `auto`; config `sendPolicy` overrides explicitly |
 | Action proposals / mutations (#22) | `applyActionProposalDiscipline` runs at BOTH assistant-reply finalization sites (core chat turn + Gateway configured-route): fenced `mindstone-memory-proposal`/`mindstone-calendar-proposal` blocks become pending ProposedActions (kind `connector_mutation` for mutations) and are stripped from the visible reply. Approve enqueues the typed payload onto the target connector's queue; its `sendOutbound` applies it with apply-time fail-closed validation |
 | Status/doctor/TUI visibility | per-connector `status.json` (state/lastError/inbound/denied counts) written by the Gateway runtime, read anywhere; `getConnectorVisibilityStatuses` consolidates credential-presence (masked) + runtime + queue depth into `mindstone status [--json]` and the `connectors.catalog` doctor check |
-| Tests/smokes | `npm run smoke:connector` |
+| Tests/smokes | `npm run smoke:connector`, `npm run smoke:connector-queue`, `npm run smoke:channel-trust` |
 
 ## Gateway connector runtime
 
@@ -34,7 +34,8 @@ inbound message
 → trigger policy (no-reply messages still land in the transcript)
 → session key + source metadata → user transcript entry
 → standard configured route (same path as chat/gateway surfaces)
-→ reply enqueued on the connector's delivery queue → sendOutbound (retry/dead-letter)
+→ successful, non-empty reply enqueued on the connector's delivery queue → sendOutbound (retry/dead-letter)
+   (a failed run posts nothing: the error stays in the transcript as routing_failed)
 ```
 
 **Failure isolation:** a connector with no registered implementation, an

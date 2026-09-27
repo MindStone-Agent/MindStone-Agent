@@ -106,7 +106,7 @@ export type MindStoneRoutingConfig = {
     captureFile?: string;
     /** Smoke tests only: fail the turn when the last user message contains this text. */
     failWhenTextIncludes?: string;
-    /** Smoke tests only: reply with empty text when the last user message contains this text. */
+    /** Smoke tests only: reply with whitespace-only text when the last user message contains this text. */
     emptyWhenTextIncludes?: string;
   };
   pi?: {
