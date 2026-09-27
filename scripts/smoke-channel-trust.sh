@@ -83,6 +83,26 @@ assert.equal(
 assert.equal(emailSenderVerified(gmail("mx.google.com; spf=pass (x; dkim=pass header.d=example.com ) smtp.mailfrom=a@attacker.test"), "owner@example.com"), false);
 assert.equal(emailSenderVerified(gmail('mx.google.com; spf=pass smtp.mailfrom="x;dkim=pass header.d=example.com y"@attacker.test'), "owner@example.com"), false);
 assert.equal(emailSenderVerified(gmail("mx.google.com; dkim=pass header.i=@example.com; dmarc=fail header.from=example.com"), "owner@example.com"), false, "DMARC fail vetoes a DKIM pass");
+// Round 3: a sender-controlled local part that closes or opens a comment or a quote.
+for (const [label, results] of [
+  ["unterminated quote hides dmarc=fail", 'mx.google.com; spf=pass (google.com: domain of "a)b;dkim=pass header.d=example.com c"@attacker.test designates 1.2.3.4) smtp.mailfrom="a)b;dkim=pass header.d=example.com c"@attacker.test; dmarc=fail (p=NONE) header.from=example.com'],
+  ["early close plus (( swallows the veto", 'mx.google.com; spf=pass (google.com: domain of "a);dmarc=pass header.from=example.com ((b"@attacker.test designates 1.2.3.4) smtp.mailfrom=x@attacker.test; dmarc=fail header.from=example.com'],
+  ["early close, no DMARC record", "mx.google.com; spf=pass (google.com: domain of a);dmarc=pass header.from=example.com ((b@attacker.test designates 1.2.3.4) smtp.mailfrom=x@attacker.test"],
+  ["DKIM variant", "mx.google.com; spf=pass (google.com: a);dkim=pass header.d=example.com ((b) smtp.mailfrom=x@attacker.test"],
+  ["two DMARC results", "mx.google.com; dmarc=pass header.from=example.com; dmarc=fail header.from=example.com"],
+  // Each of these gets past every check but one, so each check is shown able to fail.
+  ["quote inside a comment (only the quote rule)", 'mx.google.com; spf=pass (google.com: "a);dkim=pass header.d=example.com (b") smtp.mailfrom=x@attacker.test'],
+  ["balanced comments swallow dmarc=fail (only the count rule)", "mx.google.com; spf=pass (a);dkim=pass header.d=example.com ((b) smtp.mailfrom=x@attacker.test; dmarc=fail header.from=example.com)"],
+  ["a second DMARC result for another domain (only the one-DMARC rule)", "mx.google.com; dmarc=pass header.from=example.com; dmarc=fail header.from=attacker.test"],
+] as const) {
+  assert.equal(emailSenderVerified(gmail(results), "owner@example.com"), false, label);
+}
+// Control: Gmail's real shape still verifies.
+assert.equal(
+  emailSenderVerified(gmail("mx.google.com; dkim=pass header.i=@example.com header.s=20230601 header.b=AbC+d/E=; spf=pass (google.com: domain of owner@example.com designates 209.85.220.41 as permitted sender) smtp.mailfrom=owner@example.com; dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=example.com"), "owner@example.com"),
+  true,
+  "control: a real Gmail header verifies",
+);
 assert.equal(emailSenderVerified(gmail("mx.google.com; dkim=pass header.d=example.com header.i=@other.test"), "owner@example.com"), true, "header.d is the signing domain");
 assert.equal(emailSenderVerified(gmail("mx.google.com; dkim=pass header.d=com"), "owner@example.com"), false, "a bare TLD never aligns");
 assert.equal(
@@ -117,6 +137,9 @@ for (const chatType of ["group", "channel", "thread", undefined] as const) {
   assert.equal(isOwnerDirectMessage({ text: "x", senderId: "clint", chatType }, owners), false, `${chatType} is not the owner`);
 }
 assert.equal(isOwnerDirectMessage({ text: "x", senderId: "clint", chatType: "direct", senderVerified: false }, owners), false);
+const kate = connectorOwnerSenders({ channels: { email: { ownerSenders: ["kate@victim.test"] } } }, "email");
+assert.equal(isOwnerDirectMessage({ text: "x", senderId: "kate@victim.test", chatType: "direct" }, kate), true);
+assert.equal(isOwnerDirectMessage({ text: "x", senderId: "\u212Aate@victim.test", chatType: "direct" }, kate), false, "a Unicode lookalike never case-folds onto the owner");
 
 assert.equal(key({ text: "x", senderId: "clint", chatId: "dm", chatType: "direct" }), "agent:default:main");
 for (const message of [
@@ -145,7 +168,7 @@ import { piSessionRunnerOptions } from "./packages/mindstone-gateway/src/index.t
 import { piSessionResourceOptions } from "./packages/mindstone-gateway/src/pi-session-executor.ts";
 
 const config = {
-  routing: { mode: "pi-session" as const, pi: { builtinTools: ["read", "bash"], additionalExtensionPaths: ["/x/adapter"], additionalSkillPaths: ["/x/skills"] } },
+  routing: { mode: "pi-session" as const, pi: { builtinTools: ["read", "bash"], additionalExtensionPaths: ["/x/adapter"], additionalSkillPaths: ["/x/skills"], additionalPromptTemplatePaths: ["/x/pt"] } },
   contextManagement: { pruning: { enabled: true } },
 } as never;
 const owner = piSessionRunnerOptions(config, "owner");
@@ -156,6 +179,8 @@ assert.deepEqual(guest.additionalExtensionPaths, []);
 assert.deepEqual(guest.additionalSkillPaths, []);
 assert.equal(guest.noSkills, true);
 assert.equal(guest.noContextFiles, true);
+assert.equal(guest.noPromptTemplates, true, "a non-owner /name can't expand the owner's prompt templates");
+assert.deepEqual(guest.additionalPromptTemplatePaths, []);
 const ownerResources = piSessionResourceOptions(owner);
 const guestResources = piSessionResourceOptions(guest);
 assert.ok(!ownerResources.noExtensions, "control: the owner's discovered extensions load");
@@ -312,5 +337,48 @@ for (const [label, payload] of [["group", group], ["no-chat-type", unknown], ["a
 }
 console.log("gateway trust-boundary assertions passed");
 NODE
+
+# --- 7. A non-owner session never writes the shared handoff (auto-compact) ---
+kill "${gateway_pid}" >/dev/null 2>&1 || true
+wait "${gateway_pid}" >/dev/null 2>&1 || true
+unset gateway_pid
+rm -f "${RUNTIME_DATA}/transcripts/.handoff.md"
+node <<'NODE'
+const { readFileSync, writeFileSync } = require("node:fs");
+const configPath = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone/config.json`;
+const config = JSON.parse(readFileSync(configPath, "utf8"));
+config.agents.default.contextWindowTokens = 400;
+config.contextManagement = { mode: "auto_compact", checkpointWarningPercent: 20, compactTargetPercent: 30, keepRecentTokens: 120, emergencyAutoHandoff: true };
+writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+NODE
+RESTART_MARK="${TEMP_RUNTIME}/restart.mark"
+touch "${RESTART_MARK}"
+sleep 1
+./scripts/start-gateway.sh >/tmp/mindstone-agent-channel-trust-gateway2.log 2>&1 &
+gateway_pid=$!
+# The loopback connector starts reading at the inbox's end when it starts, so
+# wait until it has actually (re)started before writing to the inbox.
+for _ in $(seq 1 40); do
+  [[ "${SPOOL_DIR}/status.json" -nt "${RESTART_MARK}" ]] && grep -q '"startedAt"' "${SPOOL_DIR}/status.json" && break
+  sleep 0.25
+done
+before="$(grep -c . "${OUTBOX}")"
+printf '%s\n' '{"messageId":"h1","text":"PEWTER-GROUP-TAIL long group message to push the window over its limit PEWTER-GROUP-TAIL","senderId":"alice","chatId":"ops9","chatType":"group","mentioned":true}' >> "${INBOX}"
+wait_for_lines "${OUTBOX}" "$((before + 1))"
+sleep 1
+if [[ -f "${RUNTIME_DATA}/transcripts/.handoff.md" ]] && grep -q PEWTER-GROUP-TAIL "${RUNTIME_DATA}/transcripts/.handoff.md"; then
+  echo "a non-owner turn wrote the shared handoff" >&2
+  exit 1
+fi
+grep -q '"emergency_auto_handoff_disabled"' "${RUNTIME_DATA}"/transcripts/*.jsonl || {
+  echo "control: the group turn never reached auto_compact_required, so this check proves nothing" >&2
+  exit 1
+}
+# Control: the owner's own turn does write it.
+printf '%s\n' '{"messageId":"h2","text":"SLATE-OWNER-TAIL owner message to push the window over its limit SLATE-OWNER-TAIL","senderId":"clint","chatId":"dm-clint","chatType":"direct"}' >> "${INBOX}"
+wait_for_lines "${OUTBOX}" "$((before + 2))"
+sleep 1
+grep -q SLATE-OWNER-TAIL "${RUNTIME_DATA}/transcripts/.handoff.md" || { echo "control: the owner's handoff was not written" >&2; exit 1; }
+echo "handoff suppression assertions passed"
 
 echo "Channel-turn trust boundary smoke test passed."

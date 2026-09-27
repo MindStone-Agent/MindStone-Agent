@@ -19,8 +19,19 @@ export function connectorOwnerSenders(config: MindStoneConfig | undefined, conne
   if (!Array.isArray(list)) return [];
   return list
     .filter((value): value is string => typeof value === "string")
-    .map((value) => value.trim().toLowerCase())
-    .filter((value) => value !== "" && value !== "*");
+    .map(ownerIdKey)
+    .filter((value): value is string => value !== undefined && value !== "*");
+}
+
+/**
+ * The comparison key for an owner id: trimmed, ASCII letters lower-cased.
+ * Non-ASCII ids never match (#61): Unicode case folding maps lookalikes such
+ * as U+212A KELVIN SIGN onto ASCII letters.
+ */
+function ownerIdKey(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed || /[^\x21-\x7e]/.test(trimmed)) return undefined;
+  return trimmed.replace(/[A-Z]/g, (char) => char.toLowerCase());
 }
 
 /**
@@ -31,11 +42,11 @@ export function connectorOwnerSenders(config: MindStoneConfig | undefined, conne
  * unverified sender and any sender not in ownerSenders are not the owner.
  */
 export function isOwnerDirectMessage(message: ConnectorInboundMessage, ownerSenders: readonly string[]): boolean {
-  const sender = typeof message.senderId === "string" ? message.senderId.trim().toLowerCase() : "";
+  const sender = typeof message.senderId === "string" ? ownerIdKey(message.senderId) : undefined;
   return (
     normalizeConnectorChatType(message.chatType) === "direct" &&
     message.senderVerified !== false &&
-    sender !== "" &&
+    sender !== undefined &&
     ownerSenders.includes(sender)
   );
 }

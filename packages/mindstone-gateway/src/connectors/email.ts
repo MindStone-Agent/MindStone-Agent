@@ -112,7 +112,7 @@ export function gmailMessageBody(message: GmailMessage, maxBodyChars: number): s
  * controls (an SPF comment echoing MAIL FROM, a quoted local part) can never
  * be read as a result of its own (#61).
  */
-function stripCommentsAndQuotes(value: string): string {
+function stripCommentsAndQuotes(value: string): string | undefined {
   let output = "";
   let depth = 0;
   let quoted = false;
@@ -135,14 +135,16 @@ function stripCommentsAndQuotes(value: string): string {
       depth += 1;
       continue;
     }
-    if (char === ")" && depth > 0) {
+    if (char === ")") {
+      if (depth === 0) return undefined;
       depth -= 1;
       output += " ";
       continue;
     }
     if (depth === 0) output += char;
   }
-  return output;
+  // Ending inside a comment or a quote means the structure was tampered with.
+  return depth === 0 && !quoted ? output : undefined;
 }
 
 /**
@@ -162,7 +164,13 @@ export function emailSenderVerified(message: GmailMessage, fromAddress: string):
   if (!fromDomain) return false;
   const results = header(message, "Authentication-Results");
   if (!results) return false;
-  const [authservId, ...resinfos] = stripCommentsAndQuotes(results).split(";").map((part) => part.trim());
+  // Gmail's own results never contain quotes or backslashes; those only get
+  // in through sender-controlled text (a quoted MAIL FROM local part) that can
+  // close or open a comment and hide or forge a result. Fail closed (#61).
+  if (/["\\]/.test(results)) return false;
+  const stripped = stripCommentsAndQuotes(results);
+  if (stripped === undefined) return false;
+  const [authservId, ...resinfos] = stripped.split(";").map((part) => part.trim());
   if (authservId?.split(/\s+/)[0]?.toLowerCase() !== "mx.google.com") return false;
   const aligned = (domain: string | undefined): boolean => {
     const d = (domain ?? "").trim().replace(/^@/, "").toLowerCase();
@@ -170,6 +178,12 @@ export function emailSenderVerified(message: GmailMessage, fromAddress: string):
   };
   const property = (resinfo: string, name: string) =>
     new RegExp(`(?:^|\\s)${name.replace(/\./g, "\\.")}=([^\\s;]+)`, "i").exec(resinfo)?.[1];
+  // Every result token in the raw text must be one this parse saw, and there
+  // is at most one DMARC result: anything else means text was hidden (#61).
+  const rawResults = (results.match(/\b(?:dmarc|dkim)\s*=/gi) ?? []).length;
+  const parsedResults = resinfos.filter((resinfo) => /^(dmarc|dkim)\s*=/i.test(resinfo)).length;
+  if (rawResults !== parsedResults) return false;
+  if (resinfos.filter((resinfo) => /^dmarc\s*=/i.test(resinfo)).length > 1) return false;
   let dmarcPass = false;
   let dkimPass = false;
   for (const resinfo of resinfos) {
@@ -191,7 +205,8 @@ export function emailSenderVerified(message: GmailMessage, fromAddress: string):
 
 /** True when a From header names more than one address (#61): never verified. */
 function hasMultipleAddresses(raw: string | undefined): boolean {
-  return (stripCommentsAndQuotes(raw ?? "").match(/@/g) ?? []).length > 1;
+  const stripped = stripCommentsAndQuotes(raw ?? "");
+  return stripped === undefined || (stripped.match(/@/g) ?? []).length > 1;
 }
 
 /**

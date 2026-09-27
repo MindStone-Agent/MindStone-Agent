@@ -388,8 +388,9 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
 /**
  * PiSessionAgentRunner options for one turn. A non-owner turn gets none of
  * the owner's Pi resources (#61): no installed or extra extensions (the
- * MindStone adapter injects USER.md, recall and memory tools), skills, context
- * files or built-in tools. MindStone's own pruning/compaction extensions still
+ * MindStone adapter injects USER.md, recall and memory tools), skills, prompt
+ * templates (a `/name` message would expand the owner's), context files or
+ * built-in tools. MindStone's own pruning/compaction extensions still
  * run.
  */
 export function piSessionRunnerOptions(
@@ -423,7 +424,9 @@ export function piSessionRunnerOptions(
     noDiscoveredExtensions: true,
     additionalExtensionPaths: [],
     additionalSkillPaths: [],
+    additionalPromptTemplatePaths: [],
     noSkills: true,
+    noPromptTemplates: true,
     noContextFiles: true,
     builtinTools: [],
   };
