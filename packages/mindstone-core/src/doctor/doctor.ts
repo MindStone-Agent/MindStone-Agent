@@ -13,7 +13,7 @@ import { harnessVersion, verifyPack } from "../packs/lifecycle.js";
 import { installedPackDir, listInstalledPackIds, listStaleStaging, packPathsFromConfig, readPackLock, readReceipt, readTrustStore } from "../packs/store.js";
 import { satisfiesRange } from "../packs/semver.js";
 import type { PackManifest } from "../packs/types.js";
-import { getConnectorVisibilityStatuses } from "../channels/index.js";
+import { connectorOwnerSenders, getConnectorVisibilityStatuses } from "../channels/index.js";
 import { getIsolatedModelsStatus } from "../provider/local-models.js";
 import { getMindStoneGatewayStatus } from "../status/gateway.js";
 import { getPiSessionSafetyStatus } from "../status/pi-session-safety.js";
@@ -543,6 +543,21 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
           : []),
         ...(deadLetters.length ? [`dead-letters: ${deadLetters.map((status) => `${status.connectorId}=${status.queue.dead}`).join(", ")}`] : []),
       ].join(" · "),
+    );
+  }
+
+  // #61: without ownerSenders nobody on that connector is the owner, so the
+  // owner's DMs there get no USER.md, memory index or recall.
+  const ownerless = connectorStatuses
+    .map((status) => status.connectorId)
+    .filter((connectorId) => connectorId !== "calendar" && connectorOwnerSenders(config, connectorId).length === 0);
+  if (ownerless.length > 0) {
+    check(
+      checks,
+      "warn",
+      "connectors.owner",
+      "Connectors with no ownerSenders treat every message as a non-owner's",
+      `${ownerless.join(", ")}: set channels.<id>.ownerSenders to your own sender id(s) so your DMs get your profile and memory`,
     );
   }
 

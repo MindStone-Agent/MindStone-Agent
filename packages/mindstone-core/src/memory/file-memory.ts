@@ -120,6 +120,8 @@ function readMarkdownDocument(params: {
       description: parsed.frontmatter.description,
       critical: parsed.frontmatter.critical,
       invariant: parsed.frontmatter.invariant,
+      // "all" lets the rule reach non-owner turns; anything else is owner-only (#61).
+      invariantAudience: parsed.frontmatter.invariant_audience,
       evergreen: parsed.frontmatter.evergreen,
       hits: parsed.frontmatter.hits,
       prevented: parsed.frontmatter.prevented,

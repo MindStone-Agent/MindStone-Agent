@@ -75,13 +75,18 @@ runtime-status) by extending the #16 access policy:
 - `allowedSenderDomains` — **new, generic policy field**: a sender whose
   address ends in `@<domain>` is allowed. Empty/missing = no domain grants.
 - Everything else fails closed exactly as before: no policy ⇒ nobody.
-- The From header is only an address claim, so passing these lists is not
-  enough to be treated as the owner (#61). A message counts as the owner's
-  only when Gmail's own `Authentication-Results` header (the topmost one,
-  authserv-id `mx.google.com`) shows DMARC pass for the From domain, or DKIM
-  pass with a signing domain equal to it or a parent of it. SPF alone does not
-  count. An unverified message is still answered, in its own session, without
-  autoRecall, `USER.md` or the memory index.
+- Passing these lists lets a sender talk to the agent; it never makes them
+  the owner (#61). A message is the owner's only when its From address is in
+  `ownerSenders` **and** Gmail authenticated it: the topmost
+  `Authentication-Results` header (authserv-id `mx.google.com`), read with
+  comments and quoted strings removed, shows DMARC pass for the From domain,
+  or DKIM pass with a signing domain equal to it or a parent of it. Any other
+  DMARC result for the From domain is final. SPF alone does not count, and a
+  From header with more than one address is never verified. DKIM and DMARC
+  authenticate the domain, not the mailbox, so anyone who can send aligned
+  mail for your domain passes that check; `ownerSenders` is what names you.
+  Any other message is still answered, in its own session, without autoRecall,
+  `USER.md` or the memory index.
 
 Outbound trust is structural: **reply-only**. The MVP cannot compose to
 arbitrary recipients — every outbound is a reply on an inbound thread, to the

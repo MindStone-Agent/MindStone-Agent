@@ -14,7 +14,9 @@ export class MockMindStoneProvider implements MindStoneModelProvider {
 
   constructor(options: MockProviderOptions = {}) {
     this.#responsePrefix = options.responsePrefix ?? "Mock MindStone response";
-    this.#captureFile = options.captureFile?.trim() || undefined;
+    // Honoured only when the smoke harness also sets MINDSTONE_AGENT_MOCK_CAPTURE=1,
+    // so a config edit alone can't start writing full prompts to disk (#61).
+    this.#captureFile = process.env.MINDSTONE_AGENT_MOCK_CAPTURE === "1" ? options.captureFile?.trim() || undefined : undefined;
   }
 
   listModels(): MindStoneModelInfo[] {
@@ -24,7 +26,7 @@ export class MockMindStoneProvider implements MindStoneModelProvider {
   async completeChat(request: MindStoneChatRequest): Promise<MindStoneChatResult> {
     if (request.signal?.aborted) throw new Error("aborted");
     if (this.#captureFile) {
-      appendFileSync(this.#captureFile, `${JSON.stringify({ model: request.model, messages: request.messages })}\n`);
+      appendFileSync(this.#captureFile, `${JSON.stringify({ model: request.model, messages: request.messages })}\n`, { mode: 0o600 });
     }
     const lastUser = [...request.messages].reverse().find((message) => message.role === "user" && message.text?.trim());
     return {

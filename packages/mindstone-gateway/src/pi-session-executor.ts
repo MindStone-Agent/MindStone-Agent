@@ -12,6 +12,8 @@ export type PiSessionResourceLoaderOptions = {
   additionalPromptTemplatePaths?: string[];
   additionalThemePaths?: string[];
   noExtensions?: boolean;
+  /** Skip Pi-discovered extensions but keep MindStone's own (#61: non-owner turns). */
+  noDiscoveredExtensions?: boolean;
   noSkills?: boolean;
   noPromptTemplates?: boolean;
   noThemes?: boolean;
@@ -729,6 +731,33 @@ export function buildPiSessionPromptParts(messages: MindStoneChatRequest["messag
   };
 }
 
+/**
+ * The Pi resource-loader options for a session. `noDiscoveredExtensions` (a
+ * non-owner turn, #61) skips the extensions Pi would discover or be pointed
+ * at, while MindStone's own pruning/compaction extensions still load.
+ */
+export function piSessionResourceOptions(options: PiSessionExecutorOptions): PiSessionResourceLoaderOptions {
+  return {
+    additionalExtensionPaths: options.additionalExtensionPaths,
+    additionalSkillPaths: options.additionalSkillPaths,
+    additionalPromptTemplatePaths: options.additionalPromptTemplatePaths,
+    additionalThemePaths: options.additionalThemePaths,
+    noExtensions: options.noExtensions || options.noDiscoveredExtensions,
+    noSkills: options.noSkills,
+    noPromptTemplates: options.noPromptTemplates,
+    noThemes: options.noThemes,
+    noContextFiles: options.noContextFiles,
+    extensionFactories: [
+      ...(options.extensionFactories ?? []),
+      ...buildMindStonePiExtensionFactories({
+        contextManagement: options.contextManagement,
+        compaction: options.compaction,
+        noExtensions: options.noExtensions,
+      }),
+    ],
+  };
+}
+
 export class PiSessionExecutor implements MindStoneModelProvider {
   readonly id = "pi-session";
   readonly #projectRoot: string;
@@ -756,25 +785,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     this.#resumeCapOptions = options.resumeCap;
     this.#builtinTools = piSessionEnabledBuiltinTools(options.builtinTools);
     this.#excludeTools = piSessionExcludedBuiltinTools(options.builtinTools);
-    this.#resourceOptions = {
-      additionalExtensionPaths: options.additionalExtensionPaths,
-      additionalSkillPaths: options.additionalSkillPaths,
-      additionalPromptTemplatePaths: options.additionalPromptTemplatePaths,
-      additionalThemePaths: options.additionalThemePaths,
-      noExtensions: options.noExtensions,
-      noSkills: options.noSkills,
-      noPromptTemplates: options.noPromptTemplates,
-      noThemes: options.noThemes,
-      noContextFiles: options.noContextFiles,
-      extensionFactories: [
-        ...(options.extensionFactories ?? []),
-        ...buildMindStonePiExtensionFactories({
-          contextManagement: options.contextManagement,
-          compaction: options.compaction,
-          noExtensions: options.noExtensions,
-        }),
-      ],
-    };
+    this.#resourceOptions = piSessionResourceOptions(options);
   }
 
   async #load(): Promise<{ modules: PiSessionModules; registry: PiRegistry }> {

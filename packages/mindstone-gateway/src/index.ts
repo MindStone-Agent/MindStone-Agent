@@ -115,7 +115,7 @@ import {
   readConnectorRuntimeStatus,
   resolveConnectorCredential,
   shouldTriggerConnectorReply,
-  isOwnerDirectMessage,
+  isConnectorOwnerMessage,
   writeConnectorRuntimeStatus,
   type ConnectorContext,
   type ConnectorInboundHandle,
@@ -385,31 +385,56 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
   return undefined;
 }
 
-function resolveRunner(config: MindStoneConfig | undefined, provider: MindStoneModelProvider): AgentRunner {
-  const mode = resolveRoutingMode(config);
-  if (mode === "pi-session") {
-    const paths = runtimePathsFromEnv();
-    return new PiSessionAgentRunner({
-      projectRoot: paths.root,
-      agentDir: config?.routing?.pi?.agentDir ?? paths.piAgentDir,
-      sessionDir: paths.piSessionDir,
-      cwd: config?.workspace?.root,
-      defaultModel: config?.routing?.defaultModel,
-      contextManagement: config?.contextManagement,
-      compaction: config?.routing?.pi?.compaction,
-      resumeCap: config?.routing?.pi?.resumeCap,
-      additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
-      additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
-      additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
-      additionalThemePaths: config?.routing?.pi?.additionalThemePaths,
-      noExtensions: config?.routing?.pi?.noExtensions,
-      noSkills: config?.routing?.pi?.noSkills,
-      noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
-      noThemes: config?.routing?.pi?.noThemes,
-      noContextFiles: config?.routing?.pi?.noContextFiles,
-      builtinTools: config?.routing?.pi?.builtinTools,
-    });
-  }
+/**
+ * PiSessionAgentRunner options for one turn. A non-owner turn gets none of
+ * the owner's Pi resources (#61): no installed or extra extensions (the
+ * MindStone adapter injects USER.md, recall and memory tools), skills, context
+ * files or built-in tools. MindStone's own pruning/compaction extensions still
+ * run.
+ */
+export function piSessionRunnerOptions(
+  config: MindStoneConfig | undefined,
+  audience: "owner" | "non_owner",
+): ConstructorParameters<typeof PiSessionAgentRunner>[0] {
+  const paths = runtimePathsFromEnv();
+  const options: ConstructorParameters<typeof PiSessionAgentRunner>[0] = {
+    projectRoot: paths.root,
+    agentDir: config?.routing?.pi?.agentDir ?? paths.piAgentDir,
+    sessionDir: paths.piSessionDir,
+    cwd: config?.workspace?.root,
+    defaultModel: config?.routing?.defaultModel,
+    contextManagement: config?.contextManagement,
+    compaction: config?.routing?.pi?.compaction,
+    resumeCap: config?.routing?.pi?.resumeCap,
+    additionalExtensionPaths: config?.routing?.pi?.additionalExtensionPaths,
+    additionalSkillPaths: config?.routing?.pi?.additionalSkillPaths,
+    additionalPromptTemplatePaths: config?.routing?.pi?.additionalPromptTemplatePaths,
+    additionalThemePaths: config?.routing?.pi?.additionalThemePaths,
+    noExtensions: config?.routing?.pi?.noExtensions,
+    noSkills: config?.routing?.pi?.noSkills,
+    noPromptTemplates: config?.routing?.pi?.noPromptTemplates,
+    noThemes: config?.routing?.pi?.noThemes,
+    noContextFiles: config?.routing?.pi?.noContextFiles,
+    builtinTools: config?.routing?.pi?.builtinTools,
+  };
+  if (audience === "owner") return options;
+  return {
+    ...options,
+    noDiscoveredExtensions: true,
+    additionalExtensionPaths: [],
+    additionalSkillPaths: [],
+    noSkills: true,
+    noContextFiles: true,
+    builtinTools: [],
+  };
+}
+
+function resolveRunner(
+  config: MindStoneConfig | undefined,
+  provider: MindStoneModelProvider,
+  audience: "owner" | "non_owner" = "owner",
+): AgentRunner {
+  if (resolveRoutingMode(config) === "pi-session") return new PiSessionAgentRunner(piSessionRunnerOptions(config, audience));
   void provider;
   return createProviderRouteAgentRunner();
 }
@@ -783,7 +808,9 @@ async function runConfiguredRoute(input: {
   const model = resolveRouteModel(input.config, input.agentId, input.metadata);
   const entries = readTranscriptEntries(input.sessionKey);
   const currentHandoff = readCurrentHandoff();
-  const handoffReplay = currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
+  // The handoff is the verbatim tail of an owner session: never replayed into
+  // a non-owner turn (#61).
+  const handoffReplay = input.audience === "owner" && currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
     ? {
         path: currentHandoff.path,
         sha256: currentHandoff.sha256,
@@ -824,7 +851,7 @@ async function runConfiguredRoute(input: {
     // Walked once and shared: the recall provider and the invariant tier both
     // read the same files, and the tier must not depend on the vector store.
     const fileMemoryDocuments = discoverFileMemoryDocuments({ config: input.config });
-    const runner = resolveRunner(input.config, provider);
+    const runner = resolveRunner(input.config, provider, input.audience);
     const streamOptions = resolveRunnerStreamOptions(input.config);
     const { route, streamEvents } = await runGatewayRunner({
       runner,
@@ -878,7 +905,11 @@ async function runConfiguredRoute(input: {
         },
         invariants: {
           enabled: input.config?.memory?.invariants?.enabled !== false,
-          documents: [...(input.config?.memory?.localDocuments ?? []), ...fileMemoryDocuments],
+          // Owner-authored rules reach a non-owner turn only when marked
+          // `invariant_audience: all` (#61).
+          documents: [...(input.config?.memory?.localDocuments ?? []), ...fileMemoryDocuments].filter(
+            (document) => input.audience === "owner" || document.metadata?.invariantAudience === "all",
+          ),
           maxPromptTokens: input.config?.memory?.invariants?.maxPromptTokens,
         },
         memoryIndex: {
@@ -948,7 +979,10 @@ async function runConfiguredRoute(input: {
       await appendAutoCompactTranscriptEvent({
         sessionKey: input.sessionKey,
         agentId: input.agentId,
-        event: route.promptWindow.autoCompactEvent,
+        // A non-owner session never writes the shared handoff file (#61).
+        event: input.audience === "owner"
+          ? route.promptWindow.autoCompactEvent
+          : { ...route.promptWindow.autoCompactEvent, emergencyAutoHandoff: false },
         entries: route.promptWindow.entries,
         runId: run.id,
         source,
@@ -2074,7 +2108,7 @@ async function handleConnectorInbound(params: {
   const routed = await runConfiguredRoute({
     sessionKey,
     agentId,
-    audience: isOwnerDirectMessage(message) ? "owner" : "non_owner",
+    audience: isConnectorOwnerMessage({ config: ctx.config, connectorId, message }) ? "owner" : "non_owner",
     config: loadedConfig.config,
     configPath: loadedConfig.path,
     metadata: { connector: connectorId },

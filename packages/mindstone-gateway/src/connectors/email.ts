@@ -108,37 +108,90 @@ export function gmailMessageBody(message: GmailMessage, maxBodyChars: number): s
 }
 
 /**
+ * Strip RFC 8601 / RFC 5322 comments and quoted strings, so text a sender
+ * controls (an SPF comment echoing MAIL FROM, a quoted local part) can never
+ * be read as a result of its own (#61).
+ */
+function stripCommentsAndQuotes(value: string): string {
+  let output = "";
+  let depth = 0;
+  let quoted = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]!;
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (quoted) {
+      if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"' && depth === 0) {
+      quoted = true;
+      output += " ";
+      continue;
+    }
+    if (char === "(") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")" && depth > 0) {
+      depth -= 1;
+      output += " ";
+      continue;
+    }
+    if (depth === 0) output += char;
+  }
+  return output;
+}
+
+/**
  * Whether Gmail authenticated the From address (#61). Reads only the topmost
  * Authentication-Results header, the one Gmail's own receiving server
  * prepends (authserv-id mx.google.com); a sender can add their own copies
- * lower down, so later ones are ignored. Verified means DMARC passed for the
- * From domain, or DKIM passed with a signing domain aligned to it (equal, or
- * a parent domain). SPF alone does not count: it checks the envelope sender,
- * not From.
+ * lower down, so later ones are ignored. Comments and quoted strings are
+ * removed before parsing. Any DMARC result other than pass for the From
+ * domain is final. Otherwise verified means DMARC passed for the From domain,
+ * or DKIM passed with a signing domain (header.d, else header.i) equal to it
+ * or a parent of it. SPF alone does not count: it checks the envelope sender,
+ * not From. This authenticates the domain, not the mailbox, so it is never
+ * enough to be the owner on its own: see ownerSenders.
  */
 export function emailSenderVerified(message: GmailMessage, fromAddress: string): boolean {
   const fromDomain = fromAddress.split("@").pop()?.trim().toLowerCase();
   if (!fromDomain) return false;
   const results = header(message, "Authentication-Results");
   if (!results) return false;
-  const [authservId, ...clauses] = results.split(";").map((part) => part.trim());
+  const [authservId, ...resinfos] = stripCommentsAndQuotes(results).split(";").map((part) => part.trim());
   if (authservId?.split(/\s+/)[0]?.toLowerCase() !== "mx.google.com") return false;
   const aligned = (domain: string | undefined): boolean => {
     const d = (domain ?? "").trim().replace(/^@/, "").toLowerCase();
-    return d !== "" && (fromDomain === d || fromDomain.endsWith(`.${d}`));
+    return d.includes(".") && (fromDomain === d || fromDomain.endsWith(`.${d}`));
   };
-  for (const clause of clauses) {
-    const method = /^(dmarc|dkim)=(\w+)/i.exec(clause);
-    if (!method || method[2]!.toLowerCase() !== "pass") continue;
-    const property = (name: string) => new RegExp(`\\b${name.replace(".", "\\.")}=([^\\s;]+)`, "i").exec(clause)?.[1];
-    if (method[1]!.toLowerCase() === "dmarc") {
-      if (property("header.from")?.toLowerCase() === fromDomain) return true;
-    } else {
-      const signer = property("header.d") ?? property("header.i")?.split("@").pop();
-      if (aligned(signer)) return true;
+  const property = (resinfo: string, name: string) =>
+    new RegExp(`(?:^|\\s)${name.replace(/\./g, "\\.")}=([^\\s;]+)`, "i").exec(resinfo)?.[1];
+  let dmarcPass = false;
+  let dkimPass = false;
+  for (const resinfo of resinfos) {
+    const method = /^(dmarc|dkim)\s*=\s*(\w+)/i.exec(resinfo);
+    if (!method) continue;
+    const kind = method[1]!.toLowerCase();
+    const result = method[2]!.toLowerCase();
+    if (kind === "dmarc") {
+      if (property(resinfo, "header.from")?.toLowerCase() !== fromDomain) continue;
+      if (result !== "pass") return false;
+      dmarcPass = true;
+    } else if (result === "pass") {
+      const signer = property(resinfo, "header.d") ?? property(resinfo, "header.i")?.split("@").pop();
+      if (aligned(signer)) dkimPass = true;
     }
   }
-  return false;
+  return dmarcPass || dkimPass;
+}
+
+/** True when a From header names more than one address (#61): never verified. */
+function hasMultipleAddresses(raw: string | undefined): boolean {
+  return (stripCommentsAndQuotes(raw ?? "").match(/@/g) ?? []).length > 1;
 }
 
 /**
@@ -172,7 +225,7 @@ export function gmailMessageToInbound(
     chatId: message.threadId ?? message.id,
     chatType: "direct",
     // An unauthenticated From header is spoofable, so it never counts as the owner (#61).
-    senderVerified: emailSenderVerified(message, from.address),
+    senderVerified: !hasMultipleAddresses(header(message, "From")) && emailSenderVerified(message, from.address),
     threadId: message.threadId,
     timestamp: message.internalDate ? new Date(Number(message.internalDate)).toISOString() : undefined,
     metadata: { subject, sensitiveSource: "email" },

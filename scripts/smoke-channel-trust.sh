@@ -9,7 +9,10 @@ set -euo pipefail
 #   3. a message with no chat type is not treated as a DM: no reply without a
 #      mention, and no owner context when mentioned
 #   4. email: an unauthenticated From header is not verified; an aligned
-#      DMARC/DKIM pass from Gmail's own Authentication-Results header is
+#      DMARC/DKIM pass from Gmail's own Authentication-Results header is;
+#      text inside comments or quoted strings never counts; DMARC fail vetoes
+#   5. another allowlisted sender's DM is not the owner's (ownerSenders)
+#   6. the handoff file and owner-only invariants never reach non-owner turns
 # Synthetic sentinels only. Binds gateway port base+23 — serialize per smoke protocol.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +44,7 @@ RUNTIME_DATA="${TEMP_RUNTIME}/mindstone"
 SPOOL_DIR="${RUNTIME_DATA}/connectors/loopback"
 CAPTURE="${TEMP_RUNTIME}/capture.jsonl"
 export CAPTURE
+export MINDSTONE_AGENT_MOCK_CAPTURE=1
 
 # --- 4. Email sender verification (no ports) ---
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
@@ -69,6 +73,23 @@ assert.equal(
   emailSenderVerified(mail([["Authentication-Results", "mx.google.com; dmarc=fail header.from=example.com"], ["Authentication-Results", "mx.google.com; dmarc=pass header.from=example.com"], from]), "owner@example.com"),
   false,
 );
+// Text a sender controls, inside a comment or a quoted string, is not a result.
+assert.equal(
+  emailSenderVerified(gmail('mx.google.com; spf=pass (google.com: domain of "x;dmarc=pass header.from=example.com y"@attacker.test designates 1.2.3.4) smtp.mailfrom="x;dmarc=pass header.from=example.com y"@attacker.test; dmarc=fail (p=NONE) header.from=example.com'), "owner@example.com"),
+  false,
+  "a DMARC pass smuggled through an SPF comment or quoted local part",
+);
+// No genuine DMARC result to veto it: only comment stripping stops these.
+assert.equal(emailSenderVerified(gmail("mx.google.com; spf=pass (x; dkim=pass header.d=example.com ) smtp.mailfrom=a@attacker.test"), "owner@example.com"), false);
+assert.equal(emailSenderVerified(gmail('mx.google.com; spf=pass smtp.mailfrom="x;dkim=pass header.d=example.com y"@attacker.test'), "owner@example.com"), false);
+assert.equal(emailSenderVerified(gmail("mx.google.com; dkim=pass header.i=@example.com; dmarc=fail header.from=example.com"), "owner@example.com"), false, "DMARC fail vetoes a DKIM pass");
+assert.equal(emailSenderVerified(gmail("mx.google.com; dkim=pass header.d=example.com header.i=@other.test"), "owner@example.com"), true, "header.d is the signing domain");
+assert.equal(emailSenderVerified(gmail("mx.google.com; dkim=pass header.d=com"), "owner@example.com"), false, "a bare TLD never aligns");
+assert.equal(
+  gmailMessageToInbound(mail([["Authentication-Results", "mx.google.com; dmarc=pass header.from=attacker.test"], ["From", "owner@example.com, x@attacker.test"]]))?.senderVerified,
+  false,
+  "a From header with two addresses is never verified",
+);
 assert.equal(gmailMessageToInbound(mail([from]))?.senderVerified, false);
 assert.equal(gmailMessageToInbound(gmail("mx.google.com; dmarc=pass header.from=example.com"))?.senderVerified, true);
 console.log("email sender verification assertions passed");
@@ -77,22 +98,33 @@ TS
 # --- Core contract units (no ports) ---
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
 import assert from "node:assert/strict";
-import { connectorSessionKey, isOwnerDirectMessage, shouldTriggerConnectorReply } from "./packages/mindstone-core/src/index.ts";
+import { connectorOwnerSenders, connectorSessionKey, isOwnerDirectMessage, shouldTriggerConnectorReply } from "./packages/mindstone-core/src/index.ts";
 
-const single = { session: { mode: "single" as const, defaultSessionKey: "agent:default:main" } };
+const single = {
+  session: { mode: "single" as const, defaultSessionKey: "agent:default:main" },
+  channels: { loopback: { allowedSenders: ["clint", "alice", "*"], ownerSenders: [" Clint ", "*"] } },
+};
 const key = (message: Parameters<typeof isOwnerDirectMessage>[0]) => connectorSessionKey({ config: single, connectorId: "loopback", message });
+const owners = connectorOwnerSenders(single, "loopback");
+assert.deepEqual(owners, ["clint"], "ownerSenders is trimmed, lower-cased, and never includes *");
+assert.deepEqual(connectorOwnerSenders({ channels: { loopback: { allowedSenders: ["clint"] } } }, "loopback"), [], "no ownerSenders means nobody is the owner");
 
-assert.equal(isOwnerDirectMessage({ text: "x", chatType: "direct" }), true);
+assert.equal(isOwnerDirectMessage({ text: "x", senderId: "clint", chatType: "direct" }, owners), true);
+assert.equal(isOwnerDirectMessage({ text: "x", senderId: "CLINT", chatType: " Direct " }, owners), true);
+assert.equal(isOwnerDirectMessage({ text: "x", senderId: "alice", chatType: "direct" }, owners), false, "an allowlisted non-owner is not the owner");
+assert.equal(isOwnerDirectMessage({ text: "x", chatType: "direct" }, owners), false, "no sender id");
 for (const chatType of ["group", "channel", "thread", undefined] as const) {
-  assert.equal(isOwnerDirectMessage({ text: "x", chatType }), false, `${chatType} is not the owner`);
+  assert.equal(isOwnerDirectMessage({ text: "x", senderId: "clint", chatType }, owners), false, `${chatType} is not the owner`);
 }
-assert.equal(isOwnerDirectMessage({ text: "x", chatType: "direct", senderVerified: false }), false);
+assert.equal(isOwnerDirectMessage({ text: "x", senderId: "clint", chatType: "direct", senderVerified: false }, owners), false);
 
 assert.equal(key({ text: "x", senderId: "clint", chatId: "dm", chatType: "direct" }), "agent:default:main");
 for (const message of [
+  { text: "x", senderId: "alice", chatId: "dm-alice", chatType: "direct" as const },
   { text: "x", senderId: "clint", chatId: "ops", chatType: "group" as const },
   { text: "x", senderId: "clint", chatId: "ops" },
   { text: "x", senderId: "clint", chatId: "dm", chatType: "direct" as const, senderVerified: false },
+  { text: "x", senderId: "clint", chatId: "dm", chatType: "DIRECT" as never, senderVerified: false },
 ]) {
   assert.notEqual(key(message), "agent:default:main", `non-owner turn must not share the main session: ${JSON.stringify(message)}`);
 }
@@ -100,7 +132,40 @@ assert.ok(key({ text: "x", senderId: "clint", chatId: "ops" }).includes("unknown
 
 assert.equal(shouldTriggerConnectorReply({}, { text: "x" }).respond, false, "missing chat type needs a mention");
 assert.equal(shouldTriggerConnectorReply({}, { text: "x", mentioned: true }).respond, true);
+assert.equal(shouldTriggerConnectorReply({}, { text: "x", chatType: " Direct " as never }).respond, true, "one chat-type normalizer everywhere");
+const other = connectorSessionKey({ config: single, connectorId: "slack", message: { text: "x", senderId: "clint", chatId: "ops", chatType: "group" } });
+assert.notEqual(other, key({ text: "x", senderId: "clint", chatId: "ops", chatType: "group" }), "two connectors never share a non-owner session");
 console.log("core trust-boundary assertions passed");
+TS
+
+# --- Pi session options per audience (no ports, no model) ---
+MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
+import assert from "node:assert/strict";
+import { piSessionRunnerOptions } from "./packages/mindstone-gateway/src/index.ts";
+import { piSessionResourceOptions } from "./packages/mindstone-gateway/src/pi-session-executor.ts";
+
+const config = {
+  routing: { mode: "pi-session" as const, pi: { builtinTools: ["read", "bash"], additionalExtensionPaths: ["/x/adapter"], additionalSkillPaths: ["/x/skills"] } },
+  contextManagement: { pruning: { enabled: true } },
+} as never;
+const owner = piSessionRunnerOptions(config, "owner");
+const guest = piSessionRunnerOptions(config, "non_owner");
+assert.deepEqual(owner.builtinTools, ["read", "bash"], "control: the owner keeps configured built-ins");
+assert.deepEqual(guest.builtinTools, [], "a non-owner turn gets no built-in tools");
+assert.deepEqual(guest.additionalExtensionPaths, []);
+assert.deepEqual(guest.additionalSkillPaths, []);
+assert.equal(guest.noSkills, true);
+assert.equal(guest.noContextFiles, true);
+const ownerResources = piSessionResourceOptions(owner);
+const guestResources = piSessionResourceOptions(guest);
+assert.ok(!ownerResources.noExtensions, "control: the owner's discovered extensions load");
+assert.equal(guestResources.noExtensions, true, "a non-owner turn skips discovered extensions (the MindStone adapter)");
+assert.equal(
+  guestResources.extensionFactories?.length,
+  ownerResources.extensionFactories?.length,
+  "MindStone's own pruning/compaction extensions still run on a non-owner turn",
+);
+console.log("pi audience assertions passed");
 TS
 
 # --- Gateway end to end ---
@@ -125,6 +190,31 @@ The heron budget sentinel is AMBER-RECALL-SECRET.
 MD
 
 printf '%s\n' '# Memory index' '' '- [Heron budget](project_heron_budget.md) — heron budget pointer' >> "${RUNTIME_DATA}/memory/MEMORY.md"
+cat >"${RUNTIME_DATA}/memory/feedback_private_rule.md" <<'MD'
+---
+name: feedback_private_rule
+description: Owner-only rule.
+type: feedback
+critical: true
+invariant: Never mention the PLUM-INVARIANT-PRIVATE arrangement.
+---
+
+Owner-only rule body.
+MD
+cat >"${RUNTIME_DATA}/memory/feedback_public_rule.md" <<'MD'
+---
+name: feedback_public_rule
+description: Rule for every audience.
+type: feedback
+critical: true
+invariant: Always answer politely (SAGE-INVARIANT-PUBLIC).
+invariant_audience: all
+---
+
+Public rule body.
+MD
+mkdir -p "${RUNTIME_DATA}/transcripts"
+printf '%s\n' '# MindStone-Agent Auto-Compact Handoff' '' '- Session: agent:default:main' '' '## Recent transcript tail' '' 'CORAL-HANDOFF-TAIL owner DM text' > "${RUNTIME_DATA}/transcripts/.handoff.md"
 
 node <<'NODE'
 const { readFileSync, writeFileSync } = require("node:fs");
@@ -144,7 +234,7 @@ config.memory = {
   vectorStore: "memory",
   recall: { maxResults: 3, maxPromptTokens: 500, minScore: 0.1 },
 };
-config.channels = { loopback: { enabled: true, allowedSenders: ["clint"], pollMs: 100 } };
+config.channels = { loopback: { enabled: true, allowedSenders: ["clint", "alice"], ownerSenders: ["clint"], pollMs: 100 } };
 writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
 NODE
 
@@ -189,6 +279,11 @@ printf '%s\n' '{"messageId":"u1","text":"ambient heron chatter","senderId":"clin
 printf '%s\n' '{"messageId":"u2","text":"What is the heron budget?","senderId":"clint","chatId":"ops3","mentioned":true}' >> "${INBOX}"
 wait_for_lines "${CAPTURE}" 3
 wait_for_lines "${OUTBOX}" 3
+
+# 5. Another allowlisted sender's DM: allowed to talk, but not the owner.
+printf '%s\n' '{"messageId":"a1","text":"What is the heron budget?","senderId":"alice","chatId":"dm-alice","chatType":"direct"}' >> "${INBOX}"
+wait_for_lines "${CAPTURE}" 4
+wait_for_lines "${OUTBOX}" 4
 sleep 1
 
 node <<'NODE'
@@ -199,20 +294,21 @@ const fail = (message) => {
   console.error(message);
   process.exit(1);
 };
-if (requests.length !== 3) fail(`expected 3 model requests (DM, group, mentioned no-chat-type), got ${requests.length}`);
-if (outbox.length !== 3) fail(`expected 3 replies; the unmentioned no-chat-type message must not reply. Outbox:\n${outbox.join("\n")}`);
+if (requests.length !== 4) fail(`expected 4 model requests (owner DM, group, mentioned no-chat-type, alice DM), got ${requests.length}`);
+if (outbox.length !== 4) fail(`expected 4 replies; the unmentioned no-chat-type message must not reply. Outbox:\n${outbox.join("\n")}`);
 if (outbox.some((line) => line.includes('"inReplyToMessageId":"u1"'))) fail("replied to an unmentioned message with no chat type");
 
 const text = (request) => request.messages.map((message) => message.text ?? "").join("\n");
-const [dm, group, unknown] = requests.map(text);
-for (const sentinel of ["TEAL-OWNER-PROFILE", "AMBER-RECALL-SECRET", "project_heron_budget"]) {
+const [dm, group, unknown, alice] = requests.map(text);
+for (const sentinel of ["TEAL-OWNER-PROFILE", "AMBER-RECALL-SECRET", "project_heron_budget", "CORAL-HANDOFF-TAIL", "PLUM-INVARIANT-PRIVATE", "SAGE-INVARIANT-PUBLIC"]) {
   if (!dm.includes(sentinel)) fail(`control failed: the owner's DM is missing ${sentinel}, so this smoke can't show it being withheld`);
 }
-for (const [label, payload] of [["group", group], ["no-chat-type", unknown]]) {
-  for (const sentinel of ["TEAL-OWNER-PROFILE", "AMBER-RECALL-SECRET", "project_heron_budget", "VIOLET-DM-HISTORY"]) {
+for (const [label, payload] of [["group", group], ["no-chat-type", unknown], ["allowlisted non-owner DM", alice]]) {
+  for (const sentinel of ["TEAL-OWNER-PROFILE", "AMBER-RECALL-SECRET", "project_heron_budget", "VIOLET-DM-HISTORY", "CORAL-HANDOFF-TAIL", "PLUM-INVARIANT-PRIVATE", "feedback_private_rule"]) {
     if (payload.includes(sentinel)) fail(`${label} turn payload leaked ${sentinel}:\n${payload}`);
   }
   if (!payload.includes("heron budget")) fail(`${label} turn payload is missing its own message`);
+  if (!payload.includes("SAGE-INVARIANT-PUBLIC")) fail(`${label} turn lost the rule marked invariant_audience: all`);
 }
 console.log("gateway trust-boundary assertions passed");
 NODE
