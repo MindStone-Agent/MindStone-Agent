@@ -13,6 +13,8 @@ set -euo pipefail
 #   4. through the gateway: a failed run posts nothing to the chat (DM or
 #      group) and stays recorded in the transcript; a whitespace-only reply
 #      posts nothing
+# Needs `expect` (for the confirm-prompt race in 3d); macOS ships it, on
+# Linux install the expect package.
 # Binds gateway port base+24 — serialize per smoke protocol.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -172,6 +174,7 @@ ${MS} approvals approve "${LOCKED_ID}" --yes >/dev/null
 [[ "$(status_of "${LOCKED_ID}")" == "approved" ]] || { echo "the re-approval should stand" >&2; exit 1; }
 
 # Rejected while the confirm prompt is open: approving must not queue it.
+command -v expect >/dev/null || { echo "smoke-connector-queue needs expect (install the expect package)" >&2; exit 1; }
 RACE_ID="$(propose SYNTHETIC-DRAFT-RACE)"
 cat > "${TEMP_RUNTIME}/approve-race.exp" <<EXP
 set timeout 60

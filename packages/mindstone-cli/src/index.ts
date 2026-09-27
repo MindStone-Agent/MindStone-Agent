@@ -2011,8 +2011,18 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       try {
         enqueue();
       } catch (error) {
-        store.undoApproval(decided.id, decided.decidedAt);
-        throw new Error(`${error instanceof Error ? error.message : String(error)}; the action is pending again, approve it once the queue is free`);
+        const reason = error instanceof Error ? error.message : String(error);
+        let undone = false;
+        try {
+          undone = store.undoApproval(decided.id, decided.decidedAt);
+        } catch (undoError) {
+          throw new Error(`${reason}; undoing the approval also failed (${undoError instanceof Error ? undoError.message : String(undoError)}): the action is approved but not queued`);
+        }
+        throw new Error(
+          undone
+            ? `${reason}; the action is pending again, approve it once the queue is free`
+            : `${reason}; the approval could not be undone (it changed meanwhile): check it with mindstone approvals show ${decided.id}`,
+        );
       }
     };
     if (action.kind === "connector_send" && action.send) {
