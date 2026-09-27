@@ -23,7 +23,11 @@ export type MindStoneRunRequest = {
   tenantId?: string;
   userId?: string;
   agentId: string;
-  /** Explicit session key. When omitted, a canonical scoped key is derived (companion-compatible). */
+  /**
+   * Explicit session key. When omitted, a canonical scoped key is derived
+   * (companion-compatible). A scoped run (appId, tenantId or userId set) may
+   * only name its own scoped keys, `<scope>:agent:<id>:…` (403 otherwise).
+   */
   sessionKey?: string;
   /** Deterministically force a persona for this run (wins over workflow decisions and config rules). */
   personaId?: string;
@@ -61,9 +65,9 @@ export const SCOPE_DIMENSIONS = ["appId", "tenantId", "userId", "agentId"] as co
 
 export function scopeFromRequest(request: Pick<MindStoneRunRequest, "appId" | "tenantId" | "userId" | "agentId">): MindStoneRunScope {
   return {
-    ...(request.appId ? { appId: request.appId } : {}),
-    ...(request.tenantId ? { tenantId: request.tenantId } : {}),
-    ...(request.userId ? { userId: request.userId } : {}),
+    ...(request.appId?.trim() ? { appId: request.appId.trim() } : {}),
+    ...(request.tenantId?.trim() ? { tenantId: request.tenantId.trim() } : {}),
+    ...(request.userId?.trim() ? { userId: request.userId.trim() } : {}),
     agentId: request.agentId,
   };
 }
@@ -80,6 +84,41 @@ export function scopedSessionKey(scope: MindStoneRunScope, suffix = "main"): str
   parts.push(`agent:${scope.agentId}`);
   parts.push(suffix);
   return parts.join(":");
+}
+
+/** A run scoped to an app, tenant or user: not the owner's (#70). */
+export function isScopedRun(scope: MindStoneRunScope): boolean {
+  return Boolean(scope.appId || scope.tenantId || scope.userId);
+}
+
+/**
+ * Whether a caller-chosen session key is inside the run's scope (#70). A
+ * scoped run may only use its own scoped keys (`<scope>:agent:<id>:…`), never
+ * the owner's main session or another tenant's. Unscoped runs are the owner's.
+ */
+export function scopeSessionKeyAllowed(scope: MindStoneRunScope, sessionKey: string): boolean {
+  if (!isScopedRun(scope)) return true;
+  return sessionKey === scopedSessionKey(scope) || sessionKey.startsWith(scopedSessionKey(scope, ""));
+}
+
+/**
+ * Scope fields that are present but not a non-empty string (#70): a numeric
+ * tenant id would otherwise be dropped silently and the run would fall back to
+ * the owner's context and main session.
+ */
+export function invalidScopeFields(request: Record<string, unknown>): string[] {
+  return (["appId", "tenantId", "userId"] as string[]).filter((field) => {
+    const value = request[field];
+    // null is refused rather than read as absent: a nullable tenant column must not become an owner run.
+    // ":" is refused because it separates the parts of a scoped session key.
+    return value !== undefined && (typeof value !== "string" || value.trim() === "" || value.includes(":"));
+  }).concat(
+    // For a scoped run the agent id is part of the scoped key too.
+    ["appId", "tenantId", "userId"].some((field) => request[field] !== undefined)
+      && typeof request.agentId === "string" && request.agentId.includes(":")
+      ? ["agentId"]
+      : [],
+  );
 }
 
 /**

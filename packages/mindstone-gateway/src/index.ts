@@ -100,6 +100,8 @@ import {
   recallScopeForMemoryScope,
   scopeFromRequest,
   scopedSessionKey,
+  invalidScopeFields,
+  scopeSessionKeyAllowed,
   ApprovalStore,
   ConnectorDeliveryQueue,
   applyActionProposalDiscipline,
@@ -388,6 +390,15 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
 }
 
 /**
+ * Who a route answers (#61, #70). "owner": the owner's own surfaces and
+ * verified direct messages. "non_owner": group/channel turns, other senders,
+ * unverified senders. "tenant": an App Engine run scoped to an app, tenant or
+ * user; it gets the non-owner treatment for the owner's context (no USER.md,
+ * memory index, private invariants or handoff) but keeps its scoped recall.
+ */
+type RouteAudience = "owner" | "non_owner" | "tenant";
+
+/**
  * PiSessionAgentRunner options for one turn. A non-owner turn gets none of
  * the owner's Pi resources (#61): no installed or extra extensions (the
  * MindStone adapter injects USER.md, recall and memory tools), skills, prompt
@@ -397,7 +408,7 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
  */
 export function piSessionRunnerOptions(
   config: MindStoneConfig | undefined,
-  audience: "owner" | "non_owner",
+  audience: RouteAudience,
 ): ConstructorParameters<typeof PiSessionAgentRunner>[0] {
   const paths = runtimePathsFromEnv();
   const options: ConstructorParameters<typeof PiSessionAgentRunner>[0] = {
@@ -437,7 +448,7 @@ export function piSessionRunnerOptions(
 function resolveRunner(
   config: MindStoneConfig | undefined,
   provider: MindStoneModelProvider,
-  audience: "owner" | "non_owner" = "owner",
+  audience: RouteAudience = "owner",
 ): AgentRunner {
   if (resolveRoutingMode(config) === "pi-session") return new PiSessionAgentRunner(piSessionRunnerOptions(config, audience));
   void provider;
@@ -601,6 +612,48 @@ function transcriptTextFromOpenAiContent(content: unknown): string | undefined {
     return parts.length > 0 ? parts.join("\n") : undefined;
   }
   return undefined;
+}
+
+/** Session key for one MindStone Console conversation (#38). */
+/**
+ * Session key for one MindStone Console conversation (#38). Keyed by user and
+ * conversation, not by persona or config: switching persona (model) or
+ * changing routing.defaultAgentId keeps the conversation's history. The key
+ * uses a fixed "console" namespace in the agent:<id>:… form; the persona
+ * answering each turn is still recorded on every transcript entry. Parts
+ * whose encoded form is over 64 characters are hashed, so the transcript
+ * filename stays within filesystem limits.
+ */
+export function consoleConversationSessionKey(userId: string, conversationId: string): string {
+  const part = (value: string) => {
+    const encoded = encodeURIComponent(value);
+    return encoded.length > 64 ? `h-${createHash("sha256").update(value).digest("hex").slice(0, 32)}` : encoded;
+  };
+  return ["agent", "console", "console", part(userId), part(conversationId)].join(":");
+}
+
+/** The session a handoff was written from (its "- Session: …" line), if any. */
+export function handoffSessionKey(text: string): string | undefined {
+  return /^- Session: (.+)$/m.exec(text)?.[1]?.trim();
+}
+
+/**
+ * Index of the first message of the new turn in an OpenAI-style messages
+ * array: the trailing run of user messages (#38). Everything before it is
+ * history the gateway already has, apart from client system prompts, which
+ * are handled separately. Returns messages.length when the array doesn't end
+ * in a user message.
+ */
+export function newChatCompletionsTurnStart(messages: unknown[]): number {
+  let start = messages.length;
+  while (start > 0) {
+    const record = messages[start - 1];
+    const role = typeof record === "object" && record !== null ? (record as Record<string, unknown>).role : undefined;
+    // A message with no role is a user message, as openAiRoleToTranscriptRole treats it.
+    if (role !== "user" && role !== undefined) break;
+    start -= 1;
+  }
+  return start;
 }
 
 function openAiRoleToTranscriptRole(role: unknown): TranscriptRole {
@@ -777,7 +830,7 @@ function loadRouteIdentityContext(input: {
 /** A non-owner turn keeps the agent's IDENTITY.md but not the owner's USER.md (#61). */
 function withoutOwnerProfile(
   context: ReturnType<typeof loadRouteIdentityContext>,
-  audience: "owner" | "non_owner",
+  audience: RouteAudience,
 ): ReturnType<typeof loadRouteIdentityContext> {
   if (!context || audience === "owner") return context;
   return { ...context, userMarkdown: undefined, userPath: undefined };
@@ -787,12 +840,14 @@ async function runConfiguredRoute(input: {
   sessionKey: string;
   agentId: string;
   /**
-   * Who the turn answers (#61). "owner" is the owner's own surfaces (webchat,
-   * REST, OpenAI endpoints, App Engine) and verified direct messages. Anything
-   * else is "non_owner": no autoRecall, no USER.md and no memory index. Required
-   * so no caller can leave it to a default.
+   * Who the turn answers (#61, #70). "owner": the owner's own surfaces
+   * (webchat, REST, OpenAI endpoints, agent-only App Engine runs) and verified
+   * direct messages. "non_owner": other connector turns; no autoRecall, USER.md,
+   * memory index, owner-only invariants or handoff. "tenant": an app-, tenant-
+   * or user-scoped App Engine run; like non_owner but keeps its scoped recall.
+   * Required so no caller can leave it to a default.
    */
-  audience: "owner" | "non_owner";
+  audience: RouteAudience;
   config: MindStoneConfig | undefined;
   configPath?: string;
   metadata?: Record<string, unknown>;
@@ -815,7 +870,12 @@ async function runConfiguredRoute(input: {
   const currentHandoff = readCurrentHandoff();
   // The handoff is the verbatim tail of an owner session: never replayed into
   // a non-owner turn (#61) or a scoped App Engine / tenant run (#62).
-  const handoffReplay = input.audience === "owner" && !input.scope && currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
+  // A handoff is replayed only into the session that wrote it (#38): with a
+  // session per Console conversation, a runtime-wide replay would hand one
+  // conversation's tail to every new one.
+  const handoffReplay = input.audience === "owner" && !input.scope && currentHandoff
+    && handoffSessionKey(currentHandoff.text) === input.sessionKey
+    && !hasReplayedHandoff(entries, currentHandoff.sha256)
     ? {
         path: currentHandoff.path,
         sha256: currentHandoff.sha256,
@@ -893,7 +953,7 @@ async function runConfiguredRoute(input: {
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
         memoryRecall: {
-          enabled: input.audience === "owner" && input.config?.memory?.autoRecall === true,
+          enabled: (input.audience === "owner" || input.audience === "tenant") && input.config?.memory?.autoRecall === true,
           provider: input.config?.memory?.vectorStore === "sqlite-vec"
             ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
                 ...(input.config?.memory?.localDocuments ?? []),
@@ -1577,6 +1637,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
     const memoryScope = memoryScopeRaw as "app" | "tenant" | "user" | "agent" | "none";
+    // A present but non-string or blank app/tenant/user id would be dropped and
+    // the run would fall back to the owner (#70): refuse it.
+    const badScopeFields = invalidScopeFields({ ...(input as Record<string, unknown>), agentId });
+    if (badScopeFields.length) {
+      sendJson(res, 400, { ok: false, error: `${badScopeFields.join(", ")} must be non-empty strings without ":" when given` });
+      return;
+    }
     const scope = scopeFromRequest({
       appId: stringParam(input.appId),
       tenantId: stringParam(input.tenantId),
@@ -1584,6 +1651,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       agentId,
     });
     const sessionKey = stringParam(input.sessionKey)?.trim() || scopedSessionKey(scope);
+    if (!scopeSessionKeyAllowed(scope, sessionKey)) {
+      // A scoped run may not read or write the owner's or another tenant's session (#70).
+      sendJson(res, 403, { ok: false, error: `sessionKey ${sessionKey} is outside this run's scope` });
+      return;
+    }
     const recallScope = recallScopeForMemoryScope(scope, memoryScope);
     const loadedConfig = loadGatewayConfig();
     const config = memoryScope === "none" && loadedConfig.config?.memory?.autoRecall
@@ -1604,7 +1676,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const routed = await runConfiguredRoute({
       sessionKey,
       agentId,
-      audience: "owner",
+      // An app-, tenant- or user-scoped run isn't the owner (#70): no owner
+      // profile, memory index, private invariants or handoff; scoped recall stays.
+      audience: scope.appId || scope.tenantId || scope.userId ? "tenant" : "owner",
       config,
       configPath: loadedConfig.path,
       metadata: { ...(metadata ?? {}), appEngine: true, memoryScope },
@@ -1926,9 +2000,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const model = typeof input.model === "string" ? input.model : "mindstone/default";
     const agentId = agentIdFromModel(loadedConfig.config, model, metadata.agentId);
     const senderId = forwarded.userId ?? (typeof input.user === "string" ? input.user : model);
+    // Each Console conversation is its own session (#38), so separate chats don't
+    // share a context window. They are all the same agent's transcripts, so the
+    // memory backfill indexes every one into that agent's memory.
     const sessionKey = gatewaySessionKey({
       config: loadedConfig.config,
-      explicitSessionKey: metadata.sessionKey,
+      explicitSessionKey: metadata.sessionKey ?? (forwarded.conversationId
+        ? consoleConversationSessionKey(senderId, forwarded.conversationId)
+        : undefined),
       agentId,
       substrate: "openai",
       channel: "openai-chat-completions",
@@ -1937,8 +2016,58 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     });
 
     const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-chat-completions", chatType: "internal", senderId });
-    const persistedEntries = messages.map((message, index) => {
-      const record = typeof message === "object" && message !== null ? message as Record<string, unknown> : {};
+    // The gateway already holds the conversation (#38): clients such as LibreChat
+    // resend the whole history every turn, so only the new turn is stored: the
+    // trailing user messages. Client system prompts follow CONSOLE_DESIGN §4.2:
+    // ignored for a Console "user", kept for an admin or a direct API caller
+    // (service token, no forwarded role), stored once per session, always logged.
+    const newTurnStart = newChatCompletionsTurnStart(messages);
+    const records = messages.map((message) => (typeof message === "object" && message !== null ? message as Record<string, unknown> : {}));
+    const clientSystemTexts = records
+      .filter((record) => record.role === "system" || record.role === "developer")
+      .map((record) => transcriptTextFromOpenAiContent(record.content)?.trim())
+      .filter((text): text is string => Boolean(text));
+    // A role header that is present but blank (LibreChat blanks a placeholder it
+    // can't fill) is an unknown user, not a trusted caller.
+    const roleHeaderSent = req.headers["x-mindstone-user-role"] !== undefined;
+    const keepClientSystem = forwarded.userRole ? forwarded.userRole.toLowerCase() === "admin" : !roleHeaderSent;
+    const keptSystemEntries: TranscriptEntry[] = [];
+    const commonMetadata = {
+      source: "openai-chat-completions",
+      model,
+      ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}),
+      ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}),
+    };
+    if (newTurnStart < messages.length && clientSystemTexts.length > 0) {
+      const existing = readTranscriptEntries(sessionKey);
+      const stored = new Set(existing.filter((entry) => entry.role === "system").map((entry) => entry.text?.trim()));
+      const ignored = new Set(
+        existing.filter((entry) => entry.metadata?.event === "client_system_prompt_ignored").map((entry) => entry.metadata?.promptHash),
+      );
+      for (const text of clientSystemTexts) {
+        if (keepClientSystem && stored.has(text)) continue;
+        const promptHash = createHash("sha256").update(text).digest("hex").slice(0, 16);
+        if (!keepClientSystem && ignored.has(promptHash)) continue;
+        if (keepClientSystem) {
+          keptSystemEntries.push(appendTranscriptEntry({ sessionKey, agentId, role: "system", text, source, metadata: { ...commonMetadata, clientSystemPrompt: "kept" } }));
+          stored.add(text);
+        } else {
+          appendTranscriptEntry({
+            sessionKey,
+            agentId,
+            role: "event",
+            text: `A client system prompt (${text.length} characters) was ignored: the ${forwarded.userRole} role can't set one.`,
+            source,
+            metadata: { ...commonMetadata, event: "client_system_prompt_ignored", length: text.length, promptHash },
+          });
+          ignored.add(promptHash);
+        }
+      }
+    }
+    const resentSkipped = records.slice(0, newTurnStart).filter((record) => record.role !== "system" && record.role !== "developer").length;
+    const turnEntries = messages.slice(newTurnStart).map((message, offset) => {
+      const index = newTurnStart + offset;
+      const record = records[index]!;
       return appendTranscriptEntry({
         sessionKey,
         agentId,
@@ -1947,15 +2076,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         content: record.content,
         source,
         metadata: {
-          source: "openai-chat-completions",
-          model,
+          ...commonMetadata,
           messageIndex: index,
           originalRole: record.role,
-          ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}),
-          ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}),
+          ...(offset === 0 && resentSkipped > 0 ? { resentMessagesSkipped: resentSkipped } : {}),
         },
       });
     });
+    const persistedEntries = [...keptSystemEntries, ...turnEntries];
+    if (turnEntries.length === 0) {
+      sendJson(res, 400, openAiError("the last message must be a user message", "invalid_request_error", "invalid_messages"));
+      return;
+    }
     const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
     if (routed.routed && routed.status === 200 && input.stream === true) {
       // OpenAI-compatible server-sent events. LibreChat (and the openai/langchain clients generally)
