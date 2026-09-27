@@ -143,6 +143,7 @@ import {
   writeConnectorRuntimeStatus,
   type ConnectorContext,
   type ConnectorInboundHandle,
+  type ConnectorOutboundMessage,
   type ConnectorInboundMessage,
   getMindStoneSystemStatus,
   listTranscriptSessions,
@@ -2989,6 +2990,110 @@ type RunningConnector = {
 
 const runningConnectors = new Map<string, RunningConnector>();
 
+/**
+ * Report a connector queue problem in the gateway's log (stderr) and in the
+ * connector's runtime status. The same message is logged at most once a
+ * minute, so a queue that stays unreadable doesn't flood the log.
+ */
+const lastQueueReport = new Map<string, { message: string; at: number }>();
+function reportConnectorQueueError(
+  connectorId: string,
+  message: string,
+  running?: RunningConnector,
+  options: { repeating?: boolean; info?: boolean } = {},
+): void {
+  // Only a report that repeats on a timer (the drain timer) is de-duplicated;
+  // each reply's own failures are always logged (#77 round 3).
+  if (options.repeating) {
+    const last = lastQueueReport.get(connectorId);
+    const now = Date.now();
+    if (last && last.message === message && now - last.at < 60_000) return;
+    lastQueueReport.set(connectorId, { message, at: now });
+  }
+  process.stderr.write(`[mindstone-gateway] connector ${connectorId}: ${message}\n`);
+  // Good news is logged only: it must not replace an error in the status.
+  if (options.info) return;
+  writeConnectorRuntimeStatus({
+    connectorId,
+    state: "running",
+    lastError: message,
+    ...(running ? { inboundCount: running.inboundCount, deniedCount: running.deniedCount } : {}),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/** Replies waiting to be retried into the queue, so a gateway stop can report them as lost. */
+const pendingReplyRetries = new Set<{
+  connectorId: string;
+  chatId?: string;
+  running: RunningConnector;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  stopped: boolean;
+}>();
+
+/** Waits between later attempts to queue a reply the queue refused (locked, EIO, EMFILE, unreadable): about 13 minutes in all. */
+export const CONNECTOR_ENQUEUE_RETRY_MS = [1_000, 5_000, 30_000, 120_000, 600_000];
+
+/**
+ * Queue a reply. If the queue refuses it, the failure is logged and the reply
+ * is retried in the background (held in memory, so the inbound handler isn't
+ * held up), then drained once queued, so a transient error doesn't drop it
+ * silently (#77 review). A gateway restart during the retries, or running out
+ * of retries, loses it; that is logged as a lost reply. Returns the queue
+ * when the first attempt succeeded.
+ */
+function enqueueConnectorReply(
+  connectorId: string,
+  outbound: ConnectorOutboundMessage,
+  running: RunningConnector,
+  drain: (queue: ConnectorDeliveryQueue) => Promise<unknown>,
+  retryMs: readonly number[] = CONNECTOR_ENQUEUE_RETRY_MS,
+): ConnectorDeliveryQueue | undefined {
+  const queue = new ConnectorDeliveryQueue(connectorId);
+  const attempt = (n: number): boolean => {
+    try {
+      queue.enqueue(outbound, { now: new Date().toISOString() });
+      if (n > 1) reportConnectorQueueError(connectorId, `a reply to chat ${outbound.chatId ?? "(unknown)"} was queued on attempt ${n}`, running, { info: true });
+      return true;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (n > retryMs.length) {
+        reportConnectorQueueError(
+          connectorId,
+          `a reply to chat ${outbound.chatId ?? "(unknown)"} was LOST: it could not be queued after ${n} attempts (${reason}); its text is in the session transcript`,
+          running,
+        );
+      } else {
+        reportConnectorQueueError(connectorId, `could not queue a reply (attempt ${n}): ${reason}; retrying in ${Math.round(retryMs[n - 1]! / 1000)}s`, running);
+      }
+      return false;
+    }
+  };
+  if (attempt(1)) return queue;
+  // Held in memory until queued; a gateway stop logs it as lost (#77 round 3).
+  const pending = { connectorId, chatId: outbound.chatId, running, timer: undefined as ReturnType<typeof setTimeout> | undefined, stopped: false };
+  pendingReplyRetries.add(pending);
+  void (async () => {
+    try {
+      for (let n = 2; n <= retryMs.length + 1; n += 1) {
+        await new Promise<void>((resolve) => {
+          pending.timer = setTimeout(resolve, retryMs[n - 2]);
+        });
+        if (pending.stopped) return;
+        if (attempt(n)) {
+          await drain(queue);
+          return;
+        }
+      }
+    } finally {
+      pendingReplyRetries.delete(pending);
+    }
+  })().catch((error) =>
+    reportConnectorQueueError(connectorId, `delivery drain failed: ${error instanceof Error ? error.message : String(error)}`, running),
+  );
+  return undefined;
+}
+
 async function handleConnectorInbound(params: {
   connectorId: string;
   ctx: ConnectorContext;
@@ -3056,6 +3161,21 @@ async function handleConnectorInbound(params: {
     metadata: { connector: connectorId },
   });
   if (!routed.routed) return;
+  if (routed.status !== 200) {
+    // A failed run's text is an internal error, never a reply: it goes to the
+    // runtime status (and the transcript already holds routing_failed), not
+    // into the chat, which may be a shared group (#63).
+    const error = (routed.body as { error?: unknown } | undefined)?.error;
+    writeConnectorRuntimeStatus({
+      connectorId,
+      state: "running",
+      lastError: `run failed for an inbound message (status ${routed.status}): ${typeof error === "string" ? error : "unknown error"}`,
+      inboundCount: running.inboundCount,
+      deniedCount: running.deniedCount,
+      updatedAt: new Date().toISOString(),
+    });
+    return;
+  }
   const body = routed.body as { entry?: { text?: string } } | undefined;
   // Proposal blocks (memory writes, mutations) are already extracted into
   // pending ProposedActions by the core chat turn (issues #21/#22) — the
@@ -3098,10 +3218,11 @@ async function handleConnectorInbound(params: {
     return;
   }
 
-  const queue = new ConnectorDeliveryQueue(connectorId);
-  queue.enqueue(outbound, { now: new Date().toISOString() });
-  if (!connector) return;
-  await queue.drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() });
+  const drain = (queue: ConnectorDeliveryQueue) =>
+    connector ? queue.drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() }) : Promise.resolve();
+  const queue = enqueueConnectorReply(connectorId, outbound, running, drain);
+  if (!queue) return;
+  await drain(queue);
 }
 
 export async function startConfiguredConnectors(): Promise<void> {
@@ -3153,8 +3274,18 @@ export async function startConfiguredConnectors(): Promise<void> {
       const drainMs = typeof channelConfig.queueDrainMs === "number" && channelConfig.queueDrainMs > 0 ? channelConfig.queueDrainMs : 5000;
       running.drainTimer = setInterval(() => {
         const queue = new ConnectorDeliveryQueue(connectorId);
-        if (queue.pending().length === 0) return;
-        void queue.drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() }).catch(() => undefined);
+        let pending: number;
+        try {
+          pending = queue.pending().length;
+        } catch (error) {
+          // An unreadable queue is reported, never read as empty (#77 review).
+          reportConnectorQueueError(connectorId, `delivery queue: ${error instanceof Error ? error.message : String(error)}`, running, { repeating: true });
+          return;
+        }
+        if (pending === 0) return;
+        void queue
+          .drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() })
+          .catch((error) => reportConnectorQueueError(connectorId, `delivery drain failed: ${error instanceof Error ? error.message : String(error)}`, running));
       }, drainMs);
       running.drainTimer.unref?.();
       writeConnectorRuntimeStatus({
@@ -3177,6 +3308,17 @@ export async function startConfiguredConnectors(): Promise<void> {
 }
 
 export async function stopConfiguredConnectors(): Promise<void> {
+  // A reply still waiting to be queued is held only in memory: say it's lost.
+  for (const pending of pendingReplyRetries) {
+    pending.stopped = true;
+    if (pending.timer) clearTimeout(pending.timer);
+    reportConnectorQueueError(
+      pending.connectorId,
+      `a reply to chat ${pending.chatId ?? "(unknown)"} was LOST: the gateway stopped while it was waiting to be queued; its text is in the session transcript`,
+      pending.running,
+    );
+  }
+  pendingReplyRetries.clear();
   for (const [connectorId, running] of runningConnectors) {
     try {
       if (running.drainTimer) clearInterval(running.drainTimer);

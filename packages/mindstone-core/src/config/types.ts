@@ -104,6 +104,10 @@ export type MindStoneRoutingConfig = {
      * file as one JSON line, so a test can assert what reached the model.
      */
     captureFile?: string;
+    /** Smoke tests only: fail the turn when the last user message contains this text. */
+    failWhenTextIncludes?: string;
+    /** Smoke tests only: reply with whitespace-only text when the last user message contains this text. */
+    emptyWhenTextIncludes?: string;
   };
   pi?: {
     /** Isolated Pi agent/config directory. Defaults to PI_CODING_AGENT_DIR. */
