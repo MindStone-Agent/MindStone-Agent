@@ -405,7 +405,7 @@ mindstone memory maintain
 mindstone memory maintain --dry-run
 ```
 
-`memory backfill` indexes transcripts with their origin: surface, chat type, sender, audience, and an App Engine session's tenant scope. A tenant's run is recalled only at that exact scope. Turns that weren't the owner's (group, channel or thread messages, a missing chat type, an unverified sender) and the replies to them are left out of the owner's memory, and a backfill removes any that an earlier one indexed. Set `memory.transcripts.includeNonOwner: true` to index them anyway.
+`memory backfill` indexes transcripts with their origin: surface, chat type, sender, audience, and the App Engine scope of the run each turn belongs to. A scoped run (its turn and reply) is recalled only by a run whose recall scope matches every part of it, never by the owner's own recall, and scope is applied before results are ranked. Turns that weren't the owner's (group, channel or thread messages, a missing chat type, an unverified sender, another sender's DM) and the entries after them up to the next turn are left out of the owner's memory. Older entries without the owner label count only if they are a DM from one of the connector's `ownerSenders`; older email never does. Each backfill removes transcript chunks an earlier one indexed that the rules now exclude, and prunes nothing if the transcript directory is missing. Run `mindstone memory backfill` once after upgrading. Set `memory.transcripts.includeNonOwner: true` to index non-owner turns anyway.
 
 Memory features currently include:
 

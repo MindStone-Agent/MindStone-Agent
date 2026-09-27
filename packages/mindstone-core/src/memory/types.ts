@@ -26,6 +26,8 @@ export type MemoryQuery = {
   limit?: number;
   agentId?: string;
   filters?: Record<string, unknown>;
+  /** Recall scope (App Engine / Agent Mesh). Providers that store scoped chunks apply it before ranking (#62). */
+  scope?: Record<string, string>;
 };
 
 export type MemoryRecallConfig = {

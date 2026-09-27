@@ -812,8 +812,8 @@ async function runConfiguredRoute(input: {
   const entries = readTranscriptEntries(input.sessionKey);
   const currentHandoff = readCurrentHandoff();
   // The handoff is the verbatim tail of an owner session: never replayed into
-  // a non-owner turn (#61).
-  const handoffReplay = input.audience === "owner" && currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
+  // a non-owner turn (#61) or a scoped App Engine / tenant run (#62).
+  const handoffReplay = input.audience === "owner" && !input.scope && currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
     ? {
         path: currentHandoff.path,
         sha256: currentHandoff.sha256,
@@ -2097,7 +2097,7 @@ async function handleConnectorInbound(params: {
       triggered: trigger.respond,
       triggerReason: trigger.reason,
       // Read by the memory backfill: non-owner turns stay out of the owner's recall (#62).
-      ownerTurn: isOwnerDirectMessage(message),
+      ownerTurn: isConnectorOwnerMessage({ config: ctx.config, connectorId, message }),
     },
   });
   writeConnectorRuntimeStatus({
