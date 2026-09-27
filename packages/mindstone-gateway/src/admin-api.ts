@@ -8,7 +8,7 @@
  * With no admin credential configured, or gateway auth "none", the admin API
  * does not exist (404).
  */
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { dirname, isAbsolute, resolve } from "node:path";
@@ -26,28 +26,44 @@ function headerValue(headers: IncomingMessage["headers"], name: string): string 
   return value?.trim() || undefined;
 }
 
-/** The admin credential from gateway.admin.tokenEnv, else tokenFile (relative to the config file). */
-export function resolveAdminToken(config: MindStoneConfig | undefined, configPath: string): string | undefined {
-  const admin = (config?.gateway as { admin?: { tokenEnv?: unknown; tokenFile?: unknown } } | undefined)?.admin;
-  if (typeof admin?.tokenEnv === "string" && admin.tokenEnv.trim()) {
-    const value = process.env[admin.tokenEnv.trim()]?.trim();
-    if (value) return value;
+/**
+ * The admin credential's SHA-256 digest. `gateway.admin.tokenSha256` (the
+ * recommended form) holds only the digest, so an agent that can read the
+ * gateway's config or environment doesn't learn the credential. Otherwise the
+ * plain credential comes from tokenEnv or tokenFile (relative to the config
+ * file) and must be at least MIN_ADMIN_TOKEN_LENGTH characters.
+ */
+export function resolveAdminDigest(config: MindStoneConfig | undefined, configPath: string): Buffer | undefined {
+  const admin = (config?.gateway as { admin?: { tokenSha256?: unknown; tokenEnv?: unknown; tokenFile?: unknown } } | undefined)?.admin;
+  if (typeof admin?.tokenSha256 === "string") {
+    const hex = admin.tokenSha256.trim().toLowerCase();
+    return /^[0-9a-f]{64}$/.test(hex) ? Buffer.from(hex, "hex") : undefined;
   }
-  if (typeof admin?.tokenFile === "string" && admin.tokenFile.trim()) {
+  let plain: string | undefined;
+  if (typeof admin?.tokenEnv === "string" && admin.tokenEnv.trim()) {
+    plain = process.env[admin.tokenEnv.trim()]?.trim() || undefined;
+  }
+  if (!plain && typeof admin?.tokenFile === "string" && admin.tokenFile.trim()) {
     const path = isAbsolute(admin.tokenFile) ? admin.tokenFile : resolve(dirname(configPath), admin.tokenFile);
     try {
-      if (existsSync(path)) return readFileSync(path, "utf-8").trim() || undefined;
+      if (existsSync(path)) plain = readFileSync(path, "utf-8").trim() || undefined;
     } catch {
-      return undefined;
+      plain = undefined;
     }
   }
-  return undefined;
+  if (!plain || plain.length < MIN_ADMIN_TOKEN_LENGTH) return undefined;
+  return sha256(plain);
+}
+
+function sha256(value: string): Buffer {
+  return createHash("sha256").update(value).digest();
 }
 
 export const MIN_ADMIN_TOKEN_LENGTH = 16;
 
-function sameSecret(a: string, b: string): boolean {
-  return timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
+/** Whether a presented value matches a digest, in constant time. */
+function matchesDigest(value: string, digest: Buffer): boolean {
+  return timingSafeEqual(sha256(value), digest);
 }
 
 /**
@@ -63,14 +79,14 @@ export function decideAdminAccess(input: {
   const notEnabled: AdminGateDecision = { allowed: false, status: 404, error: "the admin API is not enabled on this gateway" };
   const requirement = resolveGatewayAuthRequirement({ config: input.config?.gateway?.auth, configPath: input.configPath });
   if (!requirement.enabled || requirement.mode === "misconfigured") return notEnabled;
-  const adminToken = resolveAdminToken(input.config, input.configPath);
-  // Too short, or the same as the service credential every webchat and API
-  // caller holds: treat the admin API as not configured (#38 review).
-  if (!adminToken || adminToken.length < MIN_ADMIN_TOKEN_LENGTH) return notEnabled;
+  const adminDigest = resolveAdminDigest(input.config, input.configPath);
+  // Missing, too short, or the same as the service credential every webchat
+  // and API caller holds: treat the admin API as not configured (#38 review).
+  if (!adminDigest) return notEnabled;
   const serviceSecret = requirement.mode === "token" ? requirement.token : requirement.mode === "password" ? requirement.password : undefined;
-  if (serviceSecret && sameSecret(serviceSecret, adminToken)) return notEnabled;
+  if (serviceSecret && matchesDigest(serviceSecret, adminDigest)) return notEnabled;
   const presented = headerValue(input.headers, "x-mindstone-admin-token");
-  if (!presented || !sameSecret(presented, adminToken)) {
+  if (!presented || !matchesDigest(presented, adminDigest)) {
     return { allowed: false, status: 401, error: "the admin API needs the admin credential" };
   }
   if (headerValue(input.headers, "x-mindstone-user-role")?.toLowerCase() !== "admin") {
@@ -109,10 +125,14 @@ function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+/** Keys that look like secrets but aren't: a session key is a routing id, a public key is public. */
+const NOT_SECRET_SUFFIXES = ["sessionkey", "publickey"];
+
 export function isSecretKey(key: string): boolean {
   const lower = normalizeKey(key);
   if (!lower) return false;
   if (REFERENCE_SUFFIXES.some((suffix) => lower.endsWith(suffix))) return false;
+  if (NOT_SECRET_SUFFIXES.some((suffix) => lower.endsWith(suffix)) || lower.includes("tokenizer")) return false;
   return SECRET_WORDS.some((word) => lower.includes(word)) || SECRET_SUFFIX_WORDS.some((word) => lower.endsWith(word));
 }
 
@@ -131,10 +151,24 @@ function isSecretMap(key: string): boolean {
 }
 
 const SECRET_PARAM_NAME = /(key|token|secret|password|passwd|signature|sig|auth|credential|code|jwt|session)/i;
-/** A URL path segment that looks like a credential: long and mixed, or a bot token (`bot<id>:<secret>`). */
+/** A URL path segment that looks like a credential: very long, long and mixed, or a bot token (`bot<id>:<secret>`). */
 function isSecretPathSegment(segment: string): boolean {
-  if (segment.includes(":")) return true;
+  if (segment.includes(":") || segment.length >= 24) return true;
   return segment.length >= 16 && /[A-Za-z]/.test(segment) && /\d/.test(segment);
+}
+
+const INLINE_SECRET = /\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)("?\s*[=:]\s*"?)([^\s;&,"']+)/gi;
+const INLINE_BEARER = /\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{8,})/gi;
+
+/**
+ * A plain string with inline credentials masked: `password=…` pairs (DSNs,
+ * connection strings, JSON in a string) and `Bearer …`/`Basic …` values
+ * (commands and header strings).
+ */
+function maskInlineSecrets(value: string): string {
+  return value
+    .replace(INLINE_SECRET, (_match, name: string, sep: string) => `${name}${sep}***`)
+    .replace(INLINE_BEARER, (_match, scheme: string) => `${scheme} ***`);
 }
 
 function maskParams(params: string): string {
@@ -150,7 +184,7 @@ function maskParams(params: string): string {
  */
 export function maskUrlCredentials(value: string): string {
   const scheme = /^([a-z][a-z0-9+.-]*:\/\/)(.*)$/is.exec(value.trim());
-  if (!scheme) return value;
+  if (!scheme) return maskInlineSecrets(value);
   let rest = scheme[2]!;
   // Userinfo: everything up to the last "@" before the path, even with "/" in a password.
   const at = rest.lastIndexOf("@");
@@ -170,7 +204,7 @@ export function maskUrlCredentials(value: string): string {
   return `${scheme[1]}${host}${maskedPath}${maskParams(query)}${maskedFragment}`;
 }
 
-const SECRET_FLAG = /^--?[\w-]*(key|token|secret|password|passwd|auth|credential)[\w-]*$/i;
+const SECRET_FLAG = /^(--?[\w-]*(key|token|secret|password|passwd|auth|credential|header)[\w-]*|-[kHp])$/i;
 const SECRET_FLAG_WITH_VALUE = /^(--?[\w-]*(?:key|token|secret|password|passwd|auth|credential)[\w-]*=).+$/i;
 
 /** A command-line style list (`["--api-key", "…"]`, `["--token=…"]`) with the secret values masked. */
@@ -204,7 +238,16 @@ export function maskConfig(value: unknown, key = "", parentIsSecretMap = false):
   if (masksWhole(key, value) || (parentIsSecretMap && key)) return { set: isSet(value) };
   if (typeof value === "string") return maskUrlCredentials(value);
   if (Array.isArray(value)) {
-    if (key && isSecretMap(key)) return value.map((item) => (typeof item === "string" ? { set: item !== "" } : maskConfig(item)));
+    if (key && isSecretMap(key)) {
+      // A header list: strings ("Name: value") or objects ({ name, value }); only names stay visible.
+      return value.map((item) => {
+        if (typeof item === "string") return { set: item !== "" };
+        if (item && typeof item === "object" && !Array.isArray(item)) {
+          return Object.fromEntries(Object.entries(item as Record<string, unknown>).map(([k, v]) => [k, normalizeKey(k) === "name" ? v : { set: isSet(v) }]));
+        }
+        return { set: isSet(item) };
+      });
+    }
     return maskArgs(value);
   }
   if (value && typeof value === "object") {
@@ -385,6 +428,11 @@ function valueAt(root: unknown, path: string): unknown {
  * dots (mergeConfigPatch refuses them), so a path names exactly one setting.
  */
 export function isAdvancedChange(path: string, nextConfig: unknown, previousConfig?: unknown): boolean {
+  // Creating a channel is free only as a disabled one: a new section that is
+  // on (or doesn't say) starts a connector on the next restart.
+  const channel = /^channels\.([^.]+)(\.|$)/.exec(path);
+  if (channel && valueAt(previousConfig, `channels.${channel[1]}`) === undefined
+    && valueAt(nextConfig, `channels.${channel[1]}.enabled`) !== false) return true;
   const rule = SAFE_SETTINGS.find((candidate) => matchesPattern(candidate.pattern, path));
   if (!rule) return true;
   return !rule.value(valueAt(nextConfig, path), valueAt(previousConfig, path));
@@ -429,25 +477,37 @@ export const MAX_PATCH_DEPTH = 32;
  *   exactly one setting. Prototype keys and patches nested deeper than
  *   MAX_PATCH_DEPTH are refused.
  */
-export function mergeConfigPatch(target: unknown, patch: unknown, key = "", parentIsSecretMap = false, depth = 0): unknown {
+export function mergeConfigPatch(
+  target: unknown,
+  patch: unknown,
+  key = "",
+  parentIsSecretMap = false,
+  depth = 0,
+  touched: { secrets: boolean } = { secrets: false },
+): unknown {
   if (depth > MAX_PATCH_DEPTH) throw new AdminPatchError("the patch is nested too deeply");
-  if (target !== undefined) {
-    const shown = JSON.stringify(maskConfig(target, key, parentIsSecretMap));
-    if (JSON.stringify(patch) === shown) return target;
-  }
+  const shown = target === undefined ? undefined : JSON.stringify(maskConfig(target, key, parentIsSecretMap));
+  if (shown !== undefined && JSON.stringify(patch) === shown) return target;
   const secretSlot = masksWhole(key, patch) || masksWhole(key, target) || (parentIsSecretMap && key);
   if (secretSlot && isMaskedSecret(patch)) return target;
   if (secretSlot) {
     throw new AdminPatchError(`${key}: store secrets with POST /admin/secrets/<name> and reference them with tokenFile`);
   }
-  if (!patch || typeof patch !== "object" || Array.isArray(patch)) return patch;
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+    // Replacing a value that held masked content (a URL with a password, a
+    // header list, a list of objects with tokens). The caller requires the
+    // permission for that, even when nothing changes, so a patch can't be used
+    // to confirm a guess at the hidden part (#38 review round 3).
+    if (shown !== undefined && shown !== JSON.stringify(target)) touched.secrets = true;
+    return patch;
+  }
   const base: Record<string, unknown> = target && typeof target === "object" && !Array.isArray(target) ? { ...(target as Record<string, unknown>) } : {};
   const secretMap = Boolean(key) && isSecretMap(key);
   for (const [k, v] of Object.entries(patch as Record<string, unknown>)) {
     if (FORBIDDEN_KEYS.has(k)) throw new AdminPatchError(`the key "${k}" is not allowed`);
     if (!k || k.includes(".")) throw new AdminPatchError(`the key "${k.slice(0, 64)}" is not allowed: keys can't be empty or contain "."`);
     if (v === null) delete base[k];
-    else base[k] = mergeConfigPatch(base[k], v, k, secretMap, depth + 1);
+    else base[k] = mergeConfigPatch(base[k], v, k, secretMap, depth + 1, touched);
   }
   return base;
 }
@@ -468,8 +528,15 @@ export function jsonDepth(value: unknown, limit = MAX_PATCH_DEPTH): number {
 }
 
 /** ETag of the config file's bytes, for optimistic concurrency on PATCH (If-Match). */
+/**
+ * Keyed with a per-process random secret, so the etag can't be used to check
+ * guesses at the hidden parts of the config offline (#38 review round 3).
+ * A restart changes every etag; a client holding an old one gets a 412 and
+ * reloads.
+ */
+const ETAG_KEY = randomBytes(32);
 export function configEtag(content: string): string {
-  return `"${createHash("sha256").update(content).digest("hex").slice(0, 32)}"`;
+  return `"${createHmac("sha256", ETAG_KEY).update(content).digest("hex").slice(0, 32)}"`;
 }
 
 export type AdminPermissions = { advancedSettings: boolean; grantedBy?: string; grantedAt?: string; expiresAt?: string };

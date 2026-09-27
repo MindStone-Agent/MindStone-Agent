@@ -40,6 +40,10 @@ if os.environ["ADMIN_TOKEN_MODE"] == "env":
     gw["admin"] = {"tokenEnv": "ADMIN_SMOKE_ADMIN_TOKEN"}
 elif os.environ["ADMIN_TOKEN_MODE"] == "same":
     gw["admin"] = {"tokenEnv": "ADMIN_SMOKE_TOKEN"}
+elif os.environ["ADMIN_TOKEN_MODE"] == "hash":
+    import hashlib
+    # Only the digest is on the gateway; the Console holds the credential.
+    gw["admin"] = {"tokenSha256": hashlib.sha256(os.environ["ADMIN_SMOKE_ADMIN_TOKEN"].encode()).hexdigest()}
 else:
     gw.pop("admin", None)
 c["routing"] = {"mode": os.environ["ROUTING"], "defaultAgentId": "default", "defaultModel": "mindstone/mock"}
@@ -75,12 +79,20 @@ c["channels"] = {"telegram": {
     "botUrl": "https://api.telegram.example/bot123456:SENTINEL-BOTPATH-7731/sendMessage",
     "slashUrl": "https://user:pa/SENTINEL-SLASHPW-7731@db.example.test/x",
     "callbackUrl": "https://app.example.test/cb#access_token=SENTINEL-FRAGMENT-7731&state=1",
-    "args": ["--api-key", "SENTINEL-ARG-7731", "--token=SENTINEL-ARGEQ-7731", "--verbose"],
+    "args": ["--api-key", "SENTINEL-ARG-7731", "--token=SENTINEL-ARGEQ-7731", "--verbose", "--header", "Authorization: Bearer SENTINEL-HDRARG-7731"],
+    # Round 3 review shapes.
+    "lettersUrl": "https://hooks.example.test/services/T0/B0/SENTINELLETTERSONLYABCDEFGH",
+    "digitsUrl": "https://hooks.example.test/hook/77317731773177317731773177",
+    "conn": "host=db.example.test password=SENTINEL-DSNKV-7731 user=x",
+    "headerObjects": [{"name": "X-Api-Token", "value": "SENTINEL-HDROBJ-7731"}],
+    "command": "curl -H 'Authorization: Bearer SENTINELCMDBEARER7731' https://api.example.test",
+    "jsonBlob": "{\"password\": \"SENTINEL-JSONSTR-7731\"}",
     # Not secrets: must stay readable.
     "dispatch": "fifo",
     "mapping": {"a": "b"},
     "author": "someone",
 }}
+c["session"] = {**c.get("session", {}), "defaultSessionKey": "agent:default:main"}
 agents = c.setdefault("agents", {})
 agents["default"] = {**agents.get("default", {"id": "default"}), "contextWindowTokens": 64000}
 p.write_text(json.dumps(c, indent=2) + "\n")
@@ -114,6 +126,14 @@ start_gateway
 test "$(code "${AUTH[@]}" -H "x-mindstone-admin-token: ${ADMIN_SMOKE_TOKEN}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/status")" = "404" || { echo "an admin credential equal to the service token must not enable the admin API" >&2; exit 1; }
 stop_gateway
 
+# 1d. Only a digest of the admin credential on the gateway: it still works.
+configure token mock hash
+start_gateway
+test "$(code "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/status")" = "200" || { echo "a tokenSha256 admin credential should work" >&2; exit 1; }
+test "$(code "${AUTH[@]}" -H 'x-mindstone-admin-token: wrong-admin-token-000' -H 'x-mindstone-user-role: admin' "${BASE}/admin/status")" = "401" || { echo "a wrong credential against tokenSha256 must be 401" >&2; exit 1; }
+grep -q "${ADMIN_SMOKE_ADMIN_TOKEN}" "${CONFIG}" && { echo "the admin credential is stored in plain text" >&2; exit 1; }
+stop_gateway
+
 # 2. Token auth plus the admin credential.
 configure token placeholder
 start_gateway
@@ -126,14 +146,15 @@ test "$(code "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: user' "${
 
 STATUS="$(curl -s "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: Admin' "${BASE}/admin/status")"
 CONF="$(curl -s "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/config")"
-STATUS="${STATUS}" CONF="${CONF}" node <<'NODE'
+STATUS="${STATUS}" CONF="${CONF}" CONFIG_PATH="${CONFIG}" node <<'NODE'
 const fail = (m) => { console.error(m); process.exit(1); };
 const status = JSON.parse(process.env.STATUS);
 const conf = JSON.parse(process.env.CONF);
 if (status.onboarded !== false || status.steps?.provider?.done !== false) fail(`placeholder routing must not count as onboarded: ${JSON.stringify(status.steps)}`);
 const sentinels = ["APIKEY", "BOT-TOKEN", "OBJECT", "ARRAY", "SNAKE", "UPPER", "AUTHZ", "COOKIE", "DSN", "HEADER", "ENVMAP", "USERINFO", "QUERY",
-  "PEM", "KEYVALUE", "AUTHHEADER", "JWT", "SESSIONID", "TOKENS", "CREDJSON", "SECRETVALUE", "HEADERLIST", "ENVVARS", "ENVVARS2", "BOTPATH", "SLASHPW", "FRAGMENT", "ARG", "ARGEQ"]
-  .map((s) => `SENTINEL-${s}-7731`).concat(["SENTINELWEBHOOK7731abcd"]);
+  "PEM", "KEYVALUE", "AUTHHEADER", "JWT", "SESSIONID", "TOKENS", "CREDJSON", "SECRETVALUE", "HEADERLIST", "ENVVARS", "ENVVARS2", "BOTPATH", "SLASHPW", "FRAGMENT", "ARG", "ARGEQ",
+  "HDRARG", "DSNKV", "HDROBJ", "JSONSTR"]
+  .map((s) => `SENTINEL-${s}-7731`).concat(["SENTINELWEBHOOK7731abcd", "SENTINELLETTERSONLYABCDEFGH", "77317731773177317731773177", "SENTINELCMDBEARER7731"]);
 for (const [label, text] of [["status", process.env.STATUS], ["config", process.env.CONF]]) {
   for (const secret of [...sentinels, "admin-smoke-service-token", "admin-smoke-admin-token"]) {
     if (text.includes(secret)) fail(`${label} leaked ${secret}`);
@@ -149,10 +170,15 @@ if (!tg.apiBaseUrl?.includes("api.example.test") || !tg.apiBaseUrl.includes("pag
 if (tg.tokenEnv !== "TELEGRAM_TOKEN_ENV_NAME" || tg.tokenFile !== "secrets/example") fail("secret references (tokenEnv, tokenFile) should stay visible");
 if (conf.config?.gateway?.auth?.tokenEnv !== "ADMIN_SMOKE_TOKEN") fail("gateway.auth.tokenEnv should stay visible");
 if (conf.config?.agents?.default?.contextWindowTokens !== 64000) fail("a token budget is not a secret");
+if (conf.config?.session?.defaultSessionKey !== "agent:default:main") fail(`a session key is a routing id, not a secret: ${JSON.stringify(conf.config?.session)}`);
+if (tg.headerObjects?.[0]?.name !== "X-Api-Token") fail(`a header list keeps its names: ${JSON.stringify(tg.headerObjects)}`);
 if (tg.dispatch !== "fifo" || tg.mapping?.a !== "b" || tg.author !== "someone") fail(`ordinary keys should stay readable: ${JSON.stringify({ d: tg.dispatch, m: tg.mapping, a: tg.author })}`);
 if (!tg.webhookUrl?.startsWith("https://hooks.slack.example/services/")) fail(`a webhook URL should keep its host and readable path: ${tg.webhookUrl}`);
 if (tg.args?.[3] !== "--verbose" || tg.args?.[0] !== "--api-key") fail(`argument lists should keep their flags: ${JSON.stringify(tg.args)}`);
 if (typeof conf.etag !== "string") fail("GET /admin/config should return an etag");
+// The etag is keyed, so it can't be used to check guesses at hidden values offline.
+const plainHash = `"${require("crypto").createHash("sha256").update(require("fs").readFileSync(process.env.CONFIG_PATH)).digest("hex").slice(0, 32)}"`;
+if (conf.etag === plainHash) fail("the etag is a plain hash of the config file");
 console.log("admin read assertions passed");
 NODE
 stop_gateway
@@ -199,6 +225,10 @@ grep -q 'SENTINEL-USERINFO-7731' "${CONFIG}" || { echo "a masked URL round trip 
 # A new plain secret value is refused: secrets go through /admin/secrets.
 expect "$(patch channels '{"telegram":{"botToken":"NEW-PLAIN-TOKEN"}}')" 400 "a plain secret value in a patch"
 grep -q 'NEW-PLAIN-TOKEN' "${CONFIG}" && { echo "a plain secret was written" >&2; exit 1; }
+# Replacing a value with hidden parts needs the permission even when the guess
+# is right, so a correct guess and a wrong one look the same.
+expect "$(patch channels '{"telegram":{"apiBaseUrl":"https://user:SENTINEL-USERINFO-7731@api.example.test/v1?api_key=SENTINEL-QUERY-7731&page=2"}}')" 403 "a correct guess at a hidden URL password"
+expect "$(patch channels '{"telegram":{"apiBaseUrl":"https://user:wrong-guess@api.example.test/v1?api_key=SENTINEL-QUERY-7731&page=2"}}')" 403 "a wrong guess at a hidden URL password"
 # A key with a dot can't pose as a safe path.
 expect "$(patch channels '{"evil.enabled":"https://attacker.example.test/x"}')" 400 "a key containing a dot"
 # Default deny: everything else needs the permission (#38 review round 1).
@@ -215,7 +245,8 @@ channels|{"telegram":{"tokenFile":"/etc/passwd"}}|a tokenFile outside secrets/
 channels|{"telegram":{"tokenFile":"secrets/tg.token"}}|a new token file
 channels|{"telegram":{"allowedSenders":["alice","bob"]}}|adding a sender
 channels|{"telegram":{"enabled":true}}|enabling a channel
-channels|{"attackerbot":{"enabled":false,"allowedSenders":["mallory"]}}|creating a channel
+channels|{"attackerbot":{"enabled":false,"allowedSenders":["mallory"]}}|creating a channel with senders
+channels|{"loopback":{"pollMs":1000}}|creating a channel that starts on restart
 channels|{"telegram":{"respondWithoutMention":true}}|answering without a mention
 channels|{"telegram":{"triggerPrefix":""}}|changing the trigger prefix
 channels|{"telegram":{"sendPolicy":"open"}}|an unlisted connector setting
@@ -244,6 +275,8 @@ expect "$(patch memory '{"autoRecall":false}' -H "If-Match: W/${ETAG}")" 200 "a 
 expect "$(post /admin/permissions/advanced '{"enabled":true}')" 400 "granting advanced settings without the confirmation"
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings"
 expect "$(patch routing '{"pi":{"builtinTools":["read"]}}')" 200 "an advanced patch with the permission"
+# The gateway's own token file can't be written under another spelling of its name, even with the permission.
+expect "$(post /admin/secrets/Gateway-Token '{"value":"HIJACK-ALIAS"}')" 422 "writing the gateway token file under a case alias"
 expect "$(patch gateway '{"auth":{"mode":"none"}}')" 422 "turning gateway auth off, even with the permission"
 expect "$(patch gateway '{"auth":null}')" 422 "removing gateway auth, even with the permission"
 expect "$(patch gateway '{"auth":{"mode":"NONE"}}')" 422 "an unknown gateway auth mode, even with the permission"

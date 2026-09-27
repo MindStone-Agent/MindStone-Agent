@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
@@ -1663,13 +1663,20 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       }
       const current = (loadedConfig.config ?? {}) as Record<string, unknown>;
       let merged: unknown;
+      const touched = { secrets: false };
       try {
-        merged = mergeConfigPatch(current[section], patch, section);
+        merged = mergeConfigPatch(current[section], patch, section, false, 0, touched);
       } catch (error) {
         sendJson(res, 400, { ok: false, error: error instanceof AdminPatchError ? error.message : "the patch could not be applied" });
         return;
       }
       const changed = changedPaths(current[section], merged, section);
+      // Replacing a value with hidden parts needs the permission whether or not
+      // it changes anything, so a matching guess and a wrong one look the same.
+      if (touched.secrets && !readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "replacing a value with hidden parts needs the advanced-settings permission" }, { section, reason: "advanced_masked" });
+        return;
+      }
       if (changed.length === 0) {
         sendJson(res, 200, { ok: true, changed: [], restartRequired: false, etag: configEtag(currentText) });
         return;
@@ -1739,7 +1746,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       const target = resolvePath(secretsDir, name);
       // The gateway's own credentials are set on the host, never from the Console.
       const hostCredentials = hostCredentialFiles(loadMindStoneConfig(configPath).config, configPath);
-      if (hostCredentials.includes(target)) {
+      if (hostCredentials.some((file) => sameFile(file, target))) {
         refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
         return;
       }
@@ -1795,6 +1802,33 @@ function readAdminPermissions(dataDir: string): AdminPermissions {
   } catch {
     return { advancedSettings: false };
   }
+}
+
+/**
+ * Whether two paths name the same file: the same inode when both exist, else
+ * the same real path compared without case (macOS volumes are usually
+ * case-insensitive), so an alias can't get past the host-credential guard.
+ */
+function sameFile(a: string, b: string): boolean {
+  try {
+    const sa = statSync(a);
+    const sb = statSync(b);
+    if (sa.dev === sb.dev && sa.ino === sb.ino) return true;
+  } catch {
+    // One of them doesn't exist yet: compare names.
+  }
+  const real = (path: string) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      try {
+        return resolvePath(realpathSync(dirname(path)), basename(path));
+      } catch {
+        return resolvePath(path);
+      }
+    }
+  };
+  return real(a).toLowerCase() === real(b).toLowerCase();
 }
 
 /** Absolute paths of the files holding the gateway's own credentials (auth and admin token files). */
@@ -1855,7 +1889,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
-    await handleAdminRequest(req, res, url);
+    try {
+      await handleAdminRequest(req, res, url);
+    } catch {
+      // Never echo internal error text from the admin API.
+      if (!res.headersSent) sendJson(res, 500, { ok: false, error: "the admin API hit an internal error" });
+    }
     return;
   }
 
