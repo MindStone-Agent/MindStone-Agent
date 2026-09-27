@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -1651,7 +1651,46 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     });
     return;
   }
-  if (req.method !== "POST" && req.method !== "PATCH") {
+  if (req.method === "GET" && url.pathname === "/admin/secrets") {
+    // The stored secrets by name (#88): never a value. A link is listed as a
+    // link and never followed.
+    const secretsDir = `${paths.dataDir}/secrets`;
+    const config = gateConfig.config;
+    const hostCredentials = hostCredentialFiles(config, configPath);
+    let names: string[] = [];
+    try {
+      names = readdirSync(secretsDir).sort();
+    } catch {
+      // No secrets directory yet: none stored.
+    }
+    const secrets = names.map((name) => {
+      const target = resolvePath(secretsDir, name);
+      let kind: "file" | "link" | "other" = "other";
+      let size: number | undefined;
+      let modifiedAt: string | undefined;
+      try {
+        const entry = lstatSync(target);
+        kind = entry.isSymbolicLink() ? "link" : entry.isFile() ? "file" : "other";
+        if (kind === "file") {
+          size = entry.size;
+          modifiedAt = entry.mtime.toISOString();
+        }
+      } catch {
+        // Removed meanwhile: listed without details.
+      }
+      return {
+        name,
+        kind,
+        ...(size !== undefined ? { size, modifiedAt } : {}),
+        tokenFile: `secrets/${name}`,
+        usedBy: connectorsReading(config, configPath, paths, target),
+        gatewayCredential: hostCredentials.some((file) => pointsAtSameFile(file, target)),
+      };
+    });
+    sendJson(res, 200, { ok: true, secrets });
+    return;
+  }
+  if (req.method !== "POST" && req.method !== "PATCH" && req.method !== "DELETE") {
     sendJson(res, 404, { ok: false, error: "unknown admin endpoint" });
     return;
   }
@@ -1900,6 +1939,55 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
   }
 
   const secretMatch = /^\/admin\/secrets\/([^/]+)$/.exec(url.pathname);
+  if (req.method === "DELETE" && secretMatch) {
+    // Remove a stored secret (#88), under the same guards as replacing one:
+    // the advanced-settings permission, never the gateway's own credentials,
+    // never a link made on the host, and never through a link.
+    let name: string;
+    try {
+      name = decodeURIComponent(secretMatch[1]!);
+    } catch {
+      sendJson(res, 400, { ok: false, error: "the secret name is not valid URL encoding" });
+      return;
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name) || name.includes("..")) {
+      sendJson(res, 400, { ok: false, error: "secret names are letters, digits, dot, dash and underscore (max 64)" });
+      return;
+    }
+    await withAdminWriteLock(() => {
+      const secretsDir = `${paths.dataDir}/secrets`;
+      const target = resolvePath(secretsDir, name);
+      const config = loadMindStoneConfig(configPath).config;
+      if (hostCredentialFiles(config, configPath).some((file) => pointsAtSameFile(file, target))) {
+        refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
+        return;
+      }
+      if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "deleting a secret needs the advanced-settings permission" }, { reason: "advanced", secret: name });
+        return;
+      }
+      let entry: ReturnType<typeof lstatSync>;
+      try {
+        entry = lstatSync(target);
+      } catch {
+        refuse(404, { error: `no stored secret named ${name}` }, { reason: "not_found", secret: name });
+        return;
+      }
+      if (entry.isSymbolicLink()) {
+        refuse(422, { error: "this secret name is a link made on the gateway host; change it there" }, { reason: "host_link", secret: name });
+        return;
+      }
+      if (!entry.isFile()) {
+        refuse(422, { error: "this secret name isn't a file; change it on the gateway host" }, { reason: "not_a_file", secret: name });
+        return;
+      }
+      const usedBy = connectorsReading(config, configPath, paths, target);
+      unlinkSync(target);
+      appendAdminAudit(paths.dataDir, { userId, action: "secret_deleted", secret: name, usedBy });
+      sendJson(res, 200, { ok: true, name, usedBy });
+    });
+    return;
+  }
   if (req.method === "POST" && secretMatch) {
     let name: string;
     try {
@@ -2086,6 +2174,20 @@ function connectorTokenFiles(
     }
   }
   return { all, read };
+}
+
+/** The configured connectors (channel ids) with a …File setting that reads this path, by the store guard's rule. */
+function connectorsReading(
+  config: MindStoneConfig | undefined,
+  configPath: string,
+  paths: MindStoneRuntimePaths,
+  target: string,
+): string[] {
+  const ids: string[] = [];
+  for (const [id, section] of Object.entries((config?.channels ?? {}) as Record<string, unknown>)) {
+    if (connectorTokenFiles({ channels: { [id]: section } } as MindStoneConfig, configPath, paths).all.some((file) => pointsAtSameFile(file, target))) ids.push(id);
+  }
+  return ids;
 }
 
 /** A path and, when it is a symlink (even a dangling one), where it points. */
