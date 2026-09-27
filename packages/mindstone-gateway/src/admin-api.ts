@@ -44,6 +44,8 @@ export function resolveAdminToken(config: MindStoneConfig | undefined, configPat
   return undefined;
 }
 
+export const MIN_ADMIN_TOKEN_LENGTH = 16;
+
 function sameSecret(a: string, b: string): boolean {
   return timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
 }
@@ -62,7 +64,11 @@ export function decideAdminAccess(input: {
   const requirement = resolveGatewayAuthRequirement({ config: input.config?.gateway?.auth, configPath: input.configPath });
   if (!requirement.enabled || requirement.mode === "misconfigured") return notEnabled;
   const adminToken = resolveAdminToken(input.config, input.configPath);
-  if (!adminToken) return notEnabled;
+  // Too short, or the same as the service credential every webchat and API
+  // caller holds: treat the admin API as not configured (#38 review).
+  if (!adminToken || adminToken.length < MIN_ADMIN_TOKEN_LENGTH) return notEnabled;
+  const serviceSecret = requirement.mode === "token" ? requirement.token : requirement.mode === "password" ? requirement.password : undefined;
+  if (serviceSecret && sameSecret(serviceSecret, adminToken)) return notEnabled;
   const presented = headerValue(input.headers, "x-mindstone-admin-token");
   if (!presented || !sameSecret(presented, adminToken)) {
     return { allowed: false, status: 401, error: "the admin API needs the admin credential" };
@@ -74,26 +80,30 @@ export function decideAdminAccess(input: {
 }
 
 /**
- * Keys whose values are secrets, matched on the key's ending with case and
- * separators ignored, so camelCase, snake_case and plural names count
- * (botToken, client_secret, secretKey, apiKeys, AWS_SECRET_ACCESS_KEY). A key
- * naming where a secret lives (tokenEnv, tokenFile, keyPath, secretName) is
- * not a secret. Budget fields such as contextWindowTokens and maxPromptTokens
- * are not secrets, so the plain plural "tokens" is left out.
+ * Keys whose values are secrets. A key is a secret when, with case and
+ * separators ignored, it contains a secret word (botToken, client_secret,
+ * privateKeyPem, apiKeyValue, authorizationHeader, credentialsJson, jwt,
+ * sessionId, AWS_SECRET_ACCESS_KEY) or ends in a short one (encryption key,
+ * dbPass, basicAuth, githubPat, sentryDsn), unless it ends in a word that
+ * names where a secret lives (tokenEnv, tokenFile, keyPath, secretName,
+ * tokenUrl).
+ * Masking a harmless value by mistake costs little; missing a secret doesn't.
  */
-const SECRET_SUFFIXES = [
-  "key", "keys", "token", "apitokens", "accesstokens", "authtokens", "refreshtokens", "password", "passwords", "passwd", "secret", "secrets", "credential", "credentials",
-  "pass", "passphrase", "auth", "authorization", "bearer", "cookie", "cookies", "dsn", "connectionstring", "signature", "pat",
+const SECRET_WORDS = [
+  "token", "secret", "password", "passwd", "credential", "bearer", "cookie", "jwt", "sessionid", "connectionstring",
+  "signature", "apikey", "privatekey", "accesskey", "secretkey", "signingkey", "encryptionkey", "authorization",
 ];
-const REFERENCE_SUFFIXES = ["env", "envs", "file", "files", "path", "paths", "ref", "refs", "name", "names", "id", "ids", "url", "mode"];
+/** Short words that count only at the end of a key, so `dispatch`, `mapping` or `author` aren't caught. */
+const SECRET_SUFFIX_WORDS = ["key", "keys", "pass", "auth", "pat", "pin", "otp", "pem", "dsn"];
+const REFERENCE_SUFFIXES = ["env", "envs", "file", "files", "path", "paths", "ref", "refs", "name", "names", "url", "urls", "mode", "dir"];
+/** Words that make even a number a secret (a PIN is a number; a token budget is not a secret). */
+const NUMERIC_SECRET_WORDS = ["password", "passwd", "secret", "pin", "otp", "pass"];
 /**
  * Secret keys whose object values are opened rather than masked whole: an
  * `auth` block (gateway.auth) mostly holds references and a mode, and its
  * secrets are caught by their own keys.
  */
 const OPEN_WHEN_OBJECT = new Set(["auth"]);
-/** Maps whose every value is a secret: header and environment maps. */
-const SECRET_MAPS = new Set(["headers", "env", "environment", "extraheaders", "defaultheaders"]);
 
 function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -103,24 +113,76 @@ export function isSecretKey(key: string): boolean {
   const lower = normalizeKey(key);
   if (!lower) return false;
   if (REFERENCE_SUFFIXES.some((suffix) => lower.endsWith(suffix))) return false;
-  return SECRET_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+  return SECRET_WORDS.some((word) => lower.includes(word)) || SECRET_SUFFIX_WORDS.some((word) => lower.endsWith(word));
 }
 
+/** Whether the value under `key` is replaced by `{ set }` as a whole. */
 function masksWhole(key: string, value: unknown): boolean {
   if (!key || !isSecretKey(key)) return false;
+  if (typeof value === "boolean") return false;
+  if (typeof value === "number") return NUMERIC_SECRET_WORDS.some((word) => normalizeKey(key).includes(word));
   return !(OPEN_WHEN_OBJECT.has(normalizeKey(key)) && value !== null && typeof value === "object" && !Array.isArray(value));
 }
 
+/** Header and environment maps (or lists): every value in them is a secret. */
 function isSecretMap(key: string): boolean {
-  return SECRET_MAPS.has(normalizeKey(key));
+  const lower = normalizeKey(key);
+  return lower.includes("header") || lower.startsWith("env") || lower.includes("environment") || lower.endsWith("vars") || lower.endsWith("variables");
 }
 
-const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@?#]+@/gi;
-const URL_SECRET_PARAM = /([?&;][^=&#\s]*(?:key|token|secret|password|passwd|signature|sig|auth|credential)[^=&#\s]*=)[^&#\s]+/gi;
+const SECRET_PARAM_NAME = /(key|token|secret|password|passwd|signature|sig|auth|credential|code|jwt|session)/i;
+/** A URL path segment that looks like a credential: long and mixed, or a bot token (`bot<id>:<secret>`). */
+function isSecretPathSegment(segment: string): boolean {
+  if (segment.includes(":")) return true;
+  return segment.length >= 16 && /[A-Za-z]/.test(segment) && /\d/.test(segment);
+}
 
-/** A string with credentials inside URLs masked: userinfo and secret-looking query parameters. */
+function maskParams(params: string): string {
+  return params.replace(/([^=&;#?]+)=([^&;#]*)/g, (match, name: string, value: string) =>
+    SECRET_PARAM_NAME.test(name) && value ? `${name}=***` : match);
+}
+
+/**
+ * A string with credentials inside a URL masked: userinfo, secret-looking
+ * query and fragment parameters, and path segments that look like tokens
+ * (webhook and bot URLs carry the secret in the path). Anything that isn't a
+ * URL is returned as it is.
+ */
 export function maskUrlCredentials(value: string): string {
-  return value.replace(URL_USERINFO, "$1***@").replace(URL_SECRET_PARAM, "$1***");
+  const scheme = /^([a-z][a-z0-9+.-]*:\/\/)(.*)$/is.exec(value.trim());
+  if (!scheme) return value;
+  let rest = scheme[2]!;
+  // Userinfo: everything up to the last "@" before the path, even with "/" in a password.
+  const at = rest.lastIndexOf("@");
+  const firstQuery = rest.search(/[?#]/);
+  if (at !== -1 && (firstQuery === -1 || at < firstQuery)) rest = `***@${rest.slice(at + 1)}`;
+  const queryStart = rest.search(/[?#]/);
+  const hostAndPath = queryStart === -1 ? rest : rest.slice(0, queryStart);
+  const tail = queryStart === -1 ? "" : rest.slice(queryStart);
+  const slash = hostAndPath.indexOf("/");
+  const host = slash === -1 ? hostAndPath : hostAndPath.slice(0, slash);
+  const path = slash === -1 ? "" : hostAndPath.slice(slash);
+  const maskedPath = path.split("/").map((segment) => (isSecretPathSegment(segment) ? "***" : segment)).join("/");
+  const hash = tail.indexOf("#");
+  const query = hash === -1 ? tail : tail.slice(0, hash);
+  const fragment = hash === -1 ? "" : tail.slice(hash);
+  const maskedFragment = fragment && !fragment.includes("=") && fragment.length > 17 ? "#***" : maskParams(fragment);
+  return `${scheme[1]}${host}${maskedPath}${maskParams(query)}${maskedFragment}`;
+}
+
+const SECRET_FLAG = /^--?[\w-]*(key|token|secret|password|passwd|auth|credential)[\w-]*$/i;
+const SECRET_FLAG_WITH_VALUE = /^(--?[\w-]*(?:key|token|secret|password|passwd|auth|credential)[\w-]*=).+$/i;
+
+/** A command-line style list (`["--api-key", "…"]`, `["--token=…"]`) with the secret values masked. */
+function maskArgs(items: unknown[]): unknown[] {
+  return items.map((item, index) => {
+    if (typeof item !== "string") return maskConfig(item);
+    const previous = items[index - 1];
+    if (typeof previous === "string" && SECRET_FLAG.test(previous)) return "***";
+    const withValue = SECRET_FLAG_WITH_VALUE.exec(item);
+    if (withValue) return `${withValue[1]}***`;
+    return maskUrlCredentials(item);
+  });
 }
 
 function isSet(value: unknown): boolean {
@@ -132,14 +194,19 @@ function isSet(value: unknown): boolean {
 
 /**
  * A copy of the config safe to show in a browser. The value under a secret
- * key, whatever its type, becomes `{ "set": true|false }`; so does every value
- * in a header or environment map; credentials inside URL strings are masked.
- * Secret references (tokenEnv, tokenFile, …) are kept.
+ * key becomes `{ "set": true|false }` whatever its type (booleans and token
+ * budgets excepted); so does every value in a header or environment map, and
+ * every string in a header or environment list. Credentials inside URLs and
+ * command-line style lists are masked. Secret references (tokenEnv,
+ * tokenFile, …) are kept.
  */
 export function maskConfig(value: unknown, key = "", parentIsSecretMap = false): unknown {
   if (masksWhole(key, value) || (parentIsSecretMap && key)) return { set: isSet(value) };
   if (typeof value === "string") return maskUrlCredentials(value);
-  if (Array.isArray(value)) return value.map((item) => maskConfig(item));
+  if (Array.isArray(value)) {
+    if (key && isSecretMap(key)) return value.map((item) => (typeof item === "string" ? { set: item !== "" } : maskConfig(item)));
+    return maskArgs(value);
+  }
   if (value && typeof value === "object") {
     const secretMap = Boolean(key) && isSecretMap(key);
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, maskConfig(v, k, secretMap)]));
@@ -210,64 +277,80 @@ export const EDITABLE_SECTIONS = [
 ] as const;
 
 const PLAIN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-const SECRETS_FILE = /^secrets\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const isBool = (value: unknown) => value === undefined || typeof value === "boolean";
-const isNumber = (value: unknown) => value === undefined || (typeof value === "number" && Number.isFinite(value));
-const isShortText = (value: unknown) => value === undefined || (typeof value === "string" && value.length <= 200 && !/[\r\n]/.test(value));
-const isNote = (value: unknown) => value === undefined || (typeof value === "string" && value.length <= 4000);
-const isId = (value: unknown) => value === undefined || (typeof value === "string" && PLAIN_ID.test(value));
-const oneOf = (...allowed: string[]) => (value: unknown) => value === undefined || (typeof value === "string" && allowed.includes(value));
-/** A list of plain ids with no "*" wildcard. `absentOk` says whether removing the list is also safe (fail closed when absent). */
-const isNarrowList = (absentOk: boolean) => (value: unknown) =>
-  value === undefined
-    ? absentOk
-    : Array.isArray(value) && value.length > 0 && value.length <= 200
-      && value.every((item) => typeof item === "string" && item.trim() !== "" && item.trim() !== "*" && item.length <= 320);
+type Check = (next: unknown, previous: unknown) => boolean;
+const isBool: Check = (value) => value === undefined || typeof value === "boolean";
+const inRange = (min: number, max: number): Check => (value) =>
+  value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= min && value <= max);
+const isShortText: Check = (value) => value === undefined || (typeof value === "string" && value.length <= 200 && !/[\r\n]/.test(value));
+const isNote: Check = (value) => value === undefined || (typeof value === "string" && value.length <= 4000);
+const isId: Check = (value) => value === undefined || (typeof value === "string" && PLAIN_ID.test(value));
+const oneOf = (...allowed: string[]): Check => (value) => value === undefined || (typeof value === "string" && allowed.includes(value));
+/** Only turning something off is free. */
+const onlyOff: Check = (value) => value === false;
+/** Only turning something on is free (a safety switch). */
+const onlyOn: Check = (value) => value === undefined || value === true;
+const stringList = (value: unknown): string[] | undefined =>
+  Array.isArray(value) && value.every((item) => typeof item === "string") ? (value as string[]) : undefined;
+/**
+ * Narrowing an access list is free, widening it is not: the new list must be
+ * a subset of the old one, with no "*". `removable` says whether deleting the
+ * list narrows it (a missing allowedSenders lets nobody in; a missing
+ * allowedChats or allowedGuilds lets every chat in).
+ */
+const narrows = (removable: boolean): Check => (value, previous) => {
+  if (value === undefined) return removable;
+  const next = stringList(value);
+  const before = stringList(previous) ?? [];
+  if (!next || (!removable && next.length === 0)) return false;
+  return next.every((item) => item.trim() !== "*" && before.includes(item));
+};
 
 /**
  * The settings the browser may change without the advanced-settings
- * permission (default deny, #38 review round 1): each dotted pattern ("*" is
- * one segment) with a check on the new value. Everything else needs the
- * permission, including anything that names an environment variable, a URL,
- * a file or a directory, sends memory to a new provider, or widens who may
- * talk to the agent or who counts as its owner.
+ * permission (default deny, #38 review rounds 1 and 2): each dotted pattern
+ * ("*" is one segment) with a check on the new value, given the old one.
+ * Everything else needs the permission: anything that names an environment
+ * variable, a URL, a file or a directory; sends memory to a new provider;
+ * turns off a safety rule; or opens the agent to anyone new (a new or
+ * re-enabled channel, a new sender, chat or guild, a token, answering
+ * without a mention, a changed trigger prefix, or who counts as the owner).
  */
-const SAFE_SETTINGS: Array<{ pattern: string; value: (value: unknown) => boolean }> = [
+const SAFE_SETTINGS: Array<{ pattern: string; value: Check }> = [
   { pattern: "routing.mode", value: oneOf("placeholder", "mock", "pi", "pi-session") },
   { pattern: "routing.defaultModel", value: isShortText },
   { pattern: "routing.defaultAgentId", value: isId },
   { pattern: "routing.mock.responsePrefix", value: isShortText },
   { pattern: "agents.*.id", value: isId },
   { pattern: "agents.*.defaultModel", value: isShortText },
-  { pattern: "agents.*.contextWindowTokens", value: isNumber },
+  { pattern: "agents.*.contextWindowTokens", value: inRange(1024, 10_000_000) },
   { pattern: "agents.*.profileId", value: isId },
   { pattern: "memory.autoRecall", value: isBool },
   { pattern: "memory.vectorStore", value: oneOf("lancedb", "sqlite-vec", "memory") },
-  { pattern: "memory.recall.maxResults", value: isNumber },
-  { pattern: "memory.recall.maxPromptTokens", value: isNumber },
-  { pattern: "memory.recall.minScore", value: isNumber },
+  { pattern: "memory.recall.maxResults", value: inRange(1, 100) },
+  { pattern: "memory.recall.maxPromptTokens", value: inRange(1, 1_000_000) },
+  { pattern: "memory.recall.minScore", value: inRange(0, 1) },
   { pattern: "memory.recall.dedupAgainstActiveContext", value: isBool },
-  { pattern: "memory.recall.maxActiveEntriesForDedup", value: isNumber },
+  { pattern: "memory.recall.maxActiveEntriesForDedup", value: inRange(1, 100_000) },
   { pattern: "memory.index.enabled", value: isBool },
-  { pattern: "memory.index.maxPromptTokens", value: isNumber },
-  { pattern: "memory.invariants.enabled", value: isBool },
-  { pattern: "memory.invariants.maxPromptTokens", value: isNumber },
-  { pattern: "channels.*.enabled", value: isBool },
-  // Missing allowedSenders lets nobody in; missing allowedChats or allowedGuilds lets every chat in.
-  { pattern: "channels.*.allowedSenders", value: isNarrowList(true) },
-  { pattern: "channels.*.allowedChats", value: isNarrowList(false) },
-  { pattern: "channels.*.allowedGuilds", value: isNarrowList(false) },
-  { pattern: "channels.*.triggerPrefix", value: isShortText },
-  { pattern: "channels.*.respondWithoutMention", value: isBool },
-  { pattern: "channels.*.pollMs", value: isNumber },
-  { pattern: "channels.*.pollIntervalMs", value: isNumber },
-  { pattern: "channels.*.reconnectMs", value: isNumber },
-  { pattern: "channels.*.maxBodyChars", value: isNumber },
-  // A secret stored through POST /admin/secrets, referenced by its path relative to the config.
-  { pattern: "channels.*.tokenFile", value: (v) => v === undefined || (typeof v === "string" && SECRETS_FILE.test(v)) },
+  { pattern: "memory.index.maxPromptTokens", value: inRange(1, 1_000_000) },
+  { pattern: "memory.invariants.enabled", value: onlyOn },
+  { pattern: "memory.invariants.maxPromptTokens", value: inRange(1, 1_000_000) },
+  { pattern: "channels.*.enabled", value: onlyOff },
+  { pattern: "channels.*.allowedSenders", value: narrows(true) },
+  { pattern: "channels.*.allowedChats", value: narrows(false) },
+  { pattern: "channels.*.allowedGuilds", value: narrows(false) },
+  { pattern: "channels.*.respondWithoutMention", value: onlyOff },
+  { pattern: "channels.*.pollMs", value: inRange(100, 3_600_000) },
+  { pattern: "channels.*.pollIntervalMs", value: inRange(100, 3_600_000) },
+  { pattern: "channels.*.reconnectMs", value: inRange(100, 3_600_000) },
+  { pattern: "channels.*.maxBodyChars", value: inRange(100, 1_000_000) },
   { pattern: "session.mode", value: oneOf("single", "per_surface") },
   { pattern: "contextManagement.mode", value: oneOf("auto_compact", "sliding_window") },
-  { pattern: "contextManagement.*", value: (v) => typeof v === "number" ? Number.isFinite(v) : isBool(v) },
+  { pattern: "contextManagement.*Percent", value: inRange(1, 100) },
+  { pattern: "contextManagement.*Tokens", value: inRange(0, 10_000_000) },
+  { pattern: "contextManagement.minRecentMessages", value: inRange(0, 10_000) },
+  { pattern: "contextManagement.emergencyAutoHandoff", value: isBool },
+  { pattern: "contextManagement.preserveTranscript", value: isBool },
   { pattern: "gateway.http.chatCompletions.enabled", value: isBool },
   { pattern: "gateway.http.responses.enabled", value: isBool },
   { pattern: "personas.active", value: isId },
@@ -277,10 +360,12 @@ const SAFE_SETTINGS: Array<{ pattern: string; value: (value: unknown) => boolean
   { pattern: "onboarding.identity.*", value: isNote },
 ];
 
+/** A dotted pattern: "*" is a whole segment; "*Suffix" matches a segment ending in Suffix. */
 function matchesPattern(pattern: string, path: string): boolean {
   const p = pattern.split(".");
   const q = path.split(".");
-  return p.length === q.length && p.every((part, i) => part === "*" || part === q[i]);
+  return p.length === q.length && p.every((part, i) =>
+    part === "*" || part === q[i] || (part.startsWith("*") && q[i]!.endsWith(part.slice(1)) && q[i]!.length > part.length - 1));
 }
 
 function valueAt(root: unknown, path: string): unknown {
@@ -293,15 +378,16 @@ function valueAt(root: unknown, path: string): unknown {
 }
 
 /**
- * Whether changing `path` (a dotted path from the config root) to its value
- * in `nextConfig` needs the advanced-settings permission. Default deny: only
- * a SAFE_SETTINGS path whose new value passes its check is free. The first
- * matching pattern decides.
+ * Whether changing `path` (a dotted path from the config root) from its value
+ * in `previousConfig` to its value in `nextConfig` needs the advanced-settings
+ * permission. Default deny: only a SAFE_SETTINGS path whose change passes its
+ * check is free. The first matching pattern decides. Patch keys never contain
+ * dots (mergeConfigPatch refuses them), so a path names exactly one setting.
  */
-export function isAdvancedChange(path: string, nextConfig: unknown): boolean {
+export function isAdvancedChange(path: string, nextConfig: unknown, previousConfig?: unknown): boolean {
   const rule = SAFE_SETTINGS.find((candidate) => matchesPattern(candidate.pattern, path));
   if (!rule) return true;
-  return !rule.value(valueAt(nextConfig, path));
+  return !rule.value(valueAt(nextConfig, path), valueAt(previousConfig, path));
 }
 
 /** Dotted paths whose values differ between two values (leaf level). */
@@ -332,21 +418,34 @@ const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 export const MAX_PATCH_DEPTH = 32;
 
 /**
- * JSON merge patch (RFC 7396) of `patch` onto `target`, except that a masked
- * secret sent back unchanged (`{ set: … }` where GET /admin/config masked a
- * value) keeps the stored value, so the Console can round-trip what it read
- * without wiping keys. Prototype keys and patches nested deeper than
- * MAX_PATCH_DEPTH throw.
+ * JSON merge patch (RFC 7396) of `patch` onto `target`, for the Console.
+ * - What GET /admin/config returned, sent back unchanged, keeps the stored
+ *   value: a masked secret `{ set: … }`, a URL with its credentials masked,
+ *   a masked header list. So the Console can round-trip what it read.
+ * - A new plain value for a secret is refused: secrets go through
+ *   POST /admin/secrets and are referenced with tokenFile. (This also means a
+ *   patch can't be used to guess a stored secret.)
+ * - Keys must be non-empty and contain no ".", so every changed path names
+ *   exactly one setting. Prototype keys and patches nested deeper than
+ *   MAX_PATCH_DEPTH are refused.
  */
 export function mergeConfigPatch(target: unknown, patch: unknown, key = "", parentIsSecretMap = false, depth = 0): unknown {
   if (depth > MAX_PATCH_DEPTH) throw new AdminPatchError("the patch is nested too deeply");
-  const secretSlot = masksWhole(key, target) || (parentIsSecretMap && key);
+  if (target !== undefined) {
+    const shown = JSON.stringify(maskConfig(target, key, parentIsSecretMap));
+    if (JSON.stringify(patch) === shown) return target;
+  }
+  const secretSlot = masksWhole(key, patch) || masksWhole(key, target) || (parentIsSecretMap && key);
   if (secretSlot && isMaskedSecret(patch)) return target;
+  if (secretSlot) {
+    throw new AdminPatchError(`${key}: store secrets with POST /admin/secrets/<name> and reference them with tokenFile`);
+  }
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) return patch;
   const base: Record<string, unknown> = target && typeof target === "object" && !Array.isArray(target) ? { ...(target as Record<string, unknown>) } : {};
   const secretMap = Boolean(key) && isSecretMap(key);
   for (const [k, v] of Object.entries(patch as Record<string, unknown>)) {
     if (FORBIDDEN_KEYS.has(k)) throw new AdminPatchError(`the key "${k}" is not allowed`);
+    if (!k || k.includes(".")) throw new AdminPatchError(`the key "${k.slice(0, 64)}" is not allowed: keys can't be empty or contain "."`);
     if (v === null) delete base[k];
     else base[k] = mergeConfigPatch(base[k], v, k, secretMap, depth + 1);
   }
@@ -373,7 +472,24 @@ export function configEtag(content: string): string {
   return `"${createHash("sha256").update(content).digest("hex").slice(0, 32)}"`;
 }
 
-export type AdminPermissions = { advancedSettings: boolean; grantedBy?: string; grantedAt?: string };
+export type AdminPermissions = { advancedSettings: boolean; grantedBy?: string; grantedAt?: string; expiresAt?: string };
+
+/** How long a grant of the advanced-settings permission lasts. */
+export const ADVANCED_GRANT_MS = 60 * 60 * 1000;
+
+/** The permission as stored, with an expired grant read as not granted. */
+export function effectivePermissions(stored: AdminPermissions, now = Date.now()): AdminPermissions {
+  if (stored.advancedSettings !== true) return { advancedSettings: false };
+  const expires = stored.expiresAt ? Date.parse(stored.expiresAt) : NaN;
+  if (!Number.isFinite(expires) || expires <= now) return { advancedSettings: false };
+  return stored;
+}
+
+/** Whether an If-Match header (strong or weak, one etag or a list) matches the current etag. */
+export function ifMatchSatisfied(header: string, etag: string): boolean {
+  if (header.trim() === "*") return true;
+  return header.split(",").map((part) => part.trim().replace(/^W\//, "")).includes(etag);
+}
 
 /** Where the admin permission lives: runtime state, not config, so a config patch can't grant it. */
 export function adminPermissionsPath(dataDir: string): string {

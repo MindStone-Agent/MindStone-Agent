@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
@@ -12,6 +12,9 @@ import {
   configEtag,
   decideAdminAccess,
   EDITABLE_SECTIONS,
+  ADVANCED_GRANT_MS,
+  effectivePermissions,
+  ifMatchSatisfied,
   isAdvancedChange,
   jsonDepth,
   MAX_PATCH_DEPTH,
@@ -1572,8 +1575,10 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
   const gate = decideAdminAccess({ config: gateConfig.config, configPath, headers: req.headers });
   const userId = forwardedUser(req).userId;
   if (!gate.allowed) {
-    // 404 means the admin API doesn't exist here: nothing to audit.
-    if (gate.status !== 404) appendAdminAudit(paths.dataDir, { userId: userId ?? null, action: "refused", status: gate.status, method: req.method, path: url.pathname });
+    // Only callers past the admin credential are audited: a 404 means there is
+    // no admin API, and auditing 401s would let any service-token holder grow
+    // the log (#38 review).
+    if (gate.status === 403) appendAdminAudit(paths.dataDir, { userId: userId ?? null, action: "refused", status: gate.status, method: req.method, path: url.pathname });
     sendJson(res, gate.status, { ok: false, error: gate.error });
     return;
   }
@@ -1618,8 +1623,9 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       return;
     }
     await withAdminWriteLock(() => {
+      const now = Date.now();
       const permissions: AdminPermissions = enabled
-        ? { advancedSettings: true, grantedBy: userId, grantedAt: new Date().toISOString() }
+        ? { advancedSettings: true, grantedBy: userId, grantedAt: new Date(now).toISOString(), expiresAt: new Date(now + ADVANCED_GRANT_MS).toISOString() }
         : { advancedSettings: false };
       writeFileAtomic(adminPermissionsPath(paths.dataDir), `${JSON.stringify(permissions, null, 2)}\n`, 0o600);
       appendAdminAudit(paths.dataDir, { userId, action: enabled ? "advanced_settings_granted" : "advanced_settings_revoked" });
@@ -1651,7 +1657,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         return;
       }
       const currentText = readConfigText(configPath);
-      if (ifMatch && ifMatch !== "*" && ifMatch !== configEtag(currentText)) {
+      if (ifMatch && !ifMatchSatisfied(ifMatch, configEtag(currentText))) {
         refuse(412, { error: "the config changed since you read it; reload and try again" }, { section, reason: "etag" });
         return;
       }
@@ -1669,16 +1675,29 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         return;
       }
       const next = { ...current, [section]: merged } as MindStoneConfig;
-      if ((next.gateway?.auth as { mode?: unknown } | undefined)?.mode === "none") {
-        refuse(422, { error: "gateway auth can't be turned off from the Console" }, { section, reason: "auth_none" });
+      // Gateway auth and the admin credential are set on the gateway host,
+      // never from the Console, even with the permission: a change there can
+      // open the gateway or lock everyone out (#38 review).
+      const hostOnly = changed.filter((path) => /^gateway\.(auth|admin)(\.|$)/.test(path));
+      const nextAuth = resolveGatewayAuthRequirement({ config: next.gateway?.auth, configPath });
+      if (hostOnly.length > 0 || !nextAuth.enabled || nextAuth.mode === "misconfigured") {
+        refuse(422, {
+          error: "gateway auth and the admin credential can only be changed on the gateway host",
+          errors: hostOnly.map((path) => ({ path, error: "set on the gateway host" })),
+        }, { section, reason: "host_only", paths: hostOnly });
         return;
       }
-      const issues = validateMindStoneConfig(next);
+      let issues: string[];
+      try {
+        issues = validateMindStoneConfig(next);
+      } catch {
+        issues = ["the new config has a value of the wrong type"];
+      }
       if (issues.length > 0) {
         sendJson(res, 422, { ok: false, error: "the change doesn't validate", errors: issues.map((issue) => ({ error: issue })) });
         return;
       }
-      const advanced = changed.filter((path) => isAdvancedChange(path, next));
+      const advanced = changed.filter((path) => isAdvancedChange(path, next, current));
       if (advanced.length > 0 && !readAdminPermissions(paths.dataDir).advancedSettings) {
         refuse(403, {
           error: "these settings need the advanced-settings permission",
@@ -1714,13 +1733,28 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       sendJson(res, 400, { ok: false, error: "value must be a non-empty string of at most 16384 characters" });
       return;
     }
-    const secretsDir = `${paths.dataDir}/secrets`;
-    mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
-    chmodSync(secretsDir, 0o700);
-    writeFileAtomic(`${secretsDir}/${name}`, body.value, 0o600);
-    appendAdminAudit(paths.dataDir, { userId, action: "secret_stored", secret: name });
-    // The value is never echoed. Reference it from config as tokenFile: "secrets/<name>".
-    sendJson(res, 200, { ok: true, name, tokenFile: `secrets/${name}` });
+    const value = body.value;
+    await withAdminWriteLock(() => {
+      const secretsDir = `${paths.dataDir}/secrets`;
+      const target = resolvePath(secretsDir, name);
+      // The gateway's own credentials are set on the host, never from the Console.
+      const hostCredentials = hostCredentialFiles(loadMindStoneConfig(configPath).config, configPath);
+      if (hostCredentials.includes(target)) {
+        refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
+        return;
+      }
+      // Replacing a secret something already uses (a connector's token) needs the permission.
+      if (existsSync(target) && !readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "replacing an existing secret needs the advanced-settings permission" }, { reason: "advanced", secret: name });
+        return;
+      }
+      mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
+      chmodSync(secretsDir, 0o700);
+      writeFileAtomic(target, value, 0o600);
+      appendAdminAudit(paths.dataDir, { userId, action: "secret_stored", secret: name });
+      // The value is never echoed. Reference it from config as tokenFile: "secrets/<name>".
+      sendJson(res, 200, { ok: true, name, tokenFile: `secrets/${name}` });
+    });
     return;
   }
   sendJson(res, 404, { ok: false, error: "unknown admin endpoint" });
@@ -1754,13 +1788,21 @@ function fileMode(path: string, fallback: number): number {
   }
 }
 
+/** The permission in force: an expired grant reads as not granted. */
 function readAdminPermissions(dataDir: string): AdminPermissions {
   try {
-    const parsed = JSON.parse(readFileSync(adminPermissionsPath(dataDir), "utf-8")) as AdminPermissions;
-    return { ...parsed, advancedSettings: parsed.advancedSettings === true };
+    return effectivePermissions(JSON.parse(readFileSync(adminPermissionsPath(dataDir), "utf-8")) as AdminPermissions);
   } catch {
     return { advancedSettings: false };
   }
+}
+
+/** Absolute paths of the files holding the gateway's own credentials (auth and admin token files). */
+function hostCredentialFiles(config: MindStoneConfig | undefined, configPath: string): string[] {
+  const gateway = config?.gateway as { auth?: { tokenFile?: unknown }; admin?: { tokenFile?: unknown } } | undefined;
+  return [gateway?.auth?.tokenFile, gateway?.admin?.tokenFile]
+    .filter((file): file is string => typeof file === "string" && file.trim() !== "")
+    .map((file) => (isAbsolute(file) ? resolvePath(file) : resolvePath(dirname(configPath), file)));
 }
 
 /** A JSON object body, or an error response (then undefined). */
@@ -1783,10 +1825,12 @@ function writeFileAtomic(path: string, content: string, mode: number): void {
   renameSync(temp, path);
 }
 
-/** Append-only audit of admin writes, with the deciding user id. Never holds secret values. */
+/** Append-only audit of admin writes and refusals, with the deciding user id. Never holds secret values. */
 function appendAdminAudit(dataDir: string, event: Record<string, unknown>): void {
   mkdirSync(`${dataDir}/admin`, { recursive: true });
-  appendFileSync(`${dataDir}/admin/audit.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`, { mode: 0o600 });
+  // Caller-chosen strings (user id, path) are capped so one entry stays small.
+  const capped = Object.fromEntries(Object.entries(event).map(([key, value]) => [key, typeof value === "string" && value.length > 200 ? `${value.slice(0, 200)}…` : value]));
+  appendFileSync(`${dataDir}/admin/audit.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), ...capped })}\n`, { mode: 0o600 });
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {

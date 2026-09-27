@@ -34,9 +34,12 @@ p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "con
 c = json.loads(p.read_text())
 mode = os.environ["AUTH_MODE"]
 gw = c.setdefault("gateway", {})
-gw["auth"] = {"mode": "none"} if mode == "none" else {"mode": "token", "tokenEnv": "ADMIN_SMOKE_TOKEN"}
+# tokenEnv wins; tokenFile is listed so the secrets endpoint must treat it as a host credential.
+gw["auth"] = {"mode": "none"} if mode == "none" else {"mode": "token", "tokenEnv": "ADMIN_SMOKE_TOKEN", "tokenFile": "secrets/gateway-token"}
 if os.environ["ADMIN_TOKEN_MODE"] == "env":
     gw["admin"] = {"tokenEnv": "ADMIN_SMOKE_ADMIN_TOKEN"}
+elif os.environ["ADMIN_TOKEN_MODE"] == "same":
+    gw["admin"] = {"tokenEnv": "ADMIN_SMOKE_TOKEN"}
 else:
     gw.pop("admin", None)
 c["routing"] = {"mode": os.environ["ROUTING"], "defaultAgentId": "default", "defaultModel": "mindstone/mock"}
@@ -56,6 +59,27 @@ c["channels"] = {"telegram": {
     "env": {"SOME_VAR": "SENTINEL-ENVMAP-7731"},
     "apiBaseUrl": "https://user:SENTINEL-USERINFO-7731@api.example.test/v1?api_key=SENTINEL-QUERY-7731&page=2",
     "tokenFile": "secrets/example",
+    # Round 2 review shapes.
+    "privateKeyPem": "SENTINEL-PEM-7731",
+    "apiKeyValue": "SENTINEL-KEYVALUE-7731",
+    "authorizationHeader": "SENTINEL-AUTHHEADER-7731",
+    "jwt": "SENTINEL-JWT-7731",
+    "sessionId": "SENTINEL-SESSIONID-7731",
+    "tokens": ["SENTINEL-TOKENS-7731"],
+    "credentialsJson": "SENTINEL-CREDJSON-7731",
+    "clientSecretValue": "SENTINEL-SECRETVALUE-7731",
+    "extraHeaders": ["Authorization: Bearer SENTINEL-HEADERLIST-7731"],
+    "environmentVariables": {"A": "SENTINEL-ENVVARS-7731"},
+    "envVars": {"B": "SENTINEL-ENVVARS2-7731"},
+    "webhookUrl": "https://hooks.slack.example/services/T0000/B0000/SENTINELWEBHOOK7731abcd",
+    "botUrl": "https://api.telegram.example/bot123456:SENTINEL-BOTPATH-7731/sendMessage",
+    "slashUrl": "https://user:pa/SENTINEL-SLASHPW-7731@db.example.test/x",
+    "callbackUrl": "https://app.example.test/cb#access_token=SENTINEL-FRAGMENT-7731&state=1",
+    "args": ["--api-key", "SENTINEL-ARG-7731", "--token=SENTINEL-ARGEQ-7731", "--verbose"],
+    # Not secrets: must stay readable.
+    "dispatch": "fifo",
+    "mapping": {"a": "b"},
+    "author": "someone",
 }}
 agents = c.setdefault("agents", {})
 agents["default"] = {**agents.get("default", {"id": "default"}), "contextWindowTokens": 64000}
@@ -84,6 +108,12 @@ start_gateway
 test "$(code "${AUTH[@]}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/status")" = "404" || { echo "admin API reachable with no admin credential configured" >&2; exit 1; }
 stop_gateway
 
+# 1c. The admin credential is the service credential: treated as not configured.
+configure token mock same
+start_gateway
+test "$(code "${AUTH[@]}" -H "x-mindstone-admin-token: ${ADMIN_SMOKE_TOKEN}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/status")" = "404" || { echo "an admin credential equal to the service token must not enable the admin API" >&2; exit 1; }
+stop_gateway
+
 # 2. Token auth plus the admin credential.
 configure token placeholder
 start_gateway
@@ -101,7 +131,9 @@ const fail = (m) => { console.error(m); process.exit(1); };
 const status = JSON.parse(process.env.STATUS);
 const conf = JSON.parse(process.env.CONF);
 if (status.onboarded !== false || status.steps?.provider?.done !== false) fail(`placeholder routing must not count as onboarded: ${JSON.stringify(status.steps)}`);
-const sentinels = ["APIKEY", "BOT-TOKEN", "OBJECT", "ARRAY", "SNAKE", "UPPER", "AUTHZ", "COOKIE", "DSN", "HEADER", "ENVMAP", "USERINFO", "QUERY"].map((s) => `SENTINEL-${s}-7731`);
+const sentinels = ["APIKEY", "BOT-TOKEN", "OBJECT", "ARRAY", "SNAKE", "UPPER", "AUTHZ", "COOKIE", "DSN", "HEADER", "ENVMAP", "USERINFO", "QUERY",
+  "PEM", "KEYVALUE", "AUTHHEADER", "JWT", "SESSIONID", "TOKENS", "CREDJSON", "SECRETVALUE", "HEADERLIST", "ENVVARS", "ENVVARS2", "BOTPATH", "SLASHPW", "FRAGMENT", "ARG", "ARGEQ"]
+  .map((s) => `SENTINEL-${s}-7731`).concat(["SENTINELWEBHOOK7731abcd"]);
 for (const [label, text] of [["status", process.env.STATUS], ["config", process.env.CONF]]) {
   for (const secret of [...sentinels, "admin-smoke-service-token", "admin-smoke-admin-token"]) {
     if (text.includes(secret)) fail(`${label} leaked ${secret}`);
@@ -117,6 +149,9 @@ if (!tg.apiBaseUrl?.includes("api.example.test") || !tg.apiBaseUrl.includes("pag
 if (tg.tokenEnv !== "TELEGRAM_TOKEN_ENV_NAME" || tg.tokenFile !== "secrets/example") fail("secret references (tokenEnv, tokenFile) should stay visible");
 if (conf.config?.gateway?.auth?.tokenEnv !== "ADMIN_SMOKE_TOKEN") fail("gateway.auth.tokenEnv should stay visible");
 if (conf.config?.agents?.default?.contextWindowTokens !== 64000) fail("a token budget is not a secret");
+if (tg.dispatch !== "fifo" || tg.mapping?.a !== "b" || tg.author !== "someone") fail(`ordinary keys should stay readable: ${JSON.stringify({ d: tg.dispatch, m: tg.mapping, a: tg.author })}`);
+if (!tg.webhookUrl?.startsWith("https://hooks.slack.example/services/")) fail(`a webhook URL should keep its host and readable path: ${tg.webhookUrl}`);
+if (tg.args?.[3] !== "--verbose" || tg.args?.[0] !== "--api-key") fail(`argument lists should keep their flags: ${JSON.stringify(tg.args)}`);
 if (typeof conf.etag !== "string") fail("GET /admin/config should return an etag");
 console.log("admin read assertions passed");
 NODE
@@ -154,10 +189,18 @@ expect "$(patch nosuchsection '{"a":1}')" 404 "an unknown section"
 expect "$(curl -s -o "${BODY}" -w '%{http_code}' -X PATCH "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' -H 'content-type: application/json' -d '{"autoRecall":false}' "${BASE}/admin/config/memory")" 400 "a write without a user id"
 
 # Safe settings: free without the permission.
-expect "$(patch channels '{"telegram":{"allowedSenders":["alice","bob"]}}')" 200 "adding a named sender"
-expect "$(patch channels '{"telegram":{"tokenFile":"secrets/tg.token"}}')" 200 "a tokenFile under secrets/"
 expect "$(patch personas '{"active":"analyst"}')" 200 "choosing a persona"
 expect "$(patch agents '{"default":{"contextWindowTokens":96000}}')" 200 "an agent's context window"
+expect "$(patch channels '{"telegram":{"allowedChats":["chat-1"],"respondWithoutMention":false}}')" 200 "keeping a chat allowlist and turning off answering without a mention"
+# The URL GET returned (credentials masked), sent back unchanged, keeps the stored URL.
+MASKED_URL="$(curl -s "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/config" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).config.channels.telegram.apiBaseUrl))')"
+expect "$(patch channels "{\"telegram\":{\"apiBaseUrl\":\"${MASKED_URL}\"}}")" 200 "sending a masked URL back unchanged"
+grep -q 'SENTINEL-USERINFO-7731' "${CONFIG}" || { echo "a masked URL round trip destroyed the stored credential" >&2; exit 1; }
+# A new plain secret value is refused: secrets go through /admin/secrets.
+expect "$(patch channels '{"telegram":{"botToken":"NEW-PLAIN-TOKEN"}}')" 400 "a plain secret value in a patch"
+grep -q 'NEW-PLAIN-TOKEN' "${CONFIG}" && { echo "a plain secret was written" >&2; exit 1; }
+# A key with a dot can't pose as a safe path.
+expect "$(patch channels '{"evil.enabled":"https://attacker.example.test/x"}')" 400 "a key containing a dot"
 # Default deny: everything else needs the permission (#38 review round 1).
 while IFS='|' read -r section body label; do
   [[ -n "${section}" ]] || continue
@@ -169,7 +212,15 @@ channels|{"telegram":{"allowedSenders":["*"]}}|a wildcard sender
 channels|{"telegram":{"allowedChats":null}}|removing a chat allowlist
 channels|{"telegram":{"ownerSenders":["mallory"]}}|who counts as the owner
 channels|{"telegram":{"tokenFile":"/etc/passwd"}}|a tokenFile outside secrets/
+channels|{"telegram":{"tokenFile":"secrets/tg.token"}}|a new token file
+channels|{"telegram":{"allowedSenders":["alice","bob"]}}|adding a sender
+channels|{"telegram":{"enabled":true}}|enabling a channel
+channels|{"attackerbot":{"enabled":false,"allowedSenders":["mallory"]}}|creating a channel
+channels|{"telegram":{"respondWithoutMention":true}}|answering without a mention
+channels|{"telegram":{"triggerPrefix":""}}|changing the trigger prefix
 channels|{"telegram":{"sendPolicy":"open"}}|an unlisted connector setting
+agents|{"default":{"contextWindowTokens":-5}}|a negative context window
+memory|{"invariants":{"enabled":false}}|turning off the always-on rules
 memory|{"transcripts":{"includeNonOwner":true}}|indexing non-owner turns
 memory|{"embeddingProvider":"openai:text-embedding-3-small"}|a new embedding provider
 routing|{"pi":{"builtinTools":["bash"]}}|Pi built-in tools
@@ -177,7 +228,7 @@ agents|{"default":{"identityPath":"/etc/passwd"}}|a path setting
 personas|{"active":"../x"}|a persona id with a path
 workspace|{"root":"/"}|workspace
 CASES
-grep -q 'attacker\|mallory\|"bash"\|includeNonOwner\|/etc/passwd' "${CONFIG}" && { echo "a refused patch was written" >&2; exit 1; }
+grep -q 'attacker\|mallory\|"bash"\|includeNonOwner\|/etc/passwd\|"bob"\|tg.token' "${CONFIG}" && { echo "a refused patch was written" >&2; exit 1; }
 expect "$(patch routing '{"mode":"bogus"}')" 422 "an invalid change"
 grep -q '"bogus"' "${CONFIG}" && { echo "an invalid patch was written" >&2; exit 1; }
 # Malformed patches.
@@ -187,14 +238,18 @@ expect "$(patch onboarding "${DEEP}")" 400 "a deeply nested patch"
 # If-Match: a stale etag is refused; the current one is accepted.
 ETAG="$(curl -s "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/config" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).etag))')"
 expect "$(patch memory '{"autoRecall":false}' -H 'If-Match: "stale"')" 412 "a stale If-Match"
-expect "$(patch memory '{"autoRecall":false}' -H "If-Match: ${ETAG}")" 200 "a current If-Match"
+expect "$(patch memory '{"autoRecall":false}' -H "If-Match: W/${ETAG}")" 200 "a current weak If-Match"
 
 # The advanced permission.
 expect "$(post /admin/permissions/advanced '{"enabled":true}')" 400 "granting advanced settings without the confirmation"
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings"
 expect "$(patch routing '{"pi":{"builtinTools":["read"]}}')" 200 "an advanced patch with the permission"
 expect "$(patch gateway '{"auth":{"mode":"none"}}')" 422 "turning gateway auth off, even with the permission"
-has gateway.auth.mode '"token"' || { echo "gateway auth was turned off" >&2; exit 1; }
+expect "$(patch gateway '{"auth":null}')" 422 "removing gateway auth, even with the permission"
+expect "$(patch gateway '{"auth":{"mode":"NONE"}}')" 422 "an unknown gateway auth mode, even with the permission"
+expect "$(patch gateway '{"auth":{"tokenEnv":"HOME"}}')" 422 "pointing gateway auth at another variable, even with the permission"
+expect "$(patch gateway '{"admin":{"tokenEnv":"ADMIN_SMOKE_TOKEN"}}')" 422 "changing the admin credential, even with the permission"
+has gateway.auth.mode '"token"' && has gateway.auth.tokenEnv '"ADMIN_SMOKE_TOKEN"' || { echo "gateway auth was changed from the Console" >&2; exit 1; }
 # A patch whose body arrives slowly is judged against the config and permission
 # at the time it lands, not when it started: revoking in between wins, and a
 # change made in between is kept.
@@ -218,8 +273,17 @@ wait "${slow_pid}"
 has memory.autoRecall true || { echo "a change made during a slow request was lost" >&2; exit 1; }
 grep -q '"bash"' "${CONFIG}" && { echo "the slow advanced patch was written" >&2; exit 1; }
 
+# An expired grant is no grant.
+PERMS="${TEMP_RUNTIME}/mindstone/admin/permissions.json"
+printf '{"advancedSettings":true,"grantedBy":"smoke-admin","grantedAt":"2026-01-01T00:00:00Z","expiresAt":"2026-01-01T01:00:00Z"}\n' > "${PERMS}"
+expect "$(patch routing '{"pi":{"builtinTools":["write"]}}')" 403 "an advanced patch on an expired grant"
+printf '{"advancedSettings":false}\n' > "${PERMS}"
+
 # Secrets: stored 0600 in a 0700 directory, never echoed.
 expect "$(post /admin/secrets/tg.token '{"value":"SECRET-VALUE-4412"}')" 200 "storing a secret"
+expect "$(post /admin/secrets/tg.token '{"value":"SECRET-VALUE-9999"}')" 403 "replacing an existing secret without the permission"
+expect "$(post /admin/secrets/gateway-token '{"value":"HIJACK-9999"}')" 422 "writing the gateway's own token file"
+[[ -e "${TEMP_RUNTIME}/mindstone/secrets/gateway-token" ]] && { echo "the gateway token file was written from the Console" >&2; exit 1; }
 grep -q 'SECRET-VALUE-4412' "${BODY}" && { echo "the secret was echoed back" >&2; exit 1; }
 SECRET_FILE="${TEMP_RUNTIME}/mindstone/secrets/tg.token"
 [[ "$(cat "${SECRET_FILE}")" == "SECRET-VALUE-4412" ]] || { echo "the secret was not stored" >&2; exit 1; }
@@ -232,6 +296,10 @@ AUDIT="${TEMP_RUNTIME}/mindstone/admin/audit.jsonl"
 [[ "$(grep -c '"userId":"smoke-admin"' "${AUDIT}")" -ge 5 ]] || { echo "admin writes are not audited with the user id" >&2; cat "${AUDIT}" >&2; exit 1; }
 grep -q '"action":"refused".*"reason":"advanced"' "${AUDIT}" || { echo "refused writes are not audited" >&2; exit 1; }
 grep -q 'SECRET-VALUE-4412\|SENTINEL' "${AUDIT}" && { echo "a secret value reached the audit log" >&2; exit 1; }
+# A caller without the admin credential can't write to the audit log.
+before="$(wc -l < "${AUDIT}")"
+code "${AUTH[@]}" -H 'x-mindstone-user-role: admin' -H "x-mindstone-user-id: $(printf 'x%.0s' $(seq 1 500))" "${BASE}/admin/config" >/dev/null
+[[ "$(wc -l < "${AUDIT}")" == "${before}" ]] || { echo "a 401 was audited" >&2; exit 1; }
 # A non-admin can't write, even holding both credentials.
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: user' -H 'content-type: application/json' -d '{"autoRecall":false}' "${BASE}/admin/config/memory")" == "403" ]] || { echo "a user-role patch must be 403" >&2; exit 1; }
 echo "admin write assertions passed"
