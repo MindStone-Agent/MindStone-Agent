@@ -190,7 +190,7 @@ function looksLikeCredential(value: string): boolean {
  * `"name": "value"`, header lines, Bearer/Basic credentials, `-u user:pass`,
  * and credentials in URLs anywhere in the string.
  */
-function maskInlineSecrets(value: string): string {
+export function maskInlineSecrets(value: string): string {
   return value
     .replace(URL_IN_TEXT, (url) => maskUrlCredentials(url))
     .replace(INLINE_SECRET_EQ, (_match, name: string) => `${name}=***`)
