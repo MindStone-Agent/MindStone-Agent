@@ -1041,7 +1041,7 @@ function printStatus(json = false): void {
       ...(status.connectors.length
         ? status.connectors.map(
             (connector) =>
-              `Connector ${connector.connectorId}: ${connector.runtime.state}${connector.runtime.lastError ? ` (${connector.runtime.lastError})` : ""} · credential ${connector.credential.configured ? (connector.credential.present ? `present via ${connector.credential.source}` : `MISSING (${connector.credential.error})`) : "none"} · queue p${connector.queue.pending}/d${connector.queue.delivered}/x${connector.queue.dead}`,
+              `Connector ${connector.connectorId}: ${connector.runtime.state}${connector.runtime.lastError ? ` (${connector.runtime.lastError})` : ""} · credential ${connector.credential.configured ? (connector.credential.present ? `present via ${connector.credential.source}` : `MISSING (${connector.credential.error})`) : "none"} · queue ${connector.queue.error ? `UNREADABLE (${connector.queue.error})` : `p${connector.queue.pending}/d${connector.queue.delivered}/x${connector.queue.dead}`}`,
           )
         : ["Connectors: none configured"]),
       loaded.config ? "" : undefined,
@@ -1985,63 +1985,69 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
   }
 
   if (subcommand === "approve") {
-    // An approve interrupted after the decision but before the send was
-    // queued (a killed process, #77 review) leaves the action approved with
-    // nothing queued. Approving it again completes it: queued once, found by
-    // its approval id.
-    const repairQueue = action.status === "approved"
-      ? action.kind === "connector_send" && action.send
-        ? action.connectorId
+    // What an approved send or mutation puts on its connector's queue.
+    const queueTarget =
+      action.kind === "connector_send" && action.send
+        ? { connectorId: action.connectorId, message: action.send }
         : action.kind === "connector_mutation" && action.mutation
-          ? action.mutation.connectorId
-          : undefined
-      : undefined;
-    if (repairQueue && !new ConnectorDeliveryQueue(repairQueue).hasApproval(action.id)) {
-      const queue = new ConnectorDeliveryQueue(repairQueue);
-      if (action.kind === "connector_send" && action.send) {
-        queue.enqueue(action.send, { now: new Date().toISOString(), approvalId: action.id });
-      } else if (action.mutation) {
-        queue.enqueue(
-          { text: action.summary, metadata: { kind: "connector_mutation", mutation: action.mutation } },
-          { now: new Date().toISOString(), approvalId: action.id },
-        );
-      }
-      appendApprovalAuditEvent(action, "approved", `enqueued via ${repairQueue} (completing an earlier approval that was never queued)`);
-      output.write(`${gold("Queued")} — ${action.id} was approved earlier but never queued; it is queued now.\n`);
-      return;
-    }
-    if (action.status !== "pending") throw new Error(`action ${action.id} is already ${action.status}`);
+          ? {
+              connectorId: action.mutation.connectorId,
+              message: { text: action.summary, metadata: { kind: "connector_mutation", mutation: action.mutation } },
+            }
+          : undefined;
+    // An approve interrupted after the decision but before the queue entry
+    // was recorded (a killed process) leaves the action approved with
+    // queueState "queuing". Approving it again completes it. Only such an
+    // action is re-queued: one that was queued, or approved before
+    // queueState existed, is refused like any decided action (#77 review).
+    const repair = action.status === "approved" && action.queueState === "queuing" && queueTarget !== undefined;
+    if (!repair && action.status !== "pending") throw new Error(`action ${action.id} is already ${action.status}`);
     if (!hasOption(argv, "--yes")) {
       if (!input.isTTY || !output.isTTY) throw new Error("Refusing non-interactive approve without --yes");
       const prompter = makeTerminalPrompter();
       try {
         const preview = action.send?.text ?? action.memory?.content ?? (action.mutation ? JSON.stringify(action.mutation, null, 2) : "");
-        await prompter.note(`${action.summary}\n\n${preview}`, `Approve ${action.kind}?`);
-        const accepted = await prompter.confirm({ message: "Approve this action now?", initialValue: false });
+        await prompter.note(`${action.summary}\n\n${preview}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
+        const accepted = await prompter.confirm({ message: repair ? "Queue it now?" : "Approve this action now?", initialValue: false });
         if (!accepted) {
-          output.write("Approval cancelled — the action stays pending.\n");
+          output.write(repair ? "Cancelled — nothing queued.\n" : "Approval cancelled — the action stays pending.\n");
           return;
         }
       } finally {
         prompter.close();
       }
     }
+    if (repair && queueTarget) {
+      const { queued } = new ConnectorDeliveryQueue(queueTarget.connectorId).enqueueForApproval(queueTarget.message, action.id, {
+        now: new Date().toISOString(),
+      });
+      store.markQueued(action.id, action.decidedAt);
+      if (queued) {
+        appendApprovalAuditEvent(action, "approved", `enqueued via ${queueTarget.connectorId} (completing an earlier approval that was never queued)`);
+        output.write(`${gold("Queued")} — ${action.id} was approved earlier but never queued; it is queued now.\n`);
+      } else {
+        output.write(`${gold("Already queued")} — ${action.id} was queued by the earlier approve; nothing was added.\n`);
+      }
+      return;
+    }
     const decidedBy = process.env.USER ?? "cli";
     // Decide first: decide refuses an action that was rejected or approved
     // while the confirm prompt was open, so nothing it refuses is queued.
+    // The decision records queueState "queuing" until the entry is written.
     // If the queue then fails (locked), the approval is undone and the action
-    // is pending again rather than approved but never sent (#63).
-    const approveThenEnqueue = (enqueue: () => void) => {
-      const decided = store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
+    // is pending again rather than approved but never sent (#63). The entry
+    // is written at most once per approval, even if two approves race (#77).
+    const approveThenEnqueue = (target: NonNullable<typeof queueTarget>) => {
+      const decided = store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString(), queueState: "queuing" });
       try {
-        enqueue();
+        new ConnectorDeliveryQueue(target.connectorId).enqueueForApproval(target.message, action.id, { now: new Date().toISOString() });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         let undone = false;
         try {
           undone = store.undoApproval(decided.id, decided.decidedAt);
         } catch (undoError) {
-          throw new Error(`${reason}; undoing the approval also failed (${undoError instanceof Error ? undoError.message : String(undoError)}): the action is approved but not queued`);
+          throw new Error(`${reason}; undoing the approval also failed (${undoError instanceof Error ? undoError.message : String(undoError)}): the action is approved but not queued; approve it again to queue it`);
         }
         throw new Error(
           undone
@@ -2049,25 +2055,17 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
             : `${reason}; the approval could not be undone (it changed meanwhile): check it with mindstone approvals show ${decided.id}`,
         );
       }
+      store.markQueued(decided.id, decided.decidedAt);
     };
-    if (action.kind === "connector_send" && action.send) {
-      const send = action.send;
-      approveThenEnqueue(() =>
-        new ConnectorDeliveryQueue(action.connectorId).enqueue(send, { now: new Date().toISOString(), approvalId: action.id }),
-      );
+    if (action.kind === "connector_send" && action.send && queueTarget) {
+      approveThenEnqueue(queueTarget);
       appendApprovalAuditEvent(action, "approved", `enqueued for delivery via ${action.connectorId}`);
       output.write(`${gold("Approved")} — draft enqueued for delivery via ${action.connectorId}.\n`);
       output.write("A running Gateway delivers it within seconds; a stopped one on next start.\n");
       return;
     }
-    if (action.kind === "connector_mutation" && action.mutation) {
-      const mutation = action.mutation;
-      approveThenEnqueue(() =>
-        new ConnectorDeliveryQueue(mutation.connectorId).enqueue(
-          { text: action.summary, metadata: { kind: "connector_mutation", mutation } },
-          { now: new Date().toISOString(), approvalId: action.id },
-        ),
-      );
+    if (action.kind === "connector_mutation" && action.mutation && queueTarget) {
+      approveThenEnqueue(queueTarget);
       appendApprovalAuditEvent(action, "approved", `mutation enqueued for apply via ${action.mutation.connectorId}`);
       output.write(`${gold("Approved")} — ${action.mutation.operation} ${action.mutation.resource} enqueued for apply via ${action.mutation.connectorId}.\n`);
       output.write("A running Gateway applies it within seconds; a stopped one on next start.\n");

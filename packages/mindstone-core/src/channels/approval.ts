@@ -65,6 +65,14 @@ export type ProposedAction = {
   decidedAt?: string;
   decidedBy?: string;
   decisionNote?: string;
+  /**
+   * For an approved send or mutation: "queuing" from the decision until its
+   * queue entry is written, then "queued". An approve interrupted in between
+   * leaves "queuing", and only such an action can be queued by approving it
+   * again (#77 review). Approvals from before this field existed have none
+   * and are never re-queued.
+   */
+  queueState?: "queuing" | "queued";
 };
 
 type ApprovalFile = {
@@ -141,7 +149,10 @@ export class ApprovalStore {
    * Record a decision on a pending action. Decisions are immutable — deciding
    * a non-pending action throws rather than silently rewriting history.
    */
-  decide(id: string, decision: { status: "approved" | "rejected"; decidedBy?: string; note?: string; now?: string }): ProposedAction {
+  decide(
+    id: string,
+    decision: { status: "approved" | "rejected"; decidedBy?: string; note?: string; now?: string; queueState?: "queuing" },
+  ): ProposedAction {
     const file = this.#read();
     const target = file.actions.find((action) => action.id === id) ?? (id.length >= 8 ? singlePrefixMatch(file.actions, id) : undefined);
     if (!target) throw new Error(`no proposed action matches id "${id}"`);
@@ -150,8 +161,19 @@ export class ApprovalStore {
     target.decidedAt = decision.now;
     target.decidedBy = decision.decidedBy;
     target.decisionNote = decision.note;
+    if (decision.status === "approved" && decision.queueState) target.queueState = decision.queueState;
     this.#write(file);
     return target;
+  }
+
+  /** Record that this approval's queue entry is written. Only this exact decision is marked. */
+  markQueued(id: string, decidedAt: string | undefined): boolean {
+    const file = this.#read();
+    const target = file.actions.find((action) => action.id === id);
+    if (!target || target.status !== "approved" || target.decidedAt !== decidedAt) return false;
+    target.queueState = "queued";
+    this.#write(file);
+    return true;
   }
 
   /**
@@ -167,6 +189,7 @@ export class ApprovalStore {
     delete target.decidedAt;
     delete target.decidedBy;
     delete target.decisionNote;
+    delete target.queueState;
     this.#write(file);
     return true;
   }

@@ -150,6 +150,15 @@ for (let n = 0; n < 300; n += 1) q.enqueue({ text: process.argv[2] + "-" + n });
   write(corrupt.path, '{"entries": [');
   assert.throws(() => corrupt.enqueue({ text: "two" }), /moved aside/);
   assert.ok(readdirSync(dirname(corrupt.path)).some((name) => name.startsWith("queue.json.corrupt-")), "the corrupt file was not kept");
+  // Reads outside the lock report it and never move it (#77 review round 2).
+  const listed = new ConnectorDeliveryQueue("unit-corrupt-read");
+  listed.enqueue({ text: "one" });
+  write(listed.path, '{"entries": [');
+  assert.throws(() => listed.pending(), /unreadable/);
+  assert.throws(() => listed.deadLetters(), /unreadable/);
+  assert.match(listed.status().error ?? "", /unreadable/, "status must report an unreadable queue, not 0 entries");
+  await assert.rejects(listed.drain(async () => {}), /unreadable/);
+  assert.ok(!readdirSync(dirname(listed.path)).some((name) => name.startsWith("queue.json.corrupt-")), "a read-only path moved the queue aside");
 }
 // 3f. A failed delivery backs off instead of retrying at once; delivered entries are pruned.
 {
@@ -168,6 +177,61 @@ for (let n = 0; n < 300; n += 1) q.enqueue({ text: process.argv[2] + "-" + n });
   for (let n = 0; n < 510; n += 1) big.enqueue({ text: `d-${n}` });
   await big.drain(async () => {});
   assert.ok(big.status().delivered <= 500, `delivered entries are not pruned (${big.status().delivered})`);
+  // An approval's entry is never pruned: it records that the approval was queued.
+  const kept = new ConnectorDeliveryQueue("unit-prune-approval");
+  assert.equal(kept.enqueueForApproval({ text: "approved" }, "approval-1").queued, true);
+  await kept.drain(async () => {});
+  for (let n = 0; n < 510; n += 1) kept.enqueue({ text: `d-${n}` });
+  await kept.drain(async () => {});
+  assert.equal(kept.enqueueForApproval({ text: "approved" }, "approval-1").queued, false, "a pruned approval entry let the approval be queued again");
+}
+// 3h. Backoff doubles from 2 s and the entry dead-letters on its 8th failure (about 4.2 minutes in all).
+{
+  const queue = new ConnectorDeliveryQueue("unit-deadletter");
+  queue.enqueue({ text: "doomed" });
+  let t = 1_000_000;
+  const waits: number[] = [];
+  for (let n = 0; n < 20 && queue.pending().length > 0; n += 1) {
+    await queue.drain(async () => {
+      throw new Error("down");
+    }, { nowMs: t });
+    const next = queue.pending()[0]?.nextAttemptAt;
+    if (next === undefined) break;
+    waits.push(next - t);
+    t = next;
+  }
+  assert.deepEqual(waits, [2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000], `unexpected backoff: ${waits}`);
+  const [dead] = queue.deadLetters();
+  assert.equal(dead?.attempts, 8, "an entry should dead-letter on its 8th failed attempt");
+}
+// 3i. A send that never settles times out and counts as a failure, so the drain moves on.
+{
+  const queue = new ConnectorDeliveryQueue("unit-hung");
+  queue.enqueue({ text: "hangs" });
+  queue.enqueue({ text: "fine" });
+  const sent: string[] = [];
+  await queue.drain(async (entry) => {
+    if (entry.message.text === "hangs") await new Promise(() => {});
+    sent.push(entry.message.text);
+  }, { sendTimeoutMs: 100 });
+  assert.deepEqual(sent, ["fine"], "a hung send stalled the drain");
+  assert.match(queue.pending()[0]?.lastError ?? "", /timed out/);
+}
+// 3g. Queueing an approval from three processes at once queues it once.
+{
+  const child = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/approve-child.ts`;
+  writeFileSync(child, `import { ConnectorDeliveryQueue } from "${process.env.PROJECT_ROOT}/packages/mindstone-core/src/index.ts";
+new ConnectorDeliveryQueue("unit-approval-race").enqueueForApproval({ text: "once" }, "approval-race");
+`);
+  const { spawn } = await import("node:child_process");
+  const run = () =>
+    new Promise<void>((resolve, reject) => {
+      const proc = spawn("npx", ["tsx", child], { stdio: "inherit", env: process.env });
+      proc.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`child exited ${code}`))));
+    });
+  await Promise.all([run(), run(), run()]);
+  const entries = new ConnectorDeliveryQueue("unit-approval-race").pending().length;
+  assert.equal(entries, 1, `three processes queued one approval ${entries} times`);
 }
 console.log("queue unit assertions passed");
 TS
@@ -230,6 +294,54 @@ if [[ "$(status_of "${KILLED_ID}")" == "approved" ]]; then
 else
   echo "the killed approve did not get past the decision (status $(status_of "${KILLED_ID}")); the repair path was not exercised" >&2; exit 1
 fi
+
+# The repair only runs for an approval marked mid-queue (#77 review round 2).
+decide_raw() {
+  PROJECT_ROOT="${PROJECT_ROOT}" ID="$1" STATE="$2" npx tsx -e '
+import { ApprovalStore } from "'"${PROJECT_ROOT}"'/packages/mindstone-core/src/index.ts";
+new ApprovalStore().decide(process.env.ID, { status: "approved", decidedBy: "smoke", now: new Date().toISOString(), ...(process.env.STATE ? { queueState: process.env.STATE } : {}) });'
+}
+queue_raw() {
+  PROJECT_ROOT="${PROJECT_ROOT}" ID="$1" TEXT="$2" npx tsx -e '
+import { ConnectorDeliveryQueue } from "'"${PROJECT_ROOT}"'/packages/mindstone-core/src/index.ts";
+new ConnectorDeliveryQueue("clitest").enqueueForApproval({ text: process.env.TEXT, chatId: "dm-clint" }, process.env.ID);'
+}
+# An approval from before queueState (delivered long ago, entry pruned) is never re-queued.
+OLD_ID="$(propose SYNTHETIC-DRAFT-OLD)"
+decide_raw "${OLD_ID}" ""
+if ${MS} approvals approve "${OLD_ID}" --yes >/dev/null 2>&1; then
+  echo "re-approving an old approval (no queueState) should be refused" >&2; exit 1
+fi
+[[ "$(queued SYNTHETIC-DRAFT-OLD)" == "0" ]] || { echo "an old approval was queued again" >&2; exit 1; }
+# Killed after the entry was written but before it was marked queued: nothing is added.
+WRITTEN_ID="$(propose SYNTHETIC-DRAFT-WRITTEN)"
+decide_raw "${WRITTEN_ID}" queuing
+queue_raw "${WRITTEN_ID}" SYNTHETIC-DRAFT-WRITTEN
+written_out="$(${MS} approvals approve "${WRITTEN_ID}" --yes 2>&1)"
+grep -q "Already queued" <<<"${written_out}" || { echo "expected 'Already queued': ${written_out}" >&2; exit 1; }
+[[ "$(queued SYNTHETIC-DRAFT-WRITTEN)" == "1" ]] || { echo "an already-queued approval was queued twice" >&2; exit 1; }
+if ${MS} approvals approve "${WRITTEN_ID}" --yes >/dev/null 2>&1; then
+  echo "once marked queued, the approval should be refused" >&2; exit 1
+fi
+# Two repairs at once, released together from a held lock: queued once.
+TWICE_ID="$(propose SYNTHETIC-DRAFT-TWICE)"
+decide_raw "${TWICE_ID}" queuing
+printf 'held-by-smoke' > "${QUEUE_LOCK}"
+${MS} approvals approve "${TWICE_ID}" --yes >"${TEMP_RUNTIME}/twice-a.log" 2>&1 &
+twice_a=$!
+${MS} approvals approve "${TWICE_ID}" --yes >"${TEMP_RUNTIME}/twice-b.log" 2>&1 &
+twice_b=$!
+sleep 1
+rm -f "${QUEUE_LOCK}"
+wait "${twice_a}" || true; wait "${twice_b}" || true
+[[ "$(queued SYNTHETIC-DRAFT-TWICE)" == "1" ]] || { echo "two concurrent repairs queued the draft $(queued SYNTHETIC-DRAFT-TWICE) times" >&2; cat "${TEMP_RUNTIME}"/twice-*.log >&2; exit 1; }
+# The repair asks first, like any approve.
+ASK_ID="$(propose SYNTHETIC-DRAFT-ASK)"
+decide_raw "${ASK_ID}" queuing
+if ask_out="$(${MS} approvals approve "${ASK_ID}" </dev/null 2>&1)"; then
+  echo "a repair with no --yes and no terminal should be refused: ${ask_out}" >&2; exit 1
+fi
+[[ "$(queued SYNTHETIC-DRAFT-ASK)" == "0" ]] || { echo "the repair queued without confirmation" >&2; exit 1; }
 
 # Rejected while the confirm prompt is open: approving must not queue it.
 command -v expect >/dev/null || { echo "smoke-connector-queue needs expect (install the expect package)" >&2; exit 1; }
@@ -309,11 +421,35 @@ if grep -q 'not available' "${OUTBOX}"; then
   echo "a run error was posted into a chat" >&2
   exit 1
 fi
+# A reply the queue refuses is retried and still sent, and the failure is logged (#77 review round 2).
+chmod 000 "${SPOOL_DIR}/queue.json"
+printf '%s\n' '{"messageId":"r1","text":"hello again","senderId":"clint","chatId":"dm-clint","chatType":"direct"}' >> "${INBOX}"
+for _ in $(seq 1 40); do
+  grep -q "could not queue a reply" "${TEMP_RUNTIME}/gateway.log" && break
+  sleep 0.25
+done
+chmod 600 "${SPOOL_DIR}/queue.json"
+grep -q "could not queue a reply" "${TEMP_RUNTIME}/gateway.log" || { echo "a refused enqueue was not logged" >&2; tail -20 "${TEMP_RUNTIME}/gateway.log" >&2; exit 1; }
+for _ in $(seq 1 60); do
+  grep -q '"inReplyToMessageId":"r1"' "${OUTBOX}" 2>/dev/null && break
+  sleep 0.25
+done
+grep -q '"inReplyToMessageId":"r1"' "${OUTBOX}" || { echo "the refused reply was never sent after the queue recovered" >&2; tail -20 "${TEMP_RUNTIME}/gateway.log" >&2; exit 1; }
 # Both failures stay visible to the owner: the transcripts record them.
 failed_runs="$(cat "${TEMP_RUNTIME}"/mindstone/transcripts/*.jsonl | grep -c '"routing_failed"' || true)"
 if [[ "${failed_runs}" -lt 2 ]]; then
   echo "expected 2 routing_failed transcript events, got ${failed_runs}" >&2
   exit 1
 fi
+
+# A corrupt queue is reported by the drain timer and status, and left where it is.
+printf '{"entries": [' > "${SPOOL_DIR}/queue.json"
+for _ in $(seq 1 40); do
+  grep -q "delivery queue: .*unreadable" "${TEMP_RUNTIME}/gateway.log" && break
+  sleep 0.25
+done
+grep -q "delivery queue: .*unreadable" "${TEMP_RUNTIME}/gateway.log" || { echo "an unreadable queue was not reported by the drain timer" >&2; tail -20 "${TEMP_RUNTIME}/gateway.log" >&2; exit 1; }
+[[ -f "${SPOOL_DIR}/queue.json" ]] || { echo "a read-only path moved the corrupt queue aside" >&2; exit 1; }
+${MS} status 2>&1 | grep -q "queue UNREADABLE" || { echo "mindstone status should show the queue as unreadable" >&2; ${MS} status >&2; exit 1; }
 
 echo "Connector queue smoke test passed."
