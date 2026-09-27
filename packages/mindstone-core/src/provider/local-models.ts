@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -82,6 +83,21 @@ export const LOCAL_PROVIDER_PRESETS: Record<LocalProviderPresetId, LocalProvider
     api: "openai-completions",
   },
 };
+
+/**
+ * A literal value for a Pi config field such as `apiKey`. Pi treats these
+ * fields as templates: a leading "!" runs a shell command and "$VAR" or
+ * "${VAR}" reads an environment variable. A key that should be used as it
+ * is (a stored secret) is escaped: "$$" is a literal "$" and a leading "$!"
+ * a literal "!" (resolve-config-value.ts).
+ */
+export function literalConfigValue(value: string): string {
+  const escaped = value.replace(/\$/g, "$$$$");
+  return escaped.startsWith("!") ? `$!${escaped.slice(1)}` : escaped;
+}
+
+/** A model id a provider listing may register: short, printable, no spaces or control/bidi characters. */
+export const MODEL_ID_PATTERN = /^[^\s\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]{1,200}$/;
 
 export function isolatedModelsPath(agentDir: string): string {
   return join(agentDir, "models.json");
@@ -169,9 +185,21 @@ export function upsertIsolatedProvider(
     return { path: current.path, wrote: false, providerId, modelCount };
   }
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-  writeFileSync(current.path, `${JSON.stringify(nextConfig, null, 2)}\n`, { mode: 0o600 });
-  // Re-assert permissions: writeFileSync mode only applies on creation.
-  chmodSync(current.path, 0o600);
+  // Written to a new 0600 file and renamed over the old one, so a crash can't
+  // leave a truncated models.json and the key is never in a wider-mode file.
+  const temp = `${current.path}.tmp-${randomUUID().slice(0, 8)}`;
+  try {
+    writeFileSync(temp, `${JSON.stringify(nextConfig, null, 2)}\n`, { mode: 0o600 });
+    chmodSync(temp, 0o600);
+    renameSync(temp, current.path);
+  } catch (error) {
+    try {
+      unlinkSync(temp);
+    } catch {
+      // Never written.
+    }
+    throw error;
+  }
   return { path: current.path, wrote: true, providerId, modelCount };
 }
 
@@ -187,6 +215,9 @@ function normalizeBaseUrl(baseUrl: string): string {
  * List models from an OpenAI-compatible endpoint (`GET <baseUrl>/models`). Works for
  * Ollama (local and Cloud), LM Studio, vLLM, and other OpenAI-compatible servers.
  */
+/** The most of a model listing that is read; a bigger one is refused. */
+const PROBE_MAX_BYTES = 1024 * 1024;
+
 export async function probeOpenAiCompatibleModels(params: {
   baseUrl: string;
   apiKey?: string;
@@ -203,20 +234,43 @@ export async function probeOpenAiCompatibleModels(params: {
     if (!response.ok) {
       return { ok: false, baseUrl, error: `HTTP ${response.status} from ${baseUrl}/models` };
     }
-    const body = (await response.json()) as { data?: Array<{ id?: unknown }> };
-    const models = (Array.isArray(body.data) ? body.data : [])
-      .map((entry) => (typeof entry.id === "string" && entry.id.trim() ? { id: entry.id } : undefined))
-      .filter((entry): entry is { id: string } => Boolean(entry));
+    // Read at most PROBE_MAX_BYTES: the server can be anywhere, and its answer
+    // is kept in memory and written to models.json.
+    const reader = response.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    if (reader) {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > PROBE_MAX_BYTES) {
+          await reader.cancel();
+          return { ok: false, baseUrl, error: `The model list at ${baseUrl}/models is too large` };
+        }
+        chunks.push(value);
+      }
+    }
+    let body: { data?: Array<{ id?: unknown }> };
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as { data?: Array<{ id?: unknown }> };
+    } catch {
+      return { ok: false, baseUrl, error: `${baseUrl}/models did not answer with a model list` };
+    }
+    const seen = new Set<string>();
+    const models = (Array.isArray(body?.data) ? body.data : [])
+      .map((entry) => (entry && typeof entry.id === "string" ? entry.id.trim() : ""))
+      .filter((id) => MODEL_ID_PATTERN.test(id) && !seen.has(id) && Boolean(seen.add(id)))
+      .slice(0, 500)
+      .map((id) => ({ id }));
     if (models.length === 0) {
-      return { ok: false, baseUrl, error: `Endpoint responded but listed no models (${baseUrl}/models)` };
+      return { ok: false, baseUrl, error: `Endpoint responded but listed no usable models (${baseUrl}/models)` };
     }
     return { ok: true, baseUrl, models };
   } catch (error) {
     const message = error instanceof Error && error.name === "AbortError"
       ? `Timed out after ${params.timeoutMs ?? 5_000}ms`
-      : error instanceof Error
-        ? error.message
-        : String(error);
+      : "Could not connect";
     return { ok: false, baseUrl, error: `${message} (${baseUrl}/models)` };
   } finally {
     clearTimeout(timeout);
