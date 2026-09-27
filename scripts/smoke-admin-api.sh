@@ -851,7 +851,71 @@ stop_gateway
 start_gateway
 echo "doctor and logs assertions passed"
 
-# 9. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
+# 9. Hosted-provider API keys (#98): from a stored secret into Pi's isolated
+#    auth.json, escaped, never echoed, under the #80 guards.
+AUTHJSON="${PI_CODING_AGENT_DIR}/auth.json"
+get() { curl -s -o "${BODY}" -w '%{http_code}' "${ADMIN[@]}" "${BASE}$1"; }
+del() { curl -s -o "${BODY}" -w '%{http_code}' -X DELETE "${ADMIN[@]}" "${BASE}$1"; }
+auth_field() { node -e 'let a={};try{a=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))}catch{};const e=a[process.argv[2]];console.log(e?JSON.stringify(e):"none")' "${AUTHJSON}" "$1"; }
+printf '{"advancedSettings":false}\n' > "${PERMS}"
+expect "$(post /admin/secrets/anth.key '{"value":"sk-ant-SENTINEL-98"}')" 200 "storing an Anthropic key as a secret"
+expect "$(get /admin/auth)" 200 "listing hosted providers"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const a=b.providers.find(p=>p.providerId==="anthropic"); if(!a||a.env!=="ANTHROPIC_API_KEY"||a.auth!==null){console.error("anthropic should be listed unset: "+JSON.stringify(a));process.exit(1)}' "${BODY}" || exit 1
+expect "$(post /admin/auth/anthropic '{"secret":"anth.key"}')" 403 "setting a provider key without the permission"
+[[ "$(auth_field anthropic)" == none ]] || { echo "a refused key reached auth.json" >&2; exit 1; }
+expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings for provider keys"
+# What's refused: an unknown provider, a key in the body, a bad or missing secret, gateway credentials, connector tokens.
+expect "$(post /admin/auth/nope '{"secret":"anth.key"}')" 404 "an unknown provider"
+expect "$(post /admin/auth/anthropic '{"apiKey":"sk-PLAIN-98"}')" 400 "a key in the body"
+expect "$(post /admin/auth/anthropic '{"secret":"anth.key","apiKey":"sk-PLAIN-98"}')" 400 "a key alongside the secret"
+expect "$(post /admin/auth/anthropic '{"secret":"../config.json"}')" 400 "a traversal secret name"
+expect "$(post /admin/auth/anthropic '{"secret":"missing.key"}')" 400 "a secret that isn't stored"
+[[ -e "${TEMP_RUNTIME}/mindstone/secrets/gateway-token" ]] || printf 'GW-TOKEN-SENTINEL-98\n' > "${TEMP_RUNTIME}/mindstone/secrets/gateway-token"
+expect "$(post /admin/auth/anthropic '{"secret":"gateway-token"}')" 422 "the gateway token file as a provider key"
+expect "$(post /admin/secrets/copied98.key '{"value":"'"${ADMIN_SMOKE_TOKEN}"'"}')" 200 "storing a copy of the service token"
+expect "$(post /admin/auth/anthropic '{"secret":"copied98.key"}')" 422 "a secret holding the service token"
+printf 'CONNECTOR-TOKEN-98\n' > "${TEMP_RUNTIME}/mindstone/secrets/example"
+expect "$(post /admin/auth/anthropic '{"secret":"example"}')" 422 "a connector's token as a provider key"
+[[ "$(auth_field anthropic)" == none ]] || { echo "a refused key reached auth.json" >&2; exit 1; }
+grep -q 'sk-PLAIN-98\|GW-TOKEN-SENTINEL-98\|CONNECTOR-TOKEN-98\|admin-smoke' "${AUTHJSON}" 2>/dev/null && { echo "a refused value reached auth.json" >&2; exit 1; }
+# Stored: escaped, 0600, never echoed, listed, audited.
+expect "$(post /admin/auth/anthropic '{"secret":"anth.key"}')" 200 "setting Anthropic's key from a stored secret"
+grep -q 'SENTINEL-98' "${BODY}" && { echo "the key was echoed" >&2; exit 1; }
+[[ "$(mode_of "${AUTHJSON}")" == 600 ]] || { echo "auth.json is not 0600" >&2; exit 1; }
+[[ "$(auth_field anthropic)" == '{"type":"api_key","key":"sk-ant-SENTINEL-98"}' ]] || { echo "unexpected auth.json entry: $(auth_field anthropic)" >&2; exit 1; }
+expect "$(get /admin/auth)" 200 "listing after setting a key"
+grep -q 'SENTINEL-98' "${BODY}" && { echo "the list showed a key" >&2; exit 1; }
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(b.providers.find(p=>p.providerId==="anthropic").auth==="stored key"?0:1)' "${BODY}" || { echo "anthropic should show a stored key: $(cat "${BODY}")" >&2; exit 1; }
+grep -q '"userId":"smoke-admin","action":"provider_key_stored","provider":"anthropic","keySource":"secret:anth.key"' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" || { echo "the key was not audited" >&2; exit 1; }
+# Keys that look like templates stay literal through Pi's own resolver, and no command runs.
+PWNED98="${TEMP_RUNTIME}/pwned98"
+expect "$(post /admin/secrets/tmpl98.key '{"value":"${ADMIN_SMOKE_TOKEN}x$HOME"}')" 200 "storing a template-looking key"
+expect "$(post /admin/auth/openai '{"secret":"tmpl98.key"}')" 200 "setting a template-looking key"
+expect "$(post /admin/secrets/cmd98.key '{"value":"!touch '"${PWNED98}"'; echo k"}')" 200 "storing a command-looking key"
+expect "$(post /admin/auth/groq '{"secret":"cmd98.key"}')" 200 "setting a command-looking key"
+AUTHJSON="${AUTHJSON}" PWNED98="${PWNED98}" node --input-type=module -e '
+const { resolveConfigValue } = await import(process.argv[1]);
+const a = JSON.parse((await import("node:fs")).readFileSync(process.env.AUTHJSON, "utf8"));
+if (resolveConfigValue(a.openai.key) !== "${ADMIN_SMOKE_TOKEN}x$HOME") { console.error("a template-looking key was expanded"); process.exit(1); }
+if (resolveConfigValue(a.groq.key) !== `!touch ${process.env.PWNED98}; echo k`) { console.error("a command-looking key was not kept literal"); process.exit(1); }
+if ((await import("node:fs")).existsSync(process.env.PWNED98)) { console.error("a stored key ran as a command"); process.exit(1); }' "${PROJECT_ROOT}/vendor/pi/packages/coding-agent/dist/core/resolve-config-value.js" || exit 1
+# An OAuth login stays on the host: not replaced, not removed.
+node -e 'const f=process.argv[1]; const fs=require("fs"); const a=JSON.parse(fs.readFileSync(f,"utf8")); a.xai={type:"oauth",access:"OAUTH-SENTINEL-98",refresh:"r",expires:Date.now()+3600000}; fs.writeFileSync(f, JSON.stringify(a,null,2))' "${AUTHJSON}"
+expect "$(post /admin/auth/xai '{"secret":"anth.key"}')" 409 "replacing an OAuth login"
+expect "$(del /admin/auth/xai)" 409 "removing an OAuth login"
+[[ "$(auth_field xai)" == *OAUTH-SENTINEL-98* ]] || { echo "an OAuth login was changed" >&2; exit 1; }
+expect "$(get /admin/auth)" 200 "listing with an OAuth login"
+grep -q 'OAUTH-SENTINEL-98' "${BODY}" && { echo "the list showed an OAuth token" >&2; exit 1; }
+# Remove a stored key.
+expect "$(del /admin/auth/openai)" 200 "removing a stored key"
+[[ "$(auth_field openai)" == none && "$(auth_field anthropic)" != none ]] || { echo "the remove changed the wrong entries" >&2; exit 1; }
+expect "$(del /admin/auth/openai)" 404 "removing a key that isn't there"
+grep -q '"action":"provider_key_removed","provider":"openai"' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" || { echo "the removal was not audited" >&2; exit 1; }
+printf '{"advancedSettings":false}\n' > "${PERMS}"
+expect "$(del /admin/auth/anthropic)" 403 "removing a key without the permission"
+echo "hosted provider key assertions passed"
+
+# 10. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
 #    token files resolve under the data dir, as the connectors read them, not
 #    next to the config file (#75 review A, tested end to end per #78).
 stop_gateway
