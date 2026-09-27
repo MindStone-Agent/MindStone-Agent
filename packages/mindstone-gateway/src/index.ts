@@ -606,15 +606,19 @@ function transcriptTextFromOpenAiContent(content: unknown): string | undefined {
 /** Session key for one MindStone Console conversation (#38). */
 /**
  * Session key for one MindStone Console conversation (#38). Keyed by user and
- * conversation, not by persona: switching persona (model) mid-conversation
- * keeps the conversation's history. The agent part is the default agent so the
- * key stays in the agent:<id>:… namespace; the persona answering each turn is
- * still recorded on every transcript entry. Ids over 64 characters are hashed
- * so the transcript filename stays within filesystem limits.
+ * conversation, not by persona or config: switching persona (model) or
+ * changing routing.defaultAgentId keeps the conversation's history. The key
+ * uses a fixed "console" namespace in the agent:<id>:… form; the persona
+ * answering each turn is still recorded on every transcript entry. Parts
+ * whose encoded form is over 64 characters are hashed, so the transcript
+ * filename stays within filesystem limits.
  */
-export function consoleConversationSessionKey(defaultAgentId: string, userId: string, conversationId: string): string {
-  const part = (value: string) => (value.length > 64 ? `h-${createHash("sha256").update(value).digest("hex").slice(0, 32)}` : value);
-  return ["agent", defaultAgentId, "console", part(userId), part(conversationId)].map((value) => encodeURIComponent(value)).join(":");
+export function consoleConversationSessionKey(userId: string, conversationId: string): string {
+  const part = (value: string) => {
+    const encoded = encodeURIComponent(value);
+    return encoded.length > 64 ? `h-${createHash("sha256").update(value).digest("hex").slice(0, 32)}` : encoded;
+  };
+  return ["agent", "console", "console", part(userId), part(conversationId)].join(":");
 }
 
 /** The session a handoff was written from (its "- Session: …" line), if any. */
@@ -1975,7 +1979,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const sessionKey = gatewaySessionKey({
       config: loadedConfig.config,
       explicitSessionKey: metadata.sessionKey ?? (forwarded.conversationId
-        ? consoleConversationSessionKey(loadedConfig.config?.routing?.defaultAgentId ?? "default", senderId, forwarded.conversationId)
+        ? consoleConversationSessionKey(senderId, forwarded.conversationId)
         : undefined),
       agentId,
       substrate: "openai",

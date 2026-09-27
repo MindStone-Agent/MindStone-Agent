@@ -11,7 +11,7 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - **Breaking:** a request that doesn't end with a user message (for example a tool-role or assistant-prefill tail) is now a 400. A message with no role counts as a user message.
   - Client system prompts: ignored for the Console's `user` role (logged once per session as an event), stored once per session for an admin or a direct API caller. Before, every resent copy was stored.
   - Each Console conversation (`x-mindstone-conversation-id`) gets its own session, so separate chats don't share a context window. Switching persona mid-conversation keeps its history. The memory backfill indexes every conversation into memory. Recall isn't yet scoped per agent or per Console user (#71).
-  - The auto-compact handoff is replayed only into the session that wrote it, not into every new session.
+  - The gateway replays the auto-compact handoff only into the session that wrote it, not into every new session (the CLI and TUI are unchanged). In `per_surface` mode, one surface's handoff no longer carries over to another surface's session.
 
 ### Security
 - **Memory backfill keeps tenants apart and keeps non-owner turns out of the owner's recall** (#62).
