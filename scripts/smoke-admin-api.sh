@@ -321,6 +321,9 @@ revoke() { expect "$(post /admin/permissions/advanced '{"enabled":false}')" 200 
 regrant() { expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings again"; }
 expect "$(patch memory '{"autoRecall":true}')" 200 "turning autoRecall on with the permission"
 revoke
+expect "$(patch memory '{"autoRecall":"true"}')" 403 "a string \"true\" for autoRecall without the permission"
+regrant
+revoke
 expect "$(patch memory '{"autoRecall":false}')" 200 "turning autoRecall off without the permission"
 has memory.autoRecall false || { echo "turning autoRecall off was not written" >&2; exit 1; }
 regrant
@@ -392,13 +395,16 @@ rm -f "${TEMP_RUNTIME}/mindstone/secrets/applink"
 # A connector's configured token file can't be created without the permission (#75 review).
 expect "$(post /admin/secrets/example '{"value":"CONNECTOR-TOKEN-1"}')" 403 "creating the token file a connector reads"
 [[ -e "${TEMP_RUNTIME}/mindstone/secrets/example" ]] && { echo "a connector token was created without the permission" >&2; exit 1; }
-# While a connector's token file is missing, any new secret needs the permission:
-# it could be that file under another name, by the filesystem's own case or
-# Unicode folding or a chain of links (#78).
-expect "$(post /admin/secrets/unrelated.key '{"value":"UNRELATED-1"}')" 403 "a new secret while a connector's token file is missing"
-grep -q "token file is missing" "${BODY}" || { echo "the refusal should say a connector's token file is missing: $(cat "${BODY}")" >&2; exit 1; }
-# The operator provides the connector files on the host; then an unrelated new secret is free.
-for file in example client.id applink; do printf 'HOST-PROVIDED\n' > "${TEMP_RUNTIME}/mindstone/secrets/${file}"; done
+# A new, unrelated secret is free even while connector files are missing (#78 review).
+expect "$(post /admin/secrets/unrelated.key '{"value":"UNRELATED-1"}')" 200 "a new unrelated secret while connector files are missing"
+# A two-hop dangling chain from a connector's file: its end can't be planted,
+# and a link on the way is an existing name (#78).
+SECRETS_DIR="${TEMP_RUNTIME}/mindstone/secrets"
+ln -s hop.link "${SECRETS_DIR}/applink" && ln -s chain.end "${SECRETS_DIR}/hop.link"
+expect "$(post /admin/secrets/chain.end '{"value":"PLANTED-CHAIN"}')" 403 "planting the end of a connector's two-hop dangling chain"
+[[ -e "${SECRETS_DIR}/chain.end" ]] && { echo "the end of a connector's link chain was planted" >&2; exit 1; }
+expect "$(post /admin/secrets/hop.link '{"value":"PLANTED-HOP"}')" 403 "writing through a link in a connector's chain"
+rm -f "${SECRETS_DIR}/applink" "${SECRETS_DIR}/hop.link"
 expect "$(post /admin/secrets/tg.token '{"value":"SECRET-VALUE-4412"}')" 200 "storing a secret"
 expect "$(post /admin/secrets/tg.token '{"value":"SECRET-VALUE-9999"}')" 403 "replacing an existing secret without the permission"
 expect "$(post /admin/secrets/gateway-token '{"value":"HIJACK-9999"}')" 422 "writing the gateway's own token file"
@@ -408,25 +414,41 @@ SECRET_FILE="${TEMP_RUNTIME}/mindstone/secrets/tg.token"
 [[ "$(cat "${SECRET_FILE}")" == "SECRET-VALUE-4412" ]] || { echo "the secret was not stored" >&2; exit 1; }
 [[ "$(mode_of "${SECRET_FILE}")" == "600" ]] || { echo "the secret file is not 0600" >&2; exit 1; }
 [[ "$(mode_of "$(dirname "${SECRET_FILE}")")" == "700" ]] || { echo "the secrets directory is not 0700" >&2; exit 1; }
-# A host credential file named with a compatibility character ("ſ", which
-# APFS folds to "s") can't be planted under its plain spelling, even with the
-# permission (#78).
-REAL_CONFIG="${REAL_CONFIG}" python3 - <<'PY2'
+# The gateway's own token file can't be planted: not through a dangling link
+# (#79 review A), and not under a name the filesystem folds to it (APFS
+# treats "ß" as "ss" and "ſ" as "s"; #79 review B), even with the permission.
+set_host_token_file() {
+  REAL_CONFIG="${REAL_CONFIG}" TOKEN_FILE="$1" python3 - <<'PY2'
 import json, os, pathlib
 p = pathlib.Path(os.environ["REAL_CONFIG"])
 c = json.loads(p.read_text())
-c["gateway"]["auth"]["tokenFile"] = "secrets/gateway-\u017fecret"
+c["gateway"]["auth"]["tokenFile"] = os.environ["TOKEN_FILE"]
 p.write_text(json.dumps(c, indent=2, ensure_ascii=False))
 PY2
+}
+set_host_token_file "secrets/gwlink"
+ln -s gwtarget "${SECRETS_DIR}/gwlink"
+expect "$(post /admin/secrets/gwtarget '{"value":"HIJACK-LINK"}')" 422 "planting the gateway token through a dangling link"
 regrant
-expect "$(post /admin/secrets/gateway-secret '{"value":"HIJACK-NFKC"}')" 422 "planting the gateway token file under its folded spelling"
-REAL_CONFIG="${REAL_CONFIG}" python3 - <<'PY2'
-import json, os, pathlib
-p = pathlib.Path(os.environ["REAL_CONFIG"])
-c = json.loads(p.read_text())
-c["gateway"]["auth"]["tokenFile"] = "secrets/gateway-token"
-p.write_text(json.dumps(c, indent=2, ensure_ascii=False))
-PY2
+expect "$(post /admin/secrets/gwtarget '{"value":"HIJACK-LINK"}')" 422 "planting the gateway token through a dangling link, with the permission"
+[[ -e "${SECRETS_DIR}/gwtarget" ]] && { echo "the gateway token was planted through a link" >&2; exit 1; }
+rm -f "${SECRETS_DIR}/gwlink"
+FOLD_PROBE="${TEMP_RUNTIME}/fold-probe"
+mkdir -p "${FOLD_PROBE}" && touch "${FOLD_PROBE}/gateway-ßecret" "${FOLD_PROBE}/gateway-ſecret-long"
+if [[ -e "${FOLD_PROBE}/gateway-ssecret" ]]; then
+  set_host_token_file "secrets/gateway-ßecret"
+  expect "$(post /admin/secrets/gateway-ssecret '{"value":"HIJACK-FOLD"}')" 422 "planting the gateway token under the folded spelling ß → ss"
+  ls "${SECRETS_DIR}" | grep -qi 'gateway-s' && { echo "a folded gateway token name was left behind" >&2; exit 1; }
+else
+  echo "this filesystem doesn't fold ß to ss; the folding check is skipped"
+fi
+if [[ -e "${FOLD_PROBE}/gateway-secret-long" ]]; then
+  set_host_token_file "secrets/gateway-ſecret"
+  expect "$(post /admin/secrets/gateway-secret '{"value":"HIJACK-FOLD-2"}')" 422 "planting the gateway token under the folded spelling ſ → s"
+else
+  echo "this filesystem doesn't fold ſ to s; that folding check is skipped"
+fi
+set_host_token_file "secrets/gateway-token"
 # A failed write leaves no temp copy of the secret, and the 500 is audited with the user (#78).
 mkdir -p "${TEMP_RUNTIME}/mindstone/secrets/adir"
 expect "$(post /admin/secrets/adir '{"value":"FAILED-WRITE-7"}')" 500 "writing a secret onto a directory"

@@ -8,8 +8,7 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 
 ### Fixed
 - **Admin API follow-ups from the #75 review** (#78).
-  - While a file a connector reads is missing, storing any new secret needs the advanced-settings permission. A missing file could be reached under another name: a chain of dangling links, or the filesystem folding case or Unicode forms (APFS treats `ſ` as `s`). Two such routes let a secret be planted into a connector's token file without the permission.
-  - The gateway's own credential files are also compared with Unicode compatibility forms folded (NFKC), so one named with `ſ` can't be written under its plain spelling, even with the permission.
+  - A new secret could be planted into a file that didn't exist yet but that a connector reads, or into one of the gateway's own credential files, under another name: through a chain of dangling links, or a name the filesystem folds to it (APFS treats `ß` as `ss` and `ſ` as `s`). A new secret is now created exclusively, and if a protected file that was missing exists afterwards, the new secret is removed and refused: `403` for a connector's file without the permission, `422` for a gateway credential whatever the permission. The gateway credential check also follows symlinks.
   - A secret write that fails (the name is a directory, for example) no longer leaves the value in a temporary file.
   - An admin API `500` is audited with the user id.
   - `GET /admin/permissions` shows the expiry that applies (at most an hour after the grant), not a later one from the stored file.

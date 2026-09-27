@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, linkSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -1750,37 +1750,50 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       const secretsDir = `${paths.dataDir}/secrets`;
       const target = resolvePath(secretsDir, name);
       // The gateway's own credentials are set on the host, never from the Console.
-      const hostCredentials = hostCredentialFiles(loadMindStoneConfig(configPath).config, configPath);
-      if (hostCredentials.some((file) => sameFile(file, target))) {
+      const loadedSecretsConfig = loadMindStoneConfig(configPath).config;
+      const hostCredentials = hostCredentialFiles(loadedSecretsConfig, configPath);
+      if (hostCredentials.some((file) => pointsAtSameFile(file, target))) {
         refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
         return;
       }
       // Replacing a secret, or writing one a connector is configured to read
       // (its token file), needs the permission: either one changes who the
       // agent talks to (#75 review).
-      const connectorFiles = connectorTokenFiles(loadMindStoneConfig(configPath).config, configPath, paths);
-      // While a file a connector reads is missing, any new secret might be
-      // that file under another name (a filesystem's own case or Unicode
-      // folding, a link chain), so every new secret needs the permission (#78).
-      const missingConnectorFile = connectorFiles.read.some((file) => !existsSync(file));
-      if (
-        (existsSync(target) || missingConnectorFile || connectorFiles.all.some((file) => pointsAtSameFile(file, target))) &&
-        !readAdminPermissions(paths.dataDir).advancedSettings
-      ) {
-        refuse(
-          403,
-          {
-            error: missingConnectorFile && !existsSync(target)
-              ? "a connector's token file is missing, so storing a new secret needs the advanced-settings permission (it could be that file under another name)"
-              : "replacing a secret or setting a connector's token needs the advanced-settings permission",
-          },
-          { reason: "advanced", secret: name },
-        );
+      const connectorFiles = connectorTokenFiles(loadedSecretsConfig, configPath, paths);
+      const permitted = readAdminPermissions(paths.dataDir).advancedSettings;
+      const targetExists = pathEntryExists(target);
+      if ((targetExists || connectorFiles.all.some((file) => pointsAtSameFile(file, target))) && !permitted) {
+        refuse(403, { error: "replacing a secret or setting a connector's token needs the advanced-settings permission" }, { reason: "advanced", secret: name });
         return;
       }
       mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
       chmodSync(secretsDir, 0o700);
-      writeFileAtomic(target, value, 0o600);
+      if (targetExists) {
+        writeFileAtomic(target, value, 0o600);
+      } else {
+        // A new name can still reach a protected file that doesn't exist yet
+        // through the filesystem's own folding (APFS treats "ß" as "ss" and
+        // "ſ" as "s") or a chain of dangling links, which no name comparison
+        // covers (#78 review). So the file is created exclusively, and if a
+        // protected file that was missing now exists, this name reached it:
+        // it's removed and refused, whatever the folding or link chain.
+        const missing = [...hostCredentials, ...connectorFiles.read].filter((file) => !existsSync(file));
+        if (!createFileExclusive(target, value, 0o600)) {
+          sendJson(res, 409, { ok: false, error: "a secret with this name was created meanwhile; try again" });
+          return;
+        }
+        const reached = missing.filter((file) => existsSync(file));
+        const reachedHost = reached.some((file) => hostCredentials.includes(file));
+        if (reachedHost || (reached.length > 0 && !permitted)) {
+          unlinkSync(target);
+          if (reachedHost) {
+            refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
+          } else {
+            refuse(403, { error: "replacing a secret or setting a connector's token needs the advanced-settings permission" }, { reason: "advanced", secret: name });
+          }
+          return;
+        }
+      }
       appendAdminAudit(paths.dataDir, { userId, action: "secret_stored", secret: name });
       // The value is never echoed. Reference it from config as tokenFile: "secrets/<name>".
       sendJson(res, 200, { ok: true, name, tokenFile: `secrets/${name}` });
@@ -1859,9 +1872,7 @@ function sameFile(a: string, b: string): boolean {
       }
     }
   };
-  // NFKC too: APFS folds compatibility forms ("ſ" is "s", "ﬆ" is "st") (#78).
-  const fold = (path: string) => real(path).normalize("NFKC").toLowerCase();
-  return fold(a) === fold(b);
+  return real(a).toLowerCase() === real(b).toLowerCase();
 }
 
 /**
@@ -1925,6 +1936,41 @@ async function readAdminBody(req: IncomingMessage, res: ServerResponse): Promise
     sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
   }
   return undefined;
+}
+
+/** Whether anything, even a dangling link, has this name. */
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Create a file that must not exist yet: written to a temp file, then linked
+ * to its name, which fails if the name is taken. False when it was taken.
+ */
+function createFileExclusive(path: string, content: string, mode: number): boolean {
+  const temp = `${path}.tmp-${randomUUID().slice(0, 8)}`;
+  try {
+    writeFileSync(temp, content, { mode });
+    chmodSync(temp, mode);
+    try {
+      linkSync(temp, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+    return true;
+  } finally {
+    try {
+      unlinkSync(temp);
+    } catch {
+      // Never written.
+    }
+  }
 }
 
 function writeFileAtomic(path: string, content: string, mode: number): void {
