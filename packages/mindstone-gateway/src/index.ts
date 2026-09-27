@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, linkSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -1769,6 +1769,13 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
       chmodSync(secretsDir, 0o700);
       if (targetExists) {
+        // A secret stored from the Console is never a link. A link under this
+        // name was made on the host, and replacing it could turn a link chain
+        // into a live credential (#79 review), so it's changed there.
+        if (lstatSync(target).isSymbolicLink()) {
+          refuse(422, { error: "this secret name is a link made on the gateway host; change it there" }, { reason: "host_link", secret: name });
+          return;
+        }
         writeFileAtomic(target, value, 0o600);
       } else {
         // A new name can still reach a protected file that doesn't exist yet
@@ -1785,7 +1792,12 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         const reached = missing.filter((file) => existsSync(file));
         const reachedHost = reached.some((file) => hostCredentials.includes(file));
         if (reachedHost || (reached.length > 0 && !permitted)) {
-          unlinkSync(target);
+          if (!removeOrEmpty(target)) {
+            // It couldn't be removed or emptied: fail closed, loudly.
+            appendAdminAudit(paths.dataDir, { userId, action: "failed", status: 500, reason: "plant_not_removed", secret: name });
+            sendJson(res, 500, { ok: false, error: "the admin API hit an internal error" });
+            return;
+          }
           if (reachedHost) {
             refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
           } else {
@@ -1949,26 +1961,41 @@ function pathEntryExists(path: string): boolean {
 }
 
 /**
- * Create a file that must not exist yet: written to a temp file, then linked
- * to its name, which fails if the name is taken. False when it was taken.
+ * Create a file that must not exist yet (an exclusive open, which fails if
+ * the name is taken, on every filesystem). False when it was taken.
  */
 function createFileExclusive(path: string, content: string, mode: number): boolean {
-  const temp = `${path}.tmp-${randomUUID().slice(0, 8)}`;
+  let fd: number;
   try {
-    writeFileSync(temp, content, { mode });
-    chmodSync(temp, mode);
-    try {
-      linkSync(temp, path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-      throw error;
-    }
+    fd = openSync(path, "wx", mode);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+  try {
+    writeFileSync(fd, content);
+    fsyncSync(fd);
+  } catch (error) {
+    closeSync(fd);
+    removeOrEmpty(path);
+    throw error;
+  }
+  closeSync(fd);
+  chmodSync(path, mode);
+  return true;
+}
+
+/** Remove a file just written, or at least empty it. False if neither worked. */
+function removeOrEmpty(path: string): boolean {
+  try {
+    unlinkSync(path);
     return true;
-  } finally {
+  } catch {
     try {
-      unlinkSync(temp);
+      writeFileSync(path, "");
+      return true;
     } catch {
-      // Never written.
+      return false;
     }
   }
 }

@@ -433,12 +433,31 @@ regrant
 expect "$(post /admin/secrets/gwtarget '{"value":"HIJACK-LINK"}')" 422 "planting the gateway token through a dangling link, with the permission"
 [[ -e "${SECRETS_DIR}/gwtarget" ]] && { echo "the gateway token was planted through a link" >&2; exit 1; }
 rm -f "${SECRETS_DIR}/gwlink"
+# An existing gateway token file can't be replaced, even with the permission (#79 review).
+set_host_token_file "secrets/gateway-token"
+printf 'REAL-HOST-TOKEN\n' > "${SECRETS_DIR}/gateway-token"
+expect "$(post /admin/secrets/gateway-token '{"value":"HIJACK-REPLACE"}')" 422 "replacing an existing gateway token file with the permission"
+[[ "$(cat "${SECRETS_DIR}/gateway-token")" == "REAL-HOST-TOKEN" ]] || { echo "the gateway token file was overwritten" >&2; exit 1; }
+rm -f "${SECRETS_DIR}/gateway-token"
+# Replacing a name that is a link made on the host is refused: a chain can't become a live token (#79 review).
+set_host_token_file "secrets/gw1h"
+ln -s x1h "${SECRETS_DIR}/gw1h" && ln -s z1h "${SECRETS_DIR}/x1h"
+expect "$(post /admin/secrets/x1h '{"value":"HIJACK-CHAIN"}')" 422 "replacing a link in the gateway token's chain"
+[[ -e "${SECRETS_DIR}/z1h" || -f "${SECRETS_DIR}/x1h" ]] && { echo "the gateway token chain was planted" >&2; exit 1; }
+rm -f "${SECRETS_DIR}/gw1h" "${SECRETS_DIR}/x1h"
+set_host_token_file "secrets/gateway-token"
 FOLD_PROBE="${TEMP_RUNTIME}/fold-probe"
 mkdir -p "${FOLD_PROBE}" && touch "${FOLD_PROBE}/gateway-ßecret" "${FOLD_PROBE}/gateway-ſecret-long"
 if [[ -e "${FOLD_PROBE}/gateway-ssecret" ]]; then
   set_host_token_file "secrets/gateway-ßecret"
   expect "$(post /admin/secrets/gateway-ssecret '{"value":"HIJACK-FOLD"}')" 422 "planting the gateway token under the folded spelling ß → ss"
   ls "${SECRETS_DIR}" | grep -qi 'gateway-s' && { echo "a folded gateway token name was left behind" >&2; exit 1; }
+  # One hop plus a fold: the host's link names "hopß", the Console's link is "hopss".
+  set_host_token_file "secrets/gwf"
+  ln -s "hopß" "${SECRETS_DIR}/gwf" && ln -s zz "${SECRETS_DIR}/hopss"
+  expect "$(post /admin/secrets/hopss '{"value":"HIJACK-HOPFOLD"}')" 422 "replacing a folded link in the gateway token's chain"
+  [[ -e "${SECRETS_DIR}/zz" ]] && { echo "a folded link chain was planted" >&2; exit 1; }
+  rm -f "${SECRETS_DIR}/gwf" "${SECRETS_DIR}/hopss"
 else
   echo "this filesystem doesn't fold ß to ss; the folding check is skipped"
 fi

@@ -8,7 +8,7 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 
 ### Fixed
 - **Admin API follow-ups from the #75 review** (#78).
-  - A new secret could be planted into a file that didn't exist yet but that a connector reads, or into one of the gateway's own credential files, under another name: through a chain of dangling links, or a name the filesystem folds to it (APFS treats `ß` as `ss` and `ſ` as `s`). A new secret is now created exclusively, and if a protected file that was missing exists afterwards, the new secret is removed and refused: `403` for a connector's file without the permission, `422` for a gateway credential whatever the permission. The gateway credential check also follows symlinks.
+  - A new secret could be planted into a file that didn't exist yet but that a connector reads, or into one of the gateway's own credential files, under another name: through a chain of dangling links, or a name the filesystem folds to it (APFS treats `ß` as `ss` and `ſ` as `s`). A new secret is now created exclusively, and if a protected file that was missing exists afterwards, the new secret is removed and refused: `403` for a connector's file without the permission, `422` for a gateway credential whatever the permission. The gateway credential check also follows symlinks, a secret name that is a link made on the host is never replaced, and a new secret is created with an exclusive open (no hard-link support needed).
   - A secret write that fails (the name is a directory, for example) no longer leaves the value in a temporary file.
   - An admin API `500` is audited with the user id.
   - `GET /admin/permissions` shows the expiry that applies (at most an hour after the grant), not a later one from the stored file.
