@@ -7,7 +7,9 @@ set -euo pipefail
 #   2. two concurrent drains deliver each entry once
 #   3. a stale lock from a crashed writer is broken; an enqueue from another
 #      process during a drain is kept; three processes enqueueing at once
-#      lose nothing
+#      lose nothing; CLI approve decides first (a draft rejected while the
+#      confirm prompt is open is never queued) and undoes the approval when
+#      the queue is locked
 #   4. through the gateway: a failed run posts nothing to the chat (DM or
 #      group) and stays recorded in the transcript; a whitespace-only reply
 #      posts nothing
@@ -35,7 +37,7 @@ cd "${PROJECT_ROOT}"
 echo "== Connector queue smoke test =="
 
 npm run build:mindstone
-./scripts/init-runtime.sh >/tmp/mindstone-agent-connector-queue-init.log
+./scripts/init-runtime.sh >"${TEMP_RUNTIME}/init.log"
 
 # --- 1-3. Queue units (no ports) ---
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" PROJECT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
@@ -134,6 +136,66 @@ for (let n = 0; n < 300; n += 1) q.enqueue({ text: process.argv[2] + "-" + n });
 }
 console.log("queue unit assertions passed");
 TS
+
+# --- 3d. CLI approve: decide first, undo if the queue is locked ---
+MS="./scripts/mindstone"
+propose() {
+  PROJECT_ROOT="${PROJECT_ROOT}" TEXT="$1" npx tsx -e '
+import { ApprovalStore } from "'"${PROJECT_ROOT}"'/packages/mindstone-core/src/index.ts";
+const a = new ApprovalStore().propose({ kind: "connector_send", connectorId: "clitest", summary: "synthetic", send: { text: process.env.TEXT, chatId: "dm-clint" }, createdAt: new Date().toISOString() });
+console.log(a.id);'
+}
+queued() {
+  PROJECT_ROOT="${PROJECT_ROOT}" TEXT="$1" npx tsx -e '
+import { ConnectorDeliveryQueue } from "'"${PROJECT_ROOT}"'/packages/mindstone-core/src/index.ts";
+console.log(new ConnectorDeliveryQueue("clitest").pending().filter((e) => e.message.text === process.env.TEXT).length);'
+}
+status_of() { ${MS} approvals list --all --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).find(a=>a.id===process.argv[1]).status))' "$1"; }
+# Its own connector id, so nothing here reaches the loopback gateway test below.
+QUEUE_LOCK="${TEMP_RUNTIME}/mindstone/connectors/clitest/queue.json.lock"
+
+# A locked queue: the approval is undone, the action is pending again, nothing is queued.
+LOCKED_ID="$(propose SYNTHETIC-DRAFT-LOCKED)"
+mkdir -p "$(dirname "${QUEUE_LOCK}")"
+printf 'held-by-smoke' > "${QUEUE_LOCK}"
+( for _ in $(seq 1 16); do touch "${QUEUE_LOCK}" 2>/dev/null; sleep 0.5; done ) &
+toucher_pid=$!
+if approve_out="$(${MS} approvals approve "${LOCKED_ID}" --yes 2>&1)"; then
+  echo "approve should fail while the queue is locked: ${approve_out}" >&2; exit 1
+fi
+grep -q "pending again" <<<"${approve_out}" || { echo "the locked-queue error should say the action is pending again: ${approve_out}" >&2; exit 1; }
+[[ "$(status_of "${LOCKED_ID}")" == "pending" ]] || { echo "a locked-queue approval was left approved but never queued" >&2; exit 1; }
+kill "${toucher_pid}" 2>/dev/null || true; wait "${toucher_pid}" 2>/dev/null || true
+rm -f "${QUEUE_LOCK}"
+${MS} approvals approve "${LOCKED_ID}" --yes >/dev/null
+[[ "$(queued SYNTHETIC-DRAFT-LOCKED)" == "1" ]] || { echo "the re-approved draft should be queued once" >&2; exit 1; }
+[[ "$(status_of "${LOCKED_ID}")" == "approved" ]] || { echo "the re-approval should stand" >&2; exit 1; }
+
+# Rejected while the confirm prompt is open: approving must not queue it.
+RACE_ID="$(propose SYNTHETIC-DRAFT-RACE)"
+cat > "${TEMP_RUNTIME}/approve-race.exp" <<EXP
+set timeout 60
+spawn ${MS} approvals approve ${RACE_ID}
+expect "Approve this action now?"
+exec ${MS} approvals reject ${RACE_ID} --note owner-said-no
+# The confirm is an arrow-key list that starts on "No": up to "Yes", then Enter.
+send "\033\[A"
+sleep 0.3
+send "\r"
+expect {
+  eof {}
+  timeout { puts "approve-race: the CLI never exited"; exit 99 }
+}
+catch wait result
+exit [lindex \$result 3]
+EXP
+if race_out="$(expect "${TEMP_RUNTIME}/approve-race.exp" 2>&1)"; then
+  echo "approving a draft rejected during the prompt should fail: ${race_out}" >&2; exit 1
+fi
+grep -q "already rejected" <<<"${race_out}" || { echo "expected an 'already rejected' refusal: ${race_out}" >&2; exit 1; }
+[[ "$(queued SYNTHETIC-DRAFT-RACE)" == "0" ]] || { echo "a draft the owner rejected was queued for sending" >&2; exit 1; }
+[[ "$(status_of "${RACE_ID}")" == "rejected" ]] || { echo "the rejection should stand" >&2; exit 1; }
+echo "CLI approve assertions passed"
 
 # --- 4. Gateway: failed and empty runs post nothing ---
 node <<'NODE'

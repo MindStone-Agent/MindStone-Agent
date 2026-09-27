@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
@@ -103,21 +103,48 @@ export class ConnectorDeliveryQueue {
     while (fd === undefined) {
       try {
         fd = openSync(lockPath, "wx");
-        writeFileSync(fd, token);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         try {
-          // Break a stale lock only if it still holds the same owner we judged
-          // stale, so a waiter can't delete a lock another waiter just took.
+          // Break a stale lock by renaming it to a name only this waiter
+          // uses, then checking it is the lock that was judged stale. A rename
+          // is atomic, so two waiters can't both break it. If the renamed file
+          // turns out not to be the stale one (another waiter broke and
+          // retook the lock in between), it is linked back, unless a third
+          // process took the free path in that instant (#63 review).
           const holder = readFileSync(lockPath, "utf-8");
-          if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS && readFileSync(lockPath, "utf-8") === holder) {
-            unlinkSync(lockPath);
+          if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS) {
+            const claimed = `${lockPath}.stale-${randomUUID().slice(0, 8)}`;
+            renameSync(lockPath, claimed);
+            if (readFileSync(claimed, "utf-8") === holder && Date.now() - statSync(claimed).mtimeMs > STALE_LOCK_MS) {
+              unlinkSync(claimed);
+            } else {
+              try {
+                linkSync(claimed, lockPath);
+              } catch {
+                // A new holder took the path meanwhile; theirs stands.
+              }
+              unlinkSync(claimed);
+            }
           }
         } catch {
-          // The holder released it meanwhile; retry.
+          // The holder released it meanwhile, or another waiter broke it; retry.
         }
         if (Date.now() > deadline) throw new Error(`connector queue ${this.#path} is locked`);
         sleepSync(5);
+        continue;
+      }
+      try {
+        writeFileSync(fd, token);
+      } catch (error) {
+        // Don't leave a lock with no owner behind (ENOSPC, EIO).
+        closeSync(fd);
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          // Already gone.
+        }
+        throw error;
       }
     }
     try {
@@ -127,8 +154,11 @@ export class ConnectorDeliveryQueue {
       return result;
     } finally {
       closeSync(fd);
+      // Release only our own lock: if this process was suspended past the
+      // stale threshold, another process may have broken it and taken a new
+      // one, which must stand (#63 review).
       try {
-        unlinkSync(lockPath);
+        if (readFileSync(lockPath, "utf-8") === token) unlinkSync(lockPath);
       } catch {
         // Already gone.
       }

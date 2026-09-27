@@ -2002,24 +2002,35 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       }
     }
     const decidedBy = process.env.USER ?? "cli";
+    // Decide first: decide refuses an action that was rejected or approved
+    // while the confirm prompt was open, so nothing it refuses is queued.
+    // If the queue then fails (locked), the approval is undone and the action
+    // is pending again rather than approved but never sent (#63).
+    const approveThenEnqueue = (enqueue: () => void) => {
+      const decided = store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
+      try {
+        enqueue();
+      } catch (error) {
+        store.undoApproval(decided.id, decided.decidedAt);
+        throw new Error(`${error instanceof Error ? error.message : String(error)}; the action is pending again, approve it once the queue is free`);
+      }
+    };
     if (action.kind === "connector_send" && action.send) {
-      // Queue first: if the queue is locked and this throws, the action stays
-      // pending and can be approved again, instead of approved but never sent (#63).
-      const queue = new ConnectorDeliveryQueue(action.connectorId);
-      queue.enqueue(action.send, { now: new Date().toISOString() });
-      store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
+      const send = action.send;
+      approveThenEnqueue(() => new ConnectorDeliveryQueue(action.connectorId).enqueue(send, { now: new Date().toISOString() }));
       appendApprovalAuditEvent(action, "approved", `enqueued for delivery via ${action.connectorId}`);
       output.write(`${gold("Approved")} — draft enqueued for delivery via ${action.connectorId}.\n`);
       output.write("A running Gateway delivers it within seconds; a stopped one on next start.\n");
       return;
     }
     if (action.kind === "connector_mutation" && action.mutation) {
-      const queue = new ConnectorDeliveryQueue(action.mutation.connectorId);
-      queue.enqueue(
-        { text: action.summary, metadata: { kind: "connector_mutation", mutation: action.mutation } },
-        { now: new Date().toISOString() },
+      const mutation = action.mutation;
+      approveThenEnqueue(() =>
+        new ConnectorDeliveryQueue(mutation.connectorId).enqueue(
+          { text: action.summary, metadata: { kind: "connector_mutation", mutation } },
+          { now: new Date().toISOString() },
+        ),
       );
-      store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
       appendApprovalAuditEvent(action, "approved", `mutation enqueued for apply via ${action.mutation.connectorId}`);
       output.write(`${gold("Approved")} — ${action.mutation.operation} ${action.mutation.resource} enqueued for apply via ${action.mutation.connectorId}.\n`);
       output.write("A running Gateway applies it within seconds; a stopped one on next start.\n");

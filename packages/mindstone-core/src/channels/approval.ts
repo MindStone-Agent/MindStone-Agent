@@ -154,6 +154,23 @@ export class ApprovalStore {
     return target;
   }
 
+  /**
+   * Put an approval back to pending when the step after it failed (the
+   * delivery queue was locked), so the owner can approve it again (#63).
+   * Only this exact decision is undone: a later one is left alone.
+   */
+  undoApproval(id: string, decidedAt: string | undefined): boolean {
+    const file = this.#read();
+    const target = file.actions.find((action) => action.id === id);
+    if (!target || target.status !== "approved" || target.decidedAt !== decidedAt) return false;
+    target.status = "pending";
+    delete target.decidedAt;
+    delete target.decidedBy;
+    delete target.decisionNote;
+    this.#write(file);
+    return true;
+  }
+
   status(): ApprovalStoreStatus {
     const actions = this.#read().actions;
     return {
