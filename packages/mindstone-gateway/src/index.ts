@@ -318,6 +318,8 @@ function appendRunnerStreamTranscriptEvents(input: {
   source?: TranscriptEntry["source"];
   streamEvents: AgentRunStreamEvent[];
   streamOptions: RunnerStreamOptions;
+  /** The run's App Engine scope, stamped on each event so backfill labels it with its own run (#62). */
+  scope?: Record<string, string>;
 }): TranscriptEntry[] {
   if (!input.streamOptions.persistTranscriptEvents || input.streamOptions.maxEvents <= 0) return [];
   const selectedTypes = new Set(input.streamOptions.eventTypes);
@@ -332,7 +334,7 @@ function appendRunnerStreamTranscriptEvents(input: {
       content: event.type === "substrate_event" ? sanitizeRunnerStreamSubstrateEventPayload(event.event) : undefined,
       runId: input.runId,
       source: input.source,
-      metadata: runnerStreamEventMetadata(event),
+      metadata: { ...runnerStreamEventMetadata(event), ...(input.scope ? { scope: input.scope } : {}) },
     }));
 }
 
@@ -1071,6 +1073,7 @@ async function runConfiguredRoute(input: {
       source,
       streamEvents,
       streamOptions,
+      scope: input.scope,
     });
 
     // Action-proposal discipline (issues #21/#22) — same shared step as the
@@ -1162,7 +1165,7 @@ async function runConfiguredRoute(input: {
       text: error instanceof Error ? error.message : String(error),
       source,
       runId: run.id,
-      metadata: { event: "routing_failed", provider: provider.id, model: model.id },
+      metadata: { event: "routing_failed", provider: provider.id, model: model.id, ...(input.scope ? { scope: input.scope } : {}) },
     });
     return { routed: true, status: 500, body: { ok: false, runId: run.id, error: entry.text, entry } };
   }

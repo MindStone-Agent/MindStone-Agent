@@ -5,10 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { estimatePromptTokens } from "../context/index.js";
 import type { MindStoneConfig } from "../config/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
-import { scopeMatchesRecallFilter } from "../app-engine/types.js";
-
-/** The App Engine scope dimensions (app-engine/types.ts SCOPE_DIMENSIONS). */
-const RECALL_SCOPE_DIMENSIONS = ["appId", "tenantId", "userId", "agentId"] as const;
+import { SCOPE_DIMENSIONS as RECALL_SCOPE_DIMENSIONS, scopeMatchesRecallFilter } from "../app-engine/types.js";
 import { connectorOwnerSenders, isOwnerDirectMessage } from "../channels/session.js";
 import type { TranscriptEntry } from "../transcript/index.js";
 import { createMemoryEmbeddingProvider, type MemoryEmbeddingProvider } from "./embedding.js";
@@ -805,8 +802,9 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
   /**
    * Candidate rows, newest first, capped at 5000. The scope filter is part of
    * the query (#62), so out-of-scope chunks never take up the cap: each scope
-   * dimension a chunk carries must equal the query's. #inScope repeats the
-   * check on the parsed rows.
+   * dimension a chunk carries must equal the query's. #inScope checks the
+   * parsed rows again (it treats non-string values as absent, so the SQL is
+   * the stricter of the two).
    */
   #rows(includeEmbeddings: boolean, scope: Record<string, string> | undefined): StoredChunk[] {
     const db = openDatabase(this.#databasePath);
@@ -814,7 +812,9 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     const scopeClauses = RECALL_SCOPE_DIMENSIONS.map(
       (dim) => `(json_extract(metadata_json, '$.scope.${dim}') IS NULL OR json_extract(metadata_json, '$.scope.${dim}') = ?)`,
     );
-    const where = [...(includeEmbeddings ? ["embedding_json IS NOT NULL"] : []), ...scopeClauses];
+    // A row whose metadata isn't valid JSON is left out rather than making
+    // json_extract throw and the whole recall fail.
+    const where = [...(includeEmbeddings ? ["embedding_json IS NOT NULL"] : []), "(metadata_json IS NULL OR json_valid(metadata_json))", ...scopeClauses];
     const rows = db.prepare(`
       SELECT chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, metadata_json
       FROM memory_chunks

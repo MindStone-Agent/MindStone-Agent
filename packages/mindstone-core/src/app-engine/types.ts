@@ -57,7 +57,7 @@ export type MindStoneRunResult = {
   diagnostics?: Record<string, unknown>;
 };
 
-const SCOPE_DIMENSIONS = ["appId", "tenantId", "userId", "agentId"] as const;
+export const SCOPE_DIMENSIONS = ["appId", "tenantId", "userId", "agentId"] as const;
 
 export function scopeFromRequest(request: Pick<MindStoneRunRequest, "appId" | "tenantId" | "userId" | "agentId">): MindStoneRunScope {
   return {

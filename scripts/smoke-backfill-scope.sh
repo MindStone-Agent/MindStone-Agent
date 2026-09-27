@@ -165,6 +165,14 @@ has(await recall("kestrel ledger code", undefined, 8), ["OWNER-"], "owner recall
   has(await recall("kestrel file note", undefined, 8), ["FILE-KESTREL"], "owner file memory with over 5000 newer tenant chunks");
 }
 
+// A corrupted metadata row is left out; recall still works.
+{
+  const corrupt = new DatabaseSync(sqliteMemoryDatabasePath(paths));
+  corrupt.exec(`UPDATE memory_chunks SET metadata_json = '{not json' WHERE chunk_id = (SELECT chunk_id FROM memory_chunks WHERE text LIKE '%FLOOD-1%' LIMIT 1)`);
+  corrupt.close();
+  has(await recall("kestrel ledger code", undefined, 8), ["OWNER-"], "owner recall with one corrupted metadata row");
+}
+
 // 5c. An empty transcript directory (an unmounted volume's mount point) prunes nothing.
 renameSync(paths.transcriptDir, `${paths.transcriptDir}.aside`);
 mkdirSync(paths.transcriptDir);
