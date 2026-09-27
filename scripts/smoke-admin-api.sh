@@ -592,7 +592,65 @@ kill "${fake_pid}" 2>/dev/null || true
 printf '{"advancedSettings":false}\n' > "${PERMS}"
 echo "provider assertions passed"
 
-# 6. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
+# 6. Doctor and logs (#86): `mindstone doctor` and `mindstone gateway logs`
+#    for the Console, masked, with doctor's probes capped.
+get() { curl -s -o "${BODY}" -w '%{http_code}' "${ADMIN[@]}" "${BASE}$1"; }
+expect "$(get /admin/doctor)" 200 "running doctor"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const r=b.report; const ids=r.checks.map(c=>c.id); if(!ids.includes("config.parse")||!ids.includes("provider.discovery")||typeof r.summary.pass!=="number"||typeof r.ok!=="boolean"){console.error("doctor report: "+JSON.stringify(r).slice(0,400));process.exit(1)}' "${BODY}" || exit 1
+grep -q 'SENTINEL' "${BODY}" && { echo "doctor showed a config secret" >&2; exit 1; }
+# Logs: none yet, then the tail of a managed log, masked.
+LOG="${TEMP_RUNTIME}/mindstone/gateway/gateway.log"
+rm -f "${LOG}"
+expect "$(get /admin/logs)" 200 "logs with no managed log"
+grep -Eq '"available": ?false' "${BODY}" || { echo "expected available:false: $(cat "${BODY}")" >&2; exit 1; }
+mkdir -p "$(dirname "${LOG}")"
+LOG="${LOG}" node -e '
+const lines = [];
+for (let i = 1; i <= 600; i += 1) lines.push(`[info] line ${i}`);
+lines.push("Authorization: Bearer SENTINEL-LOGTOKEN-12345abc");
+lines.push("retrying with apiKey=SENTINEL-LOGKEY-99xY");
+lines.push("fetch https://user:SENTINEL-LOGPW-7@models.example/v1 failed");
+lines.push("{\"token\": \"SENTINEL-LOGJSON-5q\"}");
+lines.push("[info] last line");
+require("fs").writeFileSync(process.env.LOG, lines.join("\n") + "\n");'
+expect "$(get /admin/logs)" 200 "logs, default count"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(!b.available||b.lines.length!==80||b.lines[79]!=="[info] last line"||b.lines[0]!=="[info] line 526"){console.error("default tail: "+JSON.stringify(b).slice(0,300));process.exit(1)}' "${BODY}" || exit 1
+grep -q 'SENTINEL-LOG' "${BODY}" && { echo "a log line showed a secret: $(grep -o 'SENTINEL-LOG[^"]*' "${BODY}")" >&2; exit 1; }
+expect "$(get '/admin/logs?lines=3')" 200 "logs, 3 lines"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(b.lines.length===3&&b.lines[2]==="[info] last line"?0:1)' "${BODY}" || { echo "3-line tail: $(cat "${BODY}")" >&2; exit 1; }
+expect "$(get '/admin/logs?lines=500')" 200 "logs, 500 lines"
+for bad in 0 501 -1 1.5 abc 1e2 '' 0500 %201; do
+  expect "$(get "/admin/logs?lines=${bad}")" 400 "logs with lines=${bad}"
+done
+# A log over the read cap: only its end is read, and the partial first line is dropped.
+LOG="${LOG}" node -e '
+const fs = require("fs"); const big = "x".repeat(2000);
+const lines = []; for (let i = 1; i <= 2000; i += 1) lines.push(`${i} ${big}`);
+fs.writeFileSync(process.env.LOG, lines.join("\n") + "\n");'
+expect "$(get '/admin/logs?lines=500')" 200 "logs over the read cap"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const first=b.lines[0]; if(b.lines[b.lines.length-1].split(" ")[0]!=="2000"||!/^\d+ x{2000}$/.test(first)||b.lines.length>=500){console.error("big tail: "+b.lines.length+" first="+first.slice(0,20));process.exit(1)}' "${BODY}" || exit 1
+# Doctor with an embedding provider that never answers: capped, reported as timed out.
+HANG_PORT="$((GATEWAY_PORT + 2))"
+HANG_PORT="${HANG_PORT}" node -e 'require("http").createServer(() => {}).listen(Number(process.env.HANG_PORT), "127.0.0.1")' &
+hang_pid=$!
+cp "${CONFIG}" "${TEMP_RUNTIME}/config.before-doctor.json"
+node -e 'const f=process.argv[1]; const fs=require("fs"); const c=JSON.parse(fs.readFileSync(f,"utf8")); c.memory=c.memory||{}; c.memory.embeddingProvider="openai-compatible:hang-model apiKey=SENTINEL-DOCKEY-12ab"; fs.writeFileSync(f, JSON.stringify(c,null,2))' "${CONFIG}"
+stop_gateway
+EMBEDDER_BASE_URL="http://127.0.0.1:${HANG_PORT}/v1" EMBEDDER_TIMEOUT_MS=60000 start_gateway
+started="$(date +%s)"
+expect "$(get /admin/doctor)" 200 "doctor with a hanging embedding provider"
+took="$(( $(date +%s) - started ))"
+(( took <= 12 )) || { echo "doctor took ${took}s with a hanging provider" >&2; exit 1; }
+grep -q 'timed out after 8 s' "${BODY}" || { echo "the hanging probe should be reported as timed out: $(head -c 400 "${BODY}")" >&2; exit 1; }
+grep -q 'SENTINEL-DOCKEY-12ab' "${BODY}" && { echo "a doctor detail showed a secret" >&2; exit 1; }
+grep -q 'apiKey=\*\*\*' "${BODY}" || { echo "the doctor detail with a secret should be there, masked: $(head -c 600 "${BODY}")" >&2; exit 1; }
+kill "${hang_pid}" 2>/dev/null || true
+cp "${TEMP_RUNTIME}/config.before-doctor.json" "${CONFIG}"
+stop_gateway
+start_gateway
+echo "doctor and logs assertions passed"
+
+# 7. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
 #    token files resolve under the data dir, as the connectors read them, not
 #    next to the config file (#75 review A, tested end to end per #78).
 stop_gateway

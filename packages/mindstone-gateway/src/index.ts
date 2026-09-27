@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync } from "node:fs";
-import { basename, dirname, isAbsolute, resolve as resolvePath } from "node:path";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync, readSync, fstatSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
@@ -21,6 +21,7 @@ import {
   jsonDepth,
   MAX_PATCH_DEPTH,
   maskConfig,
+  maskInlineSecrets,
   mergeConfigPatch,
   type AdminPermissions,
 } from "./admin-api.js";
@@ -126,6 +127,8 @@ import {
   scopeSessionKeyAllowed,
   ApprovalStore,
   ConnectorDeliveryQueue,
+  getMindStoneDoctorReport,
+  probeMemoryEmbeddingProvider,
   applyActionProposalDiscipline,
   configuredConnectorIds,
   connectorAccessPolicyFromChannelConfig,
@@ -1650,6 +1653,62 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     });
     return;
   }
+  if (req.method === "GET" && url.pathname === "/admin/doctor") {
+    // `mindstone doctor` for the Console (#86): the same checks, with Pi
+    // discovery and the embedding probe capped so the answer arrives inside
+    // the Console proxy's 15 s timeout. Titles and details are masked.
+    const agentDir = gateConfig.config?.routing?.pi?.agentDir ?? paths.piAgentDir;
+    const timedOut = `timed out after ${DOCTOR_PROBE_MS / 1000} s`;
+    const [providerDiscovery, embeddingProbe] = await Promise.all([
+      withTimeout(
+        (async () => {
+          try {
+            const pi = new PiMindStoneProvider({ agentDir });
+            const [models, providers] = await Promise.all([pi.listModels(), pi.listProviders()]);
+            return { providerCount: providers.length, modelCount: models.length };
+          } catch (error) {
+            return { providerCount: 0, modelCount: 0, error: error instanceof Error ? error.message : String(error) };
+          }
+        })(),
+        DOCTOR_PROBE_MS,
+        { providerCount: 0, modelCount: 0, error: timedOut },
+      ),
+      gateConfig.config?.memory?.embeddingProvider
+        ? withTimeout(probeMemoryEmbeddingProvider(gateConfig.config), DOCTOR_PROBE_MS, { providerId: String(gateConfig.config.memory.embeddingProvider), model: "", baseUrl: "", error: timedOut })
+        : Promise.resolve(undefined),
+    ]);
+    const report = getMindStoneDoctorReport({ providerDiscovery, embeddingProbe });
+    sendJson(res, 200, {
+      ok: true,
+      report: {
+        ...report,
+        checks: report.checks.map((entry) => ({
+          ...entry,
+          title: maskInlineSecrets(entry.title),
+          ...(entry.detail !== undefined ? { detail: maskInlineSecrets(entry.detail) } : {}),
+        })),
+      },
+    });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/admin/logs") {
+    // `mindstone gateway logs` for the Console (#86): the tail of the managed
+    // gateway log, each line masked. Only the end of the file is read.
+    const raw = url.searchParams.get("lines");
+    const lines = raw === null ? 80 : /^[0-9]{1,3}$/.test(raw) ? Number(raw) : Number.NaN;
+    if (!Number.isInteger(lines) || lines < 1 || lines > 500) {
+      sendJson(res, 400, { ok: false, error: "lines must be a whole number from 1 to 500" });
+      return;
+    }
+    const logPath = join(paths.dataDir, "gateway", "gateway.log");
+    const tail = readLogTail(logPath, lines);
+    if (!tail) {
+      sendJson(res, 200, { ok: true, available: false, path: logPath, lines: [], note: "there is no managed gateway log; it is kept when the gateway runs under `mindstone gateway start` or the launchd service" });
+      return;
+    }
+    sendJson(res, 200, { ok: true, available: true, path: logPath, lines: tail.map(maskInlineSecrets) });
+    return;
+  }
   if (req.method !== "POST" && req.method !== "PATCH") {
     sendJson(res, 404, { ok: false, error: "unknown admin endpoint" });
     return;
@@ -2233,6 +2292,49 @@ function hostCredentialFiles(config: MindStoneConfig | undefined, configPath: st
 }
 
 /** A JSON object body, or an error response (then undefined). */
+/** How long doctor's network probes may take, so GET /admin/doctor answers inside the Console proxy's 15 s timeout (#86). */
+const DOCTOR_PROBE_MS = 8_000;
+/** The most of a log file GET /admin/logs reads from its end. */
+const LOG_TAIL_BYTES = 512 * 1024;
+
+/** A promise's value, or `fallback` once `ms` have passed. */
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => {
+      timer = setTimeout(() => resolve(fallback), ms);
+      timer.unref?.();
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * The last `count` lines of a file, reading at most LOG_TAIL_BYTES from its
+ * end (a partial first line is dropped). Undefined if there is no such file.
+ */
+function readLogTail(path: string, count: number): string[] | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return undefined;
+  }
+  try {
+    const size = fstatSync(fd).size;
+    const length = Math.min(size, LOG_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    readSync(fd, buffer, 0, length, size - length);
+    let text = buffer.toString("utf-8");
+    if (length < size) text = text.slice(text.indexOf("\n") + 1);
+    const all = text.split(/\r?\n/);
+    if (all.length > 0 && all[all.length - 1] === "") all.pop();
+    return all.slice(-count);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 async function readAdminBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | undefined> {
   try {
     const body = await readJsonBody(req, 256 * 1024);
