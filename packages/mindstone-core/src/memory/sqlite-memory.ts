@@ -5,6 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import { estimatePromptTokens } from "../context/index.js";
 import type { MindStoneConfig } from "../config/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
+import { SCOPE_DIMENSIONS as RECALL_SCOPE_DIMENSIONS, scopeMatchesRecallFilter } from "../app-engine/types.js";
+import { connectorOwnerSenders, isOwnerDirectMessage } from "../channels/session.js";
 import type { TranscriptEntry } from "../transcript/index.js";
 import { createMemoryEmbeddingProvider, type MemoryEmbeddingProvider } from "./embedding.js";
 import { discoverFileMemoryDocuments } from "./file-memory.js";
@@ -41,6 +43,8 @@ export type SqliteMemoryBackfillResult = {
   chunkEmbeddingsPreserved: number;
   fileDocuments: number;
   transcriptDocuments: number;
+  /** Transcript sources removed because this pass no longer indexes them (#62). */
+  transcriptSourcesPruned: number;
 };
 
 export type SqliteVecStatus = {
@@ -318,22 +322,79 @@ function chunkText(text: string, maxChars = DEFAULT_CHUNK_CHARS, overlapChars = 
   return chunks;
 }
 
-function transcriptDocuments(paths: MindStoneRuntimePaths): MemoryDocument[] {
+/**
+ * Whether a user turn was the owner's (#61/#62). New connector entries record
+ * `ownerTurn`. Older ones are judged by today's rule where they can be: a
+ * direct message from one of the connector's ownerSenders. Older email
+ * entries never count, because nothing recorded whether the From header was
+ * authenticated. Non-connector surfaces (webchat, REST, CLI, App Engine) are
+ * the owner's own; App Engine tenants are separated by scope.
+ */
+function userTurnIsOwner(entry: TranscriptEntry, config: MindStoneConfig | undefined): boolean {
+  if (typeof entry.metadata?.ownerTurn === "boolean") return entry.metadata.ownerTurn;
+  const substrate = entry.source?.substrate ?? "";
+  if (!substrate.startsWith("connector:")) return true;
+  const connectorId = substrate.slice("connector:".length);
+  if (connectorId === "email") return false;
+  return isOwnerDirectMessage(
+    { text: entry.text ?? "", chatType: entry.source?.chatType as never, senderId: entry.source?.senderId },
+    connectorOwnerSenders(config, connectorId),
+  );
+}
+
+function recordScope(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const scope = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter((pair): pair is [string, string] => typeof pair[1] === "string" && pair[1] !== ""),
+  );
+  return Object.keys(scope).length ? scope : undefined;
+}
+
+/**
+ * Every transcript entry as a memory document, labelled with where it came
+ * from (#62): surface, chat type, sender, tenant scope and audience.
+ * - Scope comes from the entry itself, else from its run (runId), else from
+ *   the user turn it follows, so a tenant's run, reply and events included,
+ *   is recalled only at that exact scope.
+ * - A non-owner user turn, and every entry after it up to the next owner turn
+ *   (the reply to it), is audience "non_owner" and is left out unless
+ *   includeNonOwner is set.
+ */
+function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNonOwner?: boolean; config?: MindStoneConfig } = {}): MemoryDocument[] {
   if (!existsSync(paths.transcriptDir) || !statSync(paths.transcriptDir).isDirectory()) return [];
   const docs: MemoryDocument[] = [];
   for (const name of readdirSync(paths.transcriptDir).sort()) {
     if (!name.endsWith(".jsonl")) continue;
     const path = join(paths.transcriptDir, name);
     const lines = readFileSync(path, "utf-8").split(/\r?\n/).filter((line) => line.trim().length > 0);
+    const entries: Array<{ entry: TranscriptEntry; index: number }> = [];
     lines.forEach((line, index) => {
-      let entry: TranscriptEntry;
       try {
-        entry = JSON.parse(line) as TranscriptEntry;
+        entries.push({ entry: JSON.parse(line) as TranscriptEntry, index });
       } catch {
-        return;
+        // Malformed lines are skipped.
       }
+    });
+    // A user turn sets the audience and scope for itself and the entries after
+    // it (its reply, events) until the next user turn. Scope comes from each
+    // turn, never from elsewhere in the file: one scoped run in a session must
+    // not relabel the rest of it.
+    const runScopes = new Map<string, Record<string, string>>();
+    for (const { entry } of entries) {
+      const scope = recordScope(entry.metadata?.scope);
+      if (scope && entry.runId && !runScopes.has(entry.runId)) runScopes.set(entry.runId, scope);
+    }
+    let audience: "owner" | "non_owner" = "owner";
+    let turnScope: Record<string, string> | undefined;
+    for (const { entry, index } of entries) {
+      if (entry.role === "user") {
+        audience = userTurnIsOwner(entry, options.config) ? "owner" : "non_owner";
+        turnScope = recordScope(entry.metadata?.scope);
+      }
+      const scope = recordScope(entry.metadata?.scope) ?? (entry.runId ? runScopes.get(entry.runId) : undefined) ?? turnScope;
+      if (audience === "non_owner" && !options.includeNonOwner) continue;
       const text = entry.text?.trim();
-      if (!text) return;
+      if (!text) continue;
       const sourceParts = [entry.source?.substrate, entry.source?.channel, entry.source?.chatType].filter(Boolean).join("/");
       docs.push({
         id: `transcript:${name}:${entry.id || index}`,
@@ -350,11 +411,16 @@ function transcriptDocuments(paths: MindStoneRuntimePaths): MemoryDocument[] {
           sessionKey: entry.sessionKey,
           agentId: entry.agentId,
           source: sourceParts || undefined,
+          surface: entry.source?.substrate,
+          chatType: entry.source?.chatType,
+          senderId: entry.source?.senderId,
+          audience,
+          ...(scope ? { scope } : {}),
           runId: entry.runId,
           event: entry.metadata?.event,
         },
       });
-    });
+    }
   }
   return docs;
 }
@@ -430,13 +496,41 @@ export function backfillSqliteMemoryIndex(options: SqliteMemoryBackfillOptions =
   initializeSchema(db);
 
   const fileDocuments = options.includeFileMemory === false ? [] : discoverFileMemoryDocuments({ config: options.config, paths });
-  const transcriptDocs = options.includeTranscripts === false ? [] : transcriptDocuments(paths);
+  const transcriptDocs = options.includeTranscripts === false
+    ? []
+    : transcriptDocuments(paths, { includeNonOwner: options.config?.memory?.transcripts?.includeNonOwner === true, config: options.config });
   const documents = [...fileDocuments, ...transcriptDocs];
   let chunksIndexed = 0;
   let chunkEmbeddingsPreserved = 0;
+  let transcriptSourcesPruned = 0;
 
   db.exec("BEGIN");
   try {
+    // Transcript sources this pass no longer produces (now excluded, or from a
+    // deleted transcript) are removed, so a stricter rule also clears what an
+    // earlier backfill indexed (#62).
+    // Only transcript ids (a memory file can also have kind "transcript"), and
+    // never when the transcript directory is missing: that is a moved or
+    // unmounted directory, not a deleted history.
+    // An empty directory where the index holds transcripts is treated like a
+    // missing one (an unmounted volume leaves an empty mount point).
+    const transcriptDirUsable =
+      existsSync(paths.transcriptDir) &&
+      statSync(paths.transcriptDir).isDirectory() &&
+      readdirSync(paths.transcriptDir).some((name) => name.endsWith(".jsonl"));
+    if (options.includeTranscripts !== false && transcriptDirUsable) {
+      const keep = new Set(transcriptDocs.map((document) => document.id));
+      const stale = (db.prepare("SELECT id FROM memory_sources WHERE kind = 'transcript' AND id LIKE 'transcript:%'").all() as Array<{ id: string }>)
+        .map((row) => row.id)
+        .filter((id) => !keep.has(id));
+      const deleteChunks = db.prepare("DELETE FROM memory_chunks WHERE source_id = ?");
+      const deleteSource = db.prepare("DELETE FROM memory_sources WHERE id = ?");
+      for (const id of stale) {
+        deleteChunks.run(id);
+        deleteSource.run(id);
+      }
+      transcriptSourcesPruned = stale.length;
+    }
     for (const document of documents) {
       const indexed = indexDocument(db, document);
       chunksIndexed += indexed.chunksIndexed;
@@ -457,6 +551,7 @@ export function backfillSqliteMemoryIndex(options: SqliteMemoryBackfillOptions =
     chunkEmbeddingsPreserved,
     fileDocuments: fileDocuments.length,
     transcriptDocuments: transcriptDocs.length,
+    transcriptSourcesPruned,
   };
 }
 
@@ -704,18 +799,47 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     return this.#lexicalSearch(query);
   }
 
-  #rows(includeEmbeddings: boolean): StoredChunk[] {
+  /**
+   * Candidate rows, newest first, capped at 5000. The scope filter is part of
+   * the query (#62), so out-of-scope chunks never take up the cap: each scope
+   * dimension a chunk carries must equal the query's. #inScope checks the
+   * parsed rows again (it treats non-string values as absent, so the SQL is
+   * the stricter of the two).
+   */
+  #rows(includeEmbeddings: boolean, scope: Record<string, string> | undefined): StoredChunk[] {
     const db = openDatabase(this.#databasePath);
     initializeSchema(db);
+    const scopeClauses = RECALL_SCOPE_DIMENSIONS.map(
+      (dim) => `(json_extract(metadata_json, '$.scope.${dim}') IS NULL OR json_extract(metadata_json, '$.scope.${dim}') = ?)`,
+    );
+    // A row whose metadata isn't valid JSON is left out rather than making
+    // json_extract throw and the whole recall fail.
+    const where = [...(includeEmbeddings ? ["embedding_json IS NOT NULL"] : []), "(metadata_json IS NULL OR json_valid(metadata_json))", ...scopeClauses];
     const rows = db.prepare(`
       SELECT chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, metadata_json
       FROM memory_chunks
-      ${includeEmbeddings ? "WHERE embedding_json IS NOT NULL" : ""}
+      WHERE ${where.join(" AND ")}
       ORDER BY updated_at DESC
       LIMIT 5000
-    `).all() as StoredChunk[];
+    `).all(...RECALL_SCOPE_DIMENSIONS.map((dim) => scope?.[dim] ?? null)) as StoredChunk[];
     db.close();
     return rows;
+  }
+
+  /**
+   * Scope is applied before ranking (#62): a scoped chunk is only a candidate
+   * for a query at its exact scope, so one tenant's volume can't crowd
+   * everyone else out of the top results. No query scope (the owner's own
+   * recall) means no scoped chunk is a candidate.
+   */
+  #inScope(row: StoredChunk, query: MemoryQuery): boolean {
+    if (!row.metadata_json || !row.metadata_json.includes('"scope"')) return true;
+    try {
+      const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
+      return scopeMatchesRecallFilter(metadata.scope as Record<string, unknown> | undefined, query.scope);
+    } catch {
+      return false;
+    }
   }
 
   async #embeddingSearch(query: MemoryQuery): Promise<MemoryHit[]> {
@@ -723,7 +847,8 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     const [queryEmbedding] = await this.#embeddingProvider.embedTexts([query.text]);
     if (!queryEmbedding) return [];
     const limit = query.limit ?? 8;
-    return this.#rows(true)
+    return this.#rows(true, query.scope)
+      .filter((row) => this.#inScope(row, query))
       .map((row) => {
         const embedding = parseEmbedding(row.embedding_json);
         const score = embedding ? cosineSimilarity(queryEmbedding, embedding) : 0;
@@ -736,7 +861,8 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
 
   #lexicalSearch(query: MemoryQuery): MemoryHit[] {
     const limit = query.limit ?? 8;
-    return this.#rows(false)
+    return this.#rows(false, query.scope)
+      .filter((row) => this.#inScope(row, query))
       .map((row) => this.#hitFromRow(row, lexicalScore(query.text, row.text), "lexical"))
       .filter((hit) => hit.score > 0)
       .sort((a, b) => b.score - a.score || a.chunkId.localeCompare(b.chunkId))

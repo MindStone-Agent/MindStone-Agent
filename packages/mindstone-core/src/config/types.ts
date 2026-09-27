@@ -48,6 +48,15 @@ export type MindStoneMemoryConfig = {
   embeddingProvider?: string;
   recall?: MemoryRecallConfig;
   files?: MindStoneFileMemoryConfig;
+  /** Transcript backfill into the memory index (#62). */
+  transcripts?: {
+    /**
+     * Index turns that weren't the owner's (group/channel/thread messages,
+     * missing chat type, unverified senders) and the replies to them. Default
+     * false: they never reach the owner's recall.
+     */
+    includeNonOwner?: boolean;
+  };
   /** Deterministic local memory docs for development/smoke tests before live vector providers are wired. */
   localDocuments?: MemoryDocument[];
 };

@@ -131,7 +131,7 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
   const limit = input.config?.maxResults ?? DEFAULT_MAX_RESULTS;
   const minScore = input.config?.minScore ?? DEFAULT_MIN_SCORE;
   const maxPromptTokens = input.config?.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS;
-  const rawHits = await provider.search({ text: query, limit: Math.max(limit * 3, limit), agentId: input.agentId });
+  const rawHits = await provider.search({ text: query, limit: Math.max(limit * 3, limit), agentId: input.agentId, ...(input.scope ? { scope: input.scope } : {}) });
   const scopeRejected: Array<{ id: string; chunkId: string; reason: string }> = [];
   const scopedHits = rawHits.filter((hit) => {
     const documentScope = hit.metadata?.scope as Record<string, unknown> | undefined;

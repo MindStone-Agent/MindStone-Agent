@@ -7,6 +7,12 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ## [Unreleased]
 
 ### Security
+- **Memory backfill keeps tenants apart and keeps non-owner turns out of the owner's recall** (#62).
+  - Before this fix, `memory backfill` indexed every transcript with no labels. One App Engine tenant's run could surface in another tenant's recall, and a stranger's channel message could come back as the owner's memory.
+  - Indexed transcript chunks now carry their surface, chat type, sender, audience and, for App Engine runs, the run's scope, taken from the entry itself, else its run, else the turn it follows (one scoped run in a session no longer affects the rest of it). A scoped run, reply included, is recalled only by a run whose recall scope matches every part of it, never by the owner's own recall. Scope is applied in the recall query itself, before ranking and before the candidate limit, so one tenant's volume can't crowd others out. App Engine runs at the tenant, app or user sharing level don't recall their own transcripts yet (their recall scope leaves out the agent id); that is part of the open App Engine scope decision.
+  - Non-owner turns and the entries after them up to the next turn are not indexed unless `memory.transcripts.includeNonOwner` is set. Older connector entries without the new label count as the owner's only when they are a DM from one of the connector's `ownerSenders`; older email entries never do.
+  - The next backfill removes transcript chunks that an earlier backfill indexed but the new rules exclude. It prunes nothing when the transcript directory is missing, empty or not a directory, and never touches memory files. Run `mindstone memory backfill` once after upgrading.
+  - A scoped App Engine run no longer receives the owner's auto-compact handoff.
 - **Channel turns that aren't the owner's direct messages no longer get the owner's context** (#61).
   - Before this fix, with the default `session.mode: "single"`, a group or channel message landed in the owner's main session. Its prompt carried the owner's recalled memories, `USER.md`, the memory index and the owner's earlier DM history.
   - **Upgrade step:** the owner is now named per connector with `channels.<id>.ownerSenders` (your own sender ids). Until it is set, nobody on that connector is the owner and your DMs there get no profile or memory; `mindstone doctor` warns. Being on `allowedSenders`, paired, or in an allowed domain lets someone talk to the agent but never makes them the owner.
