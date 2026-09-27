@@ -8,6 +8,9 @@ import { stdin as input, stdout as output } from "node:process";
 import { pathToFileURL } from "node:url";
 import {
   ApprovalStore,
+  approveProposedAction,
+  checkApprovable,
+  rejectProposedAction,
   ConnectorDeliveryQueue,
   connectorCredentialRefFromChannelConfig,
   resolveConnectorCredential,
@@ -1902,18 +1905,6 @@ async function runPersonaCommand(argv: string[]): Promise<void> {
 // event. #24 grows a UI + wider action taxonomy on this same surface.
 // ---------------------------------------------------------------------------
 
-/** Whether the approve that set "queuing" is still running: the same process id alive on this host. */
-function approverStillRunning(by: { pid: number; host: string }): boolean {
-  if (by.host !== hostname()) return true;
-  if (by.pid === process.pid) return false;
-  try {
-    process.kill(by.pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 function appendApprovalAuditEvent(action: { id: string; kind: string; connectorId: string; sessionKey?: string; agentId?: string }, decision: string, detail: string): void {
   const fallbackSessionKey = () => resolveDefaultSessionKey(loadMindStoneConfig(resolveConfigPath()).config, action.agentId ?? "default");
   appendTranscriptEntry({
@@ -1997,29 +1988,9 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
   }
 
   if (subcommand === "approve") {
-    // What an approved send or mutation puts on its connector's queue.
-    const queueTarget =
-      action.kind === "connector_send" && action.send
-        ? { connectorId: action.connectorId, message: action.send }
-        : action.kind === "connector_mutation" && action.mutation
-          ? {
-              connectorId: action.mutation.connectorId,
-              message: { text: action.summary, metadata: { kind: "connector_mutation", mutation: action.mutation } },
-            }
-          : undefined;
-    // An approve interrupted after the decision but before the queue entry
-    // was recorded (a killed process) leaves the action approved with
-    // queueState "queuing". Approving it again completes it. Only such an
-    // action is re-queued: one that was queued, or approved before
-    // queueState existed, is refused like any decided action (#77 review).
-    const repair = action.status === "approved" && action.queueState === "queuing" && queueTarget !== undefined;
-    if (!repair && action.status !== "pending") throw new Error(`action ${action.id} is already ${action.status}`);
-    // "queuing" alone can't tell an approve that is still running (waiting for
-    // the queue lock) from one that was killed. The approve records its
-    // process; while that process is alive, it isn't repaired (#77 round 3).
-    if (repair && action.queuingBy && approverStillRunning(action.queuingBy)) {
-      throw new Error(`an approve of ${action.id} is still running (process ${action.queuingBy.pid}); let it finish, or stop it and approve again`);
-    }
+    // The guards live in core, shared with the admin API (#84).
+    const check = checkApprovable(store, action.id);
+    const { repair } = check;
     if (!hasOption(argv, "--yes")) {
       if (!input.isTTY || !output.isTTY) throw new Error("Refusing non-interactive approve without --yes");
       const prompter = makeTerminalPrompter();
@@ -2035,104 +2006,31 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
         prompter.close();
       }
     }
-    if (repair && queueTarget) {
-      const { queued, refused } = new ConnectorDeliveryQueue(queueTarget.connectorId).enqueueForApproval(queueTarget.message, action.id, {
-        now: new Date().toISOString(),
-        // Re-read under the queue lock: still approved, still "queuing", same decision.
-        stillApproved: () => {
-          const current = store.get(action.id);
-          return current?.status === "approved" && current.queueState === "queuing" && current.decidedAt === action.decidedAt;
-        },
-      });
-      if (refused) throw new Error(`${action.id} changed while it was being queued (undone or decided again); nothing was queued. Check it with mindstone approvals show ${action.id}`);
-      store.markQueued(action.id, action.decidedAt);
-      if (queued) {
-        appendApprovalAuditEvent(action, "approved", `enqueued via ${queueTarget.connectorId} (completing an earlier approval that was never queued)`);
-        output.write(`${gold("Queued")} — ${action.id} was approved earlier but never queued; it is queued now.\n`);
-      } else {
-        output.write(`${gold("Already queued")} — ${action.id} was queued by the earlier approve; nothing was added.\n`);
-      }
-      return;
-    }
-    const decidedBy = process.env.USER ?? "cli";
-    // Decide first: decide refuses an action that was rejected or approved
-    // while the confirm prompt was open, so nothing it refuses is queued.
-    // The decision records queueState "queuing" until the entry is written.
-    // If the queue then fails (locked), the approval is undone and the action
-    // is pending again rather than approved but never sent (#63). The entry
-    // is written at most once per approval, even if two approves race (#77).
-    const approveThenEnqueue = (target: NonNullable<typeof queueTarget>) => {
-      const decided = store.decide(action.id, {
-        status: "approved",
-        decidedBy,
-        now: new Date().toISOString(),
-        queueState: "queuing",
-        queuingBy: { pid: process.pid, host: hostname() },
-      });
-      const queue = new ConnectorDeliveryQueue(target.connectorId);
-      try {
-        queue.enqueueForApproval(target.message, action.id, { now: new Date().toISOString() });
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        let undone = false;
-        try {
-          // Undone only under the queue lock and only if nothing queued it
-          // meanwhile, so an undone approval never has a live entry.
-          undone = queue.withApprovalLocked(decided.id, (queued) => !queued && store.undoApproval(decided.id, decided.decidedAt));
-        } catch (undoError) {
-          throw new Error(`${reason}; undoing the approval also failed (${undoError instanceof Error ? undoError.message : String(undoError)}): the action is approved but not queued; once this command has exited, approve it again to queue it`);
-        }
-        throw new Error(
-          undone
-            ? `${reason}; the action is pending again, approve it once the queue is free`
-            : `${reason}; the approval could not be undone (it changed meanwhile): check it with mindstone approvals show ${decided.id}`,
-        );
-      }
-      store.markQueued(decided.id, decided.decidedAt);
-    };
-    if (action.kind === "connector_send" && action.send && queueTarget) {
-      approveThenEnqueue(queueTarget);
-      appendApprovalAuditEvent(action, "approved", `enqueued for delivery via ${action.connectorId}`);
-      output.write(`${gold("Approved")} — draft enqueued for delivery via ${action.connectorId}.\n`);
+    const result = approveProposedAction(store, check, {
+      decidedBy: process.env.USER ?? "cli",
+      memoryDir: runtimePathsFromEnv().memoryDir,
+      force: hasOption(argv, "--force"),
+      onDecision: appendApprovalAuditEvent,
+    });
+    if (result.outcome === "requeued") {
+      output.write(`${gold("Queued")} — ${action.id} was approved earlier but never queued; it is queued now.\n`);
+    } else if (result.outcome === "already_queued") {
+      output.write(`${gold("Already queued")} — ${action.id} was queued by the earlier approve; nothing was added.\n`);
+    } else if (result.kind === "connector_send") {
+      output.write(`${gold("Approved")} — draft enqueued for delivery via ${result.connectorId}.\n`);
       output.write("A running Gateway delivers it within seconds; a stopped one on next start.\n");
-      return;
-    }
-    if (action.kind === "connector_mutation" && action.mutation && queueTarget) {
-      approveThenEnqueue(queueTarget);
-      appendApprovalAuditEvent(action, "approved", `mutation enqueued for apply via ${action.mutation.connectorId}`);
-      output.write(`${gold("Approved")} — ${action.mutation.operation} ${action.mutation.resource} enqueued for apply via ${action.mutation.connectorId}.\n`);
+    } else if (result.kind === "connector_mutation") {
+      output.write(`${gold("Approved")} — ${action.mutation?.operation} ${action.mutation?.resource} enqueued for apply via ${result.connectorId}.\n`);
       output.write("A running Gateway applies it within seconds; a stopped one on next start.\n");
-      return;
+    } else {
+      output.write(`${gold("Approved")} — memory file written: ${result.memoryFile}\n`);
     }
-    if (action.kind === "memory_write" && action.memory) {
-      const safePath = sanitizeMemoryProposalPath(action.memory.path);
-      if (!safePath) throw new Error(`memory proposal path "${action.memory.path}" is not a safe relative path`);
-      const paths = runtimePathsFromEnv();
-      const target = join(paths.memoryDir, safePath);
-      if (existsSync(target) && !hasOption(argv, "--force")) {
-        throw new Error(`memory file already exists: ${target} (re-run with --force to overwrite)`);
-      }
-      store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, action.memory.content.endsWith("\n") ? action.memory.content : `${action.memory.content}\n`);
-      appendApprovalAuditEvent(action, "approved", `memory file written: ${safePath}`);
-      output.write(`${gold("Approved")} — memory file written: ${target}\n`);
-      return;
-    }
-    throw new Error(`action ${action.id} has kind "${action.kind}" but no matching payload; refusing to approve`);
+    return;
   }
 
   if (subcommand === "reject") {
-    if (action.status !== "pending") throw new Error(`action ${action.id} is already ${action.status}`);
-    // A pending action must not have a queued send; if it does (a lost
-    // update in the approval store), rejecting it wouldn't stop the send.
-    const rejectQueue = action.kind === "connector_send" ? action.connectorId : action.kind === "connector_mutation" ? action.mutation?.connectorId : undefined;
-    if (rejectQueue && new ConnectorDeliveryQueue(rejectQueue).hasApprovalEntry(action.id)) {
-      throw new Error(`a send for ${action.id} is already queued, so rejecting it wouldn't stop it; check the ${rejectQueue} queue`);
-    }
     const note = optionValue(argv, "--note");
-    store.decide(action.id, { status: "rejected", decidedBy: process.env.USER ?? "cli", note, now: new Date().toISOString() });
-    appendApprovalAuditEvent(action, "rejected", note ?? "no note");
+    rejectProposedAction(store, action.id, { decidedBy: process.env.USER ?? "cli", note, onDecision: appendApprovalAuditEvent });
     output.write(`${gold("Rejected")} — ${action.kind} ${action.id.slice(0, 8)} archived with its payload (nothing sent/written).\n`);
     return;
   }
