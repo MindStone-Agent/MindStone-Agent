@@ -41,6 +41,8 @@ export type SqliteMemoryBackfillResult = {
   chunkEmbeddingsPreserved: number;
   fileDocuments: number;
   transcriptDocuments: number;
+  /** Transcript sources removed because this pass no longer indexes them (#62). */
+  transcriptSourcesPruned: number;
 };
 
 export type SqliteVecStatus = {
@@ -318,22 +320,58 @@ function chunkText(text: string, maxChars = DEFAULT_CHUNK_CHARS, overlapChars = 
   return chunks;
 }
 
-function transcriptDocuments(paths: MindStoneRuntimePaths): MemoryDocument[] {
+/**
+ * Whether a user turn was the owner's (#61/#62). New connector entries record
+ * `ownerTurn`; for older ones, a connector turn is the owner's only when its
+ * chat type is "direct". Non-connector surfaces (webchat, REST, CLI, App
+ * Engine) are the owner's own; App Engine tenants are separated by scope.
+ */
+function userTurnIsOwner(entry: TranscriptEntry): boolean {
+  if (typeof entry.metadata?.ownerTurn === "boolean") return entry.metadata.ownerTurn;
+  const substrate = entry.source?.substrate ?? "";
+  if (!substrate.startsWith("connector:")) return true;
+  return entry.source?.chatType === "direct";
+}
+
+function recordScope(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const scope = Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter((pair): pair is [string, string] => typeof pair[1] === "string" && pair[1] !== ""),
+  );
+  return Object.keys(scope).length ? scope : undefined;
+}
+
+/**
+ * Every transcript entry as a memory document, labelled with where it came
+ * from (#62): surface, chat type, sender, tenant scope and audience.
+ * - A session's App Engine scope applies to all of its entries, replies
+ *   included, so a tenant's run is recalled only at that exact scope.
+ * - A non-owner user turn, and every entry after it up to the next owner turn
+ *   (the reply to it), is audience "non_owner" and is left out unless
+ *   includeNonOwner is set.
+ */
+function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNonOwner?: boolean } = {}): MemoryDocument[] {
   if (!existsSync(paths.transcriptDir) || !statSync(paths.transcriptDir).isDirectory()) return [];
   const docs: MemoryDocument[] = [];
   for (const name of readdirSync(paths.transcriptDir).sort()) {
     if (!name.endsWith(".jsonl")) continue;
     const path = join(paths.transcriptDir, name);
     const lines = readFileSync(path, "utf-8").split(/\r?\n/).filter((line) => line.trim().length > 0);
+    const entries: Array<{ entry: TranscriptEntry; index: number }> = [];
     lines.forEach((line, index) => {
-      let entry: TranscriptEntry;
       try {
-        entry = JSON.parse(line) as TranscriptEntry;
+        entries.push({ entry: JSON.parse(line) as TranscriptEntry, index });
       } catch {
-        return;
+        // Malformed lines are skipped.
       }
+    });
+    const sessionScope = entries.map(({ entry }) => recordScope(entry.metadata?.scope)).find(Boolean);
+    let audience: "owner" | "non_owner" = "owner";
+    for (const { entry, index } of entries) {
+      if (entry.role === "user") audience = userTurnIsOwner(entry) ? "owner" : "non_owner";
+      if (audience === "non_owner" && !options.includeNonOwner) continue;
       const text = entry.text?.trim();
-      if (!text) return;
+      if (!text) continue;
       const sourceParts = [entry.source?.substrate, entry.source?.channel, entry.source?.chatType].filter(Boolean).join("/");
       docs.push({
         id: `transcript:${name}:${entry.id || index}`,
@@ -350,11 +388,16 @@ function transcriptDocuments(paths: MindStoneRuntimePaths): MemoryDocument[] {
           sessionKey: entry.sessionKey,
           agentId: entry.agentId,
           source: sourceParts || undefined,
+          surface: entry.source?.substrate,
+          chatType: entry.source?.chatType,
+          senderId: entry.source?.senderId,
+          audience,
+          ...(sessionScope ? { scope: sessionScope } : {}),
           runId: entry.runId,
           event: entry.metadata?.event,
         },
       });
-    });
+    }
   }
   return docs;
 }
@@ -430,13 +473,32 @@ export function backfillSqliteMemoryIndex(options: SqliteMemoryBackfillOptions =
   initializeSchema(db);
 
   const fileDocuments = options.includeFileMemory === false ? [] : discoverFileMemoryDocuments({ config: options.config, paths });
-  const transcriptDocs = options.includeTranscripts === false ? [] : transcriptDocuments(paths);
+  const transcriptDocs = options.includeTranscripts === false
+    ? []
+    : transcriptDocuments(paths, { includeNonOwner: options.config?.memory?.transcripts?.includeNonOwner === true });
   const documents = [...fileDocuments, ...transcriptDocs];
   let chunksIndexed = 0;
   let chunkEmbeddingsPreserved = 0;
+  let transcriptSourcesPruned = 0;
 
   db.exec("BEGIN");
   try {
+    // Transcript sources this pass no longer produces (now excluded, or from a
+    // deleted transcript) are removed, so a stricter rule also clears what an
+    // earlier backfill indexed (#62).
+    if (options.includeTranscripts !== false) {
+      const keep = new Set(transcriptDocs.map((document) => document.id));
+      const stale = (db.prepare("SELECT id FROM memory_sources WHERE kind = 'transcript'").all() as Array<{ id: string }>)
+        .map((row) => row.id)
+        .filter((id) => !keep.has(id));
+      const deleteChunks = db.prepare("DELETE FROM memory_chunks WHERE source_id = ?");
+      const deleteSource = db.prepare("DELETE FROM memory_sources WHERE id = ?");
+      for (const id of stale) {
+        deleteChunks.run(id);
+        deleteSource.run(id);
+      }
+      transcriptSourcesPruned = stale.length;
+    }
     for (const document of documents) {
       const indexed = indexDocument(db, document);
       chunksIndexed += indexed.chunksIndexed;
@@ -457,6 +519,7 @@ export function backfillSqliteMemoryIndex(options: SqliteMemoryBackfillOptions =
     chunkEmbeddingsPreserved,
     fileDocuments: fileDocuments.length,
     transcriptDocuments: transcriptDocs.length,
+    transcriptSourcesPruned,
   };
 }
 

@@ -564,6 +564,7 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
       `Chunk embeddings preserved: ${result.chunkEmbeddingsPreserved}`,
       `File documents: ${result.fileDocuments}`,
       `Transcript documents: ${result.transcriptDocuments}`,
+      `Transcript sources pruned: ${result.transcriptSourcesPruned}`,
     ];
     if (maintain) {
       maintenanceResult = maintainSqliteMemoryIndex({ paths, deduplicateText });

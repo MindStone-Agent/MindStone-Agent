@@ -7,6 +7,11 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ## [Unreleased]
 
 ### Security
+- **Memory backfill keeps tenants apart and keeps non-owner turns out of the owner's recall** (#62).
+  - Before this fix, `memory backfill` indexed every transcript with no labels. One App Engine tenant's run could surface in another tenant's recall, and a stranger's channel message could come back as the owner's memory.
+  - Indexed transcript chunks now carry their surface, chat type, sender, audience and, for App Engine sessions, the tenant scope. A scoped run, replies included, is recalled only at that exact scope.
+  - Non-owner turns and the replies to them are not indexed unless `memory.transcripts.includeNonOwner` is set. Older connector entries without the new label count as the owner's only when their chat type is `direct`.
+  - The next backfill removes transcript chunks that an earlier backfill indexed but the new rules exclude.
 - **Channel turns that aren't the owner's direct messages no longer get the owner's context** (#61).
   - Before this fix, with the default `session.mode: "single"`, a group or channel message landed in the owner's main session. Its prompt carried the owner's recalled memories, `USER.md`, the memory index and the owner's earlier DM history.
   - **Upgrade step:** the owner is now named per connector with `channels.<id>.ownerSenders` (your own sender ids). Until it is set, nobody on that connector is the owner and your DMs there get no profile or memory; `mindstone doctor` warns. Being on `allowedSenders`, paired, or in an allowed domain lets someone talk to the agent but never makes them the owner.

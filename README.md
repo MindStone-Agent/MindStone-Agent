@@ -405,6 +405,8 @@ mindstone memory maintain
 mindstone memory maintain --dry-run
 ```
 
+`memory backfill` indexes transcripts with their origin: surface, chat type, sender, audience, and an App Engine session's tenant scope. A tenant's run is recalled only at that exact scope. Turns that weren't the owner's (group, channel or thread messages, a missing chat type, an unverified sender) and the replies to them are left out of the owner's memory, and a backfill removes any that an earlier one indexed. Set `memory.transcripts.includeNonOwner: true` to index them anyway.
+
 Memory features currently include:
 
 - file-backed memory docs and journals;

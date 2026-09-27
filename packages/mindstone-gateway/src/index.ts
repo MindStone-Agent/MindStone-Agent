@@ -2096,6 +2096,8 @@ async function handleConnectorInbound(params: {
       threadId: message.threadId,
       triggered: trigger.respond,
       triggerReason: trigger.reason,
+      // Read by the memory backfill: non-owner turns stay out of the owner's recall (#62).
+      ownerTurn: isOwnerDirectMessage(message),
     },
   });
   writeConnectorRuntimeStatus({
