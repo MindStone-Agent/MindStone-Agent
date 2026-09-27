@@ -6,6 +6,9 @@ import { estimatePromptTokens } from "../context/index.js";
 import type { MindStoneConfig } from "../config/index.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { scopeMatchesRecallFilter } from "../app-engine/types.js";
+
+/** The App Engine scope dimensions (app-engine/types.ts SCOPE_DIMENSIONS). */
+const RECALL_SCOPE_DIMENSIONS = ["appId", "tenantId", "userId", "agentId"] as const;
 import { connectorOwnerSenders, isOwnerDirectMessage } from "../channels/session.js";
 import type { TranscriptEntry } from "../transcript/index.js";
 import { createMemoryEmbeddingProvider, type MemoryEmbeddingProvider } from "./embedding.js";
@@ -353,8 +356,9 @@ function recordScope(value: unknown): Record<string, string> | undefined {
 /**
  * Every transcript entry as a memory document, labelled with where it came
  * from (#62): surface, chat type, sender, tenant scope and audience.
- * - A session's App Engine scope applies to all of its entries, replies
- *   included, so a tenant's run is recalled only at that exact scope.
+ * - Scope comes from the entry itself, else from its run (runId), else from
+ *   the user turn it follows, so a tenant's run, reply and events included,
+ *   is recalled only at that exact scope.
  * - A non-owner user turn, and every entry after it up to the next owner turn
  *   (the reply to it), is audience "non_owner" and is left out unless
  *   includeNonOwner is set.
@@ -378,6 +382,11 @@ function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNon
     // it (its reply, events) until the next user turn. Scope comes from each
     // turn, never from elsewhere in the file: one scoped run in a session must
     // not relabel the rest of it.
+    const runScopes = new Map<string, Record<string, string>>();
+    for (const { entry } of entries) {
+      const scope = recordScope(entry.metadata?.scope);
+      if (scope && entry.runId && !runScopes.has(entry.runId)) runScopes.set(entry.runId, scope);
+    }
     let audience: "owner" | "non_owner" = "owner";
     let turnScope: Record<string, string> | undefined;
     for (const { entry, index } of entries) {
@@ -385,7 +394,7 @@ function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNon
         audience = userTurnIsOwner(entry, options.config) ? "owner" : "non_owner";
         turnScope = recordScope(entry.metadata?.scope);
       }
-      const scope = recordScope(entry.metadata?.scope) ?? turnScope;
+      const scope = recordScope(entry.metadata?.scope) ?? (entry.runId ? runScopes.get(entry.runId) : undefined) ?? turnScope;
       if (audience === "non_owner" && !options.includeNonOwner) continue;
       const text = entry.text?.trim();
       if (!text) continue;
@@ -506,7 +515,13 @@ export function backfillSqliteMemoryIndex(options: SqliteMemoryBackfillOptions =
     // Only transcript ids (a memory file can also have kind "transcript"), and
     // never when the transcript directory is missing: that is a moved or
     // unmounted directory, not a deleted history.
-    if (options.includeTranscripts !== false && existsSync(paths.transcriptDir)) {
+    // An empty directory where the index holds transcripts is treated like a
+    // missing one (an unmounted volume leaves an empty mount point).
+    const transcriptDirUsable =
+      existsSync(paths.transcriptDir) &&
+      statSync(paths.transcriptDir).isDirectory() &&
+      readdirSync(paths.transcriptDir).some((name) => name.endsWith(".jsonl"));
+    if (options.includeTranscripts !== false && transcriptDirUsable) {
       const keep = new Set(transcriptDocs.map((document) => document.id));
       const stale = (db.prepare("SELECT id FROM memory_sources WHERE kind = 'transcript' AND id LIKE 'transcript:%'").all() as Array<{ id: string }>)
         .map((row) => row.id)
@@ -787,16 +802,26 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     return this.#lexicalSearch(query);
   }
 
-  #rows(includeEmbeddings: boolean): StoredChunk[] {
+  /**
+   * Candidate rows, newest first, capped at 5000. The scope filter is part of
+   * the query (#62), so out-of-scope chunks never take up the cap: each scope
+   * dimension a chunk carries must equal the query's. #inScope repeats the
+   * check on the parsed rows.
+   */
+  #rows(includeEmbeddings: boolean, scope: Record<string, string> | undefined): StoredChunk[] {
     const db = openDatabase(this.#databasePath);
     initializeSchema(db);
+    const scopeClauses = RECALL_SCOPE_DIMENSIONS.map(
+      (dim) => `(json_extract(metadata_json, '$.scope.${dim}') IS NULL OR json_extract(metadata_json, '$.scope.${dim}') = ?)`,
+    );
+    const where = [...(includeEmbeddings ? ["embedding_json IS NOT NULL"] : []), ...scopeClauses];
     const rows = db.prepare(`
       SELECT chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, metadata_json
       FROM memory_chunks
-      ${includeEmbeddings ? "WHERE embedding_json IS NOT NULL" : ""}
+      WHERE ${where.join(" AND ")}
       ORDER BY updated_at DESC
       LIMIT 5000
-    `).all() as StoredChunk[];
+    `).all(...RECALL_SCOPE_DIMENSIONS.map((dim) => scope?.[dim] ?? null)) as StoredChunk[];
     db.close();
     return rows;
   }
@@ -822,7 +847,7 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     const [queryEmbedding] = await this.#embeddingProvider.embedTexts([query.text]);
     if (!queryEmbedding) return [];
     const limit = query.limit ?? 8;
-    return this.#rows(true)
+    return this.#rows(true, query.scope)
       .filter((row) => this.#inScope(row, query))
       .map((row) => {
         const embedding = parseEmbedding(row.embedding_json);
@@ -836,7 +861,7 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
 
   #lexicalSearch(query: MemoryQuery): MemoryHit[] {
     const limit = query.limit ?? 8;
-    return this.#rows(false)
+    return this.#rows(false, query.scope)
       .filter((row) => this.#inScope(row, query))
       .map((row) => this.#hitFromRow(row, lexicalScore(query.text, row.text), "lexical"))
       .filter((hit) => hit.score > 0)

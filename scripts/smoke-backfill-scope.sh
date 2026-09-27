@@ -32,7 +32,7 @@ npm run build:mindstone
 
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
 import assert from "node:assert/strict";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -86,6 +86,13 @@ say("agent:default:app:tenant-a", "user", "Tenant kestrel secret TENANT-A-KESTRE
 say("agent:default:app:tenant-a", "assistant", "Tenant A reply kestrel TENANT-A-REPLY.", app);
 say("agent:default:app:tenant-b", "user", "Tenant kestrel note TENANT-B-KESTREL.", app, { appEngine: true, scope: tenantB });
 
+// Two tenants' runs interleaved in one session key: an unscoped event from
+// A's run, written after B's turn, belongs to A (its runId), not B.
+const SHARED = "agent:default:app:shared";
+appendTranscriptEntry({ sessionKey: SHARED, agentId, role: "user", text: "Shared kestrel A turn SHARED-A-TURN.", source: app as never, runId: "run-a", metadata: { appEngine: true, scope: tenantA } }, { paths });
+appendTranscriptEntry({ sessionKey: SHARED, agentId, role: "user", text: "Shared kestrel B turn SHARED-B-TURN.", source: app as never, runId: "run-b", metadata: { appEngine: true, scope: tenantB } }, { paths });
+appendTranscriptEntry({ sessionKey: SHARED, agentId, role: "event", text: "Shared kestrel tool result SHARED-A-TOOL.", source: app as never, runId: "run-a" }, { paths });
+
 const recall = async (text: string, scope?: Record<string, string>, maxResults = 40) => {
   const provider = createSqliteMemoryRecallProvider({ paths });
   assert.ok(provider, "sqlite memory database missing after backfill");
@@ -133,8 +140,9 @@ const a = await recall(Q, tenantA);
 has(a, ["TENANT-A-KESTREL", "TENANT-A-REPLY"], "tenant A recall");
 absent(a, ["TENANT-B-KESTREL", "GROUP-KESTREL"], "tenant A recall");
 const b = await recall(Q, tenantB);
-has(b, ["TENANT-B-KESTREL"], "tenant B recall");
-absent(b, ["TENANT-A-KESTREL", "TENANT-A-REPLY"], "tenant B recall");
+has(b, ["TENANT-B-KESTREL", "SHARED-B-TURN"], "tenant B recall");
+absent(b, ["TENANT-A-KESTREL", "TENANT-A-REPLY", "SHARED-A-TOOL"], "tenant B recall");
+has(await recall("shared kestrel tool result", tenantA), ["SHARED-A-TOOL"], "tenant A recall of its own interleaved event");
 has(await recall(Q, { agentId: "default" }), ["APP-IN-MAIN-KESTREL", "APP-IN-MAIN-REPLY"], "the app run in main at its own scope");
 
 // A rerun is stable.
@@ -146,6 +154,24 @@ for (let n = 0; n < 60; n += 1) {
 }
 backfillSqliteMemoryIndex({ paths, config });
 has(await recall("kestrel ledger code", undefined, 8), ["OWNER-"], "owner recall under a tenant flood");
+
+// 6b. The candidate cap: 5100 newer tenant-B chunks can't push the owner's out.
+{
+  // One entry per chunk: 5100 newer tenant chunks, each its own source.
+  for (let n = 0; n < 5100; n += 1) say("agent:default:app:tenant-b", "user", `unrelated tenant filler FILL-${n}`, app, { appEngine: true, scope: tenantB });
+  backfillSqliteMemoryIndex({ paths, config });
+  // File memory is indexed first, so it is the oldest: without the scope filter
+  // in the query, the 5000-row cap would drop it.
+  has(await recall("kestrel file note", undefined, 8), ["FILE-KESTREL"], "owner file memory with over 5000 newer tenant chunks");
+}
+
+// 5c. An empty transcript directory (an unmounted volume's mount point) prunes nothing.
+renameSync(paths.transcriptDir, `${paths.transcriptDir}.aside`);
+mkdirSync(paths.transcriptDir);
+assert.equal(backfillSqliteMemoryIndex({ paths, config }).transcriptSourcesPruned, 0, "an empty transcript directory must not wipe the index");
+has(await recall(Q), ["OWNER-KESTREL"], "owner recall after an empty transcript dir");
+rmSync(paths.transcriptDir, { recursive: true });
+renameSync(`${paths.transcriptDir}.aside`, paths.transcriptDir);
 
 // 5b. A missing transcript directory prunes nothing.
 renameSync(paths.transcriptDir, `${paths.transcriptDir}.moved`);
