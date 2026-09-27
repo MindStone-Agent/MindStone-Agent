@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -1593,7 +1594,17 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     return;
   }
   if (req.method === "GET" && url.pathname === "/admin/status") {
-    sendJson(res, 200, adminStatus(gateConfig.config));
+    // supervisor and startedAt (#90): whether the Console can restart this
+    // gateway, and a way to see that a restart happened.
+    const supervisor = declaredSupervisor();
+    const evidence = supervisor ? supervisorEvidence(supervisor, paths) : undefined;
+    sendJson(res, 200, {
+      ...adminStatus(gateConfig.config),
+      supervisor: supervisor ?? null,
+      ...(evidence ? { supervisorConfirmed: evidence.ok, supervisorDetail: evidence.detail } : {}),
+      startedAt: GATEWAY_STARTED_AT,
+      recentStarts: recentGatewayStarts(paths).length,
+    });
     return;
   }
   if (req.method === "GET" && url.pathname === "/admin/config") {
@@ -1680,6 +1691,47 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       writeFileAtomic(adminPermissionsPath(paths.dataDir), `${JSON.stringify(permissions, null, 2)}\n`, 0o600);
       appendAdminAudit(paths.dataDir, { userId, action: enabled ? "advanced_settings_granted" : "advanced_settings_revoked" });
       sendJson(res, 200, { ok: true, permissions });
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/admin/restart") {
+    // Restart (#90). Only a declared supervisor brings the gateway back, so
+    // without one nothing exits and the answer says what to run on the host.
+    const supervisor = declaredSupervisor();
+    if (!supervisor) {
+      refuse(409, { supervisor: null, error: "no supervisor is declared for this gateway, so it can't restart itself; restart it on the gateway host (mindstone gateway restart, or the box's own service command)" }, { reason: "no_supervisor" });
+      return;
+    }
+    // The declaration is checked against evidence, so a stale or copied one
+    // can't turn a restart into a shutdown (#90 review).
+    const evidence = supervisorEvidence(supervisor, paths);
+    if (!evidence.ok) {
+      refuse(409, { supervisor, error: `this gateway is declared ${supervisor}, but ${evidence.detail}; restart it on the gateway host` }, { reason: "supervisor_mismatch", supervisor });
+      return;
+    }
+    if (restartRequested) {
+      refuse(409, { supervisor, error: "a restart is already under way" }, { reason: "restart_pending", supervisor });
+      return;
+    }
+    // At most RESTART_LIMIT restarts in RESTART_WINDOW_MS, so a restart loop
+    // from a bad config can't be driven from the browser.
+    const recent = recentRestarts(paths);
+    if (recent.length >= RESTART_LIMIT) {
+      refuse(429, { supervisor, error: `the gateway was restarted ${recent.length} times in the last 10 minutes; wait, or restart it on the gateway host` }, { reason: "rate_limited", supervisor });
+      return;
+    }
+    recordRestart(paths, recent);
+    restartRequested = true;
+    appendAdminAudit(paths.dataDir, { userId, action: "restart_requested", supervisor });
+    sendJson(res, 202, { ok: true, restarting: true, supervisor, startedAt: GATEWAY_STARTED_AT });
+    res.once("finish", () => {
+      if (supervisor === "managed") spawnRestartHelper(managedRestartPlan(paths) as ManagedRestartPlan, paths);
+      // The gateway's own shutdown (main.ts): stop listening, stop the
+      // connectors and let in-flight work finish (capped), then exit with
+      // RESTART_EXIT_CODE; the supervisor, or the helper for "managed",
+      // starts it again.
+      setTimeout(() => process.kill(process.pid, "SIGTERM"), 100).unref();
     });
     return;
   }
@@ -2233,6 +2285,175 @@ function hostCredentialFiles(config: MindStoneConfig | undefined, configPath: st
 }
 
 /** A JSON object body, or an error response (then undefined). */
+/** When this gateway process started, so the Console can see a restart happen (#90). */
+const GATEWAY_STARTED_AT = new Date().toISOString();
+
+const SUPERVISORS = ["launchd", "managed", "systemd", "docker"] as const;
+type Supervisor = (typeof SUPERVISORS)[number];
+
+/** The supervisor whoever started this gateway declared (#90). It is never guessed. */
+function declaredSupervisor(): Supervisor | undefined {
+  const value = process.env.MINDSTONE_AGENT_SUPERVISOR?.trim();
+  return SUPERVISORS.find((candidate) => candidate === value);
+}
+
+/**
+ * The exit code for a restart (EX_TEMPFAIL): non-zero, so a systemd unit with
+ * Restart=on-failure or a Docker policy of on-failure restarts it too (#90).
+ */
+export const RESTART_EXIT_CODE = 75;
+let restartRequested = false;
+/** The code the gateway process should exit with: RESTART_EXIT_CODE after POST /admin/restart, else 0. */
+export function gatewayExitCode(): number {
+  return restartRequested ? RESTART_EXIT_CODE : 0;
+}
+
+const RESTART_LIMIT = 5;
+const RESTART_WINDOW_MS = 10 * 60_000;
+
+function readTimes(path: string): number[] {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((value): value is number => typeof value === "number") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Restarts requested from the admin API in the last RESTART_WINDOW_MS. */
+function recentRestarts(paths: MindStoneRuntimePaths): number[] {
+  return readTimes(`${paths.dataDir}/gateway/restarts.json`).filter((at) => at > Date.now() - RESTART_WINDOW_MS);
+}
+
+function recordRestart(paths: MindStoneRuntimePaths, recent: number[]): void {
+  writeFileAtomic(`${paths.dataDir}/gateway/restarts.json`, JSON.stringify([...recent, Date.now()]), 0o600);
+}
+
+/** Gateway starts in the last RESTART_WINDOW_MS: several in a row with no restart asked for is a crash loop. */
+function recentGatewayStarts(paths: MindStoneRuntimePaths): number[] {
+  return readTimes(`${paths.dataDir}/gateway/starts.json`).filter((at) => at > Date.now() - RESTART_WINDOW_MS);
+}
+
+/** Record this start (the last 20 are kept), for recentStarts in GET /admin/status. */
+function recordGatewayStart(paths: MindStoneRuntimePaths): void {
+  try {
+    const kept = readTimes(`${paths.dataDir}/gateway/starts.json`).slice(-19);
+    writeFileAtomic(`${paths.dataDir}/gateway/starts.json`, JSON.stringify([...kept, Date.now()]), 0o600);
+  } catch {
+    // Best effort: a start is never refused for this.
+  }
+}
+
+/**
+ * Whether the declared supervisor is actually the one running this gateway
+ * (#90 review): launchd sets XPC_SERVICE_NAME and is the parent (pid 1);
+ * systemd sets INVOCATION_ID, JOURNAL_STREAM or NOTIFY_SOCKET; Docker has
+ * /.dockerenv; "managed" means the CLI's PID file names this process.
+ */
+function supervisorEvidence(supervisor: Supervisor, paths: MindStoneRuntimePaths): { ok: boolean; detail: string } {
+  const env = process.env;
+  switch (supervisor) {
+    case "launchd": {
+      const service = env.XPC_SERVICE_NAME?.trim();
+      const ok = Boolean(service && service !== "0") && process.ppid === 1;
+      return { ok, detail: ok ? `launchd service ${service}` : "it isn't running as a launchd service (no XPC_SERVICE_NAME, or its parent isn't launchd)" };
+    }
+    case "systemd": {
+      const ok = Boolean(env.INVOCATION_ID || env.JOURNAL_STREAM || env.NOTIFY_SOCKET);
+      return { ok, detail: ok ? "systemd unit" : "it isn't running under systemd (no INVOCATION_ID, JOURNAL_STREAM or NOTIFY_SOCKET)" };
+    }
+    case "docker": {
+      const ok = existsSync("/.dockerenv");
+      return { ok, detail: ok ? "Docker container" : "it isn't running in a Docker container (no /.dockerenv)" };
+    }
+    case "managed": {
+      const plan = managedRestartPlan(paths);
+      return "error" in plan ? { ok: false, detail: "the managed PID file doesn't name it" } : { ok: true, detail: "mindstone gateway start" };
+    }
+  }
+}
+
+type ManagedRestartPlan = { script: string; logPath: string; pidPath: string; cwd: string };
+
+/**
+ * For a "managed" gateway (`mindstone gateway start`): the files the CLI
+ * uses, checked against this process, so a restart starts the same thing
+ * again. The PID file must name this process.
+ */
+function managedRestartPlan(paths: MindStoneRuntimePaths): ManagedRestartPlan | { error: string } {
+  const dir = `${paths.dataDir}/gateway`;
+  const pidPath = `${dir}/gateway.pid`;
+  let recorded = "";
+  try {
+    recorded = readFileSync(pidPath, "utf-8").trim();
+  } catch {
+    // Missing: refused below.
+  }
+  if (recorded !== String(process.pid)) {
+    return { error: "this gateway is declared managed, but the managed PID file doesn't name it; restart it on the gateway host" };
+  }
+  const script = process.argv[1];
+  if (!script) return { error: "this gateway's own script path is unknown; restart it on the gateway host" };
+  return { script, logPath: `${dir}/gateway.log`, pidPath, cwd: process.cwd() };
+}
+
+/**
+ * Start a detached helper (its own session, so it outlives this process) that
+ * waits for this process to exit, starts the gateway script again with the
+ * same environment and log file, and records its PID, as `mindstone gateway
+ * restart` does. If the new process doesn't stay up (the port not released
+ * yet, say), it tries again a few times. Its progress is in
+ * <dataDir>/gateway/restart.json, which `mindstone gateway status` shows.
+ */
+function spawnRestartHelper(plan: ManagedRestartPlan, paths: MindStoneRuntimePaths): void {
+  const helper = `
+const { spawn } = require("node:child_process");
+const { openSync, writeFileSync } = require("node:fs");
+const e = process.env;
+const oldPid = Number(e.MSA_RESTART_OLD_PID);
+const status = (state, extra) => { try { writeFileSync(e.MSA_RESTART_STATUS, JSON.stringify({ state, oldPid, at: new Date().toISOString(), ...extra }), { mode: 0o600 }); } catch {} };
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; } };
+const env = { ...e };
+for (const key of Object.keys(env)) if (key.startsWith("MSA_RESTART_")) delete env[key];
+const deadline = Date.now() + 60000;
+let attempt = 0;
+const start = () => {
+  attempt += 1;
+  const log = openSync(e.MSA_RESTART_LOG, "a", 0o600);
+  const child = spawn(process.execPath, [e.MSA_RESTART_SCRIPT], { cwd: e.MSA_RESTART_CWD, detached: true, env, stdio: ["ignore", log, log] });
+  child.unref();
+  writeFileSync(e.MSA_RESTART_PIDFILE, child.pid + "\\n", { mode: 0o600 });
+  status("started", { newPid: child.pid, attempt });
+  setTimeout(() => {
+    if (alive(child.pid)) return status("running", { newPid: child.pid, attempt });
+    if (attempt < 5) return setTimeout(start, 1000);
+    status("failed", { newPid: child.pid, attempt, error: "the new gateway exited right after starting; see the gateway log" });
+  }, 3000);
+};
+const wait = () => {
+  if (!alive(oldPid)) return start();
+  if (Date.now() > deadline) return status("failed", { error: "the old gateway didn't exit within 60 s" });
+  setTimeout(wait, 200);
+};
+status("waiting");
+wait();`;
+  const child = spawn(process.execPath, ["-e", helper], {
+    cwd: plan.cwd,
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      MSA_RESTART_OLD_PID: String(process.pid),
+      MSA_RESTART_SCRIPT: plan.script,
+      MSA_RESTART_LOG: plan.logPath,
+      MSA_RESTART_PIDFILE: plan.pidPath,
+      MSA_RESTART_CWD: plan.cwd,
+      MSA_RESTART_STATUS: `${paths.dataDir}/gateway/restart.json`,
+    },
+  });
+  child.unref();
+}
+
 async function readAdminBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | undefined> {
   try {
     const body = await readJsonBody(req, 256 * 1024);
@@ -3214,6 +3435,7 @@ export async function startGateway(options: GatewayOptions = {}): Promise<{ clos
       resolve();
     });
   });
+  recordGatewayStart(runtimePathsFromEnv());
   // Connector failures are isolated into per-connector runtime status; the
   // HTTP surface is up regardless.
   await startConfiguredConnectors().catch(() => undefined);
