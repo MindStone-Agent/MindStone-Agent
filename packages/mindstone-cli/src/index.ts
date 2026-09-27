@@ -1158,6 +1158,7 @@ function gatewayLaunchdPlist(params: { label: string; cliPath: string; root: str
   <dict>
     <key>MINDSTONE_AGENT_ROOT</key><string>${escape(params.root)}</string>
     <key>MINDSTONE_AGENT_RUNTIME_DIR</key><string>${escape(params.runtimeDir)}</string>
+    <key>MINDSTONE_AGENT_SUPERVISOR</key><string>launchd</string>
     <key>PI_SKIP_VERSION_CHECK</key><string>1</string>
     <key>PI_OFFLINE</key><string>1</string>
   </dict>
@@ -1190,7 +1191,8 @@ function startManagedGateway(): GatewayManagedState {
     const child = spawn(process.execPath, [state.scriptPath], {
       cwd: runtimePathsFromEnv().root,
       detached: true,
-      env: process.env,
+      // Declares who restarts it, so POST /admin/restart can (#90).
+      env: { ...process.env, MINDSTONE_AGENT_SUPERVISOR: "managed" },
       stdio: ["ignore", logFd, logFd],
     });
     child.unref();
@@ -1247,7 +1249,14 @@ async function runGatewayCommand(argv: string[]): Promise<void> {
 
   if (subcommand === "status") {
     const live = await probeGatewayHealth(configured.baseUrl);
-    const payload = { configured, managed, live };
+    // The last restart asked for from the Console (#90), as its helper recorded it.
+    let lastRestart: { state?: string; at?: string; error?: string } | undefined;
+    try {
+      lastRestart = JSON.parse(readFileSync(join(managed.dir, "restart.json"), "utf-8")) as typeof lastRestart;
+    } catch {
+      lastRestart = undefined;
+    }
+    const payload = { configured, managed, live, ...(lastRestart ? { lastRestart } : {}) };
     if (json) {
       printJson(payload);
       return;
@@ -1264,6 +1273,7 @@ async function runGatewayCommand(argv: string[]): Promise<void> {
       `PID file: ${managed.pidPath}`,
       `Log file: ${managed.logPath}`,
       `Live health: ${live.ok} (${live.detail})`,
+      ...(lastRestart ? [`Last restart from the Console: ${lastRestart.state ?? "?"} at ${lastRestart.at ?? "?"}${lastRestart.error ? ` (${lastRestart.error})` : ""}`] : []),
     ].join("\n"));
     output.write("\n");
     return;
@@ -1271,15 +1281,11 @@ async function runGatewayCommand(argv: string[]): Promise<void> {
 
   if (subcommand === "run") {
     if (!existsSync(managed.scriptPath)) throw new Error(`Gateway is not built yet. Run: npm run build:mindstone\nMissing: ${managed.scriptPath}`);
-    const { startGateway } = await import("@mindstone-agent/gateway");
+    const { startGateway, exitGatewayOnSignals } = await import("@mindstone-agent/gateway");
     const gateway = await startGateway();
     output.write(`MindStone-Agent Gateway listening at ${gateway.url}\n`);
-    const shutdown = async () => {
-      await gateway.close();
-      process.exit(0);
-    };
-    process.on("SIGINT", () => void shutdown());
-    process.on("SIGTERM", () => void shutdown());
+    // The same capped shutdown as main.ts, so a Console restart exits 75 here too (#94 review).
+    exitGatewayOnSignals(gateway);
     await new Promise(() => undefined);
     return;
   }
