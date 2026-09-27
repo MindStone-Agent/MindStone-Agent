@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync, readSync, fstatSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync, readSync, fstatSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -126,6 +126,12 @@ import {
   invalidScopeFields,
   scopeSessionKeyAllowed,
   ApprovalStore,
+  ApprovalActionError,
+  approveProposedAction,
+  checkApprovable,
+  rejectProposedAction,
+  resolveDefaultSessionKey,
+  type ProposedAction,
   ConnectorDeliveryQueue,
   getMindStoneDoctorReport,
   probeMemoryEmbeddingProvider,
@@ -146,6 +152,7 @@ import {
   writeConnectorRuntimeStatus,
   type ConnectorContext,
   type ConnectorInboundHandle,
+  type ConnectorOutboundMessage,
   type ConnectorInboundMessage,
   getMindStoneSystemStatus,
   listTranscriptSessions,
@@ -1709,7 +1716,64 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     sendJson(res, 200, { ok: true, available: true, path: logPath, lines: tail.map(maskInlineSecrets) });
     return;
   }
-  if (req.method !== "POST" && req.method !== "PATCH") {
+  if (req.method === "GET" && url.pathname === "/admin/approvals") {
+    // Proposed actions (#84): pending by default, every one with ?all=1. The
+    // list carries no draft text; GET /admin/approvals/<id> does.
+    const store = new ApprovalStore();
+    const actions = url.searchParams.get("all") === "1" ? store.list() : store.pending();
+    sendJson(res, 200, { ok: true, status: store.status(), actions: actions.map(approvalSummary) });
+    return;
+  }
+  const approvalMatch = APPROVAL_PATH.exec(url.pathname);
+  if (req.method === "GET" && approvalMatch && !approvalMatch[2]) {
+    const action = new ApprovalStore().get(approvalMatch[1]!);
+    if (!action) {
+      sendJson(res, 404, { ok: false, error: `no proposed action matches id "${approvalMatch[1]}"` });
+      return;
+    }
+    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation } });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/admin/secrets") {
+    // The stored secrets by name (#88): never a value. A link is listed as a
+    // link and never followed.
+    const secretsDir = `${paths.dataDir}/secrets`;
+    const config = gateConfig.config;
+    const hostCredentials = hostCredentialFiles(config, configPath);
+    let names: string[] = [];
+    try {
+      names = readdirSync(secretsDir).sort();
+    } catch {
+      // No secrets directory yet: none stored.
+    }
+    const secrets = names.map((name) => {
+      const target = resolvePath(secretsDir, name);
+      let kind: "file" | "link" | "other" = "other";
+      let size: number | undefined;
+      let modifiedAt: string | undefined;
+      try {
+        const entry = lstatSync(target);
+        kind = entry.isSymbolicLink() ? "link" : entry.isFile() ? "file" : "other";
+        if (kind === "file") {
+          size = entry.size;
+          modifiedAt = entry.mtime.toISOString();
+        }
+      } catch {
+        // Removed meanwhile: listed without details.
+      }
+      return {
+        name,
+        kind,
+        ...(size !== undefined ? { size, modifiedAt } : {}),
+        tokenFile: `secrets/${name}`,
+        usedBy: connectorsReading(config, configPath, paths, target),
+        gatewayCredential: hostCredentials.some((file) => pointsAtSameFile(file, target)),
+      };
+    });
+    sendJson(res, 200, { ok: true, secrets });
+    return;
+  }
+  if (req.method !== "POST" && req.method !== "PATCH" && req.method !== "DELETE") {
     sendJson(res, 404, { ok: false, error: "unknown admin endpoint" });
     return;
   }
@@ -1740,6 +1804,56 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       appendAdminAudit(paths.dataDir, { userId, action: enabled ? "advanced_settings_granted" : "advanced_settings_revoked" });
       sendJson(res, 200, { ok: true, permissions });
     });
+    return;
+  }
+
+  if (req.method === "POST" && approvalMatch && approvalMatch[2]) {
+    // Approve or reject a proposed action (#84), with the same guards as
+    // `mindstone approvals` (core's approval actions). No advanced-settings
+    // gate: approving is the normal path for an approval_required connector.
+    const decision = approvalMatch[2] as "approve" | "reject";
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    if (decision === "approve" && body.force !== undefined && typeof body.force !== "boolean") {
+      sendJson(res, 400, { ok: false, error: "force must be true or false" });
+      return;
+    }
+    if (decision === "reject" && body.note !== undefined && (typeof body.note !== "string" || body.note.length > 2000)) {
+      sendJson(res, 400, { ok: false, error: "note must be a string of at most 2000 characters" });
+      return;
+    }
+    const store = new ApprovalStore();
+    const onDecision = (action: ProposedAction, decided: "approved" | "rejected", detail: string) => {
+      appendTranscriptEntry({
+        sessionKey: action.sessionKey ?? resolveDefaultSessionKey(gateConfig.config, action.agentId ?? "default"),
+        agentId: action.agentId ?? "default",
+        role: "event",
+        text: `approval ${decided}: ${action.kind} ${action.id} — ${detail} (from the Console)`,
+        metadata: { event: "approval_decided", approvalId: action.id, kind: action.kind, decision: decided, connector: action.connectorId },
+      });
+      appendAdminAudit(paths.dataDir, { userId, action: `approval_${decided}`, approvalId: action.id, kind: action.kind, connector: action.connectorId });
+    };
+    try {
+      if (decision === "approve") {
+        const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
+          decidedBy: `console:${userId}`,
+          memoryDir: paths.memoryDir,
+          force: body.force === true,
+          onDecision,
+        });
+        sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
+      } else {
+        const rejected = rejectProposedAction(store, approvalMatch[1]!, {
+          decidedBy: `console:${userId}`,
+          note: typeof body.note === "string" && body.note.trim() ? body.note.trim() : undefined,
+          onDecision,
+        });
+        sendJson(res, 200, { ok: true, action: approvalSummary(rejected) });
+      }
+    } catch (error) {
+      if (!(error instanceof ApprovalActionError)) throw error;
+      refuse(error.status, { error: error.publicMessage, code: error.code }, { reason: error.code, approvalId: approvalMatch[1], decision });
+    }
     return;
   }
 
@@ -1958,6 +2072,55 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
   }
 
   const secretMatch = /^\/admin\/secrets\/([^/]+)$/.exec(url.pathname);
+  if (req.method === "DELETE" && secretMatch) {
+    // Remove a stored secret (#88), under the same guards as replacing one:
+    // the advanced-settings permission, never the gateway's own credentials,
+    // never a link made on the host, and never through a link.
+    let name: string;
+    try {
+      name = decodeURIComponent(secretMatch[1]!);
+    } catch {
+      sendJson(res, 400, { ok: false, error: "the secret name is not valid URL encoding" });
+      return;
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name) || name.includes("..")) {
+      sendJson(res, 400, { ok: false, error: "secret names are letters, digits, dot, dash and underscore (max 64)" });
+      return;
+    }
+    await withAdminWriteLock(() => {
+      const secretsDir = `${paths.dataDir}/secrets`;
+      const target = resolvePath(secretsDir, name);
+      const config = loadMindStoneConfig(configPath).config;
+      if (hostCredentialFiles(config, configPath).some((file) => pointsAtSameFile(file, target))) {
+        refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
+        return;
+      }
+      if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "deleting a secret needs the advanced-settings permission" }, { reason: "advanced", secret: name });
+        return;
+      }
+      let entry: ReturnType<typeof lstatSync>;
+      try {
+        entry = lstatSync(target);
+      } catch {
+        refuse(404, { error: `no stored secret named ${name}` }, { reason: "not_found", secret: name });
+        return;
+      }
+      if (entry.isSymbolicLink()) {
+        refuse(422, { error: "this secret name is a link made on the gateway host; change it there" }, { reason: "host_link", secret: name });
+        return;
+      }
+      if (!entry.isFile()) {
+        refuse(422, { error: "this secret name isn't a file; change it on the gateway host" }, { reason: "not_a_file", secret: name });
+        return;
+      }
+      const usedBy = connectorsReading(config, configPath, paths, target);
+      unlinkSync(target);
+      appendAdminAudit(paths.dataDir, { userId, action: "secret_deleted", secret: name, usedBy });
+      sendJson(res, 200, { ok: true, name, usedBy });
+    });
+    return;
+  }
   if (req.method === "POST" && secretMatch) {
     let name: string;
     try {
@@ -2144,6 +2307,20 @@ function connectorTokenFiles(
     }
   }
   return { all, read };
+}
+
+/** The configured connectors (channel ids) with a …File setting that reads this path, by the store guard's rule. */
+function connectorsReading(
+  config: MindStoneConfig | undefined,
+  configPath: string,
+  paths: MindStoneRuntimePaths,
+  target: string,
+): string[] {
+  const ids: string[] = [];
+  for (const [id, section] of Object.entries((config?.channels ?? {}) as Record<string, unknown>)) {
+    if (connectorTokenFiles({ channels: { [id]: section } } as MindStoneConfig, configPath, paths).all.some((file) => pointsAtSameFile(file, target))) ids.push(id);
+  }
+  return ids;
 }
 
 /** A path and, when it is a symlink (even a dangling one), where it points. */
@@ -2333,6 +2510,25 @@ function readLogTail(path: string, count: number): string[] | undefined {
   } finally {
     closeSync(fd);
   }
+}
+
+/** /admin/approvals/<id> and /admin/approvals/<id>/(approve|reject): ids are UUIDs, or a unique prefix of at least 8. */
+const APPROVAL_PATH = /^\/admin\/approvals\/([0-9a-f-]{8,36})(?:\/(approve|reject))?$/;
+
+/** What the approvals list shows: no draft text, memory content or mutation data. */
+function approvalSummary(action: ProposedAction) {
+  return {
+    id: action.id,
+    status: action.status,
+    kind: action.kind,
+    connectorId: action.connectorId,
+    summary: action.summary,
+    createdAt: action.createdAt,
+    decidedAt: action.decidedAt,
+    decidedBy: action.decidedBy,
+    decisionNote: action.decisionNote,
+    queueState: action.queueState,
+  };
 }
 
 async function readAdminBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | undefined> {
@@ -3091,6 +3287,110 @@ type RunningConnector = {
 
 const runningConnectors = new Map<string, RunningConnector>();
 
+/**
+ * Report a connector queue problem in the gateway's log (stderr) and in the
+ * connector's runtime status. The same message is logged at most once a
+ * minute, so a queue that stays unreadable doesn't flood the log.
+ */
+const lastQueueReport = new Map<string, { message: string; at: number }>();
+function reportConnectorQueueError(
+  connectorId: string,
+  message: string,
+  running?: RunningConnector,
+  options: { repeating?: boolean; info?: boolean } = {},
+): void {
+  // Only a report that repeats on a timer (the drain timer) is de-duplicated;
+  // each reply's own failures are always logged (#77 round 3).
+  if (options.repeating) {
+    const last = lastQueueReport.get(connectorId);
+    const now = Date.now();
+    if (last && last.message === message && now - last.at < 60_000) return;
+    lastQueueReport.set(connectorId, { message, at: now });
+  }
+  process.stderr.write(`[mindstone-gateway] connector ${connectorId}: ${message}\n`);
+  // Good news is logged only: it must not replace an error in the status.
+  if (options.info) return;
+  writeConnectorRuntimeStatus({
+    connectorId,
+    state: "running",
+    lastError: message,
+    ...(running ? { inboundCount: running.inboundCount, deniedCount: running.deniedCount } : {}),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/** Replies waiting to be retried into the queue, so a gateway stop can report them as lost. */
+const pendingReplyRetries = new Set<{
+  connectorId: string;
+  chatId?: string;
+  running: RunningConnector;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  stopped: boolean;
+}>();
+
+/** Waits between later attempts to queue a reply the queue refused (locked, EIO, EMFILE, unreadable): about 13 minutes in all. */
+export const CONNECTOR_ENQUEUE_RETRY_MS = [1_000, 5_000, 30_000, 120_000, 600_000];
+
+/**
+ * Queue a reply. If the queue refuses it, the failure is logged and the reply
+ * is retried in the background (held in memory, so the inbound handler isn't
+ * held up), then drained once queued, so a transient error doesn't drop it
+ * silently (#77 review). A gateway restart during the retries, or running out
+ * of retries, loses it; that is logged as a lost reply. Returns the queue
+ * when the first attempt succeeded.
+ */
+function enqueueConnectorReply(
+  connectorId: string,
+  outbound: ConnectorOutboundMessage,
+  running: RunningConnector,
+  drain: (queue: ConnectorDeliveryQueue) => Promise<unknown>,
+  retryMs: readonly number[] = CONNECTOR_ENQUEUE_RETRY_MS,
+): ConnectorDeliveryQueue | undefined {
+  const queue = new ConnectorDeliveryQueue(connectorId);
+  const attempt = (n: number): boolean => {
+    try {
+      queue.enqueue(outbound, { now: new Date().toISOString() });
+      if (n > 1) reportConnectorQueueError(connectorId, `a reply to chat ${outbound.chatId ?? "(unknown)"} was queued on attempt ${n}`, running, { info: true });
+      return true;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (n > retryMs.length) {
+        reportConnectorQueueError(
+          connectorId,
+          `a reply to chat ${outbound.chatId ?? "(unknown)"} was LOST: it could not be queued after ${n} attempts (${reason}); its text is in the session transcript`,
+          running,
+        );
+      } else {
+        reportConnectorQueueError(connectorId, `could not queue a reply (attempt ${n}): ${reason}; retrying in ${Math.round(retryMs[n - 1]! / 1000)}s`, running);
+      }
+      return false;
+    }
+  };
+  if (attempt(1)) return queue;
+  // Held in memory until queued; a gateway stop logs it as lost (#77 round 3).
+  const pending = { connectorId, chatId: outbound.chatId, running, timer: undefined as ReturnType<typeof setTimeout> | undefined, stopped: false };
+  pendingReplyRetries.add(pending);
+  void (async () => {
+    try {
+      for (let n = 2; n <= retryMs.length + 1; n += 1) {
+        await new Promise<void>((resolve) => {
+          pending.timer = setTimeout(resolve, retryMs[n - 2]);
+        });
+        if (pending.stopped) return;
+        if (attempt(n)) {
+          await drain(queue);
+          return;
+        }
+      }
+    } finally {
+      pendingReplyRetries.delete(pending);
+    }
+  })().catch((error) =>
+    reportConnectorQueueError(connectorId, `delivery drain failed: ${error instanceof Error ? error.message : String(error)}`, running),
+  );
+  return undefined;
+}
+
 async function handleConnectorInbound(params: {
   connectorId: string;
   ctx: ConnectorContext;
@@ -3158,6 +3458,21 @@ async function handleConnectorInbound(params: {
     metadata: { connector: connectorId },
   });
   if (!routed.routed) return;
+  if (routed.status !== 200) {
+    // A failed run's text is an internal error, never a reply: it goes to the
+    // runtime status (and the transcript already holds routing_failed), not
+    // into the chat, which may be a shared group (#63).
+    const error = (routed.body as { error?: unknown } | undefined)?.error;
+    writeConnectorRuntimeStatus({
+      connectorId,
+      state: "running",
+      lastError: `run failed for an inbound message (status ${routed.status}): ${typeof error === "string" ? error : "unknown error"}`,
+      inboundCount: running.inboundCount,
+      deniedCount: running.deniedCount,
+      updatedAt: new Date().toISOString(),
+    });
+    return;
+  }
   const body = routed.body as { entry?: { text?: string } } | undefined;
   // Proposal blocks (memory writes, mutations) are already extracted into
   // pending ProposedActions by the core chat turn (issues #21/#22) — the
@@ -3200,10 +3515,11 @@ async function handleConnectorInbound(params: {
     return;
   }
 
-  const queue = new ConnectorDeliveryQueue(connectorId);
-  queue.enqueue(outbound, { now: new Date().toISOString() });
-  if (!connector) return;
-  await queue.drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() });
+  const drain = (queue: ConnectorDeliveryQueue) =>
+    connector ? queue.drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() }) : Promise.resolve();
+  const queue = enqueueConnectorReply(connectorId, outbound, running, drain);
+  if (!queue) return;
+  await drain(queue);
 }
 
 export async function startConfiguredConnectors(): Promise<void> {
@@ -3255,8 +3571,18 @@ export async function startConfiguredConnectors(): Promise<void> {
       const drainMs = typeof channelConfig.queueDrainMs === "number" && channelConfig.queueDrainMs > 0 ? channelConfig.queueDrainMs : 5000;
       running.drainTimer = setInterval(() => {
         const queue = new ConnectorDeliveryQueue(connectorId);
-        if (queue.pending().length === 0) return;
-        void queue.drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() }).catch(() => undefined);
+        let pending: number;
+        try {
+          pending = queue.pending().length;
+        } catch (error) {
+          // An unreadable queue is reported, never read as empty (#77 review).
+          reportConnectorQueueError(connectorId, `delivery queue: ${error instanceof Error ? error.message : String(error)}`, running, { repeating: true });
+          return;
+        }
+        if (pending === 0) return;
+        void queue
+          .drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() })
+          .catch((error) => reportConnectorQueueError(connectorId, `delivery drain failed: ${error instanceof Error ? error.message : String(error)}`, running));
       }, drainMs);
       running.drainTimer.unref?.();
       writeConnectorRuntimeStatus({
@@ -3279,6 +3605,17 @@ export async function startConfiguredConnectors(): Promise<void> {
 }
 
 export async function stopConfiguredConnectors(): Promise<void> {
+  // A reply still waiting to be queued is held only in memory: say it's lost.
+  for (const pending of pendingReplyRetries) {
+    pending.stopped = true;
+    if (pending.timer) clearTimeout(pending.timer);
+    reportConnectorQueueError(
+      pending.connectorId,
+      `a reply to chat ${pending.chatId ?? "(unknown)"} was LOST: the gateway stopped while it was waiting to be queued; its text is in the session transcript`,
+      pending.running,
+    );
+  }
+  pendingReplyRetries.clear();
   for (const [connectorId, running] of runningConnectors) {
     try {
       if (running.drainTimer) clearInterval(running.drainTimer);
