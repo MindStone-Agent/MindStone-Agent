@@ -87,6 +87,8 @@ c["channels"] = {"telegram": {
     "headerObjects": [{"name": "X-Api-Token", "value": "SENTINEL-HDROBJ-7731"}],
     "command": "curl -H 'Authorization: Bearer SENTINELCMDBEARER7731' https://api.example.test",
     "jsonBlob": "{\"password\": \"SENTINEL-JSONSTR-7731,with,commas\"}",
+    # A 200 KB string must not stall the gateway while it is masked.
+    "bigBlob": "x-" * 100000,
     # Not secrets: must stay readable.
     "dispatch": "fifo",
     "mapping": {"a": "b"},
@@ -145,6 +147,8 @@ test "$(code "${AUTH[@]}" "${ADMIN_TOK[@]}" "${BASE}/admin/status")" = "403" || 
 test "$(code "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: user' "${BASE}/admin/status")" = "403" || { echo "admin API as role user must be 403" >&2; exit 1; }
 
 STATUS="$(curl -s "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: Admin' "${BASE}/admin/status")"
+CONF_SECONDS="$(curl -s -o /dev/null -w '%{time_total}' "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/config")"
+node -e 'process.exit(Number(process.argv[1]) < 2 ? 0 : 1)' "${CONF_SECONDS}" || { echo "GET /admin/config took ${CONF_SECONDS}s with a 200 KB string in the config" >&2; exit 1; }
 CONF="$(curl -s "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/config")"
 STATUS="${STATUS}" CONF="${CONF}" CONFIG_PATH="${CONFIG}" node <<'NODE'
 const fail = (m) => { console.error(m); process.exit(1); };

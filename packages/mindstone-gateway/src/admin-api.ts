@@ -162,17 +162,23 @@ function isSecretPathSegment(segment: string): boolean {
 const SECRET_NAME = String.raw`[\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)`;
 // `NAME=value` with no spaces around "=" (DSNs, env lines, connection strings), so prose
 // such as "1 token = 4 characters" is left alone.
-const INLINE_SECRET_EQ = new RegExp(String.raw`(?<![\w-])(${SECRET_NAME})=([^\s;&"']+)`, "gi");
+const INLINE_SECRET_EQ = new RegExp(String.raw`(?<![\w-])(${SECRET_NAME})=(["']?)([^\s;&"']+)\2`, "gi");
+// YAML-style `name: value` at the start of a line.
+const INLINE_SECRET_YAML = new RegExp(String.raw`(^|\n)([ \t]*${SECRET_NAME}[ \t]*:[ \t]*)(["']?)([^\s"']+)\3`, "gi");
 // `"name": "value"` (JSON inside a string), up to the closing quote.
-const INLINE_SECRET_JSON = new RegExp(String.raw`("${SECRET_NAME}"\s*:\s*")((?:[^"\\]|\\.)*)(")`, "gi");
+const INLINE_SECRET_JSON = new RegExp(String.raw`("${SECRET_NAME}"\s*:\s*")((?:[^"\\]|\\.)*)(")|('${SECRET_NAME}'\s*:\s*')((?:[^'\\]|\\.)*)(')`, "gi");
 // Header lines: `Authorization: <scheme> <value>` and `X-…-Key/Token/Secret: <value>`.
-const INLINE_HEADER = /\b(authorization|x-[\w-]*(?:key|token|secret))(\s*:\s*)((?:bearer|basic|token)\s+)?([^\s'"]+)/gi;
+const INLINE_HEADER = /(?<![\w-])(authorization|cookie|api-key|x-[\w-]*(?:key|token|secret))(\s*:\s*)((?:bearer|basic|token)\s+)?([^\s'"]+)/gi;
 // `Bearer <credential>` / `Basic <credential>` elsewhere, when the value looks like one:
 // 12+ characters with a digit, mixed case, or base64 padding ("basic question-and-answer" is prose).
 const INLINE_BEARER = /\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{12,})/gi;
 // curl -u user:pass
-const INLINE_USER_FLAG = /(\s-u\s+)(\S+)/g;
-const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s'"<>]+/gi;
+const INLINE_USER_FLAG = /(\s(?:-u|--user|--password|--pass)(?:\s+|=))(\S+)/g;
+// The lookbehinds stop a match restarting inside a long run of word characters,
+// which made these patterns quadratic (#38 review: 256 KB took ~40 s).
+const URL_IN_TEXT = /(?<![\w.+-])[a-z][a-z0-9+.-]*:\/\/[^\s'"<>]+/gi;
+/** Strings longer than this are masked whole rather than scanned. */
+const MAX_SCANNED_STRING = 8192;
 
 function looksLikeCredential(value: string): boolean {
   return /\d/.test(value) || (/[a-z]/.test(value) && /[A-Z]/.test(value)) || value.endsWith("=");
@@ -186,8 +192,10 @@ function looksLikeCredential(value: string): boolean {
 function maskInlineSecrets(value: string): string {
   return value
     .replace(URL_IN_TEXT, (url) => maskUrlCredentials(url))
-    .replace(INLINE_SECRET_EQ, (_match, name: string) => `${name}=***`)
-    .replace(INLINE_SECRET_JSON, (_match, open: string, _secret: string, close: string) => `${open}***${close}`)
+    .replace(INLINE_SECRET_EQ, (_match, name: string, quote: string) => `${name}=${quote}***${quote}`)
+    .replace(INLINE_SECRET_YAML, (_match, start: string, name: string, quote: string) => `${start}${name}${quote}***${quote}`)
+    .replace(INLINE_SECRET_JSON, (_match, dOpen?: string, _d?: string, dClose?: string, sOpen?: string, _s?: string, sClose?: string) =>
+      dOpen !== undefined ? `${dOpen}***${dClose}` : `${sOpen}***${sClose}`)
     .replace(INLINE_HEADER, (_match, name: string, sep: string, scheme: string | undefined) => `${name}${sep}${scheme ?? ""}***`)
     .replace(INLINE_BEARER, (match, scheme: string, credential: string) => (looksLikeCredential(credential) ? `${scheme} ***` : match))
     .replace(INLINE_USER_FLAG, (_match, flag: string) => `${flag}***`);
@@ -270,7 +278,10 @@ function isSet(value: unknown): boolean {
  */
 export function maskConfig(value: unknown, key = "", parentIsSecretMap = false): unknown {
   if (masksWhole(key, value) || (parentIsSecretMap && key)) return { set: isSet(value) };
-  if (typeof value === "string") return isProseKey(key) ? value : maskUrlCredentials(value);
+  if (typeof value === "string") {
+    if (isProseKey(key)) return value;
+    return value.length > MAX_SCANNED_STRING ? { set: true } : maskUrlCredentials(value);
+  }
   if (Array.isArray(value)) {
     if (key && isSecretMap(key)) {
       // A header list: strings ("Name: value") or objects ({ name, value }); only names stay visible.
