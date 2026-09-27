@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { pathToFileURL } from "node:url";
 import {
   ApprovalStore,
+  approveProposedAction,
+  checkApprovable,
+  rejectProposedAction,
   ConnectorDeliveryQueue,
   connectorCredentialRefFromChannelConfig,
   resolveConnectorCredential,
@@ -1041,7 +1044,7 @@ function printStatus(json = false): void {
       ...(status.connectors.length
         ? status.connectors.map(
             (connector) =>
-              `Connector ${connector.connectorId}: ${connector.runtime.state}${connector.runtime.lastError ? ` (${connector.runtime.lastError})` : ""} · credential ${connector.credential.configured ? (connector.credential.present ? `present via ${connector.credential.source}` : `MISSING (${connector.credential.error})`) : "none"} · queue p${connector.queue.pending}/d${connector.queue.delivered}/x${connector.queue.dead}`,
+              `Connector ${connector.connectorId}: ${connector.runtime.state}${connector.runtime.lastError ? ` (${connector.runtime.lastError})` : ""} · credential ${connector.credential.configured ? (connector.credential.present ? `present via ${connector.credential.source}` : `MISSING (${connector.credential.error})`) : "none"} · queue ${connector.queue.error ? `UNREADABLE (${connector.queue.error})` : `p${connector.queue.pending}/d${connector.queue.delivered}/x${connector.queue.dead}`}`,
           )
         : ["Connectors: none configured"]),
       loaded.config ? "" : undefined,
@@ -1995,67 +1998,49 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
   }
 
   if (subcommand === "approve") {
-    if (action.status !== "pending") throw new Error(`action ${action.id} is already ${action.status}`);
+    // The guards live in core, shared with the admin API (#84).
+    const check = checkApprovable(store, action.id);
+    const { repair } = check;
     if (!hasOption(argv, "--yes")) {
       if (!input.isTTY || !output.isTTY) throw new Error("Refusing non-interactive approve without --yes");
       const prompter = makeTerminalPrompter();
       try {
         const preview = action.send?.text ?? action.memory?.content ?? (action.mutation ? JSON.stringify(action.mutation, null, 2) : "");
-        await prompter.note(`${action.summary}\n\n${preview}`, `Approve ${action.kind}?`);
-        const accepted = await prompter.confirm({ message: "Approve this action now?", initialValue: false });
+        await prompter.note(`${action.summary}\n\n${preview}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
+        const accepted = await prompter.confirm({ message: repair ? "Queue it now?" : "Approve this action now?", initialValue: false });
         if (!accepted) {
-          output.write("Approval cancelled — the action stays pending.\n");
+          output.write(repair ? "Cancelled — nothing queued.\n" : "Approval cancelled — the action stays pending.\n");
           return;
         }
       } finally {
         prompter.close();
       }
     }
-    const decidedBy = process.env.USER ?? "cli";
-    if (action.kind === "connector_send" && action.send) {
-      store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
-      const queue = new ConnectorDeliveryQueue(action.connectorId);
-      queue.enqueue(action.send, { now: new Date().toISOString() });
-      appendApprovalAuditEvent(action, "approved", `enqueued for delivery via ${action.connectorId}`);
-      output.write(`${gold("Approved")} — draft enqueued for delivery via ${action.connectorId}.\n`);
+    const result = approveProposedAction(store, check, {
+      decidedBy: process.env.USER ?? "cli",
+      memoryDir: runtimePathsFromEnv().memoryDir,
+      force: hasOption(argv, "--force"),
+      onDecision: appendApprovalAuditEvent,
+    });
+    if (result.outcome === "requeued") {
+      output.write(`${gold("Queued")} — ${action.id} was approved earlier but never queued; it is queued now.\n`);
+    } else if (result.outcome === "already_queued") {
+      output.write(`${gold("Already queued")} — ${action.id} was queued by the earlier approve; nothing was added.\n`);
+    } else if (result.kind === "connector_send") {
+      output.write(`${gold("Approved")} — draft enqueued for delivery via ${result.connectorId}.\n`);
       output.write("A running Gateway delivers it within seconds; a stopped one on next start.\n");
-      return;
-    }
-    if (action.kind === "connector_mutation" && action.mutation) {
-      store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
-      const queue = new ConnectorDeliveryQueue(action.mutation.connectorId);
-      queue.enqueue(
-        { text: action.summary, metadata: { kind: "connector_mutation", mutation: action.mutation } },
-        { now: new Date().toISOString() },
-      );
-      appendApprovalAuditEvent(action, "approved", `mutation enqueued for apply via ${action.mutation.connectorId}`);
-      output.write(`${gold("Approved")} — ${action.mutation.operation} ${action.mutation.resource} enqueued for apply via ${action.mutation.connectorId}.\n`);
+    } else if (result.kind === "connector_mutation") {
+      output.write(`${gold("Approved")} — ${action.mutation?.operation} ${action.mutation?.resource} enqueued for apply via ${result.connectorId}.\n`);
       output.write("A running Gateway applies it within seconds; a stopped one on next start.\n");
-      return;
+    } else {
+      output.write(`${gold("Approved")} — memory file written: ${result.memoryFile}\n`);
     }
-    if (action.kind === "memory_write" && action.memory) {
-      const safePath = sanitizeMemoryProposalPath(action.memory.path);
-      if (!safePath) throw new Error(`memory proposal path "${action.memory.path}" is not a safe relative path`);
-      const paths = runtimePathsFromEnv();
-      const target = join(paths.memoryDir, safePath);
-      if (existsSync(target) && !hasOption(argv, "--force")) {
-        throw new Error(`memory file already exists: ${target} (re-run with --force to overwrite)`);
-      }
-      store.decide(action.id, { status: "approved", decidedBy, now: new Date().toISOString() });
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, action.memory.content.endsWith("\n") ? action.memory.content : `${action.memory.content}\n`);
-      appendApprovalAuditEvent(action, "approved", `memory file written: ${safePath}`);
-      output.write(`${gold("Approved")} — memory file written: ${target}\n`);
-      return;
-    }
-    throw new Error(`action ${action.id} has kind "${action.kind}" but no matching payload; refusing to approve`);
+    return;
   }
 
   if (subcommand === "reject") {
-    if (action.status !== "pending") throw new Error(`action ${action.id} is already ${action.status}`);
     const note = optionValue(argv, "--note");
-    store.decide(action.id, { status: "rejected", decidedBy: process.env.USER ?? "cli", note, now: new Date().toISOString() });
-    appendApprovalAuditEvent(action, "rejected", note ?? "no note");
+    rejectProposedAction(store, action.id, { decidedBy: process.env.USER ?? "cli", note, onDecision: appendApprovalAuditEvent });
     output.write(`${gold("Rejected")} — ${action.kind} ${action.id.slice(0, 8)} archived with its payload (nothing sent/written).\n`);
     return;
   }
