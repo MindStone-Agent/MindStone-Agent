@@ -157,18 +157,26 @@ function isSecretPathSegment(segment: string): boolean {
   return segment.length >= 16 && /[A-Za-z]/.test(segment) && /\d/.test(segment);
 }
 
-const INLINE_SECRET = /\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)("?\s*[=:]\s*"?)([^\s;&,"']+)/gi;
-const INLINE_BEARER = /\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{8,})/gi;
+// `name=value` (DSNs, connection strings, query-like text) up to whitespace or ";"/"&",
+// and `"name": "value"` (JSON inside a string) up to the closing quote. A bare
+// "token: …" in prose is left alone.
+const INLINE_SECRET_EQ = /\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)(\s*=\s*)([^\s;&]+)/gi;
+const INLINE_SECRET_JSON = /("(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)"\s*:\s*")((?:[^"\\]|\\.)*)(")/gi;
+// "Bearer <credential>" only when the value looks like a credential (16+ characters with a
+// digit or one of ._~+/=-), so "basic whenever" in prose isn't touched.
+const INLINE_BEARER = /\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{16,})/gi;
 
 /**
  * A plain string with inline credentials masked: `password=…` pairs (DSNs,
- * connection strings, JSON in a string) and `Bearer …`/`Basic …` values
- * (commands and header strings).
+ * connection strings), `"password": "…"` in JSON inside a string, and
+ * `Bearer …`/`Basic …` credentials (commands and header strings).
  */
 function maskInlineSecrets(value: string): string {
   return value
-    .replace(INLINE_SECRET, (_match, name: string, sep: string) => `${name}${sep}***`)
-    .replace(INLINE_BEARER, (_match, scheme: string) => `${scheme} ***`);
+    .replace(INLINE_SECRET_EQ, (_match, name: string, sep: string) => `${name}${sep}***`)
+    .replace(INLINE_SECRET_JSON, (_match, open: string, _secret: string, close: string) => `${open}***${close}`)
+    .replace(INLINE_BEARER, (match, scheme: string, credential: string) =>
+      /[\d._~+/=-]/.test(credential) ? `${scheme} ***` : match);
 }
 
 function maskParams(params: string): string {
@@ -204,7 +212,7 @@ export function maskUrlCredentials(value: string): string {
   return `${scheme[1]}${host}${maskedPath}${maskParams(query)}${maskedFragment}`;
 }
 
-const SECRET_FLAG = /^(--?[\w-]*(key|token|secret|password|passwd|auth|credential|header)[\w-]*|-[kHp])$/i;
+const SECRET_FLAG = /^(--?[\w-]*(key|token|secret|password|passwd|auth|credential|header)[\w-]*|-[kH])$/i;
 const SECRET_FLAG_WITH_VALUE = /^(--?[\w-]*(?:key|token|secret|password|passwd|auth|credential)[\w-]*=).+$/i;
 
 /** A command-line style list (`["--api-key", "…"]`, `["--token=…"]`) with the secret values masked. */

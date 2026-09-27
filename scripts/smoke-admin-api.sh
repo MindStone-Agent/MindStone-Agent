@@ -86,7 +86,7 @@ c["channels"] = {"telegram": {
     "conn": "host=db.example.test password=SENTINEL-DSNKV-7731 user=x",
     "headerObjects": [{"name": "X-Api-Token", "value": "SENTINEL-HDROBJ-7731"}],
     "command": "curl -H 'Authorization: Bearer SENTINELCMDBEARER7731' https://api.example.test",
-    "jsonBlob": "{\"password\": \"SENTINEL-JSONSTR-7731\"}",
+    "jsonBlob": "{\"password\": \"SENTINEL-JSONSTR-7731,with,commas\"}",
     # Not secrets: must stay readable.
     "dispatch": "fifo",
     "mapping": {"a": "b"},
@@ -229,6 +229,11 @@ grep -q 'NEW-PLAIN-TOKEN' "${CONFIG}" && { echo "a plain secret was written" >&2
 # is right, so a correct guess and a wrong one look the same.
 expect "$(patch channels '{"telegram":{"apiBaseUrl":"https://user:SENTINEL-USERINFO-7731@api.example.test/v1?api_key=SENTINEL-QUERY-7731&page=2"}}')" 403 "a correct guess at a hidden URL password"
 expect "$(patch channels '{"telegram":{"apiBaseUrl":"https://user:wrong-guess@api.example.test/v1?api_key=SENTINEL-QUERY-7731&page=2"}}')" 403 "a wrong guess at a hidden URL password"
+# Prose in a note is not a credential: shown as written, and editable without the permission.
+expect "$(patch onboarding '{"preferences":{"setupNotes":"Keep explanations basic whenever possible. Remember the token: rotate it monthly."}}')" 200 "writing a plain note"
+NOTE_SHOWN="$(curl -s "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/config" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).config.onboarding.preferences.setupNotes))')"
+[[ "${NOTE_SHOWN}" == "Keep explanations basic whenever possible. Remember the token: rotate it monthly." ]] || { echo "a plain note was masked: ${NOTE_SHOWN}" >&2; exit 1; }
+expect "$(patch onboarding '{"preferences":{"setupNotes":"Short answers please."}}')" 200 "editing a plain note"
 # A key with a dot can't pose as a safe path.
 expect "$(patch channels '{"evil.enabled":"https://attacker.example.test/x"}')" 400 "a key containing a dot"
 # Default deny: everything else needs the permission (#38 review round 1).
