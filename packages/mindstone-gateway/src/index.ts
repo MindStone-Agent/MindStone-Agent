@@ -1666,22 +1666,19 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const secrets = names.map((name) => {
       const target = resolvePath(secretsDir, name);
       let kind: "file" | "link" | "other" = "other";
-      let size: number | undefined;
       let modifiedAt: string | undefined;
       try {
         const entry = lstatSync(target);
         kind = entry.isSymbolicLink() ? "link" : entry.isFile() ? "file" : "other";
-        if (kind === "file") {
-          size = entry.size;
-          modifiedAt = entry.mtime.toISOString();
-        }
+        // No size: a secret's length says something about it (#92).
+        if (kind === "file") modifiedAt = entry.mtime.toISOString();
       } catch {
         // Removed meanwhile: listed without details.
       }
       return {
         name,
         kind,
-        ...(size !== undefined ? { size, modifiedAt } : {}),
+        ...(modifiedAt !== undefined ? { modifiedAt } : {}),
         tokenFile: `secrets/${name}`,
         usedBy: connectorsReading(config, configPath, paths, target),
         gatewayCredential: hostCredentials.some((file) => pointsAtSameFile(file, target)),
@@ -1957,7 +1954,14 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     await withAdminWriteLock(() => {
       const secretsDir = `${paths.dataDir}/secrets`;
       const target = resolvePath(secretsDir, name);
-      const config = loadMindStoneConfig(configPath).config;
+      // Fail closed: without the config, the gateway's own credential files
+      // aren't known, so nothing is deleted (#92).
+      const loadedConfig = loadMindStoneConfig(configPath);
+      if (loadedConfig.error || !loadedConfig.config) {
+        refuse(503, { error: CONFIG_UNREADABLE }, { reason: "config_unreadable", secret: name });
+        return;
+      }
+      const config = loadedConfig.config;
       if (hostCredentialFiles(config, configPath).some((file) => pointsAtSameFile(file, target))) {
         refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
         return;
@@ -2011,7 +2015,14 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       const secretsDir = `${paths.dataDir}/secrets`;
       const target = resolvePath(secretsDir, name);
       // The gateway's own credentials are set on the host, never from the Console.
-      const loadedSecretsConfig = loadMindStoneConfig(configPath).config;
+      // Fail closed: without the config, the gateway's own credential files
+      // and the connectors' token files aren't known, so nothing is written (#92).
+      const loadedSecrets = loadMindStoneConfig(configPath);
+      if (loadedSecrets.error || !loadedSecrets.config) {
+        refuse(503, { error: CONFIG_UNREADABLE }, { reason: "config_unreadable", secret: name });
+        return;
+      }
+      const loadedSecretsConfig = loadedSecrets.config;
       const hostCredentials = hostCredentialFiles(loadedSecretsConfig, configPath);
       if (hostCredentials.some((file) => pointsAtSameFile(file, target))) {
         refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
