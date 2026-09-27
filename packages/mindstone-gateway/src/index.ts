@@ -115,6 +115,7 @@ import {
   readConnectorRuntimeStatus,
   resolveConnectorCredential,
   shouldTriggerConnectorReply,
+  isOwnerDirectMessage,
   writeConnectorRuntimeStatus,
   type ConnectorContext,
   type ConnectorInboundHandle,
@@ -743,9 +744,25 @@ function loadRouteIdentityContext(input: {
   };
 }
 
+/** A non-owner turn keeps the agent's IDENTITY.md but not the owner's USER.md (#61). */
+function withoutOwnerProfile(
+  context: ReturnType<typeof loadRouteIdentityContext>,
+  audience: "owner" | "non_owner",
+): ReturnType<typeof loadRouteIdentityContext> {
+  if (!context || audience === "owner") return context;
+  return { ...context, userMarkdown: undefined, userPath: undefined };
+}
+
 async function runConfiguredRoute(input: {
   sessionKey: string;
   agentId: string;
+  /**
+   * Who the turn answers (#61). "owner" is the owner's own surfaces (webchat,
+   * REST, OpenAI endpoints, App Engine) and verified direct messages. Anything
+   * else is "non_owner": no autoRecall, no USER.md and no memory index. Required
+   * so no caller can leave it to a default.
+   */
+  audience: "owner" | "non_owner";
   config: MindStoneConfig | undefined;
   configPath?: string;
   metadata?: Record<string, unknown>;
@@ -818,7 +835,10 @@ async function runConfiguredRoute(input: {
         entries,
         model,
         provider,
-        identityContext: loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
+        identityContext: withoutOwnerProfile(
+          loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
+          input.audience,
+        ),
         personaContext: (input.route?.personaId
           ? loadRoutePersonaContextById({
               config: input.config,
@@ -841,7 +861,7 @@ async function runConfiguredRoute(input: {
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
         memoryRecall: {
-          enabled: input.config?.memory?.autoRecall === true,
+          enabled: input.audience === "owner" && input.config?.memory?.autoRecall === true,
           provider: input.config?.memory?.vectorStore === "sqlite-vec"
             ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
                 ...(input.config?.memory?.localDocuments ?? []),
@@ -862,7 +882,7 @@ async function runConfiguredRoute(input: {
           maxPromptTokens: input.config?.memory?.invariants?.maxPromptTokens,
         },
         memoryIndex: {
-          enabled: input.config?.memory?.index?.enabled !== false,
+          enabled: input.audience === "owner" && input.config?.memory?.index?.enabled !== false,
           documents: fileMemoryDocuments,
           maxPromptTokens: input.config?.memory?.index?.maxPromptTokens,
         },
@@ -1185,7 +1205,7 @@ async function executeGatewayRpc(rpc: GatewayRpcRequest): Promise<GatewayRpcExec
       source,
       metadata: { source: "gateway-rpc", method: "chat.send", threadId: stringParam(params.threadId) },
     });
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path });
     if (routed.routed) {
       return { status: routed.status, body: rpcSuccess(id, { persisted: true, userEntry, ...routed.body as Record<string, unknown> }) };
     }
@@ -1544,6 +1564,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const routed = await runConfiguredRoute({
       sessionKey,
       agentId,
+      audience: "owner",
       config,
       configPath: loadedConfig.path,
       metadata: { ...(metadata ?? {}), appEngine: true, memoryScope },
@@ -1595,7 +1616,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       source,
       metadata: { ...(metadata ?? {}), threadId: stringParam(input.threadId) },
     });
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata });
     if (routed.routed) {
       sendJson(res, routed.status, { persisted: true, userEntry, ...(routed.body as Record<string, unknown>) });
       return;
@@ -1765,7 +1786,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       },
     }));
 
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
     if (routed.routed && routed.status === 200) {
       const routedBody = routed.body as { entry?: TranscriptEntry; identityContext?: unknown; promptWindow?: unknown; runId?: string };
       const outputText = routedBody.entry?.text ?? "";
@@ -1895,7 +1916,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         },
       });
     });
-    const routed = await runConfiguredRoute({ sessionKey, agentId, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
     if (routed.routed && routed.status === 200 && input.stream === true) {
       // OpenAI-compatible server-sent events. LibreChat (and the openai/langchain clients generally)
       // send `stream: true` unconditionally and cannot parse a plain chat.completion body, so a
@@ -2053,6 +2074,7 @@ async function handleConnectorInbound(params: {
   const routed = await runConfiguredRoute({
     sessionKey,
     agentId,
+    audience: isOwnerDirectMessage(message) ? "owner" : "non_owner",
     config: loadedConfig.config,
     configPath: loadedConfig.path,
     metadata: { connector: connectorId },
@@ -2070,7 +2092,7 @@ async function handleConnectorInbound(params: {
     chatId: message.chatId,
     threadId: message.threadId,
     inReplyToMessageId: message.messageId,
-    metadata: { chatType: message.chatType ?? "direct" },
+    metadata: message.chatType ? { chatType: message.chatType } : {},
   };
   const connector = getConnector(connectorId);
 

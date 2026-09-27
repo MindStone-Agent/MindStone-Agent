@@ -90,6 +90,11 @@ export type MindStoneRoutingConfig = {
   defaultModel?: string;
   mock?: {
     responsePrefix?: string;
+    /**
+     * Smoke tests only: append every request the mock provider receives to this
+     * file as one JSON line, so a test can assert what reached the model.
+     */
+    captureFile?: string;
   };
   pi?: {
     /** Isolated Pi agent/config directory. Defaults to PI_CODING_AGENT_DIR. */

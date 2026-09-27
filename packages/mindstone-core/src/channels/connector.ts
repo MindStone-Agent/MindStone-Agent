@@ -31,6 +31,12 @@ export type ConnectorInboundMessage = {
   threadId?: string;
   /** Whether the agent was explicitly mentioned/addressed (connector-native semantics). */
   mentioned?: boolean;
+  /**
+   * False when the connector could not authenticate the sender (e.g. email
+   * without an aligned DKIM/DMARC pass). An unverified sender is never treated
+   * as the owner (#61). Absent means the platform itself vouches for senderId.
+   */
+  senderVerified?: boolean;
   timestamp?: string;
   metadata?: Record<string, unknown>;
 };
@@ -102,7 +108,8 @@ export function connectorTranscriptSource(params: {
   return {
     substrate: `connector:${params.connectorId}`,
     channel: params.message.chatId ?? params.connectorId,
-    chatType: params.message.chatType ?? "direct",
+    // No default: a missing chat type is unknown, not direct (#61).
+    chatType: params.message.chatType,
     senderId: params.message.senderId,
     senderName: params.message.senderLabel,
     ...(params.accountId ? { accountId: params.accountId } : {}),

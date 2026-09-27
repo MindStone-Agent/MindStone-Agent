@@ -7,6 +7,12 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ## [Unreleased]
 
 ### Security
+- **Channel turns that aren't the owner's direct messages no longer get the owner's context** (#61).
+  - Before this fix, with the default `session.mode: "single"`, a group or channel message landed in the owner's main session. Its prompt carried the owner's recalled memories, `USER.md`, the memory index and the owner's earlier DM history.
+  - Only a direct message from a sender the connector can vouch for counts as the owner. Group, channel and thread turns, messages with no chat type and unverified senders run in their own per-surface session, without autoRecall, `USER.md` or the memory index. The agent's `IDENTITY.md` and its always-in-force rules still apply.
+  - A message with no chat type is no longer treated as a DM: in a group it needs a mention or the trigger prefix, like any other group message.
+  - Email: the From address counts as the owner only when Gmail's own `Authentication-Results` header shows a DMARC pass for its domain, or a DKIM pass from that domain or a parent of it.
+  - The owner's own surfaces (webchat, REST, OpenAI endpoints, App Engine) are unchanged. Session access by key with gateway auth `none` is a separate open decision.
 - **pi-session turns no longer get Pi's built-in tools unless configured** (#54).
   - Before this fix, every turn in `pi-session` routing was offered Pi's built-in `read`, `bash`, `edit` and `write`. They run unsandboxed as the gateway user and bypass MindStone approvals.
   - Only the tools named in `routing.pi.builtinTools` are offered, and only Pi's default four can be re-enabled.

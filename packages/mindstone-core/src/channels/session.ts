@@ -1,12 +1,26 @@
 import type { MindStoneConfig } from "../config/types.js";
-import { resolveConfiguredSessionKey } from "../routing/session.js";
+import { resolveConfiguredSessionKey, resolveSessionKey } from "../routing/session.js";
 import type { ConnectorInboundMessage } from "./connector.js";
+
+/**
+ * True only for a direct message from a sender the connector could vouch for
+ * (#61). Group, channel and thread turns, a missing or unrecognised chat type,
+ * and an unverified sender are all not the owner: fails closed.
+ */
+export function isOwnerDirectMessage(message: ConnectorInboundMessage): boolean {
+  const chatType = typeof message.chatType === "string" ? message.chatType.trim().toLowerCase() : "";
+  return chatType === "direct" && message.senderVerified !== false;
+}
 
 /**
  * Thread/session mapping (issue #16): connector-native identity feeds the
  * standard session-key discipline — session.mode "single" collapses to the
  * canonical continuity session; "per_surface" keys by connector/chatType and
  * prefers threadId over senderId, so threads keep their own lineage.
+ *
+ * Only the owner's direct messages may collapse into the canonical session
+ * (#61). Every other turn gets its own per-surface key in either mode, so it
+ * never reads the owner's DM history.
  */
 export function connectorSessionKey(params: {
   config: MindStoneConfig | undefined;
@@ -15,14 +29,21 @@ export function connectorSessionKey(params: {
   message: ConnectorInboundMessage;
 }): string {
   const agentId = params.agentId ?? params.config?.routing?.defaultAgentId ?? "default";
-  return resolveConfiguredSessionKey(params.config, {
+  const input = {
     agentId,
     substrate: `connector:${params.connectorId}`,
     channel: params.message.chatId ?? params.connectorId,
-    chatType: params.message.chatType ?? "direct",
+    chatType: isOwnerDirectMessage(params.message)
+      ? "direct"
+      : params.message.chatType === "direct"
+        ? "unverified"
+        : params.message.chatType ?? "unknown",
     senderId: params.message.senderId,
     threadId: params.message.threadId,
-  });
+  };
+  return isOwnerDirectMessage(params.message)
+    ? resolveConfiguredSessionKey(params.config, input)
+    : resolveSessionKey(input);
 }
 
 /**
@@ -55,7 +76,8 @@ export type ConnectorTriggerDecision = {
 
 export function shouldTriggerConnectorReply(policy: ConnectorTriggerPolicy, message: ConnectorInboundMessage): ConnectorTriggerDecision {
   const text = message.text ?? "";
-  const chatType = message.chatType ?? "direct";
+  // A missing chat type is unknown, not direct: it needs a mention too (#61).
+  const chatType = message.chatType ?? "unknown";
   if (policy.triggerPrefix && text.trimStart().startsWith(policy.triggerPrefix)) {
     return { respond: true, reason: `trigger prefix ${policy.triggerPrefix}`, text: text.trimStart().slice(policy.triggerPrefix.length).trimStart() };
   }

@@ -108,6 +108,40 @@ export function gmailMessageBody(message: GmailMessage, maxBodyChars: number): s
 }
 
 /**
+ * Whether Gmail authenticated the From address (#61). Reads only the topmost
+ * Authentication-Results header, the one Gmail's own receiving server
+ * prepends (authserv-id mx.google.com); a sender can add their own copies
+ * lower down, so later ones are ignored. Verified means DMARC passed for the
+ * From domain, or DKIM passed with a signing domain aligned to it (equal, or
+ * a parent domain). SPF alone does not count: it checks the envelope sender,
+ * not From.
+ */
+export function emailSenderVerified(message: GmailMessage, fromAddress: string): boolean {
+  const fromDomain = fromAddress.split("@").pop()?.trim().toLowerCase();
+  if (!fromDomain) return false;
+  const results = header(message, "Authentication-Results");
+  if (!results) return false;
+  const [authservId, ...clauses] = results.split(";").map((part) => part.trim());
+  if (authservId?.split(/\s+/)[0]?.toLowerCase() !== "mx.google.com") return false;
+  const aligned = (domain: string | undefined): boolean => {
+    const d = (domain ?? "").trim().replace(/^@/, "").toLowerCase();
+    return d !== "" && (fromDomain === d || fromDomain.endsWith(`.${d}`));
+  };
+  for (const clause of clauses) {
+    const method = /^(dmarc|dkim)=(\w+)/i.exec(clause);
+    if (!method || method[2]!.toLowerCase() !== "pass") continue;
+    const property = (name: string) => new RegExp(`\\b${name.replace(".", "\\.")}=([^\\s;]+)`, "i").exec(clause)?.[1];
+    if (method[1]!.toLowerCase() === "dmarc") {
+      if (property("header.from")?.toLowerCase() === fromDomain) return true;
+    } else {
+      const signer = property("header.d") ?? property("header.i")?.split("@").pop();
+      if (aligned(signer)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Map a Gmail message to the connector inbound shape. The text is the #21
  * envelope: header line + optional thread digest + body. senderId is the bare
  * lower-cased address so allowedSenders/allowedSenderDomains match naturally.
@@ -137,6 +171,8 @@ export function gmailMessageToInbound(
     senderLabel: from.label ?? from.address,
     chatId: message.threadId ?? message.id,
     chatType: "direct",
+    // An unauthenticated From header is spoofable, so it never counts as the owner (#61).
+    senderVerified: emailSenderVerified(message, from.address),
     threadId: message.threadId,
     timestamp: message.internalDate ? new Date(Number(message.internalDate)).toISOString() : undefined,
     metadata: { subject, sensitiveSource: "email" },

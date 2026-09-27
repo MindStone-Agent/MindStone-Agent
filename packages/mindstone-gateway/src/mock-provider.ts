@@ -1,15 +1,20 @@
+import { appendFileSync } from "node:fs";
 import type { MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider } from "@mindstone-agent/core";
 
 export type MockProviderOptions = {
   responsePrefix?: string;
+  /** Smoke tests only: append each request's messages to this file as JSON lines. */
+  captureFile?: string;
 };
 
 export class MockMindStoneProvider implements MindStoneModelProvider {
   readonly id = "mock";
   readonly #responsePrefix: string;
+  readonly #captureFile: string | undefined;
 
   constructor(options: MockProviderOptions = {}) {
     this.#responsePrefix = options.responsePrefix ?? "Mock MindStone response";
+    this.#captureFile = options.captureFile?.trim() || undefined;
   }
 
   listModels(): MindStoneModelInfo[] {
@@ -18,6 +23,9 @@ export class MockMindStoneProvider implements MindStoneModelProvider {
 
   async completeChat(request: MindStoneChatRequest): Promise<MindStoneChatResult> {
     if (request.signal?.aborted) throw new Error("aborted");
+    if (this.#captureFile) {
+      appendFileSync(this.#captureFile, `${JSON.stringify({ model: request.model, messages: request.messages })}\n`);
+    }
     const lastUser = [...request.messages].reverse().find((message) => message.role === "user" && message.text?.trim());
     return {
       role: "assistant",
