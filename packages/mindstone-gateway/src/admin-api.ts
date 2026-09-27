@@ -157,26 +157,51 @@ function isSecretPathSegment(segment: string): boolean {
   return segment.length >= 16 && /[A-Za-z]/.test(segment) && /\d/.test(segment);
 }
 
-// `name=value` (DSNs, connection strings, query-like text) up to whitespace or ";"/"&",
-// and `"name": "value"` (JSON inside a string) up to the closing quote. A bare
-// "token: …" in prose is left alone.
-const INLINE_SECRET_EQ = /\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)(\s*=\s*)([^\s;&]+)/gi;
-const INLINE_SECRET_JSON = /("(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)"\s*:\s*")((?:[^"\\]|\\.)*)(")/gi;
-// "Bearer <credential>" only when the value looks like a credential (16+ characters with a
-// digit or one of ._~+/=-), so "basic whenever" in prose isn't touched.
-const INLINE_BEARER = /\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{16,})/gi;
+// Names that end in a secret word, with any prefix: password, DB_PASSWORD, access_token,
+// OPENAI_API_KEY, client_secret, private_key, refresh_token.
+const SECRET_NAME = String.raw`[\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)`;
+// `NAME=value` with no spaces around "=" (DSNs, env lines, connection strings), so prose
+// such as "1 token = 4 characters" is left alone.
+const INLINE_SECRET_EQ = new RegExp(String.raw`(?<![\w-])(${SECRET_NAME})=([^\s;&"']+)`, "gi");
+// `"name": "value"` (JSON inside a string), up to the closing quote.
+const INLINE_SECRET_JSON = new RegExp(String.raw`("${SECRET_NAME}"\s*:\s*")((?:[^"\\]|\\.)*)(")`, "gi");
+// Header lines: `Authorization: <scheme> <value>` and `X-…-Key/Token/Secret: <value>`.
+const INLINE_HEADER = /\b(authorization|x-[\w-]*(?:key|token|secret))(\s*:\s*)((?:bearer|basic|token)\s+)?([^\s'"]+)/gi;
+// `Bearer <credential>` / `Basic <credential>` elsewhere, when the value looks like one:
+// 12+ characters with a digit, mixed case, or base64 padding ("basic question-and-answer" is prose).
+const INLINE_BEARER = /\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{12,})/gi;
+// curl -u user:pass
+const INLINE_USER_FLAG = /(\s-u\s+)(\S+)/g;
+const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s'"<>]+/gi;
+
+function looksLikeCredential(value: string): boolean {
+  return /\d/.test(value) || (/[a-z]/.test(value) && /[A-Z]/.test(value)) || value.endsWith("=");
+}
 
 /**
- * A plain string with inline credentials masked: `password=…` pairs (DSNs,
- * connection strings), `"password": "…"` in JSON inside a string, and
- * `Bearer …`/`Basic …` credentials (commands and header strings).
+ * A plain string with inline credentials masked: `NAME=value` pairs, JSON
+ * `"name": "value"`, header lines, Bearer/Basic credentials, `-u user:pass`,
+ * and credentials in URLs anywhere in the string.
  */
 function maskInlineSecrets(value: string): string {
   return value
-    .replace(INLINE_SECRET_EQ, (_match, name: string, sep: string) => `${name}${sep}***`)
+    .replace(URL_IN_TEXT, (url) => maskUrlCredentials(url))
+    .replace(INLINE_SECRET_EQ, (_match, name: string) => `${name}=***`)
     .replace(INLINE_SECRET_JSON, (_match, open: string, _secret: string, close: string) => `${open}***${close}`)
-    .replace(INLINE_BEARER, (match, scheme: string, credential: string) =>
-      /[\d._~+/=-]/.test(credential) ? `${scheme} ***` : match);
+    .replace(INLINE_HEADER, (_match, name: string, sep: string, scheme: string | undefined) => `${name}${sep}${scheme ?? ""}***`)
+    .replace(INLINE_BEARER, (match, scheme: string, credential: string) => (looksLikeCredential(credential) ? `${scheme} ***` : match))
+    .replace(INLINE_USER_FLAG, (_match, flag: string) => `${flag}***`);
+}
+
+/**
+ * Free-text notes (onboarding preferences and identity notes, anything named
+ * …Notes or …Context) are the owner's prose: they are shown as written, so a
+ * phrase that reads like a credential doesn't lock the note behind the
+ * advanced-settings permission.
+ */
+function isProseKey(key: string): boolean {
+  const lower = normalizeKey(key);
+  return lower.endsWith("notes") || lower.endsWith("context") || lower.endsWith("direction");
 }
 
 function maskParams(params: string): string {
@@ -193,6 +218,7 @@ function maskParams(params: string): string {
 export function maskUrlCredentials(value: string): string {
   const scheme = /^([a-z][a-z0-9+.-]*:\/\/)(.*)$/is.exec(value.trim());
   if (!scheme) return maskInlineSecrets(value);
+  if (/\s/.test(value.trim())) return maskInlineSecrets(value);
   let rest = scheme[2]!;
   // Userinfo: everything up to the last "@" before the path, even with "/" in a password.
   const at = rest.lastIndexOf("@");
@@ -212,7 +238,7 @@ export function maskUrlCredentials(value: string): string {
   return `${scheme[1]}${host}${maskedPath}${maskParams(query)}${maskedFragment}`;
 }
 
-const SECRET_FLAG = /^(--?[\w-]*(key|token|secret|password|passwd|auth|credential|header)[\w-]*|-[kH])$/i;
+const SECRET_FLAG = /^(--?[\w-]*(key|token|secret|password|passwd|auth|credential|header)[\w-]*|-[kHu])$/i;
 const SECRET_FLAG_WITH_VALUE = /^(--?[\w-]*(?:key|token|secret|password|passwd|auth|credential)[\w-]*=).+$/i;
 
 /** A command-line style list (`["--api-key", "…"]`, `["--token=…"]`) with the secret values masked. */
@@ -244,7 +270,7 @@ function isSet(value: unknown): boolean {
  */
 export function maskConfig(value: unknown, key = "", parentIsSecretMap = false): unknown {
   if (masksWhole(key, value) || (parentIsSecretMap && key)) return { set: isSet(value) };
-  if (typeof value === "string") return maskUrlCredentials(value);
+  if (typeof value === "string") return isProseKey(key) ? value : maskUrlCredentials(value);
   if (Array.isArray(value)) {
     if (key && isSecretMap(key)) {
       // A header list: strings ("Name: value") or objects ({ name, value }); only names stay visible.
