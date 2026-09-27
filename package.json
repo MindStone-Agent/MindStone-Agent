@@ -59,6 +59,7 @@
     "smoke:kb-sources": "./scripts/smoke-kb-sources.sh",
     "smoke:app-engine": "./scripts/smoke-app-engine.sh",
     "smoke:connector": "./scripts/smoke-connector.sh",
+    "smoke:admin-api": "./scripts/smoke-admin-api.sh",
     "smoke:channel-trust": "./scripts/smoke-channel-trust.sh",
     "smoke:backfill-scope": "./scripts/smoke-backfill-scope.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",

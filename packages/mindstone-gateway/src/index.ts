@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
+import { adminStatus, decideAdminAccess, maskConfig } from "./admin-api.js";
 import { PiMindStoneProvider } from "./pi-provider.js";
 import { PiSessionMindStoneProvider } from "./pi-session-provider.js";
 import { PiSessionAgentRunner } from "./pi-session-runner.js";
@@ -1486,6 +1487,31 @@ function handleGatewayUpgrade(req: IncomingMessage, socket: Socket): void {
   attachGatewayRpcWebSocket(socket);
 }
 
+/** The Console's admin API (#38, P2). Read side: status and masked config. */
+async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  const paths = runtimePathsFromEnv();
+  const configPath = resolveConfigPath(process.env, paths);
+  const loadedConfig = loadMindStoneConfig(configPath);
+  const gate = decideAdminAccess({ config: loadedConfig.config, configPath, headers: req.headers });
+  if (!gate.allowed) {
+    sendJson(res, gate.status, { ok: false, error: gate.error });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/admin/status") {
+    sendJson(res, 200, adminStatus(loadedConfig.config));
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/admin/config") {
+    if (loadedConfig.error) {
+      sendJson(res, 503, { ok: false, error: loadedConfig.error });
+      return;
+    }
+    sendJson(res, 200, { ok: true, config: maskConfig(loadedConfig.config ?? {}) });
+    return;
+  }
+  sendJson(res, 404, { ok: false, error: "unknown admin endpoint" });
+}
+
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
   if (req.method === "GET" && url.pathname === "/health") {
@@ -1504,6 +1530,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   if (!enforceGatewayAuth(req, res)) {
+    return;
+  }
+
+  if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
+    await handleAdminRequest(req, res, url);
     return;
   }
 
