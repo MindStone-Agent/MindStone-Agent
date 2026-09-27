@@ -170,6 +170,11 @@ import {
   type PromptWindowAutoCompactEvent,
   resolveConnectorSecretPath,
   type MindStoneRuntimePaths,
+  LOCAL_PROVIDER_PRESETS,
+  type LocalProviderPresetId,
+  getIsolatedModelsStatus,
+  probeOpenAiCompatibleModels,
+  upsertIsolatedProvider,
 } from "@mindstone-agent/core";
 
 export type GatewayOptions = {
@@ -1602,6 +1607,46 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     sendJson(res, 200, { ok: true, permissions: readAdminPermissions(paths.dataDir) });
     return;
   }
+  if (req.method === "GET" && url.pathname === "/admin/models") {
+    // What the onboarding flow offers: the presets a provider can be
+    // registered from, the providers already in the isolated models.json
+    // (auth summarised, never a key), and Pi's providers and models (#38, P2).
+    const agentDir = gateConfig.config?.routing?.pi?.agentDir ?? paths.piAgentDir;
+    const registered = getIsolatedModelsStatus(agentDir);
+    let models: Array<{ id: string; provider: string; name?: string; contextWindowTokens?: number }> = [];
+    let providers: Array<{ id: string; name: string; configured: boolean; modelCount: number; availableModelCount: number }> = [];
+    let listError: string | undefined;
+    try {
+      const pi = new PiMindStoneProvider({ agentDir });
+      const [piModels, piProviders] = await Promise.all([pi.listModels(), pi.listProviders()]);
+      models = piModels.map((model) => ({ id: model.id, provider: model.provider, name: model.name, contextWindowTokens: model.contextWindowTokens }));
+      providers = piProviders.map((provider) => ({
+        id: provider.id,
+        name: provider.name,
+        configured: provider.authStatus?.configured === true,
+        modelCount: provider.modelCount,
+        availableModelCount: provider.availableModelCount,
+      }));
+    } catch {
+      listError = "could not list Pi's models";
+    }
+    sendJson(res, 200, {
+      ok: true,
+      presets: Object.values(LOCAL_PROVIDER_PRESETS).map((preset) => ({
+        presetId: preset.presetId,
+        providerId: preset.providerId,
+        name: preset.name,
+        baseUrl: preset.baseUrl,
+        needsKey: !preset.placeholderApiKey,
+      })),
+      registered: registered.providers,
+      ...(registered.error ? { registeredError: "the isolated models.json can't be read" } : {}),
+      providers,
+      models,
+      ...(listError ? { error: listError } : {}),
+    });
+    return;
+  }
   if (req.method !== "POST" && req.method !== "PATCH") {
     sendJson(res, 404, { ok: false, error: "unknown admin endpoint" });
     return;
@@ -1632,6 +1677,107 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       writeFileAtomic(adminPermissionsPath(paths.dataDir), `${JSON.stringify(permissions, null, 2)}\n`, 0o600);
       appendAdminAudit(paths.dataDir, { userId, action: enabled ? "advanced_settings_granted" : "advanced_settings_revoked" });
       sendJson(res, 200, { ok: true, permissions });
+    });
+    return;
+  }
+
+  const providerMatch = /^\/admin\/providers\/([a-z-]{1,40})$/.exec(url.pathname);
+  if (req.method === "POST" && providerMatch) {
+    const presetId = providerMatch[1]!;
+    const preset = Object.hasOwn(LOCAL_PROVIDER_PRESETS, presetId) ? LOCAL_PROVIDER_PRESETS[presetId as LocalProviderPresetId] : undefined;
+    if (!preset) {
+      sendJson(res, 404, { ok: false, error: `unknown provider preset: ${presetId}` });
+      return;
+    }
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const parsed = parseProviderRegistration(body, preset.baseUrl);
+    if ("error" in parsed) {
+      sendJson(res, 400, { ok: false, error: parsed.error });
+      return;
+    }
+    const loaded = loadMindStoneConfig(configPath);
+    if (loaded.error) {
+      sendJson(res, 503, { ok: false, error: CONFIG_UNREADABLE });
+      return;
+    }
+    // Registering a provider adds a URL and a credential the agent sends to
+    // it, so it needs the advanced-settings permission.
+    if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+      refuse(403, { error: "registering a model provider needs the advanced-settings permission" }, { reason: "advanced", provider: presetId });
+      return;
+    }
+    // The key comes from a stored secret or an environment variable, never
+    // from this body. The gateway's own credentials are host-only: they must
+    // never be sent to a provider URL (#38, P2).
+    let apiKey: string | undefined;
+    let probeKey: string | undefined;
+    let keySource: string;
+    if (parsed.secret) {
+      const secretPath = resolvePath(`${paths.dataDir}/secrets`, parsed.secret);
+      if (hostCredentialFiles(loaded.config, configPath).some((file) => sameFile(file, secretPath))) {
+        refuse(422, { error: "that secret is a gateway credential and can't be used as a provider key" }, { reason: "host_only", provider: presetId });
+        return;
+      }
+      let value = "";
+      try {
+        if (lstatSync(secretPath).isFile()) value = readFileSync(secretPath, "utf-8").trim();
+      } catch {
+        // Missing: handled below.
+      }
+      if (!value) {
+        sendJson(res, 400, { ok: false, error: `no stored secret named ${parsed.secret}; store it with POST /admin/secrets/${parsed.secret} first` });
+        return;
+      }
+      apiKey = value;
+      probeKey = value;
+      keySource = `secret:${parsed.secret}`;
+    } else if (parsed.env) {
+      if (gatewayCredentialEnvNames(loaded.config).includes(parsed.env)) {
+        refuse(422, { error: "that environment variable holds a gateway credential and can't be used as a provider key" }, { reason: "host_only", provider: presetId });
+        return;
+      }
+      apiKey = `$${parsed.env}`;
+      probeKey = process.env[parsed.env];
+      keySource = `env:${parsed.env}`;
+    } else if (preset.placeholderApiKey) {
+      apiKey = preset.placeholderApiKey;
+      keySource = "placeholder";
+    } else {
+      sendJson(res, 400, { ok: false, error: `${preset.name} needs a key: send { "secret": "<stored secret name>" } or { "env": "<VARIABLE>" }` });
+      return;
+    }
+    let models = parsed.models;
+    if (!models) {
+      const probe = await probeOpenAiCompatibleModels({ baseUrl: parsed.baseUrl, apiKey: probeKey, timeoutMs: 5_000 });
+      if (!probe.ok) {
+        sendJson(res, 422, { ok: false, error: `couldn't list models at ${probe.baseUrl}: ${probe.error}. Send "models": ["<id>", …] to register without listing.` });
+        return;
+      }
+      models = probe.models.slice(0, 500).map((model) => model.id);
+    }
+    const registeredModels = models;
+    await withAdminWriteLock(() => {
+      // The permission is read again at write time: it may have been revoked while the probe ran.
+      if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "registering a model provider needs the advanced-settings permission" }, { reason: "advanced", provider: presetId });
+        return;
+      }
+      const agentDir = loaded.config?.routing?.pi?.agentDir ?? paths.piAgentDir;
+      const result = upsertIsolatedProvider(agentDir, preset.providerId, {
+        name: preset.name,
+        baseUrl: parsed.baseUrl,
+        api: preset.api,
+        apiKey,
+        models: registeredModels.map((id) => ({ id })),
+      });
+      if (result.error) {
+        sendJson(res, 409, { ok: false, error: "the isolated models.json can't be read; fix or remove it on the gateway host" });
+        return;
+      }
+      appendAdminAudit(paths.dataDir, { userId, action: "provider_registered", provider: preset.providerId, baseUrl: parsed.baseUrl, keySource, models: registeredModels.length });
+      // The key is never echoed.
+      sendJson(res, 200, { ok: true, providerId: preset.providerId, modelCount: result.modelCount, models: registeredModels.map((id) => `${preset.providerId}/${id}`) });
     });
     return;
   }
@@ -1883,6 +2029,65 @@ function withLinkTarget(path: string): string[] {
 /** sameFile, also following symlinks on either side, dangling ones included. */
 function pointsAtSameFile(a: string, b: string): boolean {
   return withLinkTarget(a).some((x) => withLinkTarget(b).some((y) => sameFile(x, y)));
+}
+
+/** Names of the environment variables holding the gateway's own credentials. */
+function gatewayCredentialEnvNames(config: MindStoneConfig | undefined): string[] {
+  const gateway = config?.gateway as { auth?: { tokenEnv?: unknown; passwordEnv?: unknown }; admin?: { tokenEnv?: unknown } } | undefined;
+  return [gateway?.auth?.tokenEnv, gateway?.auth?.passwordEnv, gateway?.admin?.tokenEnv].filter(
+    (name): name is string => typeof name === "string" && name.trim() !== "",
+  ).map((name) => name.trim());
+}
+
+/**
+ * The body of POST /admin/providers/<preset>: at most one of `secret` (a
+ * stored secret's name) or `env` (a variable name), an optional http(s)
+ * `baseUrl` without credentials, and an optional list of model ids.
+ */
+function parseProviderRegistration(
+  body: Record<string, unknown>,
+  defaultBaseUrl: string,
+): { error: string } | { secret?: string; env?: string; baseUrl: string; models?: string[] } {
+  const allowed = new Set(["secret", "env", "baseUrl", "models"]);
+  const unknown = Object.keys(body).filter((key) => !allowed.has(key));
+  if (unknown.length) return { error: `unknown field: ${unknown[0]} (a key is given as "secret" or "env", never as a value)` };
+  if (body.secret !== undefined && body.env !== undefined) return { error: "send either secret or env, not both" };
+  if (body.secret !== undefined && (typeof body.secret !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(body.secret) || body.secret.includes(".."))) {
+    return { error: "secret must be the name of a stored secret" };
+  }
+  if (body.env !== undefined && (typeof body.env !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(body.env))) {
+    return { error: "env must be an environment variable name" };
+  }
+  let baseUrl = defaultBaseUrl;
+  if (body.baseUrl !== undefined) {
+    let url: URL;
+    try {
+      if (typeof body.baseUrl !== "string") throw new Error("not a string");
+      url = new URL(body.baseUrl);
+    } catch {
+      return { error: "baseUrl must be an http(s) URL" };
+    }
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash) {
+      return { error: "baseUrl must be an http(s) URL with no credentials, query or fragment" };
+    }
+    baseUrl = url.toString().replace(/\/+$/, "");
+  }
+  let models: string[] | undefined;
+  if (body.models !== undefined) {
+    if (
+      !Array.isArray(body.models) || body.models.length === 0 || body.models.length > 500 ||
+      !body.models.every((id) => typeof id === "string" && /^[^\s\u0000-\u001f]{1,200}$/.test(id))
+    ) {
+      return { error: "models must be a list of 1 to 500 model ids" };
+    }
+    models = [...new Set(body.models as string[])];
+  }
+  return {
+    ...(typeof body.secret === "string" ? { secret: body.secret } : {}),
+    ...(typeof body.env === "string" ? { env: body.env } : {}),
+    baseUrl,
+    ...(models ? { models } : {}),
+  };
 }
 
 /** Absolute paths of the files holding the gateway's own credentials (auth and admin token files). */

@@ -14,10 +14,14 @@ TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-admin-smoke.XXXXXX")"
 SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
 GATEWAY_PORT="$((SMOKE_PORT_BASE + 26))"
 stop_gateway() { if [[ -n "${gateway_pid:-}" ]]; then kill "${gateway_pid}" >/dev/null 2>&1 || true; wait "${gateway_pid}" >/dev/null 2>&1 || true; unset gateway_pid; fi; }
-cleanup() { stop_gateway; rm -rf "${TEMP_RUNTIME}"; }
+cleanup() { stop_gateway; if [[ -n "${fake_pid:-}" ]]; then kill "${fake_pid}" >/dev/null 2>&1 || true; fi; rm -rf "${TEMP_RUNTIME}"; }
 trap cleanup EXIT
 export MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}"
 export MINDSTONE_AGENT_GATEWAY_PORT="${GATEWAY_PORT}"
+# A provider key in the gateway's environment: registered as a reference, never as its value.
+export SOME_PROVIDER_KEY="ENV-KEY-VALUE-3308"
+# Pi's agent dir (models.json) stays inside this run, whatever the caller's environment says.
+export PI_CODING_AGENT_DIR="${TEMP_RUNTIME}/pi-agent"
 export ADMIN_SMOKE_TOKEN="admin-smoke-service-token"
 export ADMIN_SMOKE_ADMIN_TOKEN="admin-smoke-admin-token"
 cd "${PROJECT_ROOT}"
@@ -212,6 +216,8 @@ curl -s "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' "${BASE
 let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
   const status = JSON.parse(s);
   if (status.onboarded !== true) { console.error(`mock routing plus the default persona should be onboarded: ${JSON.stringify(status.steps)}`); process.exit(1); }
+  const ids = (status.profiles ?? []).map((p) => p.id);
+  if (!ids.includes("general_companion") || !status.profiles.every((p) => p.label && p.description)) { console.error(`status should list the base personas: ${JSON.stringify(status.profiles)}`); process.exit(1); }
   console.log("onboarding assertions passed");
 });'
 
@@ -390,5 +396,66 @@ code "${AUTH[@]}" -H 'x-mindstone-user-role: admin' -H "x-mindstone-user-id: $(p
 # A non-admin can't write, even holding both credentials.
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: user' -H 'content-type: application/json' -d '{"index":{"enabled":false}}' "${BASE}/admin/config/memory")" == "403" ]] || { echo "a user-role patch must be 403" >&2; exit 1; }
 echo "admin write assertions passed"
+
+# 5. Model providers (#38, P2 onboarding): list, and register a preset with a
+#    key taken from a stored secret or an environment variable, never from the body.
+MODELS_JSON="${PI_CODING_AGENT_DIR}/models.json"
+FAKE_LOG="${TEMP_RUNTIME}/fake-provider.log"
+FAKE_PORT="$((GATEWAY_PORT + 1))"
+FAKE_PORT="${FAKE_PORT}" FAKE_LOG="${FAKE_LOG}" node -e '
+require("http").createServer((req, res) => {
+  require("fs").appendFileSync(process.env.FAKE_LOG, JSON.stringify({ url: req.url, auth: req.headers.authorization ?? null }) + "\n");
+  if (req.url === "/v1/models") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ data: [{ id: "fake-large" }, { id: "fake-small" }] })); return; }
+  res.writeHead(404); res.end();
+}).listen(Number(process.env.FAKE_PORT), "127.0.0.1");' &
+fake_pid=$!
+sleep 0.5
+curl -s -o "${BODY}" "${ADMIN[@]}" "${BASE}/admin/models"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const ids=b.presets.map(p=>p.presetId).sort().join(","); if(ids!=="lmstudio,ollama,ollama-cloud,openai-compatible"){console.error("presets: "+ids);process.exit(1)} if(b.presets.find(p=>p.presetId==="ollama-cloud").needsKey!==true){process.exit(1)}' "${BODY}" || { echo "GET /admin/models should list the presets: $(cat "${BODY}")" >&2; exit 1; }
+printf '{"advancedSettings":false}\n' > "${PERMS}"
+expect "$(post /admin/providers/ollama-cloud '{"secret":"cloud.key"}')" 403 "registering a provider without the permission"
+expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings for providers"
+expect "$(post /admin/providers/nope '{}')" 404 "an unknown preset"
+expect "$(post /admin/providers/openai-compatible '{"env":"SOME_PROVIDER_KEY","models":["m0"],"apiKey":"PLAIN-KEY-1"}')" 400 "a plain key in the body"
+grep -q 'PLAIN-KEY-1' "${MODELS_JSON}" 2>/dev/null && { echo "a plain key from the body was stored" >&2; exit 1; }
+expect "$(post /admin/providers/ollama-cloud '{}')" 400 "Ollama Cloud with no key"
+expect "$(post /admin/providers/ollama-cloud '{"secret":"missing.key"}')" 400 "a secret that isn't stored"
+expect "$(post /admin/providers/ollama-cloud '{"secret":"a","env":"B"}')" 400 "both secret and env"
+expect "$(post /admin/providers/openai-compatible '{"env":"SOME_PROVIDER_KEY","models":["m0"],"baseUrl":"http://user:pw@127.0.0.1:1/v1"}')" 400 "a base URL with credentials"
+expect "$(post /admin/providers/openai-compatible '{"env":"SOME_PROVIDER_KEY","models":["m0"],"baseUrl":"file:///etc/passwd"}')" 400 "a non-http base URL"
+# The gateway's own credentials never become a provider key: they'd be sent to the provider URL.
+expect "$(post /admin/providers/ollama-cloud '{"secret":"gateway-token","baseUrl":"http://127.0.0.1:'"${FAKE_PORT}"'/v1"}')" 422 "the gateway token file as a provider key"
+expect "$(post /admin/providers/ollama-cloud '{"env":"ADMIN_SMOKE_TOKEN","baseUrl":"http://127.0.0.1:'"${FAKE_PORT}"'/v1"}')" 422 "the gateway token variable as a provider key"
+grep -q "admin-smoke" "${FAKE_LOG}" 2>/dev/null && { echo "a gateway credential reached the provider URL" >&2; exit 1; }
+# A stored secret: the models are listed with it, and it's written to models.json (0600), never echoed.
+expect "$(post /admin/secrets/cloud.key '{"value":"CLOUD-KEY-5521"}')" 200 "storing the provider key"
+expect "$(post /admin/providers/ollama-cloud '{"secret":"cloud.key","baseUrl":"http://127.0.0.1:'"${FAKE_PORT}"'/v1"}')" 200 "registering Ollama Cloud with a stored key"
+grep -q 'CLOUD-KEY-5521' "${BODY}" && { echo "the provider key was echoed" >&2; exit 1; }
+grep -q '"ollama-cloud/fake-large"' "${BODY}" || { echo "the listed models should be returned: $(cat "${BODY}")" >&2; exit 1; }
+grep -q '"auth":"Bearer CLOUD-KEY-5521"' "${FAKE_LOG}" || { echo "the listing should use the stored key" >&2; exit 1; }
+node -e 'const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).providers["ollama-cloud"]; if(m.apiKey!=="CLOUD-KEY-5521"||m.models.length!==2||!m.baseUrl.endsWith("/v1"))process.exit(1)' "${MODELS_JSON}" || { echo "models.json should hold the provider with its key and models" >&2; exit 1; }
+[[ "$(mode_of "${MODELS_JSON}")" == "600" ]] || { echo "models.json is not 0600" >&2; exit 1; }
+grep -q 'CLOUD-KEY-5521' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" && { echo "the provider key reached the audit log" >&2; exit 1; }
+grep -q '"action":"provider_registered".*"keySource":"secret:cloud.key"' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" || { echo "the registration was not audited" >&2; exit 1; }
+# A secret that is a link (to any host file) is not a stored secret.
+ln -s /etc/hosts "${TEMP_RUNTIME}/mindstone/secrets/hosts.key"
+expect "$(post /admin/providers/ollama-cloud '{"secret":"hosts.key","models":["x"]}')" 400 "a secret that is a symlink"
+rm -f "${TEMP_RUNTIME}/mindstone/secrets/hosts.key"
+# An environment variable: stored as a reference; explicit models skip the listing.
+expect "$(post /admin/providers/openai-compatible '{"env":"SOME_PROVIDER_KEY","models":["m1"]}')" 200 "registering with an env reference and explicit models"
+node -e 'const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).providers["local-openai"]; process.exit(m.apiKey==="$SOME_PROVIDER_KEY"&&m.models[0].id==="m1"?0:1)' "${MODELS_JSON}" || { echo "an env key should be stored as a reference" >&2; exit 1; }
+grep -q 'ENV-KEY-VALUE-3308' "${MODELS_JSON}" && { echo "an env key's value was written to models.json" >&2; exit 1; }
+# A keyless local server gets its placeholder; an unreachable one is a 422 that says how to register anyway.
+expect "$(post /admin/providers/ollama '{"baseUrl":"http://127.0.0.1:9/v1"}')" 422 "an unreachable local server"
+grep -q 'register without listing' "${BODY}" || { echo "the 422 should say how to register without listing" >&2; exit 1; }
+expect "$(post /admin/providers/ollama '{"models":["llama3"]}')" 200 "a local server with explicit models"
+node -e 'const m=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).providers.ollama; process.exit(m.apiKey==="ollama"?0:1)' "${MODELS_JSON}" || { echo "a keyless local server should get its placeholder key" >&2; exit 1; }
+# GET /admin/models never shows a key.
+curl -s -o "${BODY}" "${ADMIN[@]}" "${BASE}/admin/models"
+grep -q 'CLOUD-KEY-5521' "${BODY}" && { echo "GET /admin/models showed a key" >&2; exit 1; }
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(b.registered.some(p=>p.providerId==="ollama-cloud"&&p.modelCount===2)?0:1)' "${BODY}" || { echo "registered providers should be listed: $(cat "${BODY}")" >&2; exit 1; }
+kill "${fake_pid}" 2>/dev/null || true
+printf '{"advancedSettings":false}\n' > "${PERMS}"
+echo "provider assertions passed"
 
 echo "Admin API smoke test passed."
