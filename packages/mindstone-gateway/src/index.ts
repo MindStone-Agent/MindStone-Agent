@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -168,6 +168,8 @@ import {
   type TranscriptEntry,
   type TranscriptRole,
   type PromptWindowAutoCompactEvent,
+  resolveConnectorSecretPath,
+  type MindStoneRuntimePaths,
 } from "@mindstone-agent/core";
 
 export type GatewayOptions = {
@@ -1756,9 +1758,9 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       // Replacing a secret, or writing one a connector is configured to read
       // (its token file), needs the permission: either one changes who the
       // agent talks to (#75 review).
-      const connectorFiles = connectorTokenFiles(loadMindStoneConfig(configPath).config, configPath);
+      const connectorFiles = connectorTokenFiles(loadMindStoneConfig(configPath).config, configPath, paths);
       if (
-        (existsSync(target) || connectorFiles.some((file) => sameFile(file, target))) &&
+        (existsSync(target) || connectorFiles.some((file) => pointsAtSameFile(file, target))) &&
         !readAdminPermissions(paths.dataDir).advancedSettings
       ) {
         refuse(403, { error: "replacing a secret or setting a connector's token needs the advanced-settings permission" }, { reason: "advanced", secret: name });
@@ -1848,18 +1850,39 @@ function sameFile(a: string, b: string): boolean {
   return real(a).toLowerCase() === real(b).toLowerCase();
 }
 
-/** Absolute paths of the token files connectors are configured to read (tokenFile, appTokenFile, …File). */
-function connectorTokenFiles(config: MindStoneConfig | undefined, configPath: string): string[] {
+/**
+ * Absolute paths of every file a connector is configured to read (any key
+ * ending in "File" on a channel), resolved the way the connectors resolve
+ * them (resolveConnectorSecretPath: under the data dir, trimmed) and, for
+ * safety, also relative to the config file (#75 review).
+ */
+function connectorTokenFiles(config: MindStoneConfig | undefined, configPath: string, paths: MindStoneRuntimePaths): string[] {
   const files: string[] = [];
   for (const section of Object.values((config?.channels ?? {}) as Record<string, unknown>)) {
     if (!section || typeof section !== "object") continue;
     for (const [key, value] of Object.entries(section as Record<string, unknown>)) {
-      if (/file$/i.test(key) && /token|secret|key|credential|password/i.test(key) && typeof value === "string" && value.trim()) {
-        files.push(isAbsolute(value) ? resolvePath(value) : resolvePath(dirname(configPath), value));
+      if (/file$/i.test(key) && typeof value === "string" && value.trim()) {
+        files.push(resolveConnectorSecretPath(value, paths));
+        if (!isAbsolute(value.trim())) files.push(resolvePath(dirname(configPath), value.trim()));
       }
     }
   }
   return files;
+}
+
+/** A path and, when it is a symlink (even a dangling one), where it points. */
+function withLinkTarget(path: string): string[] {
+  try {
+    if (lstatSync(path).isSymbolicLink()) return [path, resolvePath(dirname(path), readlinkSync(path))];
+  } catch {
+    // Doesn't exist: just the path.
+  }
+  return [path];
+}
+
+/** sameFile, also following symlinks on either side, dangling ones included. */
+function pointsAtSameFile(a: string, b: string): boolean {
+  return withLinkTarget(a).some((x) => withLinkTarget(b).some((y) => sameFile(x, y)));
 }
 
 /** Absolute paths of the files holding the gateway's own credentials (auth and admin token files). */
@@ -1928,7 +1951,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
     try {
       await handleAdminRequest(req, res, url);
-    } catch {
+    } catch (error) {
+      try {
+        appendAdminAudit(runtimePathsFromEnv().dataDir, { action: "failed", status: 500, method: req.method, path: url.pathname, error: String(error).slice(0, 200) });
+      } catch {
+        // The audit itself failed; the response still goes out.
+      }
       // Never echo internal error text from the admin API.
       if (!res.headersSent) sendJson(res, 500, { ok: false, error: "the admin API hit an internal error" });
     }

@@ -63,6 +63,9 @@ c["channels"] = {"telegram": {
     "env": {"SOME_VAR": "SENTINEL-ENVMAP-7731"},
     "apiBaseUrl": "https://user:SENTINEL-USERINFO-7731@api.example.test/v1?api_key=SENTINEL-QUERY-7731&page=2",
     "tokenFile": "secrets/example",
+    # Other files a connector reads: a padded path, and a link to a file that doesn't exist yet.
+    "clientIdFile": "secrets/client.id ",
+    "appTokenFile": "secrets/applink",
     # Round 2 review shapes.
     "privateKeyPem": "SENTINEL-PEM-7731",
     "apiKeyValue": "SENTINEL-KEYVALUE-7731",
@@ -109,6 +112,16 @@ start_gateway() {
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 AUTH=(-H "Authorization: Bearer ${ADMIN_SMOKE_TOKEN}")
 ADMIN_TOK=(-H "x-mindstone-admin-token: ${ADMIN_SMOKE_ADMIN_TOKEN}")
+
+# 0. The connector secret path rule the secret guard shares with the connectors (#75 review):
+#    trimmed, and relative to the data dir (not the config file's directory).
+MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx -e '
+import assert from "node:assert/strict";
+import { resolveConnectorSecretPath } from "'"${PROJECT_ROOT}"'/packages/mindstone-core/src/index.ts";
+const paths = { dataDir: "/data" } as never;
+assert.equal(resolveConnectorSecretPath(" secrets/tg.token\n", paths), "/data/secrets/tg.token");
+assert.equal(resolveConnectorSecretPath("/abs/x.token", paths), "/abs/x.token");
+console.log("secret path rule ok");'
 
 # 1. Auth "none": the admin API does not exist, admin credential and role or not.
 configure none mock
@@ -216,6 +229,13 @@ grep -q '"memory.index.enabled"' "${BODY}" || { echo "changed paths missing" >&2
 has memory.index.enabled true || { echo "the patch was not written" >&2; exit 1; }
 # Turning autoRecall on exposes the open #71, so it needs the permission (#75 review).
 expect "$(patch memory '{"autoRecall":true}')" 403 "turning autoRecall on without the permission"
+expect "$(patch memory '{"autoRecall":false}')" 200 "turning autoRecall off stays free"
+# A channel named like a prototype member is still a new channel.
+expect "$(patch channels '{"toString":{"pollMs":1000}}')" 403 "a channel named toString"
+# An audited refusal keeps at most 50 paths.
+MANY="$(node -e 'const o={};for(let i=0;i<60;i++)o["k"+i]=i;console.log(JSON.stringify({pi:o}))')"
+expect "$(patch routing "${MANY}")" 403 "sixty advanced keys"
+node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").map(JSON.parse).filter(e=>e.reason==="advanced"&&e.section==="routing").pop();process.exit(l&&l.advanced.length<=50?0:1)' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" || { echo "an audited refusal holds more than 50 paths" >&2; exit 1; }
 [[ "$(mode_of "${CONFIG}")" == "640" ]] || { echo "the config file's mode was not kept: $(mode_of "${CONFIG}")" >&2; exit 1; }
 [[ -L "${CONFIG}" ]] || { echo "a write replaced the symlinked config instead of writing through it" >&2; exit 1; }
 grep -q '"enabled": true' "${REAL_CONFIG}" || { echo "the write did not reach the symlink target" >&2; exit 1; }
@@ -333,9 +353,16 @@ expect "$(patch routing '{"pi":{"builtinTools":["write"]}}')" 403 "an advanced p
 # A hand-edited far-future expiry is no grant either.
 printf '{"advancedSettings":true,"grantedBy":"smoke-admin","grantedAt":"2026-01-01T00:00:00Z","expiresAt":"9999-01-01T00:00:00Z"}\n' > "${PERMS}"
 expect "$(patch routing '{"pi":{"builtinTools":["write"]}}')" 403 "an advanced patch on a far-future expiry"
+printf '{"advancedSettings":true,"grantedBy":"smoke-admin","grantedAt":"9999-01-01T00:00:00Z","expiresAt":"9999-01-01T00:59:00Z"}\n' > "${PERMS}"
+expect "$(patch routing '{"pi":{"builtinTools":["write"]}}')" 403 "an advanced patch on a grant dated in the future"
 printf '{"advancedSettings":false}\n' > "${PERMS}"
 
 # Secrets: stored 0600 in a 0700 directory, never echoed.
+# A connector's other files: padded paths and dangling links resolve like the connector resolves them.
+expect "$(post /admin/secrets/client.id '{"value":"CLIENT-ID-1"}')" 403 "creating a padded connector file"
+mkdir -p "${TEMP_RUNTIME}/mindstone/secrets" && ln -sf realapp.token "${TEMP_RUNTIME}/mindstone/secrets/applink"
+expect "$(post /admin/secrets/realapp.token '{"value":"APP-TOKEN-1"}')" 403 "planting the target of a connector's dangling link"
+rm -f "${TEMP_RUNTIME}/mindstone/secrets/applink"
 # A connector's configured token file can't be created without the permission (#75 review).
 expect "$(post /admin/secrets/example '{"value":"CONNECTOR-TOKEN-1"}')" 403 "creating the token file a connector reads"
 [[ -e "${TEMP_RUNTIME}/mindstone/secrets/example" ]] && { echo "a connector token was created without the permission" >&2; exit 1; }

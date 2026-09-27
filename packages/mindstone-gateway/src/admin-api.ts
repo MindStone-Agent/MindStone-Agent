@@ -420,9 +420,10 @@ const SAFE_SETTINGS: Array<{ pattern: string; value: Check }> = [
   { pattern: "agents.*.defaultModel", value: isShortText },
   { pattern: "agents.*.contextWindowTokens", value: inRange(1024, 10_000_000) },
   { pattern: "agents.*.profileId", value: isId },
-  // memory.autoRecall is deliberately not here: turning it on exposes the open
-  // #71 (tenant recall can see the owner's unscoped memory), so it needs the
-  // permission until #71 is decided.
+  // Turning memory.autoRecall ON needs the permission: it exposes the open #71
+  // (tenant recall can see the owner's unscoped memory). Turning it off is the
+  // mitigation, so it stays free.
+  { pattern: "memory.autoRecall", value: onlyOff },
   { pattern: "memory.vectorStore", value: oneOf("lancedb", "sqlite-vec", "memory") },
   { pattern: "memory.recall.maxResults", value: inRange(1, 100) },
   { pattern: "memory.recall.maxPromptTokens", value: inRange(1, 1_000_000) },
@@ -617,11 +618,16 @@ export const ADVANCED_GRANT_MS = 60 * 60 * 1000;
 /** The permission as stored, with an expired grant read as not granted. */
 export function effectivePermissions(stored: AdminPermissions, now = Date.now()): AdminPermissions {
   if (stored.advancedSettings !== true) return { advancedSettings: false };
-  const expires = stored.expiresAt ? Date.parse(stored.expiresAt) : NaN;
   const granted = stored.grantedAt ? Date.parse(stored.grantedAt) : NaN;
-  // A stored expiry is trusted only up to one grant's length after the grant,
-  // so a hand-edited "9999-…" isn't a permanent grant (#75 review).
-  if (!Number.isFinite(expires) || !Number.isFinite(granted) || expires <= now || expires > granted + ADVANCED_GRANT_MS) {
+  const stated = stored.expiresAt ? Date.parse(stored.expiresAt) : NaN;
+  // The grant runs from grantedAt for at most one grant length, and grantedAt
+  // can't be in the future (a minute's clock skew allowed), so no hand-edited
+  // date makes it permanent (#75 review).
+  if (!Number.isFinite(granted) || granted > now + 60_000) {
+    return { advancedSettings: false };
+  }
+  const expires = Math.min(granted + ADVANCED_GRANT_MS, Number.isFinite(stated) ? stated : Infinity);
+  if (expires <= now) {
     return { advancedSettings: false };
   }
   return stored;

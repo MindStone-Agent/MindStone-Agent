@@ -26,6 +26,16 @@ export function connectorCredentialRefFromChannelConfig(channelConfig: Record<st
   return { tokenEnv, tokenFile };
 }
 
+/**
+ * Where a connector secret file lives: absolute as given, else under the
+ * runtime data dir, trimmed. The one rule the connectors use and the admin
+ * API's secret guard checks against (#75 review).
+ */
+export function resolveConnectorSecretPath(file: string, paths: MindStoneRuntimePaths): string {
+  const trimmed = file.trim();
+  return isAbsolute(trimmed) ? trimmed : resolve(paths.dataDir, trimmed);
+}
+
 export function resolveConnectorCredential(
   ref: ConnectorCredentialRef | undefined,
   options: { env?: NodeJS.ProcessEnv; paths?: MindStoneRuntimePaths } = {},
@@ -41,7 +51,7 @@ export function resolveConnectorCredential(
 
   if (ref.tokenFile) {
     const paths = options.paths ?? runtimePathsFromEnv(env);
-    const path = isAbsolute(ref.tokenFile) ? ref.tokenFile : resolve(paths.dataDir, ref.tokenFile);
+    const path = resolveConnectorSecretPath(ref.tokenFile, paths);
     if (!existsSync(path)) return { present: false, error: `secret file not found: ${path}` };
     const value = readFileSync(path, "utf-8").trim();
     if (!value) return { present: false, error: `secret file is empty: ${path}` };
