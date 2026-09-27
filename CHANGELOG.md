@@ -7,6 +7,14 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ## [Unreleased]
 
 ### Fixed
+- **Admin API follow-ups from the #75 review** (#78).
+  - While a file a connector reads is missing, storing any new secret needs the advanced-settings permission. A missing file could be reached under another name: a chain of dangling links, or the filesystem folding case or Unicode forms (APFS treats `ſ` as `s`). Two such routes let a secret be planted into a connector's token file without the permission.
+  - The gateway's own credential files are also compared with Unicode compatibility forms folded (NFKC), so one named with `ſ` can't be written under its plain spelling, even with the permission.
+  - A secret write that fails (the name is a directory, for example) no longer leaves the value in a temporary file.
+  - An admin API `500` is audited with the user id.
+  - `GET /admin/permissions` shows the expiry that applies (at most an hour after the grant), not a later one from the stored file.
+  - Removing `memory.autoRecall` (which turns it off) no longer needs the permission. Removing a channel's `enabled`, which turns it on, still does.
+  - The smoke now covers the config file living outside the data dir, turning autoRecall off after it was on, and the audited `500`.
 - **Chat completions no longer store the whole conversation again every turn** (#38). Clients such as LibreChat resend the full history with each request, and the gateway wrote all of it to the transcript each time. Only the new turn (the trailing user messages) is stored now.
   - **Breaking:** a request that doesn't end with a user message (for example a tool-role or assistant-prefill tail) is now a 400. A message with no role counts as a user message.
   - Client system prompts: ignored for the Console's `user` role (logged once per session as an event), stored once per session for an admin or a direct API caller. Before, every resent copy was stored.

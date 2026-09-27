@@ -383,6 +383,12 @@ const isId: Check = (value) => value === undefined || (typeof value === "string"
 const oneOf = (...allowed: string[]): Check => (value) => value === undefined || (typeof value === "string" && allowed.includes(value));
 /** Only turning something off is free. */
 const onlyOff: Check = (value) => value === false;
+/**
+ * For a setting that is off when absent (memory.autoRecall): turning it off
+ * or removing it is free (#78). Not for channels.*.enabled, which is on when
+ * absent.
+ */
+const offOrAbsent: Check = (value) => value === false || value === undefined;
 /** Only turning something on is free (a safety switch). */
 const onlyOn: Check = (value) => value === undefined || value === true;
 const stringList = (value: unknown): string[] | undefined =>
@@ -423,7 +429,7 @@ const SAFE_SETTINGS: Array<{ pattern: string; value: Check }> = [
   // Turning memory.autoRecall ON needs the permission: it exposes the open #71
   // (tenant recall can see the owner's unscoped memory). Turning it off is the
   // mitigation, so it stays free.
-  { pattern: "memory.autoRecall", value: onlyOff },
+  { pattern: "memory.autoRecall", value: offOrAbsent },
   { pattern: "memory.vectorStore", value: oneOf("lancedb", "sqlite-vec", "memory") },
   { pattern: "memory.recall.maxResults", value: inRange(1, 100) },
   { pattern: "memory.recall.maxPromptTokens", value: inRange(1, 1_000_000) },
@@ -630,7 +636,8 @@ export function effectivePermissions(stored: AdminPermissions, now = Date.now())
   if (expires <= now) {
     return { advancedSettings: false };
   }
-  return stored;
+  // The expiry that applies, not the stored one, which may be later (#78).
+  return { ...stored, expiresAt: new Date(expires).toISOString() };
 }
 
 /** Whether an If-Match header (strong or weak, one etag or a list) matches the current etag. */

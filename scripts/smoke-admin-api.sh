@@ -315,6 +315,32 @@ expect "$(patch memory '{"index":{"enabled":false}}' -H "If-Match: W/${ETAG}")" 
 expect "$(post /admin/permissions/advanced '{"enabled":true}')" 400 "granting advanced settings without the confirmation"
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings"
 expect "$(patch routing '{"pi":{"builtinTools":["read"]}}')" 200 "an advanced patch with the permission"
+# autoRecall on needs the permission; off, or removing the key, is free (#78:
+# the earlier check patched false onto false, which changed nothing).
+revoke() { expect "$(post /admin/permissions/advanced '{"enabled":false}')" 200 "revoking advanced settings"; }
+regrant() { expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings again"; }
+expect "$(patch memory '{"autoRecall":true}')" 200 "turning autoRecall on with the permission"
+revoke
+expect "$(patch memory '{"autoRecall":false}')" 200 "turning autoRecall off without the permission"
+has memory.autoRecall false || { echo "turning autoRecall off was not written" >&2; exit 1; }
+regrant
+expect "$(patch memory '{"autoRecall":true}')" 200 "turning autoRecall on again"
+revoke
+expect "$(patch memory '{"autoRecall":null}')" 200 "removing autoRecall (off) without the permission"
+node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(c.memory && "autoRecall" in c.memory ? 1 : 0)' "${CONFIG}" || { echo "removing autoRecall was not written" >&2; exit 1; }
+# channels.*.enabled is on when absent, so removing it is not free.
+expect "$(patch channels '{"telegram":{"enabled":null}}')" 403 "removing a channel's enabled flag without the permission"
+regrant
+# GET /admin/permissions shows the expiry that applies, not a later stored one (#78).
+PERMS_FILE="${TEMP_RUNTIME}/mindstone/admin/permissions.json"
+node -e 'const now=Date.now(); require("fs").writeFileSync(process.argv[1], JSON.stringify({advancedSettings:true,grantedBy:"smoke-admin",grantedAt:new Date(now-600000).toISOString(),expiresAt:new Date(now+86400000).toISOString()}))' "${PERMS_FILE}"
+curl -s "${ADMIN[@]}" "${BASE}/admin/permissions" | node -e '
+let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+  const p = JSON.parse(s).permissions;
+  const left = Date.parse(p.expiresAt) - Date.now();
+  if (!(left > 0 && left <= 50 * 60 * 1000 + 5000)) { console.error(`expiresAt should be grantedAt + 1 h (about 50 min away), got ${p.expiresAt}`); process.exit(1); }
+});'
+regrant
 # The gateway's own token file can't be written under another spelling of its name, even with the permission.
 expect "$(post /admin/secrets/Gateway-Token '{"value":"HIJACK-ALIAS"}')" 422 "writing the gateway token file under a case alias"
 expect "$(patch gateway '{"auth":{"mode":"none"}}')" 422 "turning gateway auth off, even with the permission"
@@ -366,6 +392,13 @@ rm -f "${TEMP_RUNTIME}/mindstone/secrets/applink"
 # A connector's configured token file can't be created without the permission (#75 review).
 expect "$(post /admin/secrets/example '{"value":"CONNECTOR-TOKEN-1"}')" 403 "creating the token file a connector reads"
 [[ -e "${TEMP_RUNTIME}/mindstone/secrets/example" ]] && { echo "a connector token was created without the permission" >&2; exit 1; }
+# While a connector's token file is missing, any new secret needs the permission:
+# it could be that file under another name, by the filesystem's own case or
+# Unicode folding or a chain of links (#78).
+expect "$(post /admin/secrets/unrelated.key '{"value":"UNRELATED-1"}')" 403 "a new secret while a connector's token file is missing"
+grep -q "token file is missing" "${BODY}" || { echo "the refusal should say a connector's token file is missing: $(cat "${BODY}")" >&2; exit 1; }
+# The operator provides the connector files on the host; then an unrelated new secret is free.
+for file in example client.id applink; do printf 'HOST-PROVIDED\n' > "${TEMP_RUNTIME}/mindstone/secrets/${file}"; done
 expect "$(post /admin/secrets/tg.token '{"value":"SECRET-VALUE-4412"}')" 200 "storing a secret"
 expect "$(post /admin/secrets/tg.token '{"value":"SECRET-VALUE-9999"}')" 403 "replacing an existing secret without the permission"
 expect "$(post /admin/secrets/gateway-token '{"value":"HIJACK-9999"}')" 422 "writing the gateway's own token file"
@@ -375,6 +408,32 @@ SECRET_FILE="${TEMP_RUNTIME}/mindstone/secrets/tg.token"
 [[ "$(cat "${SECRET_FILE}")" == "SECRET-VALUE-4412" ]] || { echo "the secret was not stored" >&2; exit 1; }
 [[ "$(mode_of "${SECRET_FILE}")" == "600" ]] || { echo "the secret file is not 0600" >&2; exit 1; }
 [[ "$(mode_of "$(dirname "${SECRET_FILE}")")" == "700" ]] || { echo "the secrets directory is not 0700" >&2; exit 1; }
+# A host credential file named with a compatibility character ("ſ", which
+# APFS folds to "s") can't be planted under its plain spelling, even with the
+# permission (#78).
+REAL_CONFIG="${REAL_CONFIG}" python3 - <<'PY2'
+import json, os, pathlib
+p = pathlib.Path(os.environ["REAL_CONFIG"])
+c = json.loads(p.read_text())
+c["gateway"]["auth"]["tokenFile"] = "secrets/gateway-\u017fecret"
+p.write_text(json.dumps(c, indent=2, ensure_ascii=False))
+PY2
+regrant
+expect "$(post /admin/secrets/gateway-secret '{"value":"HIJACK-NFKC"}')" 422 "planting the gateway token file under its folded spelling"
+REAL_CONFIG="${REAL_CONFIG}" python3 - <<'PY2'
+import json, os, pathlib
+p = pathlib.Path(os.environ["REAL_CONFIG"])
+c = json.loads(p.read_text())
+c["gateway"]["auth"]["tokenFile"] = "secrets/gateway-token"
+p.write_text(json.dumps(c, indent=2, ensure_ascii=False))
+PY2
+# A failed write leaves no temp copy of the secret, and the 500 is audited with the user (#78).
+mkdir -p "${TEMP_RUNTIME}/mindstone/secrets/adir"
+expect "$(post /admin/secrets/adir '{"value":"FAILED-WRITE-7"}')" 500 "writing a secret onto a directory"
+ls "${TEMP_RUNTIME}/mindstone/secrets" | grep -q '\.tmp-' && { echo "a failed write left the secret in a temp file" >&2; exit 1; }
+node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").map(JSON.parse).filter(e=>e.action==="failed").pop();process.exit(l&&l.userId==="smoke-admin"&&l.status===500?0:1)' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" || { echo "the 500 was not audited with the user id" >&2; exit 1; }
+grep -q 'FAILED-WRITE-7' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" && { echo "a secret value reached the audit log" >&2; exit 1; }
+printf '{"advancedSettings":false}\n' > "${PERMS}"
 expect "$(post /admin/secrets/..%2Fescape '{"value":"x"}')" 400 "a secret name with a path"
 expect "$(post /admin/secrets/%E0%A4%A '{"value":"x"}')" 400 "a secret name with bad encoding"
 # Every write and every refusal is audited with the user, and no secret value is in the audit.
@@ -390,5 +449,22 @@ code "${AUTH[@]}" -H 'x-mindstone-user-role: admin' -H "x-mindstone-user-id: $(p
 # A non-admin can't write, even holding both credentials.
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: user' -H 'content-type: application/json' -d '{"index":{"enabled":false}}' "${BASE}/admin/config/memory")" == "403" ]] || { echo "a user-role patch must be 403" >&2; exit 1; }
 echo "admin write assertions passed"
+
+# 5. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
+#    token files resolve under the data dir, as the connectors read them, not
+#    next to the config file (#75 review A, tested end to end per #78).
+stop_gateway
+mkdir -p "${TEMP_RUNTIME}/etc"
+cp "${REAL_CONFIG}" "${TEMP_RUNTIME}/etc/config.json"
+export MINDSTONE_AGENT_CONFIG="${TEMP_RUNTIME}/etc/config.json"
+start_gateway
+# The connector files exist in the data dir (not next to the config): a new unrelated secret is free.
+expect "$(post /admin/secrets/other.key '{"value":"OTHER-1"}')" 200 "a new secret with every connector file present in the data dir"
+# The data-dir copy is what a connector reads, so creating it needs the permission.
+rm -f "${TEMP_RUNTIME}/mindstone/secrets/example"
+expect "$(post /admin/secrets/example '{"value":"CONNECTOR-TOKEN-2"}')" 403 "creating a connector's token file with the config elsewhere"
+[[ -e "${TEMP_RUNTIME}/mindstone/secrets/example" ]] && { echo "a connector token was created without the permission" >&2; exit 1; }
+unset MINDSTONE_AGENT_CONFIG
+echo "config-elsewhere assertions passed"
 
 echo "Admin API smoke test passed."

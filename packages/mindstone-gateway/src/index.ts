@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -1759,11 +1759,23 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       // (its token file), needs the permission: either one changes who the
       // agent talks to (#75 review).
       const connectorFiles = connectorTokenFiles(loadMindStoneConfig(configPath).config, configPath, paths);
+      // While a file a connector reads is missing, any new secret might be
+      // that file under another name (a filesystem's own case or Unicode
+      // folding, a link chain), so every new secret needs the permission (#78).
+      const missingConnectorFile = connectorFiles.read.some((file) => !existsSync(file));
       if (
-        (existsSync(target) || connectorFiles.some((file) => pointsAtSameFile(file, target))) &&
+        (existsSync(target) || missingConnectorFile || connectorFiles.all.some((file) => pointsAtSameFile(file, target))) &&
         !readAdminPermissions(paths.dataDir).advancedSettings
       ) {
-        refuse(403, { error: "replacing a secret or setting a connector's token needs the advanced-settings permission" }, { reason: "advanced", secret: name });
+        refuse(
+          403,
+          {
+            error: missingConnectorFile && !existsSync(target)
+              ? "a connector's token file is missing, so storing a new secret needs the advanced-settings permission (it could be that file under another name)"
+              : "replacing a secret or setting a connector's token needs the advanced-settings permission",
+          },
+          { reason: "advanced", secret: name },
+        );
         return;
       }
       mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
@@ -1847,27 +1859,37 @@ function sameFile(a: string, b: string): boolean {
       }
     }
   };
-  return real(a).toLowerCase() === real(b).toLowerCase();
+  // NFKC too: APFS folds compatibility forms ("ſ" is "s", "ﬆ" is "st") (#78).
+  const fold = (path: string) => real(path).normalize("NFKC").toLowerCase();
+  return fold(a) === fold(b);
 }
 
 /**
  * Absolute paths of every file a connector is configured to read (any key
  * ending in "File" on a channel), resolved the way the connectors resolve
  * them (resolveConnectorSecretPath: under the data dir, trimmed) and, for
- * safety, also relative to the config file (#75 review).
+ * safety, also relative to the config file (#75 review). `read` holds only
+ * the paths the connectors actually read.
  */
-function connectorTokenFiles(config: MindStoneConfig | undefined, configPath: string, paths: MindStoneRuntimePaths): string[] {
-  const files: string[] = [];
+function connectorTokenFiles(
+  config: MindStoneConfig | undefined,
+  configPath: string,
+  paths: MindStoneRuntimePaths,
+): { all: string[]; read: string[] } {
+  const all: string[] = [];
+  const read: string[] = [];
   for (const section of Object.values((config?.channels ?? {}) as Record<string, unknown>)) {
     if (!section || typeof section !== "object") continue;
     for (const [key, value] of Object.entries(section as Record<string, unknown>)) {
       if (/file$/i.test(key) && typeof value === "string" && value.trim()) {
-        files.push(resolveConnectorSecretPath(value, paths));
-        if (!isAbsolute(value.trim())) files.push(resolvePath(dirname(configPath), value.trim()));
+        const resolved = resolveConnectorSecretPath(value, paths);
+        read.push(resolved);
+        all.push(resolved);
+        if (!isAbsolute(value.trim())) all.push(resolvePath(dirname(configPath), value.trim()));
       }
     }
   }
-  return files;
+  return { all, read };
 }
 
 /** A path and, when it is a symlink (even a dangling one), where it points. */
@@ -1908,9 +1930,19 @@ async function readAdminBody(req: IncomingMessage, res: ServerResponse): Promise
 function writeFileAtomic(path: string, content: string, mode: number): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.tmp-${randomUUID().slice(0, 8)}`;
-  writeFileSync(temp, content, { mode });
-  chmodSync(temp, mode);
-  renameSync(temp, path);
+  try {
+    writeFileSync(temp, content, { mode });
+    chmodSync(temp, mode);
+    renameSync(temp, path);
+  } catch (error) {
+    // Don't leave the content (a secret, for the secrets endpoint) behind (#78).
+    try {
+      unlinkSync(temp);
+    } catch {
+      // Never written, or already gone.
+    }
+    throw error;
+  }
 }
 
 /** Append-only audit of admin writes and refusals, with the deciding user id. Never holds secret values. */
@@ -1953,7 +1985,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       await handleAdminRequest(req, res, url);
     } catch (error) {
       try {
-        appendAdminAudit(runtimePathsFromEnv().dataDir, { action: "failed", status: 500, method: req.method, path: url.pathname, error: String(error).slice(0, 200) });
+        appendAdminAudit(runtimePathsFromEnv().dataDir, {
+          userId: forwardedUser(req).userId ?? null,
+          action: "failed",
+          status: 500,
+          method: req.method,
+          path: url.pathname,
+          error: String(error).slice(0, 200),
+        });
       } catch {
         // The audit itself failed; the response still goes out.
       }
