@@ -89,6 +89,7 @@ c["channels"] = {"telegram": {
     "jsonBlob": "{\"password\": \"SENTINEL-JSONSTR-7731,with,commas\"}",
     # A 200 KB string must not stall the gateway while it is masked.
     "bigBlob": "x-" * 100000,
+    "bigArgs": ["https://h.example.test/?" + "a" * 200000],
     # Not secrets: must stay readable.
     "dispatch": "fifo",
     "mapping": {"a": "b"},

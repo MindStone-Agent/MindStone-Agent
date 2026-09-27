@@ -162,9 +162,9 @@ function isSecretPathSegment(segment: string): boolean {
 const SECRET_NAME = String.raw`[\w-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)`;
 // `NAME=value` with no spaces around "=" (DSNs, env lines, connection strings), so prose
 // such as "1 token = 4 characters" is left alone.
-const INLINE_SECRET_EQ = new RegExp(String.raw`(?<![\w-])(${SECRET_NAME})=(["']?)([^\s;&"']+)\2`, "gi");
+const INLINE_SECRET_EQ = new RegExp(String.raw`(?<![\w-])(${SECRET_NAME})=(?:"[^"\n]*"|'[^'\n]*'|[^\s;&"']+)`, "gi");
 // YAML-style `name: value` at the start of a line.
-const INLINE_SECRET_YAML = new RegExp(String.raw`(^|\n)([ \t]*${SECRET_NAME}[ \t]*:[ \t]*)(["']?)([^\s"']+)\3`, "gi");
+const INLINE_SECRET_YAML = new RegExp(String.raw`(^|\n)([ \t]*${SECRET_NAME}[ \t]*:[ \t]*)(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)`, "gi");
 // `"name": "value"` (JSON inside a string), up to the closing quote.
 const INLINE_SECRET_JSON = new RegExp(String.raw`("${SECRET_NAME}"\s*:\s*")((?:[^"\\]|\\.)*)(")|('${SECRET_NAME}'\s*:\s*')((?:[^'\\]|\\.)*)(')`, "gi");
 // Header lines: `Authorization: <scheme> <value>` and `X-…-Key/Token/Secret: <value>`.
@@ -173,7 +173,7 @@ const INLINE_HEADER = /(?<![\w-])(authorization|cookie|api-key|x-[\w-]*(?:key|to
 // 12+ characters with a digit, mixed case, or base64 padding ("basic question-and-answer" is prose).
 const INLINE_BEARER = /\b(bearer|basic)\s+([A-Za-z0-9._~+/=-]{12,})/gi;
 // curl -u user:pass
-const INLINE_USER_FLAG = /(\s(?:-u|--user|--password|--pass)(?:\s+|=))(\S+)/g;
+const INLINE_USER_FLAG = /((?:^|\s)(?:-u|--user|--password|--pass)(?:\s+|=))(\S+)/g;
 // The lookbehinds stop a match restarting inside a long run of word characters,
 // which made these patterns quadratic (#38 review: 256 KB took ~40 s).
 const URL_IN_TEXT = /(?<![\w.+-])[a-z][a-z0-9+.-]*:\/\/[^\s'"<>]+/gi;
@@ -192,8 +192,8 @@ function looksLikeCredential(value: string): boolean {
 function maskInlineSecrets(value: string): string {
   return value
     .replace(URL_IN_TEXT, (url) => maskUrlCredentials(url))
-    .replace(INLINE_SECRET_EQ, (_match, name: string, quote: string) => `${name}=${quote}***${quote}`)
-    .replace(INLINE_SECRET_YAML, (_match, start: string, name: string, quote: string) => `${start}${name}${quote}***${quote}`)
+    .replace(INLINE_SECRET_EQ, (_match, name: string) => `${name}=***`)
+    .replace(INLINE_SECRET_YAML, (_match, start: string, name: string) => `${start}${name}***`)
     .replace(INLINE_SECRET_JSON, (_match, dOpen?: string, _d?: string, dClose?: string, sOpen?: string, _s?: string, sClose?: string) =>
       dOpen !== undefined ? `${dOpen}***${dClose}` : `${sOpen}***${sClose}`)
     .replace(INLINE_HEADER, (_match, name: string, sep: string, scheme: string | undefined) => `${name}${sep}${scheme ?? ""}***`)
@@ -212,9 +212,16 @@ function isProseKey(key: string): boolean {
   return lower.endsWith("notes") || lower.endsWith("context") || lower.endsWith("direction");
 }
 
+/** A query or fragment with secret-looking parameter values masked (split, not scanned: linear). */
 function maskParams(params: string): string {
-  return params.replace(/([^=&;#?]+)=([^&;#]*)/g, (match, name: string, value: string) =>
-    SECRET_PARAM_NAME.test(name) && value ? `${name}=***` : match);
+  if (!params) return params;
+  const lead = params[0] === "?" || params[0] === "#" ? params[0] : "";
+  return lead + params.slice(lead.length).split(/([&;])/).map((part) => {
+    const eq = part.indexOf("=");
+    if (eq <= 0) return part;
+    const name = part.slice(0, eq);
+    return SECRET_PARAM_NAME.test(name) && eq < part.length - 1 ? `${name}=***` : part;
+  }).join("");
 }
 
 /**
@@ -253,6 +260,7 @@ const SECRET_FLAG_WITH_VALUE = /^(--?[\w-]*(?:key|token|secret|password|passwd|a
 function maskArgs(items: unknown[]): unknown[] {
   return items.map((item, index) => {
     if (typeof item !== "string") return maskConfig(item);
+    if (item.length > MAX_SCANNED_STRING) return { set: true };
     const previous = items[index - 1];
     if (typeof previous === "string" && SECRET_FLAG.test(previous)) return "***";
     const withValue = SECRET_FLAG_WITH_VALUE.exec(item);
