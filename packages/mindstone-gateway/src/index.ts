@@ -5,6 +5,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
 import {
+  maskUrlCredentials,
+  resolveAdminDigest,
   AdminPatchError,
   adminPermissionsPath,
   adminStatus,
@@ -172,8 +174,9 @@ import {
   type MindStoneRuntimePaths,
   LOCAL_PROVIDER_PRESETS,
   type LocalProviderPresetId,
-  getIsolatedModelsStatus,
+  literalConfigValue,
   probeOpenAiCompatibleModels,
+  readIsolatedModelsConfig,
   upsertIsolatedProvider,
 } from "@mindstone-agent/core";
 
@@ -1612,7 +1615,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     // registered from, the providers already in the isolated models.json
     // (auth summarised, never a key), and Pi's providers and models (#38, P2).
     const agentDir = gateConfig.config?.routing?.pi?.agentDir ?? paths.piAgentDir;
-    const registered = getIsolatedModelsStatus(agentDir);
+    const registered = registeredProviders(agentDir);
     let models: Array<{ id: string; provider: string; name?: string; contextWindowTokens?: number }> = [];
     let providers: Array<{ id: string; name: string; configured: boolean; modelCount: number; availableModelCount: number }> = [];
     let listError: string | undefined;
@@ -1640,7 +1643,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         needsKey: !preset.placeholderApiKey,
       })),
       registered: registered.providers,
-      ...(registered.error ? { registeredError: "the isolated models.json can't be read" } : {}),
+      ...(registered.unreadable ? { registeredError: "the isolated models.json can't be read" } : {}),
       providers,
       models,
       ...(listError ? { error: listError } : {}),
@@ -1686,14 +1689,14 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const presetId = providerMatch[1]!;
     const preset = Object.hasOwn(LOCAL_PROVIDER_PRESETS, presetId) ? LOCAL_PROVIDER_PRESETS[presetId as LocalProviderPresetId] : undefined;
     if (!preset) {
-      sendJson(res, 404, { ok: false, error: `unknown provider preset: ${presetId}` });
+      refuse(404, { error: `unknown provider preset: ${presetId}` }, { reason: "unknown_preset", provider: presetId });
       return;
     }
     const body = await readAdminBody(req, res);
     if (!body) return;
-    const parsed = parseProviderRegistration(body, preset.baseUrl);
+    const parsed = parseProviderRegistration(body, preset.baseUrl, !preset.placeholderApiKey);
     if ("error" in parsed) {
-      sendJson(res, 400, { ok: false, error: parsed.error });
+      refuse(400, { error: parsed.error }, { reason: "invalid", provider: presetId });
       return;
     }
     const loaded = loadMindStoneConfig(configPath);
@@ -1713,10 +1716,17 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     let apiKey: string | undefined;
     let probeKey: string | undefined;
     let keySource: string;
+    const refuseHostCredential = () =>
+      refuse(422, { error: "that is a gateway credential and can't be used as a provider key" }, { reason: "host_only", provider: presetId });
     if (parsed.secret) {
       const secretPath = resolvePath(`${paths.dataDir}/secrets`, parsed.secret);
       if (hostCredentialFiles(loaded.config, configPath).some((file) => sameFile(file, secretPath))) {
-        refuse(422, { error: "that secret is a gateway credential and can't be used as a provider key" }, { reason: "host_only", provider: presetId });
+        refuseHostCredential();
+        return;
+      }
+      // A connector's token belongs to that connector, not to a model provider.
+      if (connectorTokenFiles(loaded.config, configPath, paths).some((file) => pointsAtSameFile(file, secretPath))) {
+        refuse(422, { error: "that secret is a connector's token and can't be used as a provider key" }, { reason: "connector_secret", provider: presetId });
         return;
       }
       let value = "";
@@ -1726,15 +1736,22 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         // Missing: handled below.
       }
       if (!value) {
-        sendJson(res, 400, { ok: false, error: `no stored secret named ${parsed.secret}; store it with POST /admin/secrets/${parsed.secret} first` });
+        refuse(400, { error: `no stored secret named ${parsed.secret}; store it with POST /admin/secrets/${parsed.secret} first` }, { reason: "no_secret", provider: presetId });
         return;
       }
-      apiKey = value;
+      if (isGatewayCredentialValue(value, loaded.config, configPath)) {
+        refuseHostCredential();
+        return;
+      }
+      // Pi reads apiKey as a template ("!cmd" runs a command, "$VAR" reads the
+      // environment), so the stored value is escaped to stay a literal key.
+      apiKey = literalConfigValue(value);
       probeKey = value;
       keySource = `secret:${parsed.secret}`;
     } else if (parsed.env) {
-      if (gatewayCredentialEnvNames(loaded.config).includes(parsed.env)) {
-        refuse(422, { error: "that environment variable holds a gateway credential and can't be used as a provider key" }, { reason: "host_only", provider: presetId });
+      const envValue = process.env[parsed.env];
+      if (gatewayCredentialEnvNames(loaded.config).includes(parsed.env) || (envValue !== undefined && isGatewayCredentialValue(envValue, loaded.config, configPath))) {
+        refuseHostCredential();
         return;
       }
       apiKey = `$${parsed.env}`;
@@ -1744,14 +1761,23 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       apiKey = preset.placeholderApiKey;
       keySource = "placeholder";
     } else {
-      sendJson(res, 400, { ok: false, error: `${preset.name} needs a key: send { "secret": "<stored secret name>" } or { "env": "<VARIABLE>" }` });
+      refuse(400, { error: `${preset.name} needs a key: send { "secret": "<stored secret name>" } or { "env": "<VARIABLE>" }` }, { reason: "no_key", provider: presetId });
+      return;
+    }
+    // Headers or overrides set on the host stay with a provider on
+    // re-registration; they must not follow it to a URL chosen here.
+    const agentDirForCheck = loaded.config?.routing?.pi?.agentDir ?? paths.piAgentDir;
+    const existing = readIsolatedModelsConfig(agentDirForCheck).config.providers[preset.providerId];
+    if (existing && (existing.headers || existing.authHeader !== undefined || existing.modelOverrides)) {
+      refuse(409, { error: `${preset.name} has settings made on the gateway host (headers or overrides); change it there` }, { reason: "host_settings", provider: presetId });
       return;
     }
     let models = parsed.models;
     if (!models) {
       const probe = await probeOpenAiCompatibleModels({ baseUrl: parsed.baseUrl, apiKey: probeKey, timeoutMs: 5_000 });
       if (!probe.ok) {
-        sendJson(res, 422, { ok: false, error: `couldn't list models at ${probe.baseUrl}: ${probe.error}. Send "models": ["<id>", …] to register without listing.` });
+        // The key was sent to the URL, so the attempt is audited too.
+        refuse(422, { error: `couldn't list models: ${probe.error}. Send "models": ["<id>", …] to register without listing.` }, { reason: "probe_failed", provider: presetId, baseUrl: maskUrlCredentials(parsed.baseUrl), keySource });
         return;
       }
       models = probe.models.slice(0, 500).map((model) => model.id);
@@ -1772,7 +1798,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         models: registeredModels.map((id) => ({ id })),
       });
       if (result.error) {
-        sendJson(res, 409, { ok: false, error: "the isolated models.json can't be read; fix or remove it on the gateway host" });
+        refuse(409, { error: "the isolated models.json can't be read; fix or remove it on the gateway host" }, { reason: "models_json_unreadable", provider: presetId });
         return;
       }
       appendAdminAudit(paths.dataDir, { userId, action: "provider_registered", provider: preset.providerId, baseUrl: parsed.baseUrl, keySource, models: registeredModels.length });
@@ -2031,12 +2057,64 @@ function pointsAtSameFile(a: string, b: string): boolean {
   return withLinkTarget(a).some((x) => withLinkTarget(b).some((y) => sameFile(x, y)));
 }
 
-/** Names of the environment variables holding the gateway's own credentials. */
+/**
+ * Names of the environment variables holding the gateway's own credentials,
+ * the defaults included (gateway-auth.ts reads MINDSTONE_AGENT_GATEWAY_TOKEN
+ * and _PASSWORD when none is configured).
+ */
 function gatewayCredentialEnvNames(config: MindStoneConfig | undefined): string[] {
   const gateway = config?.gateway as { auth?: { tokenEnv?: unknown; passwordEnv?: unknown }; admin?: { tokenEnv?: unknown } } | undefined;
-  return [gateway?.auth?.tokenEnv, gateway?.auth?.passwordEnv, gateway?.admin?.tokenEnv].filter(
-    (name): name is string => typeof name === "string" && name.trim() !== "",
-  ).map((name) => name.trim());
+  return [gateway?.auth?.tokenEnv, gateway?.auth?.passwordEnv, gateway?.admin?.tokenEnv, "MINDSTONE_AGENT_GATEWAY_TOKEN", "MINDSTONE_AGENT_GATEWAY_PASSWORD"]
+    .filter((name): name is string => typeof name === "string" && name.trim() !== "")
+    .map((name) => name.trim());
+}
+
+/**
+ * Whether a value is one of the gateway's own credentials: the service token
+ * or password as the gateway resolves them, or the admin credential (by its
+ * digest). Catches a credential copied into a secret or another variable.
+ */
+function isGatewayCredentialValue(value: string, config: MindStoneConfig | undefined, configPath: string): boolean {
+  const candidate = value.trim();
+  if (!candidate) return false;
+  const auth = resolveGatewayAuthRequirement({ config: config?.gateway?.auth as Parameters<typeof resolveGatewayAuthRequirement>[0]["config"], configPath });
+  const resolved = auth as { token?: string; password?: string };
+  if ((resolved.token && resolved.token.trim() === candidate) || (resolved.password && resolved.password.trim() === candidate)) return true;
+  const adminDigest = resolveAdminDigest(config, configPath);
+  return Boolean(adminDigest && createHash("sha256").update(candidate).digest().equals(adminDigest));
+}
+
+/** Providers in the isolated models.json for the Console: URL credentials masked, and the key only named, never shown. */
+function registeredProviders(agentDir: string): {
+  unreadable: boolean;
+  providers: Array<{ providerId: string; name?: string; baseUrl?: string; api?: string; modelCount: number; auth: string }>;
+} {
+  const read = readIsolatedModelsConfig(agentDir);
+  return {
+    unreadable: Boolean(read.error),
+    providers: Object.entries(read.config.providers).map(([providerId, provider]) => {
+      const envRef = typeof provider.apiKey === "string" ? /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(provider.apiKey) : null;
+      return {
+        providerId,
+        name: provider.name,
+        baseUrl: typeof provider.baseUrl === "string" ? maskUrlCredentials(provider.baseUrl) : undefined,
+        api: provider.api,
+        modelCount: provider.models?.length ?? 0,
+        auth: !provider.apiKey ? "none" : envRef ? `env: ${envRef[1]}` : "stored key",
+      };
+    }),
+  };
+}
+
+/** Loopback, private-network (RFC 1918, IPv6 ULA and link-local) or .local host names. */
+function isLocalHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host === "host.docker.internal") return true;
+  if (host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host)) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!v4) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
 
 /**
@@ -2047,6 +2125,7 @@ function gatewayCredentialEnvNames(config: MindStoneConfig | undefined): string[
 function parseProviderRegistration(
   body: Record<string, unknown>,
   defaultBaseUrl: string,
+  remote: boolean,
 ): { error: string } | { secret?: string; env?: string; baseUrl: string; models?: string[] } {
   const allowed = new Set(["secret", "env", "baseUrl", "models"]);
   const unknown = Object.keys(body).filter((key) => !allowed.has(key));
@@ -2055,11 +2134,17 @@ function parseProviderRegistration(
   if (body.secret !== undefined && (typeof body.secret !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(body.secret) || body.secret.includes(".."))) {
     return { error: "secret must be the name of a stored secret" };
   }
-  if (body.env !== undefined && (typeof body.env !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(body.env))) {
-    return { error: "env must be an environment variable name" };
+  // Only variables named for an API key: a provider key must not be any
+  // variable of the gateway process (HOME, a connector's token, …).
+  if (body.env !== undefined && (typeof body.env !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,119}_API_KEY$/.test(body.env))) {
+    return { error: "env must be the name of a variable ending in _API_KEY" };
   }
   let baseUrl = defaultBaseUrl;
-  if (body.baseUrl !== undefined) {
+  // A hosted provider's key only ever goes to that provider.
+  if (remote && body.baseUrl !== undefined && body.baseUrl !== defaultBaseUrl) {
+    return { error: `this provider's address is fixed (${defaultBaseUrl})` };
+  }
+  if (!remote && body.baseUrl !== undefined) {
     let url: URL;
     try {
       if (typeof body.baseUrl !== "string") throw new Error("not a string");
@@ -2069,6 +2154,10 @@ function parseProviderRegistration(
     }
     if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash) {
       return { error: "baseUrl must be an http(s) URL with no credentials, query or fragment" };
+    }
+    // A local server stays local: loopback, a private network or .local.
+    if (!isLocalHost(url.hostname)) {
+      return { error: "a local server's address must be on this machine or a private network" };
     }
     baseUrl = url.toString().replace(/\/+$/, "");
   }
