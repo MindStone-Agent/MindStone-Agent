@@ -2544,6 +2544,27 @@ export function gatewayExitCode(): number {
   return restartRequested ? RESTART_EXIT_CODE : 0;
 }
 
+/** How long shutdown may take to let in-flight work finish before the process exits anyway (#90). */
+export const SHUTDOWN_CAP_MS = 10_000;
+
+/**
+ * The gateway process's SIGINT/SIGTERM handling, shared by main.ts and
+ * `mindstone gateway run` (#94 review): close the gateway, capped at
+ * SHUTDOWN_CAP_MS, then exit with gatewayExitCode(), so a restart from the
+ * Console exits 75 however the gateway was started.
+ */
+export function exitGatewayOnSignals(gateway: { close(): Promise<void> }): void {
+  let exiting = false;
+  const shutdown = async () => {
+    if (exiting) return;
+    exiting = true;
+    await Promise.race([gateway.close().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, SHUTDOWN_CAP_MS).unref())]);
+    process.exit(gatewayExitCode());
+  };
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+}
+
 const RESTART_LIMIT = 5;
 const RESTART_WINDOW_MS = 10 * 60_000;
 
@@ -2686,6 +2707,15 @@ wait();`;
       MSA_RESTART_CWD: plan.cwd,
       MSA_RESTART_STATUS: `${paths.dataDir}/gateway/restart.json`,
     },
+  });
+  // If the helper can't start, say so where `mindstone gateway status` looks,
+  // rather than throw while the gateway is shutting down (#94 review).
+  child.on("error", (error) => {
+    try {
+      writeFileAtomic(`${paths.dataDir}/gateway/restart.json`, JSON.stringify({ state: "failed", oldPid: process.pid, at: new Date().toISOString(), error: `the restart helper didn't start: ${error.message}` }), 0o600);
+    } catch {
+      // Nothing more to do while exiting.
+    }
   });
   child.unref();
 }

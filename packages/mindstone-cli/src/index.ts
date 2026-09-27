@@ -1281,15 +1281,11 @@ async function runGatewayCommand(argv: string[]): Promise<void> {
 
   if (subcommand === "run") {
     if (!existsSync(managed.scriptPath)) throw new Error(`Gateway is not built yet. Run: npm run build:mindstone\nMissing: ${managed.scriptPath}`);
-    const { startGateway } = await import("@mindstone-agent/gateway");
+    const { startGateway, exitGatewayOnSignals } = await import("@mindstone-agent/gateway");
     const gateway = await startGateway();
     output.write(`MindStone-Agent Gateway listening at ${gateway.url}\n`);
-    const shutdown = async () => {
-      await gateway.close();
-      process.exit(0);
-    };
-    process.on("SIGINT", () => void shutdown());
-    process.on("SIGTERM", () => void shutdown());
+    // The same capped shutdown as main.ts, so a Console restart exits 75 here too (#94 review).
+    exitGatewayOnSignals(gateway);
     await new Promise(() => undefined);
     return;
   }

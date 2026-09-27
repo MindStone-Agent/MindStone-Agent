@@ -898,22 +898,28 @@ still_up "${before}" "rate limited"
 [[ "$(status_field recentStarts)" -ge 2 ]] || { echo "status should count recent starts: $(status_field recentStarts)" >&2; exit 1; }
 rm -f "${TEMP_RUNTIME}/mindstone/gateway/restarts.json"
 "${CLI[@]}" gateway stop >/dev/null
-# A supervisor outside the gateway (a stub loop that looks like systemd): the gateway exits with 75, the loop starts it again.
-SUP_STOP="${TEMP_RUNTIME}/stub-supervisor.stop"
-SUP_CODES="${TEMP_RUNTIME}/stub-supervisor.codes"
-( while [[ ! -e "${SUP_STOP}" ]]; do rc=0; INVOCATION_ID=stub-invocation MINDSTONE_AGENT_SUPERVISOR=systemd ./scripts/start-gateway.sh >>"${TEMP_RUNTIME}/gateway.log" 2>&1 || rc=$?; echo "${rc}" >> "${SUP_CODES}"; done ) &
-sup_pid=$!
-for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sleep 0.5; done
-before="$(started_at)"
-[[ "$(status_field supervisor,supervisorConfirmed)" == "systemd|true" ]] || { echo "the stub systemd gateway should be confirmed: $(status_field supervisor,supervisorConfirmed,supervisorDetail)" >&2; exit 1; }
-expect "$(post /admin/restart '{}')" 202 "restarting under a supervisor"
-after="$(wait_restarted "${before}")" || exit 1
-[[ "${after%%|*}" == "systemd" ]] || { echo "the restarted gateway should report its supervisor: ${after}" >&2; exit 1; }
-[[ "$(head -1 "${SUP_CODES}")" == 75 ]] || { echo "a restart should exit with 75, got $(head -1 "${SUP_CODES}")" >&2; exit 1; }
-touch "${SUP_STOP}"
-for pid in $(lsof -t -nP -iTCP:"${GATEWAY_PORT}" -sTCP:LISTEN 2>/dev/null); do kill -TERM "${pid}" 2>/dev/null || true; done
-wait "${sup_pid}" 2>/dev/null || true
-[[ "$(tail -1 "${SUP_CODES}")" == 0 ]] || { echo "a plain stop should exit with 0, got $(tail -1 "${SUP_CODES}")" >&2; exit 1; }
+# A supervisor outside the gateway (a stub loop that looks like systemd): the
+# gateway exits with 75, the loop starts it again. Both ways of running it:
+# the plain main.js and `mindstone gateway run` (what launchd runs; #94 review).
+for runner in main cli; do
+  SUP_STOP="${TEMP_RUNTIME}/stub-supervisor-${runner}.stop"
+  SUP_CODES="${TEMP_RUNTIME}/stub-supervisor-${runner}.codes"
+  if [[ "${runner}" == main ]]; then RUN=(./scripts/start-gateway.sh); else RUN=(node "${PROJECT_ROOT}/packages/mindstone-cli/dist/index.js" gateway run); fi
+  ( while [[ ! -e "${SUP_STOP}" ]]; do rc=0; INVOCATION_ID=stub-invocation MINDSTONE_AGENT_SUPERVISOR=systemd "${RUN[@]}" >>"${TEMP_RUNTIME}/gateway.log" 2>&1 || rc=$?; echo "${rc}" >> "${SUP_CODES}"; done ) &
+  sup_pid=$!
+  for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sleep 0.5; done
+  before="$(started_at)"
+  [[ "$(status_field supervisor,supervisorConfirmed)" == "systemd|true" ]] || { echo "${runner}: the stub systemd gateway should be confirmed: $(status_field supervisor,supervisorConfirmed,supervisorDetail)" >&2; exit 1; }
+  expect "$(post /admin/restart '{}')" 202 "${runner}: restarting under a supervisor"
+  after="$(wait_restarted "${before}")" || exit 1
+  [[ "${after%%|*}" == "systemd" ]] || { echo "${runner}: the restarted gateway should report its supervisor: ${after}" >&2; exit 1; }
+  [[ "$(head -1 "${SUP_CODES}")" == 75 ]] || { echo "${runner}: a restart should exit with 75, got $(head -1 "${SUP_CODES}")" >&2; exit 1; }
+  touch "${SUP_STOP}"
+  for pid in $(lsof -t -nP -iTCP:"${GATEWAY_PORT}" -sTCP:LISTEN 2>/dev/null); do kill -TERM "${pid}" 2>/dev/null || true; done
+  wait "${sup_pid}" 2>/dev/null || true
+  [[ "$(tail -1 "${SUP_CODES}")" == 0 ]] || { echo "${runner}: a plain stop should exit with 0, got $(tail -1 "${SUP_CODES}")" >&2; exit 1; }
+  rm -f "${TEMP_RUNTIME}/mindstone/gateway/restarts.json"
+done
 start_gateway
 echo "restart assertions passed"
 

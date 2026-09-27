@@ -17,6 +17,16 @@ Set `MINDSTONE_AGENT_SUPERVISOR` in the gateway's environment:
 | `systemd` | your unit file | `INVOCATION_ID`, `JOURNAL_STREAM` or `NOTIFY_SOCKET` is set | exits with 75. Use `Restart=always`, or `Restart=on-failure` (75 is a failure), or `RestartForceExitStatus=75` |
 | `docker` | your compose file or `docker run` | `/.dockerenv` exists | exits with 75. Use `restart: unless-stopped` or `always`, or `on-failure` |
 
+The evidence shows *where* the gateway runs, not that anything will restart
+it: `INVOCATION_ID` can also be inherited by a shell in a desktop session run
+as a systemd user service, and `/.dockerenv` exists in any container whatever
+its restart policy. The declaration is still what you vouch for; set it only
+where the restart rule in the table holds.
+
+`mindstone gateway run` (what the launchd plist runs, and the natural command
+for a unit or container) and the plain `main.js` share the same shutdown:
+capped at 10 s, exit 75 after a Console restart.
+
 Unset, or declared without the evidence (a stale or copied declaration),
 means the Console can't restart the gateway: `POST /admin/restart` answers
 `409` with what to run on the host, and nothing exits.
