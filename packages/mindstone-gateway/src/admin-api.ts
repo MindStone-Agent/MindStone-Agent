@@ -16,6 +16,7 @@ import {
   getMindStoneSystemStatus,
   resolveGatewayAuthRequirement,
   type MindStoneConfig,
+  BUILT_IN_MINDSTONE_PROFILES,
 } from "@mindstone-agent/core";
 
 export type AdminGateDecision = { allowed: true } | { allowed: false; status: number; error: string };
@@ -346,7 +347,9 @@ export function onboardingSteps(config: MindStoneConfig | undefined): {
 /** GET /admin/status body. */
 export function adminStatus(config: MindStoneConfig | undefined): Record<string, unknown> {
   const system = getMindStoneSystemStatus();
-  return { ok: true, ...onboardingSteps(config), system };
+  // The base personas onboarding offers (the same list as `mindstone onboard`).
+  const profiles = BUILT_IN_MINDSTONE_PROFILES.map(({ id, label, description }) => ({ id, label, description }));
+  return { ok: true, ...onboardingSteps(config), profiles, system };
 }
 
 // ---------------------------------------------------------------------------
