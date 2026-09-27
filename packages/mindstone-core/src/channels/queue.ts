@@ -261,7 +261,7 @@ export class ConnectorDeliveryQueue {
    * entry is claimed (attempts counted) before its send and settled after it
    * with a fresh read, so a concurrent enqueue is never lost.
    */
-  async drain(deliver: (entry: ConnectorQueueEntry) => Promise<void>, options: { now?: string } = {}): Promise<ConnectorQueueStatus> {
+  async drain(deliver: (entry: ConnectorQueueEntry) => Promise<void>, options: { now?: string; nowMs?: number } = {}): Promise<ConnectorQueueStatus> {
     const running = drainsInFlight.get(this.#path);
     if (running) {
       running.again = true;
@@ -283,13 +283,15 @@ export class ConnectorDeliveryQueue {
     return state.promise;
   }
 
-  async #drainOnce(deliver: (entry: ConnectorQueueEntry) => Promise<void>, options: { now?: string }): Promise<void> {
+  async #drainOnce(deliver: (entry: ConnectorQueueEntry) => Promise<void>, options: { now?: string; nowMs?: number }): Promise<void> {
+    // The clock for backoff; tests pass nowMs to step past it.
+    const clock = () => options.nowMs ?? Date.now();
     for (const { id } of this.pending()) {
       const claimed = this.#mutate((file) => {
         const entry = file.entries.find((candidate) => candidate.id === id);
         if (!entry || entry.status !== "pending") return undefined;
         // Still backing off after a failure: a later drain retries it.
-        if (entry.nextAttemptAt !== undefined && entry.nextAttemptAt > Date.now()) return undefined;
+        if (entry.nextAttemptAt !== undefined && entry.nextAttemptAt > clock()) return undefined;
         entry.attempts += 1;
         return { ...entry };
       });
@@ -313,7 +315,7 @@ export class ConnectorDeliveryQueue {
           if (entry.attempts >= entry.maxAttempts) {
             entry.status = "dead";
           } else {
-            entry.nextAttemptAt = Date.now() + Math.min(RETRY_BASE_MS * 2 ** (entry.attempts - 1), RETRY_MAX_MS);
+            entry.nextAttemptAt = clock() + Math.min(RETRY_BASE_MS * 2 ** (entry.attempts - 1), RETRY_MAX_MS);
           }
         }
         // Keep the file bounded: drop the oldest delivered entries.

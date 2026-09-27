@@ -114,8 +114,9 @@ assert.equal(source.channel, "ops");
 // Delivery queue: retry then success; permanent failure dead-letters with the error kept.
 const queue = new ConnectorDeliveryQueue("unit-conn");
 queue.enqueue({ text: "flaky" });
-queue.enqueue({ text: "doomed" });
+queue.enqueue({ text: "doomed" }, { maxAttempts: 3 });
 let flakyAttempts = 0;
+// Each round steps the clock past the retry backoff (#77).
 for (let round = 0; round < 3; round += 1) {
   await queue.drain(async (entry) => {
     if (entry.message.text === "flaky") {
@@ -124,7 +125,7 @@ for (let round = 0; round < 3; round += 1) {
       return;
     }
     throw new Error("permanent failure");
-  });
+  }, { nowMs: Date.now() + (round + 1) * 10 * 60_000 });
 }
 const status = queue.status();
 assert.equal(status.delivered, 1, "flaky entry delivers on retry");
