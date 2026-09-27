@@ -7,6 +7,7 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ## [Unreleased]
 
 ### Fixed
+- **A connector's credential is never stored in its error text** (#95). A Telegram base URL without a scheme made the fetch error quote `…/bot<token>/…`, and the gateway stored it as the connector's `lastError` (shown by `GET /admin/status`) and logged it. Every error the gateway records or logs for a connector, and a send error stored on a queue entry, now has that connector's credential (as is and URL-encoded) replaced by `***`, then goes through the inline-secret masking.
 - **Admin API follow-ups from the #75 review** (#78).
   - A new secret could be planted into a file that didn't exist yet but that a connector reads, or into one of the gateway's own credential files, under another name: through a chain of dangling links, or a name the filesystem folds to it (APFS treats `ß` as `ss` and `ſ` as `s`). A new secret is now created exclusively, and if a protected file that was missing exists afterwards, the new secret is removed and refused: `403` for a connector's file without the permission, `422` for a gateway credential whatever the permission. The gateway credential check also follows symlinks, a secret name that is a link made on the host is never replaced, and a new secret is created with an exclusive open (no hard-link support needed).
   - A secret write that fails (the name is a directory, for example) no longer leaves the value in a temporary file.

@@ -149,7 +149,7 @@ import {
   resolveConnectorCredential,
   shouldTriggerConnectorReply,
   isConnectorOwnerMessage,
-  writeConnectorRuntimeStatus,
+  writeConnectorRuntimeStatus as writeConnectorRuntimeStatusUnredacted,
   type ConnectorContext,
   type ConnectorInboundHandle,
   type ConnectorOutboundMessage,
@@ -3307,7 +3307,7 @@ function reportConnectorQueueError(
     if (last && last.message === message && now - last.at < 60_000) return;
     lastQueueReport.set(connectorId, { message, at: now });
   }
-  process.stderr.write(`[mindstone-gateway] connector ${connectorId}: ${message}\n`);
+  process.stderr.write(`[mindstone-gateway] connector ${connectorId}: ${redactConnectorText(connectorId, message)}\n`);
   // Good news is logged only: it must not replace an error in the status.
   if (options.info) return;
   writeConnectorRuntimeStatus({
@@ -3317,6 +3317,28 @@ function reportConnectorQueueError(
     ...(running ? { inboundCount: running.inboundCount, deniedCount: running.deniedCount } : {}),
     updatedAt: new Date().toISOString(),
   });
+}
+
+/** Each running connector's resolved credential, so no error text it produces is stored or logged with it (#95). */
+const connectorCredentials = new Map<string, string>();
+
+/**
+ * Text about a connector with its credential (as is, and URL-encoded) replaced
+ * by *** and other inline secrets masked, for anything the gateway stores or
+ * logs: runtime status, the log, queue entries (#95).
+ */
+function redactConnectorText(connectorId: string, text: string): string {
+  let out = text;
+  const credential = connectorCredentials.get(connectorId);
+  if (credential && credential.length >= 4) {
+    for (const form of new Set([credential, encodeURIComponent(credential)])) out = out.split(form).join("***");
+  }
+  return maskInlineSecrets(out);
+}
+
+/** writeConnectorRuntimeStatus, with lastError redacted (#95). */
+function writeConnectorRuntimeStatus(status: Parameters<typeof writeConnectorRuntimeStatusUnredacted>[0]): ReturnType<typeof writeConnectorRuntimeStatusUnredacted> {
+  return writeConnectorRuntimeStatusUnredacted(status.lastError ? { ...status, lastError: redactConnectorText(status.connectorId, status.lastError) } : status);
 }
 
 /** Replies waiting to be retried into the queue, so a gateway stop can report them as lost. */
@@ -3553,6 +3575,8 @@ export async function startConfiguredConnectors(): Promise<void> {
         }
         credential = resolved.value;
       }
+      if (credential) connectorCredentials.set(connectorId, credential);
+      else connectorCredentials.delete(connectorId);
       const ctx: ConnectorContext = { config: loadedConfig.config, channelConfig, credential };
       const running: RunningConnector = { connectorId, handle: { stop: () => undefined }, inboundCount: 0, deniedCount: 0 };
       running.handle = await connector.startInbound(ctx, (message) =>
@@ -3581,7 +3605,10 @@ export async function startConfiguredConnectors(): Promise<void> {
         }
         if (pending === 0) return;
         void queue
-          .drain((entry) => connector.sendOutbound(ctx, entry.message), { now: new Date().toISOString() })
+          .drain((entry) => connector.sendOutbound(ctx, entry.message).catch((error: unknown) => {
+            // A send error is stored on the queue entry: never with the credential in it (#95).
+            throw new Error(redactConnectorText(connectorId, error instanceof Error ? error.message : String(error)));
+          }), { now: new Date().toISOString() })
           .catch((error) => reportConnectorQueueError(connectorId, `delivery drain failed: ${error instanceof Error ? error.message : String(error)}`, running));
       }, drainMs);
       running.drainTimer.unref?.();
