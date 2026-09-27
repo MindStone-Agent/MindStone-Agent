@@ -1781,6 +1781,23 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     sendJson(res, 200, { ok: true, secrets });
     return;
   }
+  if (req.method === "GET" && url.pathname === "/admin/auth") {
+    // Hosted providers that take an API key (#98), and how each is set up:
+    // never the key itself.
+    const authPath = `${gateConfig.config?.routing?.pi?.agentDir ?? paths.piAgentDir}/auth.json`;
+    const auth = readPiAuth(authPath);
+    sendJson(res, 200, {
+      ok: true,
+      ...(auth.error ? { authError: "the isolated auth.json can't be read; fix it on the gateway host" } : {}),
+      providers: Object.entries(HOSTED_KEY_PROVIDERS).map(([providerId, info]) => ({
+        providerId,
+        name: info.name,
+        env: info.env,
+        auth: hostedAuthSummary(auth.data[providerId], info.env),
+      })),
+    });
+    return;
+  }
   if (req.method !== "POST" && req.method !== "PATCH" && req.method !== "DELETE") {
     sendJson(res, 404, { ok: false, error: "unknown admin endpoint" });
     return;
@@ -1903,6 +1920,93 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       if (!(error instanceof ApprovalActionError)) throw error;
       refuse(error.status, { error: error.publicMessage, code: error.code }, { reason: error.code, approvalId: approvalMatch[1], decision });
     }
+    return;
+  }
+
+  const authMatch = /^\/admin\/auth\/([a-z0-9-]{1,40})$/.exec(url.pathname);
+  if ((req.method === "POST" || req.method === "DELETE") && authMatch) {
+    // A hosted provider's API key in Pi's isolated auth.json (#98), from a
+    // stored secret, never from the request; the same guards as a local
+    // provider's key (#80).
+    const providerId = authMatch[1]!;
+    const info = Object.hasOwn(HOSTED_KEY_PROVIDERS, providerId) ? HOSTED_KEY_PROVIDERS[providerId] : undefined;
+    if (!info) {
+      refuse(404, { error: `not a hosted provider that takes an API key: ${providerId}` }, { reason: "unknown_provider", provider: providerId });
+      return;
+    }
+    const body = req.method === "POST" ? await readAdminBody(req, res) : {};
+    if (!body) return;
+    await withAdminWriteLock(() => {
+      const loaded = loadMindStoneConfig(configPath);
+      if (loaded.error || !loaded.config) {
+        refuse(503, { error: CONFIG_UNREADABLE }, { reason: "config_unreadable", provider: providerId });
+        return;
+      }
+      if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "setting a provider's API key needs the advanced-settings permission" }, { reason: "advanced", provider: providerId });
+        return;
+      }
+      const authPath = `${loaded.config.routing?.pi?.agentDir ?? paths.piAgentDir}/auth.json`;
+      const auth = readPiAuth(authPath);
+      if (auth.error) {
+        refuse(409, { error: "the isolated auth.json can't be read; fix it on the gateway host" }, { reason: "auth_unreadable", provider: providerId });
+        return;
+      }
+      const existing = auth.data[providerId] as { type?: unknown } | undefined;
+      if (existing && existing.type !== "api_key") {
+        refuse(409, { error: `${info.name} is signed in on the gateway host (not with an API key); change it there` }, { reason: "not_api_key", provider: providerId });
+        return;
+      }
+      if (req.method === "DELETE") {
+        if (!existing) {
+          refuse(404, { error: `${info.name} has no stored API key` }, { reason: "not_found", provider: providerId });
+          return;
+        }
+        delete auth.data[providerId];
+        writeFileAtomic(authPath, `${JSON.stringify(auth.data, null, 2)}\n`, 0o600);
+        appendAdminAudit(paths.dataDir, { userId, action: "provider_key_removed", provider: providerId });
+        sendJson(res, 200, { ok: true, providerId, auth: hostedAuthSummary(undefined, info.env) });
+        return;
+      }
+      const keys = Object.keys(body);
+      const secret = body.secret;
+      if (keys.some((key) => key !== "secret") || typeof secret !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(secret) || secret.includes("..")) {
+        refuse(400, { error: 'send { "secret": "<stored secret name>" }; the key itself is never sent here' }, { reason: "invalid", provider: providerId });
+        return;
+      }
+      const refuseHostCredential = () =>
+        refuse(422, { error: "that is a gateway credential and can't be used as a provider key" }, { reason: "host_only", provider: providerId });
+      const secretPath = resolvePath(`${paths.dataDir}/secrets`, secret);
+      if (hostCredentialFiles(loaded.config, configPath).some((file) => pointsAtSameFile(file, secretPath))) {
+        refuseHostCredential();
+        return;
+      }
+      if (connectorTokenFiles(loaded.config, configPath, paths).all.some((file) => pointsAtSameFile(file, secretPath))) {
+        refuse(422, { error: "that secret is a connector's token and can't be used as a provider key" }, { reason: "connector_secret", provider: providerId });
+        return;
+      }
+      let value = "";
+      try {
+        if (lstatSync(secretPath).isFile()) value = readFileSync(secretPath, "utf-8").trim();
+      } catch {
+        // Missing: refused below.
+      }
+      if (!value) {
+        refuse(400, { error: `no stored secret named ${secret}; store it with POST /admin/secrets/${secret} first` }, { reason: "no_secret", provider: providerId });
+        return;
+      }
+      if (isGatewayCredentialValue(value, loaded.config, configPath)) {
+        refuseHostCredential();
+        return;
+      }
+      // Pi resolves auth.json keys as templates ("!cmd" runs a command,
+      // "$VAR" reads the environment), so the key is stored escaped (#80).
+      auth.data[providerId] = { type: "api_key", key: literalConfigValue(value) };
+      mkdirSync(dirname(authPath), { recursive: true, mode: 0o700 });
+      writeFileAtomic(authPath, `${JSON.stringify(auth.data, null, 2)}\n`, 0o600);
+      appendAdminAudit(paths.dataDir, { userId, action: "provider_key_stored", provider: providerId, keySource: `secret:${secret}` });
+      sendJson(res, 200, { ok: true, providerId, auth: "stored key" });
+    });
     return;
   }
 
@@ -2569,6 +2673,9 @@ export function exitGatewayOnSignals(gateway: { close(): Promise<void> }): void 
   const shutdown = async () => {
     if (exiting) return;
     exiting = true;
+    // Set first: if the event loop empties before the (unref'd) cap timer
+    // fires, the process still exits with the right code (#94 review).
+    process.exitCode = gatewayExitCode();
     await Promise.race([gateway.close().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, SHUTDOWN_CAP_MS).unref())]);
     process.exit(gatewayExitCode());
   };
@@ -2791,6 +2898,55 @@ function approvalSummary(action: ProposedAction) {
     decisionNote: action.decisionNote,
     queueState: action.queueState,
   };
+}
+
+/**
+ * Hosted providers that take an API key, and the variable Pi also reads for
+ * each (Pi's env-key map, ai/src/env-api-keys.ts). Local servers and Ollama
+ * Cloud go through /admin/providers instead (#98).
+ */
+const HOSTED_KEY_PROVIDERS: Record<string, { name: string; env: string }> = {
+  anthropic: { name: "Anthropic", env: "ANTHROPIC_API_KEY" },
+  openai: { name: "OpenAI", env: "OPENAI_API_KEY" },
+  google: { name: "Google Gemini", env: "GEMINI_API_KEY" },
+  openrouter: { name: "OpenRouter", env: "OPENROUTER_API_KEY" },
+  groq: { name: "Groq", env: "GROQ_API_KEY" },
+  mistral: { name: "Mistral", env: "MISTRAL_API_KEY" },
+  deepseek: { name: "DeepSeek", env: "DEEPSEEK_API_KEY" },
+  xai: { name: "xAI", env: "XAI_API_KEY" },
+  cerebras: { name: "Cerebras", env: "CEREBRAS_API_KEY" },
+  together: { name: "Together AI", env: "TOGETHER_API_KEY" },
+  fireworks: { name: "Fireworks", env: "FIREWORKS_API_KEY" },
+  huggingface: { name: "Hugging Face", env: "HF_TOKEN" },
+  nvidia: { name: "NVIDIA", env: "NVIDIA_API_KEY" },
+};
+
+/** Pi's isolated auth.json, or an error when it exists but can't be read as an object. */
+function readPiAuth(path: string): { data: Record<string, unknown>; error?: boolean } {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? { data: {} } : { data: {}, error: true };
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? { data: parsed as Record<string, unknown> } : { data: {}, error: true };
+  } catch {
+    return { data: {}, error: true };
+  }
+}
+
+/** How a hosted provider is set up, for the Console: never the key. */
+function hostedAuthSummary(entry: unknown, env: string): string | null {
+  const credential = entry as { type?: unknown; key?: unknown } | undefined;
+  if (credential?.type === "oauth") return "signed in (OAuth)";
+  if (credential?.type === "api_key") {
+    const reference = typeof credential.key === "string" ? /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(credential.key) : null;
+    return reference ? `env: ${reference[1]}` : "stored key";
+  }
+  if (process.env[env]) return `env: ${env}`;
+  return null;
 }
 
 async function readAdminBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | undefined> {
