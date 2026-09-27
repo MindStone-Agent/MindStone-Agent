@@ -17,9 +17,9 @@ The current implementation is transcript-aware and can route through the MindSto
 Implemented today:
 
 - `/v1/models`
-- non-streaming `/v1/chat/completions`
+- `/v1/chat/completions`, non-streaming or with `stream: true`
 - Gateway auth modes: `none`, `token`, `password`
-- transcript persistence for compatible request messages
+- transcript persistence for the new turn only (the trailing user messages; resent history isn't stored again, and a request must end with a user message)
 - routed responses when `routing.mode` is configured for `mock`, `pi`, or `pi-session`
 - explicit `501 not_implemented` scaffold when no provider is configured
 - canonical default session continuity through `agent:default:main`
