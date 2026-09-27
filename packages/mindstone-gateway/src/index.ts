@@ -603,6 +603,23 @@ function transcriptTextFromOpenAiContent(content: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Index of the first message of the new turn in an OpenAI-style messages
+ * array: the user messages after the last assistant message (#38). Everything
+ * before it is history the gateway already has. Returns messages.length when
+ * the array doesn't end in user messages.
+ */
+export function newChatCompletionsTurnStart(messages: unknown[]): number {
+  let start = messages.length;
+  while (start > 0) {
+    const record = messages[start - 1];
+    const role = typeof record === "object" && record !== null ? (record as Record<string, unknown>).role : undefined;
+    if (role !== "user") break;
+    start -= 1;
+  }
+  return start;
+}
+
 function openAiRoleToTranscriptRole(role: unknown): TranscriptRole {
   if (role === "system" || role === "assistant" || role === "tool") return role;
   return "user";
@@ -1937,7 +1954,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     });
 
     const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-chat-completions", chatType: "internal", senderId });
-    const persistedEntries = messages.map((message, index) => {
+    // The gateway already holds the conversation (#38): clients such as LibreChat
+    // resend the whole history every turn, so only the new turn is stored: the
+    // user messages after the last assistant message. Resent history and client
+    // system prompts are not written again.
+    const newTurnStart = newChatCompletionsTurnStart(messages);
+    const persistedEntries = messages.slice(newTurnStart).map((message, offset) => {
+      const index = newTurnStart + offset;
       const record = typeof message === "object" && message !== null ? message as Record<string, unknown> : {};
       return appendTranscriptEntry({
         sessionKey,
@@ -1951,11 +1974,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           model,
           messageIndex: index,
           originalRole: record.role,
+          ...(index === newTurnStart && newTurnStart > 0 ? { resentMessagesSkipped: newTurnStart } : {}),
           ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}),
           ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}),
         },
       });
     });
+    if (persistedEntries.length === 0) {
+      sendJson(res, 400, openAiError("the last message must be a user message", "invalid_request_error", "invalid_messages"));
+      return;
+    }
     const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
     if (routed.routed && routed.status === 200 && input.stream === true) {
       // OpenAI-compatible server-sent events. LibreChat (and the openai/langchain clients generally)

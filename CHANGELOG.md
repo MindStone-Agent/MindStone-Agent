@@ -6,6 +6,9 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 
 ## [Unreleased]
 
+### Fixed
+- **Chat completions no longer store the whole conversation again every turn** (#38). Clients such as LibreChat resend the full history with each request, and the gateway wrote all of it to the transcript each time. Only the new turn (the user messages after the last assistant message) is stored now; resent history and client system prompts are not. A request that doesn't end with a user message is rejected with 400.
+
 ### Security
 - **Memory backfill keeps tenants apart and keeps non-owner turns out of the owner's recall** (#62).
   - Before this fix, `memory backfill` indexed every transcript with no labels. One App Engine tenant's run could surface in another tenant's recall, and a stranger's channel message could come back as the owner's memory.
