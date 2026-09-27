@@ -445,6 +445,25 @@ rm -f "${QUEUE_LOCK}"
 wait "${recheck_pid}" 2>/dev/null || true
 [[ "$(queued SYNTHETIC-DRAFT-RECHECK)" == "0" ]] || { echo "a repair queued an approval that was undone while it waited: $(cat "${TEMP_RUNTIME}/recheck.log")" >&2; exit 1; }
 grep -q "changed while it was being queued" "${TEMP_RUNTIME}/recheck.log" || { echo "expected the repair to say the approval changed: $(cat "${TEMP_RUNTIME}/recheck.log")" >&2; exit 1; }
+# The first approve re-checks the approval under the queue lock too (#91): a
+# reject that lands while it waits for the lock (here written straight into
+# the store, as #76's unlocked writes can) means nothing is queued.
+RACE3_ID="$(propose SYNTHETIC-DRAFT-RACE3)"
+printf 'held-by-smoke' > "${QUEUE_LOCK}"
+( for _ in $(seq 1 16); do touch "${QUEUE_LOCK}" 2>/dev/null; sleep 0.5; done ) &
+toucher_pid=$!
+${MS} approvals approve "${RACE3_ID}" --yes >"${TEMP_RUNTIME}/race3.log" 2>&1 &
+race3_pid=$!
+for _ in $(seq 1 40); do [[ "$(status_of "${RACE3_ID}")" == approved ]] && break; sleep 0.1; done
+ACTIONS_FILE="${TEMP_RUNTIME}/mindstone/approvals/actions.json" ID="${RACE3_ID}" node -e '
+const fs = require("fs"); const f = JSON.parse(fs.readFileSync(process.env.ACTIONS_FILE, "utf8"));
+const a = f.actions.find((x) => x.id === process.env.ID); a.status = "rejected"; delete a.queueState; delete a.queuingBy;
+fs.writeFileSync(process.env.ACTIONS_FILE, JSON.stringify(f, null, 2));'
+kill "${toucher_pid}" 2>/dev/null || true; wait "${toucher_pid}" 2>/dev/null || true
+rm -f "${QUEUE_LOCK}"
+wait "${race3_pid}" 2>/dev/null || true
+[[ "$(queued SYNTHETIC-DRAFT-RACE3)" == "0" ]] || { echo "an approve queued a send that was rejected while it waited: $(cat "${TEMP_RUNTIME}/race3.log")" >&2; exit 1; }
+grep -q "changed while it was being queued" "${TEMP_RUNTIME}/race3.log" || { echo "expected the approve to say the approval changed: $(cat "${TEMP_RUNTIME}/race3.log")" >&2; exit 1; }
 # A pending action that somehow has a queued send (a lost update) can't be "rejected" as if nothing were sent.
 LOST_ID="$(propose SYNTHETIC-DRAFT-LOSTUPDATE)"
 queue_raw "${LOST_ID}" SYNTHETIC-DRAFT-LOSTUPDATE

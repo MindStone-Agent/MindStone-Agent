@@ -3081,6 +3081,9 @@ function enqueueConnectorReply(
         });
         if (pending.stopped) return;
         if (attempt(n)) {
+          // Queued: from here it's the queue's to deliver, so a stop during
+          // the drain mustn't log it as lost (#91).
+          pendingReplyRetries.delete(pending);
           await drain(queue);
           return;
         }

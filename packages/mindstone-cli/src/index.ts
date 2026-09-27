@@ -2070,8 +2070,18 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
         queuingBy: { pid: process.pid, host: hostname() },
       });
       const queue = new ConnectorDeliveryQueue(target.connectorId);
+      let refused = false;
       try {
-        queue.enqueueForApproval(target.message, action.id, { now: new Date().toISOString() });
+        // Re-checked under the queue lock: still this approval, still
+        // "queuing". It narrows the race with a reject or a second approve;
+        // closing it needs the approval store's own lock (#76, #91).
+        refused = Boolean(queue.enqueueForApproval(target.message, action.id, {
+          now: new Date().toISOString(),
+          stillApproved: () => {
+            const current = store.get(decided.id);
+            return current?.status === "approved" && current.queueState === "queuing" && current.decidedAt === decided.decidedAt;
+          },
+        }).refused);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         let undone = false;
@@ -2088,6 +2098,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
             : `${reason}; the approval could not be undone (it changed meanwhile): check it with mindstone approvals show ${decided.id}`,
         );
       }
+      if (refused) throw new Error(`${action.id} changed while it was being queued (rejected or decided again); nothing was queued. Check it with mindstone approvals show ${action.id}`);
       store.markQueued(decided.id, decided.decidedAt);
     };
     if (action.kind === "connector_send" && action.send && queueTarget) {

@@ -49,8 +49,8 @@ const RETRY_BASE_MS = 2_000;
 const RETRY_MAX_MS = 5 * 60_000;
 /**
  * A send that hasn't settled after this counts as failed, so one hung send
- * can't stall the drain (#77 review). Delivery is at-least-once, so a send
- * that completes after timing out is sent again on its retry.
+ * can't stall the drain (#77 review). It isn't sent again while it may still
+ * be running, and a late success counts as delivered (#77 round 3).
  */
 const SEND_TIMEOUT_MS = 60_000;
 /**
