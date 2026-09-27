@@ -14,7 +14,7 @@ TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-admin-smoke.XXXXXX")"
 SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
 GATEWAY_PORT="$((SMOKE_PORT_BASE + 26))"
 stop_gateway() { if [[ -n "${gateway_pid:-}" ]]; then kill "${gateway_pid}" >/dev/null 2>&1 || true; wait "${gateway_pid}" >/dev/null 2>&1 || true; unset gateway_pid; fi; }
-cleanup() { stop_gateway; if [[ -n "${fake_pid:-}" ]]; then kill "${fake_pid}" >/dev/null 2>&1 || true; fi; rm -rf "${TEMP_RUNTIME}"; }
+cleanup() { if [[ -n "${sup_pid:-}" ]]; then kill "${sup_pid}" >/dev/null 2>&1 || true; for pid in $(lsof -t -nP -iTCP:"${GATEWAY_PORT:-0}" -sTCP:LISTEN 2>/dev/null); do kill "${pid}" >/dev/null 2>&1 || true; done; fi; stop_gateway; if [[ -n "${fake_pid:-}" ]]; then kill "${fake_pid}" >/dev/null 2>&1 || true; fi; rm -rf "${TEMP_RUNTIME}"; }
 trap cleanup EXIT
 export MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}"
 export MINDSTONE_AGENT_GATEWAY_PORT="${GATEWAY_PORT}"
@@ -851,7 +851,88 @@ stop_gateway
 start_gateway
 echo "doctor and logs assertions passed"
 
-# 9. Hosted-provider API keys (#98): from a stored secret into Pi's isolated
+# 9. Restart from the Console (#90): only a declared supervisor, confirmed by
+#    evidence, brings the gateway back, so otherwise nothing exits.
+status_field() { curl -s "${ADMIN[@]}" "${BASE}/admin/status" | node -e 'let t="";process.stdin.on("data",d=>t+=d).on("end",()=>{try{const b=JSON.parse(t);console.log(process.argv[1].split(",").map(k=>String(b[k])).join("|"))}catch{console.log("down")}})' "$1"; }
+started_at() { status_field supervisor,startedAt; }
+wait_restarted() { local before="$1" now; for _ in $(seq 1 60); do now="$(started_at)"; [[ "${now}" != down && "${now#*|}" != "${before#*|}" ]] && { echo "${now}"; return 0; }; sleep 0.5; done; echo "never came back (last: ${now})" >&2; return 1; }
+still_up() { local before="$1" label="$2"; sleep 1; [[ "$(started_at)" == "${before}" ]] || { echo "${label}: the gateway restarted or went down" >&2; exit 1; }; }
+unset MINDSTONE_AGENT_SUPERVISOR
+# None declared: refused, audited, still up.
+before="$(started_at)"
+[[ "${before%%|*}" == "null" ]] || { echo "status should show no supervisor: ${before}" >&2; exit 1; }
+expect "$(post /admin/restart '{}')" 409 "restarting with no supervisor"
+grep -q 'restart it on the gateway host' "${BODY}" || { echo "the refusal should say what to run: $(cat "${BODY}")" >&2; exit 1; }
+still_up "${before}" "no supervisor"
+grep -q '"reason":"no_supervisor"' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" || { echo "the refused restart was not audited" >&2; exit 1; }
+# Declared without the evidence (a stale or copied declaration): refused, still up.
+for declared in managed launchd docker systemd; do
+  stop_gateway
+  env -u INVOCATION_ID -u JOURNAL_STREAM -u NOTIFY_SOCKET -u XPC_SERVICE_NAME MINDSTONE_AGENT_SUPERVISOR="${declared}" ./scripts/start-gateway.sh >>"${TEMP_RUNTIME}/gateway.log" 2>&1 &
+  gateway_pid=$!
+  for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sleep 0.5; done
+  [[ "${declared}" == docker && -e /.dockerenv ]] && continue
+  [[ "$(status_field supervisor,supervisorConfirmed)" == "${declared}|false" ]] || { echo "status should show ${declared} unconfirmed: $(status_field supervisor,supervisorConfirmed,supervisorDetail)" >&2; exit 1; }
+  before="$(started_at)"
+  expect "$(post /admin/restart '{}')" 409 "restarting a gateway declared ${declared} without the evidence"
+  grep -q "declared ${declared}" "${BODY}" || { echo "the refusal should name the declaration: $(cat "${BODY}")" >&2; exit 1; }
+  still_up "${before}" "declared ${declared} without evidence"
+done
+stop_gateway
+# Managed, end to end: `mindstone gateway start`, restart from the admin API,
+# a new process with a new PID file comes back, and the CLI shows it.
+CLI=(node "${PROJECT_ROOT}/packages/mindstone-cli/dist/index.js")
+PIDFILE="${TEMP_RUNTIME}/mindstone/gateway/gateway.pid"
+"${CLI[@]}" gateway start >/dev/null
+for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sleep 0.5; done
+before="$(started_at)"; old_pid="$(cat "${PIDFILE}")"
+[[ "$(status_field supervisor,supervisorConfirmed)" == "managed|true" ]] || { echo "a managed gateway should say so: $(status_field supervisor,supervisorConfirmed,supervisorDetail)" >&2; exit 1; }
+expect "$(post /admin/restart '{}')" 202 "restarting a managed gateway"
+code="$(post /admin/restart '{}')"
+[[ "${code}" == 409 || "${code}" == 000 || "${code}" == 502 ]] || { echo "a second restart while one is under way should be refused (got ${code})" >&2; exit 1; }
+grep -q '"action":"restart_requested","supervisor":"managed"' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" || { echo "the restart was not audited" >&2; exit 1; }
+after="$(wait_restarted "${before}")" || exit 1
+new_pid="$(cat "${PIDFILE}")"
+{ [[ "${new_pid}" != "${old_pid}" ]] && kill -0 "${new_pid}" 2>/dev/null; } || { echo "the PID file should name the new process (old ${old_pid}, new ${new_pid})" >&2; exit 1; }
+kill -0 "${old_pid}" 2>/dev/null && { echo "the old gateway is still running" >&2; exit 1; }
+[[ "${after%%|*}" == "managed" ]] || { echo "the restarted gateway should still be managed: ${after}" >&2; exit 1; }
+for _ in $(seq 1 20); do grep -q '"state":"running"' "${TEMP_RUNTIME}/mindstone/gateway/restart.json" 2>/dev/null && break; sleep 0.5; done
+"${CLI[@]}" gateway status | grep -q 'Last restart from the Console: running' || { echo "mindstone gateway status should show the restart: $("${CLI[@]}" gateway status | tail -2)" >&2; exit 1; }
+# The rate limit: restarts beyond 5 in 10 minutes are refused (earlier ones are counted from the file).
+node -e 'const now=Date.now(); require("fs").writeFileSync(process.argv[1], JSON.stringify([now-1000,now-2000,now-3000,now-4000,now-5000]))' "${TEMP_RUNTIME}/mindstone/gateway/restarts.json"
+before="$(started_at)"
+expect "$(post /admin/restart '{}')" 429 "a sixth restart within 10 minutes"
+still_up "${before}" "rate limited"
+[[ "$(status_field recentStarts)" -ge 2 ]] || { echo "status should count recent starts: $(status_field recentStarts)" >&2; exit 1; }
+rm -f "${TEMP_RUNTIME}/mindstone/gateway/restarts.json"
+"${CLI[@]}" gateway stop >/dev/null
+# A supervisor outside the gateway (a stub loop that looks like systemd): the
+# gateway exits with 75, the loop starts it again. Both ways of running it:
+# the plain main.js and `mindstone gateway run` (what launchd runs; #94 review).
+for runner in main cli; do
+  SUP_STOP="${TEMP_RUNTIME}/stub-supervisor-${runner}.stop"
+  SUP_CODES="${TEMP_RUNTIME}/stub-supervisor-${runner}.codes"
+  if [[ "${runner}" == main ]]; then RUN=(./scripts/start-gateway.sh); else RUN=(node "${PROJECT_ROOT}/packages/mindstone-cli/dist/index.js" gateway run); fi
+  # The loop also stops if this run's directory is gone (the smoke exited early).
+  ( while [[ ! -e "${SUP_STOP}" && -d "${TEMP_RUNTIME}" ]]; do rc=0; INVOCATION_ID=stub-invocation MINDSTONE_AGENT_SUPERVISOR=systemd "${RUN[@]}" >>"${TEMP_RUNTIME}/gateway.log" 2>&1 || rc=$?; echo "${rc}" >> "${SUP_CODES}"; done ) &
+  sup_pid=$!
+  for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sleep 0.5; done
+  before="$(started_at)"
+  [[ "$(status_field supervisor,supervisorConfirmed)" == "systemd|true" ]] || { echo "${runner}: the stub systemd gateway should be confirmed: $(status_field supervisor,supervisorConfirmed,supervisorDetail)" >&2; exit 1; }
+  expect "$(post /admin/restart '{}')" 202 "${runner}: restarting under a supervisor"
+  after="$(wait_restarted "${before}")" || exit 1
+  [[ "${after%%|*}" == "systemd" ]] || { echo "${runner}: the restarted gateway should report its supervisor: ${after}" >&2; exit 1; }
+  [[ "$(head -1 "${SUP_CODES}")" == 75 ]] || { echo "${runner}: a restart should exit with 75, got $(head -1 "${SUP_CODES}")" >&2; exit 1; }
+  touch "${SUP_STOP}"
+  for pid in $(lsof -t -nP -iTCP:"${GATEWAY_PORT}" -sTCP:LISTEN 2>/dev/null); do kill -TERM "${pid}" 2>/dev/null || true; done
+  wait "${sup_pid}" 2>/dev/null || true
+  [[ "$(tail -1 "${SUP_CODES}")" == 0 ]] || { echo "${runner}: a plain stop should exit with 0, got $(tail -1 "${SUP_CODES}")" >&2; exit 1; }
+  rm -f "${TEMP_RUNTIME}/mindstone/gateway/restarts.json"
+done
+start_gateway
+echo "restart assertions passed"
+
+# 10. Hosted-provider API keys (#98): from a stored secret into Pi's isolated
 #    auth.json, escaped, never echoed, under the #80 guards.
 AUTHJSON="${PI_CODING_AGENT_DIR}/auth.json"
 get() { curl -s -o "${BODY}" -w '%{http_code}' "${ADMIN[@]}" "${BASE}$1"; }
@@ -915,7 +996,7 @@ printf '{"advancedSettings":false}\n' > "${PERMS}"
 expect "$(del /admin/auth/anthropic)" 403 "removing a key without the permission"
 echo "hosted provider key assertions passed"
 
-# 10. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
+# 11. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
 #    token files resolve under the data dir, as the connectors read them, not
 #    next to the config file (#75 review A, tested end to end per #78).
 stop_gateway

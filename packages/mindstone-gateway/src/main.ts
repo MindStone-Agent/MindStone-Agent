@@ -1,12 +1,7 @@
-import { startGateway } from "./index.js";
+import { exitGatewayOnSignals, startGateway } from "./index.js";
 
 const gateway = await startGateway();
 console.log(`MindStone-Agent Gateway listening at ${gateway.url}`);
 
-const shutdown = async () => {
-  await gateway.close();
-  process.exit(0);
-};
-
-process.on("SIGINT", () => void shutdown());
-process.on("SIGTERM", () => void shutdown());
+// Capped shutdown, exit 75 after a restart from the Console (#90).
+exitGatewayOnSignals(gateway);
