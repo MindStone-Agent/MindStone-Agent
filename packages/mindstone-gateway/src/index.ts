@@ -125,6 +125,12 @@ import {
   invalidScopeFields,
   scopeSessionKeyAllowed,
   ApprovalStore,
+  ApprovalActionError,
+  approveProposedAction,
+  checkApprovable,
+  rejectProposedAction,
+  resolveDefaultSessionKey,
+  type ProposedAction,
   ConnectorDeliveryQueue,
   applyActionProposalDiscipline,
   configuredConnectorIds,
@@ -1651,6 +1657,24 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     });
     return;
   }
+  if (req.method === "GET" && url.pathname === "/admin/approvals") {
+    // Proposed actions (#84): pending by default, every one with ?all=1. The
+    // list carries no draft text; GET /admin/approvals/<id> does.
+    const store = new ApprovalStore();
+    const actions = url.searchParams.get("all") === "1" ? store.list() : store.pending();
+    sendJson(res, 200, { ok: true, status: store.status(), actions: actions.map(approvalSummary) });
+    return;
+  }
+  const approvalMatch = APPROVAL_PATH.exec(url.pathname);
+  if (req.method === "GET" && approvalMatch && !approvalMatch[2]) {
+    const action = new ApprovalStore().get(approvalMatch[1]!);
+    if (!action) {
+      sendJson(res, 404, { ok: false, error: `no proposed action matches id "${approvalMatch[1]}"` });
+      return;
+    }
+    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation } });
+    return;
+  }
   if (req.method === "GET" && url.pathname === "/admin/secrets") {
     // The stored secrets by name (#88): never a value. A link is listed as a
     // link and never followed.
@@ -1721,6 +1745,56 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       appendAdminAudit(paths.dataDir, { userId, action: enabled ? "advanced_settings_granted" : "advanced_settings_revoked" });
       sendJson(res, 200, { ok: true, permissions });
     });
+    return;
+  }
+
+  if (req.method === "POST" && approvalMatch && approvalMatch[2]) {
+    // Approve or reject a proposed action (#84), with the same guards as
+    // `mindstone approvals` (core's approval actions). No advanced-settings
+    // gate: approving is the normal path for an approval_required connector.
+    const decision = approvalMatch[2] as "approve" | "reject";
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    if (decision === "approve" && body.force !== undefined && typeof body.force !== "boolean") {
+      sendJson(res, 400, { ok: false, error: "force must be true or false" });
+      return;
+    }
+    if (decision === "reject" && body.note !== undefined && (typeof body.note !== "string" || body.note.length > 2000)) {
+      sendJson(res, 400, { ok: false, error: "note must be a string of at most 2000 characters" });
+      return;
+    }
+    const store = new ApprovalStore();
+    const onDecision = (action: ProposedAction, decided: "approved" | "rejected", detail: string) => {
+      appendTranscriptEntry({
+        sessionKey: action.sessionKey ?? resolveDefaultSessionKey(gateConfig.config, action.agentId ?? "default"),
+        agentId: action.agentId ?? "default",
+        role: "event",
+        text: `approval ${decided}: ${action.kind} ${action.id} — ${detail} (from the Console)`,
+        metadata: { event: "approval_decided", approvalId: action.id, kind: action.kind, decision: decided, connector: action.connectorId },
+      });
+      appendAdminAudit(paths.dataDir, { userId, action: `approval_${decided}`, approvalId: action.id, kind: action.kind, connector: action.connectorId });
+    };
+    try {
+      if (decision === "approve") {
+        const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
+          decidedBy: `console:${userId}`,
+          memoryDir: paths.memoryDir,
+          force: body.force === true,
+          onDecision,
+        });
+        sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
+      } else {
+        const rejected = rejectProposedAction(store, approvalMatch[1]!, {
+          decidedBy: `console:${userId}`,
+          note: typeof body.note === "string" && body.note.trim() ? body.note.trim() : undefined,
+          onDecision,
+        });
+        sendJson(res, 200, { ok: true, action: approvalSummary(rejected) });
+      }
+    } catch (error) {
+      if (!(error instanceof ApprovalActionError)) throw error;
+      refuse(error.status, { error: error.publicMessage, code: error.code }, { reason: error.code, approvalId: approvalMatch[1], decision });
+    }
     return;
   }
 
@@ -2336,6 +2410,25 @@ function hostCredentialFiles(config: MindStoneConfig | undefined, configPath: st
 }
 
 /** A JSON object body, or an error response (then undefined). */
+/** /admin/approvals/<id> and /admin/approvals/<id>/(approve|reject): ids are UUIDs, or a unique prefix of at least 8. */
+const APPROVAL_PATH = /^\/admin\/approvals\/([0-9a-f-]{8,36})(?:\/(approve|reject))?$/;
+
+/** What the approvals list shows: no draft text, memory content or mutation data. */
+function approvalSummary(action: ProposedAction) {
+  return {
+    id: action.id,
+    status: action.status,
+    kind: action.kind,
+    connectorId: action.connectorId,
+    summary: action.summary,
+    createdAt: action.createdAt,
+    decidedAt: action.decidedAt,
+    decidedBy: action.decidedBy,
+    decisionNote: action.decisionNote,
+    queueState: action.queueState,
+  };
+}
+
 async function readAdminBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | undefined> {
   try {
     const body = await readJsonBody(req, 256 * 1024);

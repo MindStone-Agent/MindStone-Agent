@@ -592,7 +592,145 @@ kill "${fake_pid}" 2>/dev/null || true
 printf '{"advancedSettings":false}\n' > "${PERMS}"
 echo "provider assertions passed"
 
-# 6. Stored secrets, listed and deleted (#88): names only, and deletes under
+# 6. Approvals from the Console (#84): list, show, approve and reject proposed
+#    actions with the same guards as `mindstone approvals`.
+DATA="${TEMP_RUNTIME}/mindstone"
+ACTIONS="${DATA}/approvals/actions.json"
+QUEUE="${DATA}/connectors/email/queue.json"
+id() { printf 'aaaaaaaa-0000-4000-8000-0000000000%s' "$1"; }
+mkdir -p "$(dirname "${ACTIONS}")" "$(dirname "${QUEUE}")" "${DATA}/memory/notes"
+HOST_NAME="$(node -e 'console.log(require("os").hostname())')"
+A="bbbbbbbb-0000-4000-8000-00000000000a" B="$(id 0b)" C="$(id 0c)" D="$(id 0d)" E="$(id 0e)" F="$(id 0f)" G="$(id 10)" H="$(id 11)" R="$(id 12)"
+A="${A}" B="${B}" C="${C}" D="${D}" E="${E}" F="${F}" G="${G}" H="${H}" R="${R}" HOST_NAME="${HOST_NAME}" ACTIONS="${ACTIONS}" QUEUE="${QUEUE}" node -e '
+const fs = require("fs"); const e = process.env;
+const send = (id, text) => ({ id, kind: "connector_send", connectorId: "email", summary: `send ${id.slice(-2)}`, createdAt: "2026-09-27T12:00:00.000Z", status: "pending", send: { chatId: "c1", text } });
+const actions = [
+  send(e.A, "DRAFT-SENTINEL-A"), send(e.B, "DRAFT-SENTINEL-B"),
+  { id: e.C, kind: "memory_write", connectorId: "email", summary: "note", status: "pending", memory: { path: "notes/uat.md", content: "MEMORY-SENTINEL-C" } },
+  { id: e.D, kind: "connector_mutation", connectorId: "calendar", summary: "create event", status: "pending", mutation: { connectorId: "calendar", operation: "create", resource: "event", data: { title: "MUTATION-SENTINEL-D" } } },
+  // An approve still running (pid 1 is always alive) and one that was killed (no such pid).
+  { ...send(e.E, "DRAFT-SENTINEL-E"), status: "approved", decidedAt: "2026-09-27T12:01:00.000Z", decidedBy: "cli", queueState: "queuing", queuingBy: { pid: 1, host: e.HOST_NAME } },
+  { ...send(e.G, "DRAFT-SENTINEL-G"), status: "approved", decidedAt: "2026-09-27T12:02:00.000Z", decidedBy: "cli", queueState: "queuing", queuingBy: { pid: 999999, host: e.HOST_NAME } },
+  // Pending, but its send is already queued (a lost update): rejecting it would not stop it.
+  send(e.F, "DRAFT-SENTINEL-F"),
+  send(e.H, "DRAFT-SENTINEL-H"),
+  send(e.R, "DRAFT-SENTINEL-R"),
+];
+fs.writeFileSync(e.ACTIONS, JSON.stringify({ actions }, null, 2));
+fs.writeFileSync(e.QUEUE, JSON.stringify({ entries: [{ id: "q-f", approvalId: e.F, message: { chatId: "c1", text: "DRAFT-SENTINEL-F" }, status: "pending", attempts: 0, createdAt: "2026-09-27T12:03:00.000Z" }] }, null, 2));'
+queued_for() { node -e 'const q=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); console.log(q.entries.filter(x=>x.approvalId===process.argv[2]).length)' "${QUEUE}" "$1"; }
+action_field() { node -e 'const a=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).actions.find(x=>x.id===process.argv[2]); console.log(a?.[process.argv[3]] ?? "")' "${ACTIONS}" "$1" "$2"; }
+get() { curl -s -o "${BODY}" -w '%{http_code}' "${ADMIN[@]}" "${BASE}$1"; }
+# Reads: the list has no draft text; the detail has it.
+expect "$(get /admin/approvals)" 200 "listing approvals"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const ids=b.actions.map(a=>a.id.slice(-2)).sort().join(","); if(ids!=="0a,0b,0c,0d,0f,11,12"){console.error("pending list: "+ids);process.exit(1)}' "${BODY}" || exit 1
+grep -q 'SENTINEL' "${BODY}" && { echo "the approvals list carried draft text" >&2; exit 1; }
+expect "$(get '/admin/approvals?all=1')" 200 "listing all approvals"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(b.actions.length===9?0:1)' "${BODY}" || { echo "all=1 should list every action" >&2; exit 1; }
+expect "$(get "/admin/approvals/${A}")" 200 "showing an approval"
+grep -q 'DRAFT-SENTINEL-A' "${BODY}" || { echo "the detail should carry the draft" >&2; exit 1; }
+expect "$(get "/admin/approvals/${A:0:8}")" 200 "showing an approval by a unique 8-character prefix"
+expect "$(get "/admin/approvals/aaaaaaaa")" 404 "an 8-character prefix that matches several approvals"
+expect "$(get /admin/approvals/aaaaaaaa-0000-4000-8000-0000000000ff)" 404 "an unknown approval"
+expect "$(get /admin/approvals/..%2Fconfig)" 404 "a traversal-shaped approval id"
+expect "$(get /admin/approvals/AAAAAAAA-0000-4000-8000-00000000000A)" 404 "an uppercase approval id"
+# Writes name the deciding user.
+code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' -H 'content-type: application/json' -d '{}' "${BASE}/admin/approvals/${A}/approve")"
+expect "${code}" 400 "an approve without a user id"
+[[ "$(action_field "${A}" status)" == "pending" ]] || { echo "an approve without a user id changed the action" >&2; exit 1; }
+expect "$(post "/admin/approvals/${A}/approve" '{"force":"yes"}')" 400 "a non-boolean force"
+expect "$(post "/admin/approvals/${B}/reject" "{\"note\":\"$(printf 'x%.0s' $(seq 1 2001))\"}")" 400 "a note over 2000 characters"
+# Approve a send: decided by the Console user, queued once, audited, recorded in the transcript.
+expect "$(post "/admin/approvals/${A}/approve" '{}')" 200 "approving a send"
+grep -Eq '"outcome": ?"approved"' "${BODY}" || { echo "approve result: $(cat "${BODY}")" >&2; exit 1; }
+[[ "$(queued_for "${A}")" == "1" ]] || { echo "an approved send should be queued once" >&2; exit 1; }
+[[ "$(action_field "${A}" decidedBy)" == "console:smoke-admin" ]] || { echo "decidedBy should name the Console user" >&2; exit 1; }
+[[ "$(action_field "${A}" queueState)" == "queued" ]] || { echo "the approval should be marked queued" >&2; exit 1; }
+grep -q "\"action\":\"approval_approved\",\"approvalId\":\"${A}\"" "${DATA}/admin/audit.jsonl" || { echo "the approve was not audited" >&2; exit 1; }
+grep -rq "approval approved: connector_send ${A}.*(from the Console)" "${DATA}/transcripts" || { echo "the approve left no transcript event" >&2; exit 1; }
+expect "$(post "/admin/approvals/${A}/approve" '{}')" 409 "approving twice"
+grep -Eq '"code": ?"already_decided"' "${BODY}" || { echo "expected already_decided: $(cat "${BODY}")" >&2; exit 1; }
+[[ "$(queued_for "${A}")" == "1" ]] || { echo "a second approve added an entry" >&2; exit 1; }
+expect "$(post "/admin/approvals/${A}/reject" '{}')" 409 "rejecting an approved action"
+# Reject: nothing queued, the note kept; a second decision refused.
+expect "$(post "/admin/approvals/${B}/reject" '{"note":"not this one"}')" 200 "rejecting a send"
+[[ "$(action_field "${B}" status)" == "rejected" && "$(action_field "${B}" decisionNote)" == "not this one" ]] || { echo "the reject was not recorded" >&2; exit 1; }
+[[ "$(queued_for "${B}")" == "0" ]] || { echo "a rejected send was queued" >&2; exit 1; }
+expect "$(post "/admin/approvals/${B}/approve" '{}')" 409 "approving a rejected action"
+[[ "$(queued_for "${B}")" == "0" ]] || { echo "approving a rejected action queued it" >&2; exit 1; }
+# A pending action whose send is already queued can't be rejected as if nothing were sent.
+expect "$(post "/admin/approvals/${F}/reject" '{}')" 409 "rejecting an action whose send is queued"
+grep -Eq '"code": ?"already_queued"' "${BODY}" || { echo "expected already_queued: $(cat "${BODY}")" >&2; exit 1; }
+[[ "$(action_field "${F}" status)" == "pending" ]] || { echo "the refused reject changed the action" >&2; exit 1; }
+grep -q "\"action\":\"refused\",\"status\":409,\"reason\":\"already_queued\",\"approvalId\":\"${F}\"" "${DATA}/admin/audit.jsonl" || { echo "the refused reject was not audited" >&2; exit 1; }
+# An approve still running is never repaired; a killed one is, once.
+expect "$(post "/admin/approvals/${E}/approve" '{}')" 409 "repairing an approve that is still running"
+grep -Eq '"code": ?"approve_running"' "${BODY}" || { echo "expected approve_running: $(cat "${BODY}")" >&2; exit 1; }
+[[ "$(queued_for "${E}")" == "0" ]] || { echo "a running approve was repaired" >&2; exit 1; }
+expect "$(post "/admin/approvals/${G}/approve" '{}')" 200 "completing a killed approve"
+grep -Eq '"outcome": ?"requeued"' "${BODY}" || { echo "expected requeued: $(cat "${BODY}")" >&2; exit 1; }
+[[ "$(queued_for "${G}")" == "1" ]] || { echo "a killed approve should be queued once" >&2; exit 1; }
+expect "$(post "/admin/approvals/${G}/approve" '{}')" 409 "completing it again"
+[[ "$(queued_for "${G}")" == "1" ]] || { echo "a repaired approve was queued twice" >&2; exit 1; }
+# A memory write: an existing file needs force.
+printf 'OLD\n' > "${DATA}/memory/notes/uat.md"
+expect "$(post "/admin/approvals/${C}/approve" '{}')" 409 "a memory write over an existing file"
+grep -Eq '"code": ?"memory_exists"' "${BODY}" || { echo "expected memory_exists: $(cat "${BODY}")" >&2; exit 1; }
+grep -q "$(basename "${TEMP_RUNTIME}")" "${BODY}" && { echo "a refusal showed a host path: $(cat "${BODY}")" >&2; exit 1; }
+grep -q 'notes/uat.md' "${BODY}" || { echo "the refusal should name the memory file: $(cat "${BODY}")" >&2; exit 1; }
+[[ "$(action_field "${C}" status)" == "pending" && "$(cat "${DATA}/memory/notes/uat.md")" == "OLD" ]] || { echo "a refused memory write changed something" >&2; exit 1; }
+expect "$(post "/admin/approvals/${C}/approve" '{"force":true}')" 200 "a memory write with force"
+[[ "$(cat "${DATA}/memory/notes/uat.md")" == "MEMORY-SENTINEL-C" ]] || { echo "the memory file was not written" >&2; exit 1; }
+grep -q "$(basename "${TEMP_RUNTIME}")" "${BODY}" && { echo "the approve result showed a host path" >&2; exit 1; }
+# A mutation goes to its own connector's queue.
+expect "$(post "/admin/approvals/${D}/approve" '{}')" 200 "approving a mutation"
+node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).result; process.exit(r.kind==="connector_mutation"&&r.connectorId==="calendar"?0:1)' "${BODY}" || { echo "mutation result: $(cat "${BODY}")" >&2; exit 1; }
+node -e 'const q=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(q.entries.filter(x=>x.approvalId===process.argv[2]).length===1?0:1)' "${DATA}/connectors/calendar/queue.json" "${D}" || { echo "the mutation was not queued on the calendar queue" >&2; exit 1; }
+# A locked queue: the approve is undone and the action is pending again.
+printf 'held-by-smoke' > "${QUEUE}.lock"
+( for _ in $(seq 1 16); do touch "${QUEUE}.lock" 2>/dev/null; sleep 0.5; done ) &
+toucher_pid=$!
+expect "$(post "/admin/approvals/${H}/approve" '{}')" 409 "approving while the queue is locked"
+grep -q 'pending again' "${BODY}" || { echo "the locked-queue refusal should say the action is pending again: $(cat "${BODY}")" >&2; exit 1; }
+grep -q "$(basename "${TEMP_RUNTIME}")" "${BODY}" && { echo "a refusal showed a host path: $(cat "${BODY}")" >&2; exit 1; }
+kill "${toucher_pid}" 2>/dev/null || true; wait "${toucher_pid}" 2>/dev/null || true; rm -f "${QUEUE}.lock"
+[[ "$(action_field "${H}" status)" == "pending" && "$(queued_for "${H}")" == "0" ]] || { echo "a failed approve left the action decided or queued" >&2; exit 1; }
+# The CLI and the Console approving the same action at once: one decision, one entry.
+node "${PROJECT_ROOT}/packages/mindstone-cli/dist/index.js" approvals approve "${R}" --yes >"${TEMP_RUNTIME}/race-cli.log" 2>&1 &
+cli_pid=$!
+console_code="$(post "/admin/approvals/${R}/approve" '{}')"
+cli_rc=0; wait "${cli_pid}" || cli_rc=$?
+[[ "$(queued_for "${R}")" == "1" ]] || { echo "the CLI and the Console together queued $(queued_for "${R}") entries" >&2; exit 1; }
+if [[ "${console_code}" == "200" ]]; then [[ "${cli_rc}" != "0" ]] || { echo "both the CLI and the Console reported approving" >&2; exit 1; }; else [[ "${cli_rc}" == "0" && "${console_code}" == "409" ]] || { echo "one of the CLI (rc ${cli_rc}) and the Console (${console_code}) should have approved" >&2; exit 1; }; fi
+# A decision that lands between the check and the approve (another process) is a refusal, not a crash.
+PROJECT_ROOT="${PROJECT_ROOT}" MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}" ID="$(id 13)" node --input-type=module -e '
+const core = await import(process.env.PROJECT_ROOT + "/packages/mindstone-core/dist/index.js");
+const store = new core.ApprovalStore();
+const action = store.propose({ kind: "connector_send", connectorId: "email", summary: "race", send: { chatId: "c1", text: "RACE" } });
+const check = core.checkApprovable(store, action.id);
+store.decide(action.id, { status: "rejected", decidedBy: "other" });
+try {
+  core.approveProposedAction(store, check, { decidedBy: "console:x", memoryDir: "/nonexistent" });
+  console.error("an approve after a concurrent reject went through"); process.exit(1);
+} catch (error) {
+  if (!(error instanceof core.ApprovalActionError) || error.code !== "already_decided" || error.status !== 409) { console.error("expected already_decided 409, got " + error); process.exit(1); }
+}
+// A decision that fails to save (the store is read-only) is a failure, not "already decided".
+const fs = await import("node:fs");
+const other = store.propose({ kind: "connector_send", connectorId: "email", summary: "io", send: { chatId: "c1", text: "IO" } });
+const ioCheck = core.checkApprovable(store, other.id);
+const dir = process.env.MINDSTONE_AGENT_RUNTIME_DIR + "/mindstone/approvals";
+fs.chmodSync(dir, 0o555);
+try {
+  core.approveProposedAction(store, ioCheck, { decidedBy: "console:x", memoryDir: "/nonexistent" });
+  console.error("an approve with a read-only store went through"); process.exit(1);
+} catch (error) {
+  if (error instanceof core.ApprovalActionError) { console.error("an I/O failure was reported as a refusal: " + error.code); process.exit(1); }
+} finally {
+  fs.chmodSync(dir, 0o700);
+}' || exit 1
+echo "approvals assertions passed"
+# 7. Stored secrets, listed and deleted (#88): names only, and deletes under
 #    the same guards as replacing a secret.
 SECRETS="${TEMP_RUNTIME}/mindstone/secrets"
 get() { curl -s -o "${BODY}" -w '%{http_code}' "${ADMIN[@]}" "${BASE}$1"; }
@@ -647,7 +785,7 @@ rm -f "${SECRETS}/lnk"; rmdir "${SECRETS}/adir"
 printf '{"advancedSettings":false}\n' > "${PERMS}"
 echo "secrets list and delete assertions passed"
 
-# 7. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
+# 8. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
 #    token files resolve under the data dir, as the connectors read them, not
 #    next to the config file (#75 review A, tested end to end per #78).
 stop_gateway
