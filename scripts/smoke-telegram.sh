@@ -243,6 +243,33 @@ kill "${gateway_pid}" >/dev/null 2>&1 || true
 wait "${gateway_pid}" >/dev/null 2>&1 || true
 unset gateway_pid
 
+# --- 4. A malformed API base URL: the fetch error quotes the URL, which holds
+#        the token; the stored error and the log must not (#95).
+node <<'NODE'
+const { readFileSync, writeFileSync } = require("node:fs");
+const configPath = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone/config.json`;
+const config = JSON.parse(readFileSync(configPath, "utf8"));
+config.channels.telegram.apiBaseUrl = "api.telegram-smoke.invalid";
+writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+NODE
+rm -f "${RUNTIME_DATA}/connectors/telegram/status.json"
+TELEGRAM_SMOKE_TOKEN="123456:SENTINEL-TG-TOKEN-95" ./scripts/start-gateway.sh >/tmp/mindstone-agent-telegram-gateway3.log 2>&1 &
+gateway_pid=$!
+wait_for_status "${RUNTIME_DATA}/connectors/telegram/status.json" '"state": "error"'
+grep -q '"lastError"' "${RUNTIME_DATA}/connectors/telegram/status.json" || { echo "the malformed URL should leave an error" >&2; exit 1; }
+if grep -q 'SENTINEL-TG-TOKEN-95' "${RUNTIME_DATA}/connectors/telegram/status.json"; then
+  echo "the connector's stored error contains the bot token: $(cat "${RUNTIME_DATA}/connectors/telegram/status.json")" >&2
+  exit 1
+fi
+grep -q 'bot\*\*\*' "${RUNTIME_DATA}/connectors/telegram/status.json" || { echo "the error should keep its shape with the token masked: $(cat "${RUNTIME_DATA}/connectors/telegram/status.json")" >&2; exit 1; }
+kill "${gateway_pid}" >/dev/null 2>&1 || true
+wait "${gateway_pid}" >/dev/null 2>&1 || true
+unset gateway_pid
+if grep -q 'SENTINEL-TG-TOKEN-95' /tmp/mindstone-agent-telegram-gateway3.log; then
+  echo "the gateway log contains the bot token" >&2
+  exit 1
+fi
+
 # Doctor + status surface the telegram connector without leaking the token.
 DOCTOR_OUT="$(./scripts/mindstone doctor 2>&1 || true)"
 grep -q "connectors.catalog" <<<"${DOCTOR_OUT}"
