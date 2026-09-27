@@ -1,4 +1,4 @@
-import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
@@ -22,6 +22,10 @@ export type ConnectorQueueEntry = {
   enqueuedAt?: string;
   lastError?: string;
   deliveredAt?: string;
+  /** Epoch ms before which a failed entry isn't retried (exponential backoff). */
+  nextAttemptAt?: number;
+  /** The approved action this entry sends, so an interrupted approve can be completed (#77 review). */
+  approvalId?: string;
 };
 
 type QueueFile = {
@@ -35,7 +39,14 @@ export type ConnectorQueueStatus = {
   dead: number;
 };
 
-const DEFAULT_MAX_ATTEMPTS = 3;
+// With backoff doubling from RETRY_BASE_MS, eight attempts span about four
+// minutes, so a short outage no longer dead-letters replies in milliseconds
+// (#77 review).
+const DEFAULT_MAX_ATTEMPTS = 8;
+const RETRY_BASE_MS = 2_000;
+const RETRY_MAX_MS = 5 * 60_000;
+/** Delivered entries kept for status and history; older ones are pruned. */
+const DELIVERED_KEEP = 500;
 /**
  * A lock older than this is from a crashed writer and is broken. The critical
  * section is a synchronous read and write of one small file, so 2 s is far
@@ -70,22 +81,67 @@ export class ConnectorDeliveryQueue {
     return this.#path;
   }
 
+  /**
+   * The queue file. A missing file is an empty queue. Any other read error
+   * throws, so a write never replaces a queue it couldn't read (#77 review:
+   * EACCES or a truncated file used to read as empty and the next write
+   * wiped every entry). A file that reads but doesn't parse is moved aside
+   * as queue.json.corrupt-<time> for recovery, then this throws.
+   */
   #read(): QueueFile {
-    if (!existsSync(this.#path)) return { entries: [] };
+    let raw: string;
     try {
-      const parsed = JSON.parse(readFileSync(this.#path, "utf-8"));
+      raw = readFileSync(this.#path, "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { entries: [] };
+      throw error;
+    }
+    try {
+      const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object" && Array.isArray((parsed as QueueFile).entries)) return parsed as QueueFile;
     } catch {
-      // fall through — a corrupt queue file is replaced, not fatal
+      // Handled below.
     }
-    return { entries: [] };
+    const aside = `${this.#path}.corrupt-${Date.now()}`;
+    try {
+      renameSync(this.#path, aside);
+    } catch {
+      // Leave it; the throw below still stops the write.
+    }
+    throw new Error(`connector queue ${this.#path} was unreadable and was moved aside to ${aside}`);
+  }
+
+  /** Read for status and listing: an unreadable queue shows as empty, and nothing is written. */
+  #readForListing(): QueueFile {
+    try {
+      return this.#read();
+    } catch {
+      return { entries: [] };
+    }
   }
 
   #write(file: QueueFile): void {
     mkdirSync(dirname(this.#path), { recursive: true });
     const temp = `${this.#path}.tmp-${randomUUID().slice(0, 8)}`;
-    writeFileSync(temp, `${JSON.stringify(file, null, 2)}\n`);
+    const fd = openSync(temp, "w");
+    try {
+      writeFileSync(fd, `${JSON.stringify(file, null, 2)}\n`);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(temp, this.#path);
+    // Make the rename itself durable.
+    try {
+      const dirFd = openSync(dirname(this.#path), "r");
+      try {
+        fsyncSync(dirFd);
+      } finally {
+        closeSync(dirFd);
+      }
+    } catch {
+      // Some filesystems don't allow fsync on a directory.
+    }
   }
 
   /**
@@ -165,7 +221,10 @@ export class ConnectorDeliveryQueue {
     }
   }
 
-  enqueue(message: ConnectorOutboundMessage, options: { maxAttempts?: number; now?: string } = {}): ConnectorQueueEntry {
+  enqueue(
+    message: ConnectorOutboundMessage,
+    options: { maxAttempts?: number; now?: string; approvalId?: string } = {},
+  ): ConnectorQueueEntry {
     const entry: ConnectorQueueEntry = {
       id: randomUUID(),
       connectorId: this.connectorId,
@@ -174,6 +233,7 @@ export class ConnectorDeliveryQueue {
       attempts: 0,
       maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
       enqueuedAt: options.now,
+      ...(options.approvalId ? { approvalId: options.approvalId } : {}),
     };
     this.#mutate((file) => {
       file.entries.push(entry);
@@ -182,7 +242,12 @@ export class ConnectorDeliveryQueue {
   }
 
   pending(): ConnectorQueueEntry[] {
-    return this.#read().entries.filter((entry) => entry.status === "pending");
+    return this.#readForListing().entries.filter((entry) => entry.status === "pending");
+  }
+
+  /** Whether any entry (pending, delivered or dead) sends this approved action. */
+  hasApproval(approvalId: string): boolean {
+    return this.#read().entries.some((entry) => entry.approvalId === approvalId);
   }
 
   /**
@@ -223,6 +288,8 @@ export class ConnectorDeliveryQueue {
       const claimed = this.#mutate((file) => {
         const entry = file.entries.find((candidate) => candidate.id === id);
         if (!entry || entry.status !== "pending") return undefined;
+        // Still backing off after a failure: a later drain retries it.
+        if (entry.nextAttemptAt !== undefined && entry.nextAttemptAt > Date.now()) return undefined;
         entry.attempts += 1;
         return { ...entry };
       });
@@ -240,16 +307,27 @@ export class ConnectorDeliveryQueue {
           entry.status = "delivered";
           entry.deliveredAt = options.now;
           entry.lastError = undefined;
+          entry.nextAttemptAt = undefined;
         } else {
           entry.lastError = error instanceof Error ? error.message : String(error);
-          if (entry.attempts >= entry.maxAttempts) entry.status = "dead";
+          if (entry.attempts >= entry.maxAttempts) {
+            entry.status = "dead";
+          } else {
+            entry.nextAttemptAt = Date.now() + Math.min(RETRY_BASE_MS * 2 ** (entry.attempts - 1), RETRY_MAX_MS);
+          }
+        }
+        // Keep the file bounded: drop the oldest delivered entries.
+        const delivered = file.entries.filter((candidate) => candidate.status === "delivered");
+        if (delivered.length > DELIVERED_KEEP) {
+          const drop = new Set(delivered.slice(0, delivered.length - DELIVERED_KEEP).map((candidate) => candidate.id));
+          file.entries = file.entries.filter((candidate) => !drop.has(candidate.id));
         }
       });
     }
   }
 
   status(): ConnectorQueueStatus {
-    const file = this.#read();
+    const file = this.#readForListing();
     return {
       connectorId: this.connectorId,
       pending: file.entries.filter((entry) => entry.status === "pending").length,
@@ -259,6 +337,6 @@ export class ConnectorDeliveryQueue {
   }
 
   deadLetters(): ConnectorQueueEntry[] {
-    return this.#read().entries.filter((entry) => entry.status === "dead");
+    return this.#readForListing().entries.filter((entry) => entry.status === "dead");
   }
 }

@@ -1985,6 +1985,31 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
   }
 
   if (subcommand === "approve") {
+    // An approve interrupted after the decision but before the send was
+    // queued (a killed process, #77 review) leaves the action approved with
+    // nothing queued. Approving it again completes it: queued once, found by
+    // its approval id.
+    const repairQueue = action.status === "approved"
+      ? action.kind === "connector_send" && action.send
+        ? action.connectorId
+        : action.kind === "connector_mutation" && action.mutation
+          ? action.mutation.connectorId
+          : undefined
+      : undefined;
+    if (repairQueue && !new ConnectorDeliveryQueue(repairQueue).hasApproval(action.id)) {
+      const queue = new ConnectorDeliveryQueue(repairQueue);
+      if (action.kind === "connector_send" && action.send) {
+        queue.enqueue(action.send, { now: new Date().toISOString(), approvalId: action.id });
+      } else if (action.mutation) {
+        queue.enqueue(
+          { text: action.summary, metadata: { kind: "connector_mutation", mutation: action.mutation } },
+          { now: new Date().toISOString(), approvalId: action.id },
+        );
+      }
+      appendApprovalAuditEvent(action, "approved", `enqueued via ${repairQueue} (completing an earlier approval that was never queued)`);
+      output.write(`${gold("Queued")} — ${action.id} was approved earlier but never queued; it is queued now.\n`);
+      return;
+    }
     if (action.status !== "pending") throw new Error(`action ${action.id} is already ${action.status}`);
     if (!hasOption(argv, "--yes")) {
       if (!input.isTTY || !output.isTTY) throw new Error("Refusing non-interactive approve without --yes");
@@ -2027,7 +2052,9 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
     };
     if (action.kind === "connector_send" && action.send) {
       const send = action.send;
-      approveThenEnqueue(() => new ConnectorDeliveryQueue(action.connectorId).enqueue(send, { now: new Date().toISOString() }));
+      approveThenEnqueue(() =>
+        new ConnectorDeliveryQueue(action.connectorId).enqueue(send, { now: new Date().toISOString(), approvalId: action.id }),
+      );
       appendApprovalAuditEvent(action, "approved", `enqueued for delivery via ${action.connectorId}`);
       output.write(`${gold("Approved")} — draft enqueued for delivery via ${action.connectorId}.\n`);
       output.write("A running Gateway delivers it within seconds; a stopped one on next start.\n");
@@ -2038,7 +2065,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       approveThenEnqueue(() =>
         new ConnectorDeliveryQueue(mutation.connectorId).enqueue(
           { text: action.summary, metadata: { kind: "connector_mutation", mutation } },
-          { now: new Date().toISOString() },
+          { now: new Date().toISOString(), approvalId: action.id },
         ),
       );
       appendApprovalAuditEvent(action, "approved", `mutation enqueued for apply via ${action.mutation.connectorId}`);

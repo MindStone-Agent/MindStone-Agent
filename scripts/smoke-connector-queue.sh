@@ -136,6 +136,39 @@ for (let n = 0; n < 300; n += 1) q.enqueue({ text: process.argv[2] + "-" + n });
   const kept = new ConnectorDeliveryQueue("unit-stress").pending().length;
   assert.equal(kept, 900, `three processes enqueued 900 entries; ${kept} were kept`);
 }
+// 3e. An unreadable or corrupt queue file is never replaced by a write (#77 review).
+{
+  const { chmodSync, readdirSync, writeFileSync: write } = await import("node:fs");
+  const queue = new ConnectorDeliveryQueue("unit-unreadable");
+  for (let n = 0; n < 5; n += 1) queue.enqueue({ text: `keep-${n}` });
+  chmodSync(queue.path, 0o000);
+  assert.throws(() => queue.enqueue({ text: "late" }));
+  chmodSync(queue.path, 0o600);
+  assert.equal(queue.pending().length, 5, "an unreadable queue was overwritten");
+  const corrupt = new ConnectorDeliveryQueue("unit-corrupt");
+  corrupt.enqueue({ text: "one" });
+  write(corrupt.path, '{"entries": [');
+  assert.throws(() => corrupt.enqueue({ text: "two" }), /moved aside/);
+  assert.ok(readdirSync(dirname(corrupt.path)).some((name) => name.startsWith("queue.json.corrupt-")), "the corrupt file was not kept");
+}
+// 3f. A failed delivery backs off instead of retrying at once; delivered entries are pruned.
+{
+  const queue = new ConnectorDeliveryQueue("unit-backoff");
+  queue.enqueue({ text: "flaky" });
+  let calls = 0;
+  const failing = async () => {
+    calls += 1;
+    throw new Error("connector down");
+  };
+  await queue.drain(failing);
+  await queue.drain(failing);
+  assert.equal(calls, 1, `a failed entry was retried with no backoff (${calls} attempts)`);
+  assert.equal(queue.pending().length, 1, "a failed entry must stay pending, not dead, after one failure");
+  const big = new ConnectorDeliveryQueue("unit-prune");
+  for (let n = 0; n < 510; n += 1) big.enqueue({ text: `d-${n}` });
+  await big.drain(async () => {});
+  assert.ok(big.status().delivered <= 500, `delivered entries are not pruned (${big.status().delivered})`);
+}
 console.log("queue unit assertions passed");
 TS
 
@@ -173,6 +206,31 @@ ${MS} approvals approve "${LOCKED_ID}" --yes >/dev/null
 [[ "$(queued SYNTHETIC-DRAFT-LOCKED)" == "1" ]] || { echo "the re-approved draft should be queued once" >&2; exit 1; }
 [[ "$(status_of "${LOCKED_ID}")" == "approved" ]] || { echo "the re-approval should stand" >&2; exit 1; }
 
+# An approve killed after the decision but before the send was queued leaves
+# it approved and unqueued; approving again queues it, exactly once (#77 review).
+KILLED_ID="$(propose SYNTHETIC-DRAFT-KILLED)"
+printf 'held-by-smoke' > "${QUEUE_LOCK}"
+( for _ in $(seq 1 12); do touch "${QUEUE_LOCK}" 2>/dev/null; sleep 0.5; done ) &
+toucher_pid=$!
+node "${PROJECT_ROOT}/packages/mindstone-cli/dist/index.js" approvals approve "${KILLED_ID}" --yes >/dev/null 2>&1 &
+approve_pid=$!
+sleep 1.5
+kill -INT "${approve_pid}" 2>/dev/null || true
+wait "${approve_pid}" 2>/dev/null || true
+kill "${toucher_pid}" 2>/dev/null || true; wait "${toucher_pid}" 2>/dev/null || true
+rm -f "${QUEUE_LOCK}"
+[[ "$(queued SYNTHETIC-DRAFT-KILLED)" == "0" ]] || { echo "the killed approve should not have queued anything" >&2; exit 1; }
+if [[ "$(status_of "${KILLED_ID}")" == "approved" ]]; then
+  ${MS} approvals approve "${KILLED_ID}" --yes >/dev/null
+  [[ "$(queued SYNTHETIC-DRAFT-KILLED)" == "1" ]] || { echo "re-approving an approved but unqueued action should queue it once" >&2; exit 1; }
+  if ${MS} approvals approve "${KILLED_ID}" --yes >/dev/null 2>&1; then
+    echo "a third approve of a queued action should be refused" >&2; exit 1
+  fi
+  [[ "$(queued SYNTHETIC-DRAFT-KILLED)" == "1" ]] || { echo "the action was queued twice" >&2; exit 1; }
+else
+  echo "the killed approve did not get past the decision (status $(status_of "${KILLED_ID}")); the repair path was not exercised" >&2; exit 1
+fi
+
 # Rejected while the confirm prompt is open: approving must not queue it.
 command -v expect >/dev/null || { echo "smoke-connector-queue needs expect (install the expect package)" >&2; exit 1; }
 RACE_ID="$(propose SYNTHETIC-DRAFT-RACE)"
@@ -180,7 +238,7 @@ cat > "${TEMP_RUNTIME}/approve-race.exp" <<EXP
 set timeout 60
 spawn ${MS} approvals approve ${RACE_ID}
 expect "Approve this action now?"
-exec ${MS} approvals reject ${RACE_ID} --note owner-said-no
+exec -ignorestderr ${MS} approvals reject ${RACE_ID} --note owner-said-no
 # The confirm is an arrow-key list that starts on "No": up to "Yes", then Enter.
 send "\033\[A"
 sleep 0.3
@@ -217,7 +275,7 @@ config.channels = { loopback: { enabled: true, allowedSenders: ["clint"], pollMs
 writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
 NODE
 
-./scripts/start-gateway.sh >/tmp/mindstone-agent-connector-queue-gateway.log 2>&1 &
+./scripts/start-gateway.sh >${TEMP_RUNTIME}/gateway.log 2>&1 &
 gateway_pid=$!
 for _ in $(seq 1 20); do
   curl -s "http://127.0.0.1:${GATEWAY_PORT}/health" >/dev/null 2>&1 && break
@@ -239,7 +297,7 @@ for _ in $(seq 1 60); do
   grep -q '"inReplyToMessageId":"ok1"' "${OUTBOX}" 2>/dev/null && break
   sleep 0.25
 done
-grep -q '"inReplyToMessageId":"ok1"' "${OUTBOX}" || { echo "control reply never arrived" >&2; tail -30 /tmp/mindstone-agent-connector-queue-gateway.log >&2; exit 1; }
+grep -q '"inReplyToMessageId":"ok1"' "${OUTBOX}" || { echo "control reply never arrived" >&2; tail -30 ${TEMP_RUNTIME}/gateway.log >&2; exit 1; }
 sleep 1
 lines="$(grep -c . "${OUTBOX}")"
 if [[ "${lines}" -ne 1 ]]; then
