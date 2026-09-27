@@ -191,6 +191,8 @@ wait_for_status() {
 printf '%s\n' '{"messageId":"m1","text":"hello agent","senderId":"clint","chatId":"dm-clint","chatType":"direct"}' >> "${INBOX}"
 wait_for_outbox_lines 1
 grep -q '"inReplyToMessageId":"m1"' "${OUTBOX}"
+# The reply goes back to the chat it answers (#63).
+grep '"inReplyToMessageId":"m1"' "${OUTBOX}" | grep -q '"chatId":"dm-clint"'
 grep -q 'Mock response' "${OUTBOX}"
 
 # Disallowed sender -> denied (fail closed), outbox does NOT grow.
@@ -202,6 +204,7 @@ printf '%s\n' '{"messageId":"m4","text":"!ms status please","senderId":"clint","
 wait_for_outbox_lines 2
 test "$(grep -c . "${OUTBOX}")" -eq 2
 grep -q '"inReplyToMessageId":"m4"' "${OUTBOX}"
+grep '"inReplyToMessageId":"m4"' "${OUTBOX}" | grep -q '"chatId":"ops"'
 
 # Denial is counted in runtime status; the listener is still running.
 STATUS_FILE="${RUNTIME_DATA}/connectors/loopback/status.json"

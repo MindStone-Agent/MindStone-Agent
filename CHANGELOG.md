@@ -6,6 +6,13 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 
 ## [Unreleased]
 
+### Fixed
+- **Connector replies are no longer lost, sent twice, or replaced by error text** (#63).
+  - A reply queued while the queue was being drained could be overwritten and never sent. Every queue change is now a locked read-change-write, including enqueues from the CLI when an approved send is released.
+  - The per-message drain and the periodic drain could both send the same reply. Only one drain per queue runs at a time; a drain asked for while one is running makes it do one more pass.
+  - When a run failed, its error text (for example "model not available") was posted into the chat, including group chats. A failed run now posts nothing; the failure stays in the transcript and the connector's runtime status.
+  - An empty reply still posts nothing, now covered by a test, and the connector smoke checks that replies go to the chat they answer.
+
 ### Security
 - **Memory backfill keeps tenants apart and keeps non-owner turns out of the owner's recall** (#62).
   - Before this fix, `memory backfill` indexed every transcript with no labels. One App Engine tenant's run could surface in another tenant's recall, and a stranger's channel message could come back as the owner's memory.

@@ -61,6 +61,7 @@
     "smoke:connector": "./scripts/smoke-connector.sh",
     "smoke:channel-trust": "./scripts/smoke-channel-trust.sh",
     "smoke:backfill-scope": "./scripts/smoke-backfill-scope.sh",
+    "smoke:connector-queue": "./scripts/smoke-connector-queue.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",
     "smoke:reset": "./scripts/smoke-reset.sh",
     "smoke:auto-recall": "./scripts/smoke-auto-recall.sh",

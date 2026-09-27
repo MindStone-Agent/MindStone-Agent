@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
@@ -36,6 +36,16 @@ export type ConnectorQueueStatus = {
 };
 
 const DEFAULT_MAX_ATTEMPTS = 3;
+/** A lock older than this is from a crashed writer and is broken. */
+const STALE_LOCK_MS = 10_000;
+const LOCK_WAIT_MS = 5_000;
+
+/** One drain per queue file in this process; a drain requested mid-drain runs once more after it (#63). */
+const drainsInFlight = new Map<string, { promise: Promise<ConnectorQueueStatus>; again: boolean }>();
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 export function connectorDataDir(connectorId: string, paths?: MindStoneRuntimePaths): string {
   const resolved = paths ?? runtimePathsFromEnv();
@@ -73,8 +83,47 @@ export class ConnectorDeliveryQueue {
     renameSync(temp, this.#path);
   }
 
+  /**
+   * Read, change and write the queue file under an exclusive lock file, so a
+   * write from another process (the CLI enqueues approved sends) is never
+   * overwritten by a stale copy (#63). Synchronous, so nothing in this
+   * process interleaves with it either.
+   */
+  #mutate<T>(change: (file: QueueFile) => T): T {
+    mkdirSync(dirname(this.#path), { recursive: true });
+    const lockPath = `${this.#path}.lock`;
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    let fd: number | undefined;
+    while (fd === undefined) {
+      try {
+        fd = openSync(lockPath, "wx");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        try {
+          if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS) unlinkSync(lockPath);
+        } catch {
+          // The holder released it meanwhile; retry.
+        }
+        if (Date.now() > deadline) throw new Error(`connector queue ${this.#path} is locked`);
+        sleepSync(5);
+      }
+    }
+    try {
+      const file = this.#read();
+      const result = change(file);
+      this.#write(file);
+      return result;
+    } finally {
+      closeSync(fd);
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+
   enqueue(message: ConnectorOutboundMessage, options: { maxAttempts?: number; now?: string } = {}): ConnectorQueueEntry {
-    const file = this.#read();
     const entry: ConnectorQueueEntry = {
       id: randomUUID(),
       connectorId: this.connectorId,
@@ -84,8 +133,9 @@ export class ConnectorDeliveryQueue {
       maxAttempts: options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
       enqueuedAt: options.now,
     };
-    file.entries.push(entry);
-    this.#write(file);
+    this.#mutate((file) => {
+      file.entries.push(entry);
+    });
     return entry;
   }
 
@@ -97,24 +147,63 @@ export class ConnectorDeliveryQueue {
    * Attempt delivery of every pending entry through `deliver`. A throwing
    * delivery increments attempts; entries exceeding maxAttempts dead-letter
    * with the last error preserved.
+   *
+   * Only one drain per queue runs at a time in this process; a drain asked
+   * for while one is running makes it do one more pass, so an entry enqueued
+   * mid-drain still goes out promptly and nothing is sent twice (#63). Each
+   * entry is claimed (attempts counted) before its send and settled after it
+   * with a fresh read, so a concurrent enqueue is never lost.
    */
   async drain(deliver: (entry: ConnectorQueueEntry) => Promise<void>, options: { now?: string } = {}): Promise<ConnectorQueueStatus> {
-    const file = this.#read();
-    for (const entry of file.entries) {
-      if (entry.status !== "pending") continue;
-      entry.attempts += 1;
-      try {
-        await deliver(entry);
-        entry.status = "delivered";
-        entry.deliveredAt = options.now;
-        entry.lastError = undefined;
-      } catch (error) {
-        entry.lastError = error instanceof Error ? error.message : String(error);
-        if (entry.attempts >= entry.maxAttempts) entry.status = "dead";
-      }
+    const running = drainsInFlight.get(this.#path);
+    if (running) {
+      running.again = true;
+      return running.promise;
     }
-    this.#write(file);
-    return this.status();
+    const state = { promise: undefined as unknown as Promise<ConnectorQueueStatus>, again: false };
+    state.promise = (async () => {
+      try {
+        do {
+          state.again = false;
+          await this.#drainOnce(deliver, options);
+        } while (state.again);
+        return this.status();
+      } finally {
+        drainsInFlight.delete(this.#path);
+      }
+    })();
+    drainsInFlight.set(this.#path, state);
+    return state.promise;
+  }
+
+  async #drainOnce(deliver: (entry: ConnectorQueueEntry) => Promise<void>, options: { now?: string }): Promise<void> {
+    for (const { id } of this.pending()) {
+      const claimed = this.#mutate((file) => {
+        const entry = file.entries.find((candidate) => candidate.id === id);
+        if (!entry || entry.status !== "pending") return undefined;
+        entry.attempts += 1;
+        return { ...entry };
+      });
+      if (!claimed) continue;
+      let error: unknown;
+      try {
+        await deliver(claimed);
+      } catch (caught) {
+        error = caught ?? new Error("delivery failed");
+      }
+      this.#mutate((file) => {
+        const entry = file.entries.find((candidate) => candidate.id === id);
+        if (!entry) return;
+        if (error === undefined) {
+          entry.status = "delivered";
+          entry.deliveredAt = options.now;
+          entry.lastError = undefined;
+        } else {
+          entry.lastError = error instanceof Error ? error.message : String(error);
+          if (entry.attempts >= entry.maxAttempts) entry.status = "dead";
+        }
+      });
+    }
   }
 
   status(): ConnectorQueueStatus {

@@ -2122,6 +2122,21 @@ async function handleConnectorInbound(params: {
     metadata: { connector: connectorId },
   });
   if (!routed.routed) return;
+  if (routed.status !== 200) {
+    // A failed run's text is an internal error, never a reply: it goes to the
+    // runtime status (and the transcript already holds routing_failed), not
+    // into the chat, which may be a shared group (#63).
+    const error = (routed.body as { error?: unknown } | undefined)?.error;
+    writeConnectorRuntimeStatus({
+      connectorId,
+      state: "running",
+      lastError: `run failed for an inbound message (status ${routed.status}): ${typeof error === "string" ? error : "unknown error"}`,
+      inboundCount: running.inboundCount,
+      deniedCount: running.deniedCount,
+      updatedAt: new Date().toISOString(),
+    });
+    return;
+  }
   const body = routed.body as { entry?: { text?: string } } | undefined;
   // Proposal blocks (memory writes, mutations) are already extracted into
   // pending ProposedActions by the core chat turn (issues #21/#22) — the
