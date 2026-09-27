@@ -7,6 +7,9 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ## [Unreleased]
 
 ### Security
+- **App Engine runs scoped to an app, tenant or user no longer get the owner's context** (#70). Such runs went through as the owner, so a tenant's run carried the owner's `USER.md`, the memory index and owner-only invariants. They now get the non-owner treatment: no `USER.md`, memory index, owner-only invariants or handoff, and in `pi-session` none of the owner's Pi resources. They keep their own scoped recall and rules marked `invariant_audience: all`. An App Engine run scoped only to the agent is still the owner's. Whether a tenant run may recall the owner's unscoped memory is the open App Engine scope decision and is unchanged here.
+
+### Security
 - **Memory backfill keeps tenants apart and keeps non-owner turns out of the owner's recall** (#62).
   - Before this fix, `memory backfill` indexed every transcript with no labels. One App Engine tenant's run could surface in another tenant's recall, and a stranger's channel message could come back as the owner's memory.
   - Indexed transcript chunks now carry their surface, chat type, sender, audience and, for App Engine runs, the run's scope, taken from the entry itself, else its run, else the turn it follows (one scoped run in a session no longer affects the rest of it). A scoped run, reply included, is recalled only by a run whose recall scope matches every part of it, never by the owner's own recall. Scope is applied in the recall query itself, before ranking and before the candidate limit, so one tenant's volume can't crowd others out. App Engine runs at the tenant, app or user sharing level don't recall their own transcripts yet (their recall scope leaves out the agent id); that is part of the open App Engine scope decision.

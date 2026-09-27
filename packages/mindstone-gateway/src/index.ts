@@ -388,6 +388,15 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
 }
 
 /**
+ * Who a route answers (#61, #70). "owner": the owner's own surfaces and
+ * verified direct messages. "non_owner": group/channel turns, other senders,
+ * unverified senders. "tenant": an App Engine run scoped to an app, tenant or
+ * user; it gets the non-owner treatment for the owner's context (no USER.md,
+ * memory index, private invariants or handoff) but keeps its scoped recall.
+ */
+type RouteAudience = "owner" | "non_owner" | "tenant";
+
+/**
  * PiSessionAgentRunner options for one turn. A non-owner turn gets none of
  * the owner's Pi resources (#61): no installed or extra extensions (the
  * MindStone adapter injects USER.md, recall and memory tools), skills, prompt
@@ -397,7 +406,7 @@ function resolveProvider(config: MindStoneConfig | undefined): MindStoneModelPro
  */
 export function piSessionRunnerOptions(
   config: MindStoneConfig | undefined,
-  audience: "owner" | "non_owner",
+  audience: RouteAudience,
 ): ConstructorParameters<typeof PiSessionAgentRunner>[0] {
   const paths = runtimePathsFromEnv();
   const options: ConstructorParameters<typeof PiSessionAgentRunner>[0] = {
@@ -437,7 +446,7 @@ export function piSessionRunnerOptions(
 function resolveRunner(
   config: MindStoneConfig | undefined,
   provider: MindStoneModelProvider,
-  audience: "owner" | "non_owner" = "owner",
+  audience: RouteAudience = "owner",
 ): AgentRunner {
   if (resolveRoutingMode(config) === "pi-session") return new PiSessionAgentRunner(piSessionRunnerOptions(config, audience));
   void provider;
@@ -777,7 +786,7 @@ function loadRouteIdentityContext(input: {
 /** A non-owner turn keeps the agent's IDENTITY.md but not the owner's USER.md (#61). */
 function withoutOwnerProfile(
   context: ReturnType<typeof loadRouteIdentityContext>,
-  audience: "owner" | "non_owner",
+  audience: RouteAudience,
 ): ReturnType<typeof loadRouteIdentityContext> {
   if (!context || audience === "owner") return context;
   return { ...context, userMarkdown: undefined, userPath: undefined };
@@ -792,7 +801,7 @@ async function runConfiguredRoute(input: {
    * else is "non_owner": no autoRecall, no USER.md and no memory index. Required
    * so no caller can leave it to a default.
    */
-  audience: "owner" | "non_owner";
+  audience: RouteAudience;
   config: MindStoneConfig | undefined;
   configPath?: string;
   metadata?: Record<string, unknown>;
@@ -893,7 +902,7 @@ async function runConfiguredRoute(input: {
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
         memoryRecall: {
-          enabled: input.audience === "owner" && input.config?.memory?.autoRecall === true,
+          enabled: (input.audience === "owner" || input.audience === "tenant") && input.config?.memory?.autoRecall === true,
           provider: input.config?.memory?.vectorStore === "sqlite-vec"
             ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
                 ...(input.config?.memory?.localDocuments ?? []),
@@ -1604,7 +1613,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const routed = await runConfiguredRoute({
       sessionKey,
       agentId,
-      audience: "owner",
+      // An app-, tenant- or user-scoped run isn't the owner (#70): no owner
+      // profile, memory index, private invariants or handoff; scoped recall stays.
+      audience: scope.appId || scope.tenantId || scope.userId ? "tenant" : "owner",
       config,
       configPath: loadedConfig.path,
       metadata: { ...(metadata ?? {}), appEngine: true, memoryScope },
