@@ -1667,7 +1667,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       try {
         merged = mergeConfigPatch(current[section], patch, section, false, 0, touched);
       } catch (error) {
-        sendJson(res, 400, { ok: false, error: error instanceof AdminPatchError ? error.message : "the patch could not be applied" });
+        refuse(400, { error: error instanceof AdminPatchError ? error.message : "the patch could not be applied" }, { section, reason: "bad_patch" });
         return;
       }
       const changed = changedPaths(current[section], merged, section);
@@ -1701,7 +1701,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         issues = ["the new config has a value of the wrong type"];
       }
       if (issues.length > 0) {
-        sendJson(res, 422, { ok: false, error: "the change doesn't validate", errors: issues.map((issue) => ({ error: issue })) });
+        refuse(422, { error: "the change doesn't validate", errors: issues.map((issue) => ({ error: issue })) }, { section, reason: "invalid" });
         return;
       }
       const advanced = changed.filter((path) => isAdvancedChange(path, next, current));
@@ -1713,7 +1713,10 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         return;
       }
       const nextText = `${JSON.stringify(next, null, 2)}\n`;
-      writeFileAtomic(configPath, nextText, fileMode(configPath, 0o600));
+      // Write through a symlinked config to its target, so host edits to the
+      // real file keep applying (#75 review).
+      const configTarget = realConfigPath(configPath);
+      writeFileAtomic(configTarget, nextText, fileMode(configTarget, 0o600));
       appendAdminAudit(paths.dataDir, { userId, action: "config_patched", section, changed, advanced });
       const restartRequired = changed.some((path) => path.startsWith("channels.") || path === "channels" || /^gateway\.(host|port|auth|admin)/.test(path));
       sendJson(res, 200, { ok: true, changed, restartRequired, etag: configEtag(nextText) });
@@ -1750,9 +1753,15 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
         return;
       }
-      // Replacing a secret something already uses (a connector's token) needs the permission.
-      if (existsSync(target) && !readAdminPermissions(paths.dataDir).advancedSettings) {
-        refuse(403, { error: "replacing an existing secret needs the advanced-settings permission" }, { reason: "advanced", secret: name });
+      // Replacing a secret, or writing one a connector is configured to read
+      // (its token file), needs the permission: either one changes who the
+      // agent talks to (#75 review).
+      const connectorFiles = connectorTokenFiles(loadMindStoneConfig(configPath).config, configPath);
+      if (
+        (existsSync(target) || connectorFiles.some((file) => sameFile(file, target))) &&
+        !readAdminPermissions(paths.dataDir).advancedSettings
+      ) {
+        refuse(403, { error: "replacing a secret or setting a connector's token needs the advanced-settings permission" }, { reason: "advanced", secret: name });
         return;
       }
       mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
@@ -1776,6 +1785,14 @@ function withAdminWriteLock(work: () => void): Promise<void> {
   const run = adminWriteChain.then(work);
   adminWriteChain = run.catch(() => undefined);
   return run;
+}
+
+function realConfigPath(configPath: string): string {
+  try {
+    return realpathSync(configPath);
+  } catch {
+    return configPath;
+  }
 }
 
 function readConfigText(configPath: string): string {
@@ -1831,6 +1848,20 @@ function sameFile(a: string, b: string): boolean {
   return real(a).toLowerCase() === real(b).toLowerCase();
 }
 
+/** Absolute paths of the token files connectors are configured to read (tokenFile, appTokenFile, …File). */
+function connectorTokenFiles(config: MindStoneConfig | undefined, configPath: string): string[] {
+  const files: string[] = [];
+  for (const section of Object.values((config?.channels ?? {}) as Record<string, unknown>)) {
+    if (!section || typeof section !== "object") continue;
+    for (const [key, value] of Object.entries(section as Record<string, unknown>)) {
+      if (/file$/i.test(key) && /token|secret|key|credential|password/i.test(key) && typeof value === "string" && value.trim()) {
+        files.push(isAbsolute(value) ? resolvePath(value) : resolvePath(dirname(configPath), value));
+      }
+    }
+  }
+  return files;
+}
+
 /** Absolute paths of the files holding the gateway's own credentials (auth and admin token files). */
 function hostCredentialFiles(config: MindStoneConfig | undefined, configPath: string): string[] {
   const gateway = config?.gateway as { auth?: { tokenFile?: unknown }; admin?: { tokenFile?: unknown } } | undefined;
@@ -1863,7 +1894,13 @@ function writeFileAtomic(path: string, content: string, mode: number): void {
 function appendAdminAudit(dataDir: string, event: Record<string, unknown>): void {
   mkdirSync(`${dataDir}/admin`, { recursive: true });
   // Caller-chosen strings (user id, path) are capped so one entry stays small.
-  const capped = Object.fromEntries(Object.entries(event).map(([key, value]) => [key, typeof value === "string" && value.length > 200 ? `${value.slice(0, 200)}…` : value]));
+  const cap = (value: unknown): unknown =>
+    typeof value === "string" && value.length > 200
+      ? `${value.slice(0, 200)}…`
+      : Array.isArray(value)
+        ? value.slice(0, 50).map(cap)
+        : value;
+  const capped = Object.fromEntries(Object.entries(event).map(([key, value]) => [key, cap(value)]));
   appendFileSync(`${dataDir}/admin/audit.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), ...capped })}\n`, { mode: 0o600 });
 }
 

@@ -420,7 +420,9 @@ const SAFE_SETTINGS: Array<{ pattern: string; value: Check }> = [
   { pattern: "agents.*.defaultModel", value: isShortText },
   { pattern: "agents.*.contextWindowTokens", value: inRange(1024, 10_000_000) },
   { pattern: "agents.*.profileId", value: isId },
-  { pattern: "memory.autoRecall", value: isBool },
+  // memory.autoRecall is deliberately not here: turning it on exposes the open
+  // #71 (tenant recall can see the owner's unscoped memory), so it needs the
+  // permission until #71 is decided.
   { pattern: "memory.vectorStore", value: oneOf("lancedb", "sqlite-vec", "memory") },
   { pattern: "memory.recall.maxResults", value: inRange(1, 100) },
   { pattern: "memory.recall.maxPromptTokens", value: inRange(1, 1_000_000) },
@@ -452,8 +454,21 @@ const SAFE_SETTINGS: Array<{ pattern: string; value: Check }> = [
   { pattern: "personas.active", value: isId },
   { pattern: "workflows.active", value: isId },
   { pattern: "knowledgebases.recall.enabled", value: isBool },
-  { pattern: "onboarding.preferences.*", value: isNote },
-  { pattern: "onboarding.identity.*", value: isNote },
+  // Enum fields first (the first matching pattern decides): their values are
+  // written into the identity markdown as labels.
+  { pattern: "onboarding.preferences.interactionDetail", value: oneOf("concise", "balanced", "detailed") },
+  { pattern: "onboarding.preferences.recommendationStyle", value: oneOf("direct", "options_tradeoffs", "ask_first") },
+  { pattern: "onboarding.preferences.workStyle", value: oneOf("act_directly", "plan_first", "ask_first") },
+  { pattern: "onboarding.preferences.approvalMode", value: oneOf("standard", "strict", "custom") },
+  { pattern: "onboarding.preferences.memoryStyle", value: oneOf("propose_checkpoint_memories", "minimal", "ask_each_time") },
+  { pattern: "onboarding.preferences.selectedAt", value: isShortText },
+  { pattern: "onboarding.preferences.*Notes", value: isNote },
+  { pattern: "onboarding.preferences.projectContext", value: isNote },
+  { pattern: "onboarding.identity.mode", value: oneOf("defer", "seed", "custom") },
+  { pattern: "onboarding.identity.candidateName", value: isShortText },
+  { pattern: "onboarding.identity.identityDirection", value: isNote },
+  { pattern: "onboarding.identity.namingNotes", value: isNote },
+  { pattern: "onboarding.identity.selectedAt", value: isShortText },
 ];
 
 /** A dotted pattern: "*" is a whole segment; "*Suffix" matches a segment ending in Suffix. */
@@ -468,6 +483,8 @@ function valueAt(root: unknown, path: string): unknown {
   let current = root;
   for (const part of path.split(".")) {
     if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    // Own properties only, so a key like "toString" isn't found on the prototype.
+    if (!Object.prototype.hasOwnProperty.call(current, part)) return undefined;
     current = (current as Record<string, unknown>)[part];
   }
   return current;
@@ -601,7 +618,12 @@ export const ADVANCED_GRANT_MS = 60 * 60 * 1000;
 export function effectivePermissions(stored: AdminPermissions, now = Date.now()): AdminPermissions {
   if (stored.advancedSettings !== true) return { advancedSettings: false };
   const expires = stored.expiresAt ? Date.parse(stored.expiresAt) : NaN;
-  if (!Number.isFinite(expires) || expires <= now) return { advancedSettings: false };
+  const granted = stored.grantedAt ? Date.parse(stored.grantedAt) : NaN;
+  // A stored expiry is trusted only up to one grant's length after the grant,
+  // so a hand-edited "9999-…" isn't a permanent grant (#75 review).
+  if (!Number.isFinite(expires) || !Number.isFinite(granted) || expires <= now || expires > granted + ADVANCED_GRANT_MS) {
+    return { advancedSettings: false };
+  }
   return stored;
 }
 
