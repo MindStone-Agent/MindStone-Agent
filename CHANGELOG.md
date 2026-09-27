@@ -45,6 +45,12 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - A guard refuses the turn before any model call if the session offers a built-in that wasn't enabled.
 
 ### Added
+- **Admin API for the MindStone Console** (#38, P2). This is the server-to-server config API that the Console's settings and onboarding screens use.
+  - It exists only when gateway auth is on and a separate admin credential is configured (`gateway.admin.tokenSha256`, recommended, which keeps only a digest on the gateway; or `tokenEnv`/`tokenFile`, at least 16 characters; never the gateway token). Only the Console server holds that credential; the ordinary gateway token is not enough. Calls also need the admin role. Gateway auth and the admin credential can only be changed on the gateway host.
+  - `GET /admin/status` returns the onboarding state. `GET /admin/config` returns the config with every secret masked (inside objects, lists, header and environment maps, URLs and command-line lists) plus an `etag`. `PATCH /admin/config/<section>` applies a validated, atomic merge patch, judged against the config and permission at the moment it lands; `If-Match` refuses a stale write. What GET returned can be sent back unchanged; new secrets go through the secrets endpoint, never as plain config values.
+  - `POST /admin/secrets/<name>` stores a new secret 0600 in a 0700 directory and never echoes it back. Replacing one needs the permission.
+  - Only a short list of safe changes (model choice, bounded memory recall tuning, personas, and narrowing a channel's access) can be made without the advanced-settings permission. Everything else, including environment-variable references, URLs, paths, anything that lets someone new reach the agent, and who counts as the owner, needs an admin to grant the permission with an explicit confirmation. A grant lasts one hour and can be revoked sooner.
+  - Every write and every refused write is audited with the user id. See `docs/gateway/API_REFERENCE.md`.
 - **OpenAI-style server-sent events for chat completions** (#47). `POST /v1/chat/completions` with `stream: true` returns the reply as one content chunk, a stop chunk and `[DONE]`. It is not streamed token by token yet. Without the flag the JSON reply is unchanged.
 - **Personas as models** (#47).
   - `/v1/models` lists `mindstone/<agentId>` for each configured agent.
