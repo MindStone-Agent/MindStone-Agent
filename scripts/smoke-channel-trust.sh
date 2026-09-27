@@ -94,6 +94,7 @@ for (const [label, results] of [
   ["quote inside a comment (only the quote rule)", 'mx.google.com; spf=pass (google.com: "a);dkim=pass header.d=example.com (b") smtp.mailfrom=x@attacker.test'],
   ["balanced comments swallow dmarc=fail (only the count rule)", "mx.google.com; spf=pass (a);dkim=pass header.d=example.com ((b) smtp.mailfrom=x@attacker.test; dmarc=fail header.from=example.com)"],
   ["a second DMARC result for another domain (only the one-DMARC rule)", "mx.google.com; dmarc=pass header.from=example.com; dmarc=fail header.from=attacker.test"],
+  ["a HELO echoed in a comment supplies the separator", "mx.google.com; spf=pass (google.com: helo x);dkim=pass()header.d=example.com( designates 1.2.3.4) smtp.mailfrom=x@attacker.test"],
 ] as const) {
   assert.equal(emailSenderVerified(gmail(results), "owner@example.com"), false, label);
 }
@@ -102,6 +103,16 @@ assert.equal(
   emailSenderVerified(gmail("mx.google.com; dkim=pass header.i=@example.com header.s=20230601 header.b=AbC+d/E=; spf=pass (google.com: domain of owner@example.com designates 209.85.220.41 as permitted sender) smtp.mailfrom=owner@example.com; dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=example.com"), "owner@example.com"),
   true,
   "control: a real Gmail header verifies",
+);
+assert.equal(
+  emailSenderVerified(gmail("mx.google.com; dkim=pass header.i=@example.com header.s=s1 header.b=Xy/Z; arc=pass (i=1 spf=pass spfdomain=example.com dkim=pass dkdomain=example.com dmarc=pass fromdomain=example.com); spf=pass (google.com: domain of owner@example.com designates 209.85.220.41 as permitted sender) smtp.mailfrom=owner@example.com; dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=example.com"), "owner@example.com"),
+  true,
+  "control: a forwarded (ARC-sealed) Gmail header verifies",
+);
+assert.equal(
+  emailSenderVerified(gmail("mx.google.com; dkim=neutral (body hash did not verify) header.i=@example.com header.s=s1; dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=example.com"), "owner@example.com"),
+  true,
+  "control: a comment on a result keeps its separators",
 );
 assert.equal(emailSenderVerified(gmail("mx.google.com; dkim=pass header.d=example.com header.i=@other.test"), "owner@example.com"), true, "header.d is the signing domain");
 assert.equal(emailSenderVerified(gmail("mx.google.com; dkim=pass header.d=com"), "owner@example.com"), false, "a bare TLD never aligns");

@@ -110,7 +110,9 @@ export function gmailMessageBody(message: GmailMessage, maxBodyChars: number): s
 /**
  * Strip RFC 8601 / RFC 5322 comments and quoted strings, so text a sender
  * controls (an SPF comment echoing MAIL FROM, a quoted local part) can never
- * be read as a result of its own (#61).
+ * be read as a result of its own (#61). They collapse to nothing, not a
+ * space: a comment must not supply the separator a forged
+ * "dkim=pass header.d=..." needs.
  */
 function stripCommentsAndQuotes(value: string): string | undefined {
   let output = "";
@@ -128,7 +130,7 @@ function stripCommentsAndQuotes(value: string): string | undefined {
     }
     if (char === '"' && depth === 0) {
       quoted = true;
-      output += " ";
+      output += "";
       continue;
     }
     if (char === "(") {
@@ -138,7 +140,7 @@ function stripCommentsAndQuotes(value: string): string | undefined {
     if (char === ")") {
       if (depth === 0) return undefined;
       depth -= 1;
-      output += " ";
+      output += "";
       continue;
     }
     if (depth === 0) output += char;
@@ -180,7 +182,10 @@ export function emailSenderVerified(message: GmailMessage, fromAddress: string):
     new RegExp(`(?:^|\\s)${name.replace(/\./g, "\\.")}=([^\\s;]+)`, "i").exec(resinfo)?.[1];
   // Every result token in the raw text must be one this parse saw, and there
   // is at most one DMARC result: anything else means text was hidden (#61).
-  const rawResults = (results.match(/\b(?:dmarc|dkim)\s*=/gi) ?? []).length;
+  // Counted only where a result starts (after ";"), so the dkim=/dmarc= inside
+  // Gmail's own ARC comment (arc=pass (i=1 ... dkim=pass ... dmarc=pass ...))
+  // don't count, while one moved out of or into a comment still does.
+  const rawResults = (results.match(/(?:^|;)\s*(?:dmarc|dkim)\s*=/gi) ?? []).length;
   const parsedResults = resinfos.filter((resinfo) => /^(dmarc|dkim)\s*=/i.test(resinfo)).length;
   if (rawResults !== parsedResults) return false;
   if (resinfos.filter((resinfo) => /^dmarc\s*=/i.test(resinfo)).length > 1) return false;
