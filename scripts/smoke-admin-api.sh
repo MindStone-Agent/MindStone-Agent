@@ -592,7 +592,62 @@ kill "${fake_pid}" 2>/dev/null || true
 printf '{"advancedSettings":false}\n' > "${PERMS}"
 echo "provider assertions passed"
 
-# 6. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
+# 6. Stored secrets, listed and deleted (#88): names only, and deletes under
+#    the same guards as replacing a secret.
+SECRETS="${TEMP_RUNTIME}/mindstone/secrets"
+get() { curl -s -o "${BODY}" -w '%{http_code}' "${ADMIN[@]}" "${BASE}$1"; }
+del() { curl -s -o "${BODY}" -w '%{http_code}' -X DELETE "${ADMIN[@]}" "${BASE}$1"; }
+mkdir -p "${SECRETS}"
+[[ -e "${SECRETS}/gateway-token" ]] || printf 'GW-TOKEN-SENTINEL-88\n' > "${SECRETS}/gateway-token"
+printf 'CONNECTOR-TOKEN-88\n' > "${SECRETS}/example"
+expect "$(post /admin/secrets/del.me '{"value":"DELETE-ME-SENTINEL-88"}')" 200 "storing a secret to delete"
+ln -sfn del.me "${SECRETS}/lnk"
+mkdir -p "${SECRETS}/adir"
+expect "$(get /admin/secrets)" 200 "listing secrets"
+grep -q 'SENTINEL\|CONNECTOR-TOKEN\|CLOUD-KEY\|admin-smoke' "${BODY}" && { echo "the secrets list showed a value" >&2; exit 1; }
+node -e '
+const b = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+const by = Object.fromEntries(b.secrets.map((s) => [s.name, s]));
+const fail = (m) => { console.error(m + ": " + JSON.stringify(b.secrets)); process.exit(1); };
+if (!by["del.me"] || by["del.me"].kind !== "file" || typeof by["del.me"].size !== "number" || by["del.me"].tokenFile !== "secrets/del.me") fail("a stored secret should be listed as a file");
+if (!by.lnk || by.lnk.kind !== "link" || "size" in by.lnk) fail("a link should be listed as a link, not followed");
+if (!by.adir || by.adir.kind !== "other") fail("a directory should be listed as other");
+if (!by.example || JSON.stringify(by.example.usedBy) !== JSON.stringify(["telegram"])) fail("the connector token should list its connector");
+if (!by["gateway-token"] || by["gateway-token"].gatewayCredential !== true) fail("the gateway token file should be marked");
+if (by["del.me"].gatewayCredential !== false || by["del.me"].usedBy.length !== 0) fail("an unused secret should be marked unused");' "${BODY}" || exit 1
+# Without the permission: refused, nothing removed.
+printf '{"advancedSettings":false}\n' > "${PERMS}"
+expect "$(del /admin/secrets/del.me)" 403 "deleting without the permission"
+[[ -f "${SECRETS}/del.me" ]] || { echo "a refused delete removed the secret" >&2; exit 1; }
+# Writes name the deciding user.
+expect "$(curl -s -o "${BODY}" -w '%{http_code}' -X DELETE "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/secrets/del.me")" 400 "a delete without a user id"
+expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings for deletes"
+# The gateway's own credential files, under any name that reaches them, and host-made links: refused.
+expect "$(del /admin/secrets/gateway-token)" 422 "deleting the gateway token file"
+expect "$(del /admin/secrets/GATEWAY-TOKEN)" 422 "deleting the gateway token file by another case"
+[[ -f "${SECRETS}/gateway-token" ]] || { echo "the gateway token file was deleted" >&2; exit 1; }
+expect "$(del /admin/secrets/lnk)" 422 "deleting a host-made link"
+[[ -L "${SECRETS}/lnk" && -f "${SECRETS}/del.me" ]] || { echo "a refused link delete removed the link or its target" >&2; exit 1; }
+expect "$(del /admin/secrets/adir)" 422 "deleting a directory"
+[[ -d "${SECRETS}/adir" ]] || { echo "a directory was removed" >&2; exit 1; }
+expect "$(del /admin/secrets/no.such)" 404 "deleting a secret that isn't there"
+for bad in '..%2Fconfig.json' '%2E%2E' 'a%2Fb' '.hidden' '%ZZ'; do
+  code="$(del "/admin/secrets/${bad}")"
+  [[ "${code}" == 400 || "${code}" == 404 ]] || { echo "deleting ${bad}: expected 400 or 404, got ${code}" >&2; exit 1; }
+done
+[[ -f "${TEMP_RUNTIME}/mindstone/config.json" ]] || { echo "a traversal delete removed the config" >&2; exit 1; }
+# Allowed: an unused secret, and a connector's token (the answer names the connector).
+expect "$(del /admin/secrets/del.me)" 200 "deleting a stored secret"
+[[ ! -e "${SECRETS}/del.me" ]] || { echo "the secret is still there" >&2; exit 1; }
+grep -q '"action":"secret_deleted","secret":"del.me"' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" || { echo "the delete was not audited" >&2; exit 1; }
+expect "$(del /admin/secrets/example)" 200 "deleting a connector's token"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(JSON.stringify(b.usedBy)==="[\"telegram\"]"?0:1)' "${BODY}" || { echo "the answer should name the connector: $(cat "${BODY}")" >&2; exit 1; }
+grep -q '"reason":"host_only","secret":"GATEWAY-TOKEN"' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" || { echo "the refused host-credential delete was not audited" >&2; exit 1; }
+rm -f "${SECRETS}/lnk"; rmdir "${SECRETS}/adir"
+printf '{"advancedSettings":false}\n' > "${PERMS}"
+echo "secrets list and delete assertions passed"
+
+# 7. The config file outside the data dir (MINDSTONE_AGENT_CONFIG): connector
 #    token files resolve under the data dir, as the connectors read them, not
 #    next to the config file (#75 review A, tested end to end per #78).
 stop_gateway
