@@ -7,6 +7,13 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ## [Unreleased]
 
 ### Fixed
+- **Admin API follow-ups from the #75 review** (#78).
+  - A new secret could be planted into a file that didn't exist yet but that a connector reads, or into one of the gateway's own credential files, under another name: through a chain of dangling links, or a name the filesystem folds to it (APFS treats `ß` as `ss` and `ſ` as `s`). A new secret is now created exclusively, and if a protected file that was missing exists afterwards, the new secret is removed and refused: `403` for a connector's file without the permission, `422` for a gateway credential whatever the permission. The gateway credential check also follows symlinks, a secret name that is a link made on the host is never replaced, and a new secret is created with an exclusive open (no hard-link support needed).
+  - A secret write that fails (the name is a directory, for example) no longer leaves the value in a temporary file.
+  - An admin API `500` is audited with the user id.
+  - `GET /admin/permissions` shows the expiry that applies (at most an hour after the grant), not a later one from the stored file.
+  - Removing `memory.autoRecall` (which turns it off) no longer needs the permission. Removing a channel's `enabled`, which turns it on, still does.
+  - The smoke now covers the config file living outside the data dir, turning autoRecall off after it was on, and the audited `500`.
 - **Chat completions no longer store the whole conversation again every turn** (#38). Clients such as LibreChat resend the full history with each request, and the gateway wrote all of it to the transcript each time. Only the new turn (the trailing user messages) is stored now.
   - **Breaking:** a request that doesn't end with a user message (for example a tool-role or assistant-prefill tail) is now a 400. A message with no role counts as a user message.
   - Client system prompts: ignored for the Console's `user` role (logged once per session as an event), stored once per session for an admin or a direct API caller. Before, every resent copy was stored.
