@@ -395,13 +395,17 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   });
 
   const entries = readTranscriptEntries(input.sessionKey);
-  const identityFormation = buildIdentityFormationPrompt({
-    agentId: input.agentId,
-    entries,
-    config: input.config,
-  });
-  const currentHandoff = readCurrentHandoff();
   const ownerContext = input.ownerContext !== false;
+  // The onboarding seed carries the owner's project context and asks the
+  // model to act as the owner's companion: owner sessions only (#70).
+  const identityFormation = ownerContext
+    ? buildIdentityFormationPrompt({
+        agentId: input.agentId,
+        entries,
+        config: input.config,
+      })
+    : undefined;
+  const currentHandoff = readCurrentHandoff();
   const handoffReplay = ownerContext && currentHandoff && !hasReplayedHandoff(entries, currentHandoff.sha256)
     ? {
         path: currentHandoff.path,

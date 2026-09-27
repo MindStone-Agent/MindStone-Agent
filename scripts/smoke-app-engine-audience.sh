@@ -29,6 +29,7 @@ python3 - <<'PY'
 import json, os, pathlib
 p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
 c = json.loads(p.read_text())
+c["onboarding"] = {"preferences": {"projectContext": "Owner project MOSS-ONBOARDING-CONTEXT."}, "identity": {"mode": "seed", "candidateName": "Wren"}}
 c.setdefault("gateway", {})["auth"] = {"mode": "token", "tokenEnv": "AE_TOKEN"}
 c["routing"] = {"mode": "mock", "defaultAgentId": "default", "defaultModel": "mindstone/mock", "mock": {"responsePrefix": "ae", "captureFile": os.environ["CAPTURE"]}}
 c["memory"] = {**c.get("memory", {}), "autoRecall": True, "vectorStore": "memory", "recall": {"maxResults": 5, "maxPromptTokens": 800, "minScore": 0.01},
@@ -75,6 +76,8 @@ code() { curl -s -o "${TEMP_RUNTIME}/code.json" -w '%{http_code}' -X POST -H "Au
 [[ "$(code '{"text":"hi","tenantId":"t1","sessionKey":"tenant:t1:agent:default:thread-7"}')" == "200" ]] || { echo "a tenant run should be able to use its own scoped keys: $(cat "${TEMP_RUNTIME}/code.json")" >&2; exit 1; }
 [[ "$(code '{"text":"hi","tenantId":42}')" == "400" ]] || { echo "a numeric tenantId must be refused, not dropped" >&2; exit 1; }
 [[ "$(code '{"text":"hi","appId":"  "}')" == "400" ]] || { echo "a blank appId must be refused" >&2; exit 1; }
+[[ "$(code '{"text":"hi","tenantId":null}')" == "400" ]] || { echo "a null tenantId must be refused, not read as an owner run" >&2; exit 1; }
+[[ "$(code '{"text":"hi","tenantId":"t1:user:u1"}')" == "400" ]] || { echo "a tenantId containing a colon must be refused" >&2; exit 1; }
 
 # The in-process API (runMindStone) applies the same audience.
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
@@ -95,7 +98,13 @@ const model = { id: "mindstone/mock", provider: "mock", contextWindowTokens: 128
 const run = (extra: Record<string, unknown>) => runMindStone({ agentId: "default", input: "What is the heron budget?", ...extra } as never, { config, configPath, provider, model } as never);
 await run({ tenantId: "t1" });
 await run({});
-const [tenant, owner] = seen;
+await run({ sessionKey: "agent:default:onboarding-control" });
+// The onboarding seed fires on a session's first turn, so check a tenant with no history.
+await run({ tenantId: "t-fresh" });
+const [tenant, owner, freshOwner, freshTenant] = seen;
+assert.ok(freshOwner.includes("MOSS-ONBOARDING-CONTEXT"), "control: a fresh owner session gets the onboarding seed");
+assert.ok(!freshTenant.includes("MOSS-ONBOARDING-CONTEXT"), "in-process tenant run got the owner's onboarding seed");
+assert.ok(tenant.includes("TENANT-DOC-SENTINEL"), "in-process tenant run lost its own scoped recall");
 assert.ok(owner.includes("TEAL-OWNER-PROFILE") && owner.includes("Index of the agent's durable memories"), "control: the unscoped in-process run keeps owner context");
 for (const s of ["TEAL-OWNER-PROFILE", "Index of the agent's durable memories", "PLUM-INVARIANT-PRIVATE", "CORAL-HANDOFF-TAIL"]) {
   assert.ok(!tenant.includes(s), `in-process tenant run got the owner's ${s}`);
@@ -103,6 +112,8 @@ for (const s of ["TEAL-OWNER-PROFILE", "Index of the agent's durable memories", 
 assert.ok(tenant.includes("SAGE-INVARIANT-PUBLIC"), "in-process tenant run lost the invariant_audience: all rule");
 await assert.rejects(run({ tenantId: "t1", sessionKey: "agent:default:main" }), /outside this run's scope/);
 await assert.rejects(run({ tenantId: 7 }), /must be non-empty strings/);
+await assert.rejects(run({ tenantId: null }), /must be non-empty strings/);
+await assert.rejects(run({ tenantId: "t1:user:u1" }), /must be non-empty strings/);
 const tenantPi = piSessionRunnerOptions({ routing: { mode: "pi-session", pi: { builtinTools: ["bash"] } } } as never, "tenant");
 assert.deepEqual(tenantPi.builtinTools, [], "tenant Pi turns get no built-in tools");
 assert.equal(tenantPi.noSkills, true);

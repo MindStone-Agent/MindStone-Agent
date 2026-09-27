@@ -49,6 +49,16 @@ tenant:t1:agent:analyst:main
 agent:default:main            ← companion mode, unchanged
 ```
 
+A scoped run (any of `appId`, `tenantId`, `userId` set) may pass its own
+`sessionKey` only inside its scope: the derived key itself, or one that starts
+with `<scope>:agent:<agentId>:` (for example
+`tenant:t1:agent:analyst:thread-7`). Any other key, including the owner's
+`agent:default:main` and another tenant's keys, is refused (HTTP 403 from the
+Gateway; an error from `runMindStone`). Scope fields must be non-empty strings
+without `:`; `null`, blanks, non-strings and values containing `:` are refused
+(HTTP 400). Scoped runs are not the owner's: they get no USER.md, no memory
+index, no owner-only invariants, no handoff replay and no onboarding seed.
+
 ## Scope model (prevents cross-tenant/cross-agent recall)
 
 Scope dimensions: `appId`, `tenantId`, `userId`, `agentId`. The run's scope is

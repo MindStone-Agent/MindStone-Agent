@@ -41,7 +41,7 @@ export async function runMindStone(request: MindStoneRunRequest, options: MindSt
   if (!request.input?.trim()) throw new Error("input is required");
 
   const badFields = invalidScopeFields(request as unknown as Record<string, unknown>);
-  if (badFields.length) throw new Error(`${badFields.join(", ")} must be non-empty strings when given`);
+  if (badFields.length) throw new Error(`${badFields.join(", ")} must be non-empty strings without ":" when given`);
   const scope = scopeFromRequest(request);
   const sessionKey = request.sessionKey?.trim() || scopedSessionKey(scope);
   if (!scopeSessionKeyAllowed(scope, sessionKey)) {

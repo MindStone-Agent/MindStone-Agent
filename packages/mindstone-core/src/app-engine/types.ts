@@ -23,7 +23,11 @@ export type MindStoneRunRequest = {
   tenantId?: string;
   userId?: string;
   agentId: string;
-  /** Explicit session key. When omitted, a canonical scoped key is derived (companion-compatible). */
+  /**
+   * Explicit session key. When omitted, a canonical scoped key is derived
+   * (companion-compatible). A scoped run (appId, tenantId or userId set) may
+   * only name its own scoped keys, `<scope>:agent:<id>:…` (403 otherwise).
+   */
   sessionKey?: string;
   /** Deterministically force a persona for this run (wins over workflow decisions and config rules). */
   personaId?: string;
@@ -105,7 +109,9 @@ export function scopeSessionKeyAllowed(scope: MindStoneRunScope, sessionKey: str
 export function invalidScopeFields(request: Record<string, unknown>): string[] {
   return (["appId", "tenantId", "userId"] as const).filter((field) => {
     const value = request[field];
-    return value !== undefined && value !== null && (typeof value !== "string" || value.trim() === "");
+    // null is refused rather than read as absent: a nullable tenant column must not become an owner run.
+    // ":" is refused because it separates the parts of a scoped session key.
+    return value !== undefined && (typeof value !== "string" || value.trim() === "" || value.includes(":"));
   });
 }
 
