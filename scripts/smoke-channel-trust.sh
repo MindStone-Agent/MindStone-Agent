@@ -94,6 +94,8 @@ for (const [label, results] of [
   ["quote inside a comment (only the quote rule)", 'mx.google.com; spf=pass (google.com: "a);dkim=pass header.d=example.com (b") smtp.mailfrom=x@attacker.test'],
   ["balanced comments swallow dmarc=fail (only the count rule)", "mx.google.com; spf=pass (a);dkim=pass header.d=example.com ((b) smtp.mailfrom=x@attacker.test; dmarc=fail header.from=example.com)"],
   ["a second DMARC result for another domain (only the one-DMARC rule)", "mx.google.com; dmarc=pass header.from=example.com; dmarc=fail header.from=attacker.test"],
+  ["an unreadable DMARC failure still vetoes", "mx.google.com; dkim=pass header.i=@example.com; dmarc=fail(p=REJECT)header.from=example.com"],
+  ["a non-breaking space as a separator", "mx.google.com; smtp.mailfrom=a;dkim=pass\u00a0header.d=example.com"],
   ["a HELO echoed in a comment supplies the separator", "mx.google.com; spf=pass (google.com: helo x);dkim=pass()header.d=example.com( designates 1.2.3.4) smtp.mailfrom=x@attacker.test"],
 ] as const) {
   assert.equal(emailSenderVerified(gmail(results), "owner@example.com"), false, label);

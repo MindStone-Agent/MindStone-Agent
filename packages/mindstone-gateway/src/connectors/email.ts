@@ -170,6 +170,9 @@ export function emailSenderVerified(message: GmailMessage, fromAddress: string):
   // in through sender-controlled text (a quoted MAIL FROM local part) that can
   // close or open a comment and hide or forge a result. Fail closed (#61).
   if (/["\\]/.test(results)) return false;
+  // Only printable ASCII and folding whitespace: a non-breaking space would
+  // otherwise act as a separator the sender could smuggle in.
+  if (/[^\x09\x0a\x0d\x20-\x7e]/.test(results)) return false;
   const stripped = stripCommentsAndQuotes(results);
   if (stripped === undefined) return false;
   const [authservId, ...resinfos] = stripped.split(";").map((part) => part.trim());
@@ -197,8 +200,10 @@ export function emailSenderVerified(message: GmailMessage, fromAddress: string):
     const kind = method[1]!.toLowerCase();
     const result = method[2]!.toLowerCase();
     if (kind === "dmarc") {
-      if (property(resinfo, "header.from")?.toLowerCase() !== fromDomain) continue;
-      if (result !== "pass") return false;
+      const dmarcDomain = property(resinfo, "header.from")?.toLowerCase();
+      // A non-pass whose domain can't be read still vetoes: fail closed.
+      if (result !== "pass" && (dmarcDomain === undefined || dmarcDomain === fromDomain)) return false;
+      if (dmarcDomain !== fromDomain) continue;
       dmarcPass = true;
     } else if (result === "pass") {
       const signer = property(resinfo, "header.d") ?? property(resinfo, "header.i")?.split("@").pop();
