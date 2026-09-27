@@ -14,7 +14,7 @@ TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-admin-smoke.XXXXXX")"
 SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
 GATEWAY_PORT="$((SMOKE_PORT_BASE + 26))"
 stop_gateway() { if [[ -n "${gateway_pid:-}" ]]; then kill "${gateway_pid}" >/dev/null 2>&1 || true; wait "${gateway_pid}" >/dev/null 2>&1 || true; unset gateway_pid; fi; }
-cleanup() { stop_gateway; if [[ -n "${fake_pid:-}" ]]; then kill "${fake_pid}" >/dev/null 2>&1 || true; fi; rm -rf "${TEMP_RUNTIME}"; }
+cleanup() { if [[ -n "${sup_pid:-}" ]]; then kill "${sup_pid}" >/dev/null 2>&1 || true; for pid in $(lsof -t -nP -iTCP:"${GATEWAY_PORT:-0}" -sTCP:LISTEN 2>/dev/null); do kill "${pid}" >/dev/null 2>&1 || true; done; fi; stop_gateway; if [[ -n "${fake_pid:-}" ]]; then kill "${fake_pid}" >/dev/null 2>&1 || true; fi; rm -rf "${TEMP_RUNTIME}"; }
 trap cleanup EXIT
 export MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}"
 export MINDSTONE_AGENT_GATEWAY_PORT="${GATEWAY_PORT}"
@@ -913,7 +913,8 @@ for runner in main cli; do
   SUP_STOP="${TEMP_RUNTIME}/stub-supervisor-${runner}.stop"
   SUP_CODES="${TEMP_RUNTIME}/stub-supervisor-${runner}.codes"
   if [[ "${runner}" == main ]]; then RUN=(./scripts/start-gateway.sh); else RUN=(node "${PROJECT_ROOT}/packages/mindstone-cli/dist/index.js" gateway run); fi
-  ( while [[ ! -e "${SUP_STOP}" ]]; do rc=0; INVOCATION_ID=stub-invocation MINDSTONE_AGENT_SUPERVISOR=systemd "${RUN[@]}" >>"${TEMP_RUNTIME}/gateway.log" 2>&1 || rc=$?; echo "${rc}" >> "${SUP_CODES}"; done ) &
+  # The loop also stops if this run's directory is gone (the smoke exited early).
+  ( while [[ ! -e "${SUP_STOP}" && -d "${TEMP_RUNTIME}" ]]; do rc=0; INVOCATION_ID=stub-invocation MINDSTONE_AGENT_SUPERVISOR=systemd "${RUN[@]}" >>"${TEMP_RUNTIME}/gateway.log" 2>&1 || rc=$?; echo "${rc}" >> "${SUP_CODES}"; done ) &
   sup_pid=$!
   for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sleep 0.5; done
   before="$(started_at)"
