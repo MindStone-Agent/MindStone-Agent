@@ -61,6 +61,7 @@
     "smoke:app-engine-audience": "./scripts/smoke-app-engine-audience.sh",
     "smoke:connector": "./scripts/smoke-connector.sh",
     "smoke:channel-trust": "./scripts/smoke-channel-trust.sh",
+    "smoke:chat-completions-dedup": "./scripts/smoke-chat-completions-dedup.sh",
     "smoke:backfill-scope": "./scripts/smoke-backfill-scope.sh",
     "smoke:doctor": "./scripts/smoke-doctor.sh",
     "smoke:reset": "./scripts/smoke-reset.sh",

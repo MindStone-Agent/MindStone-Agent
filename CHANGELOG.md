@@ -6,6 +6,13 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 
 ## [Unreleased]
 
+### Fixed
+- **Chat completions no longer store the whole conversation again every turn** (#38). Clients such as LibreChat resend the full history with each request, and the gateway wrote all of it to the transcript each time. Only the new turn (the trailing user messages) is stored now.
+  - **Breaking:** a request that doesn't end with a user message (for example a tool-role or assistant-prefill tail) is now a 400. A message with no role counts as a user message.
+  - Client system prompts: ignored for the Console's `user` role (logged once per session as an event), stored once per session for an admin or a direct API caller. Before, every resent copy was stored.
+  - Each Console conversation (`x-mindstone-conversation-id`) gets its own session, so separate chats don't share a context window. Switching persona mid-conversation keeps its history. The memory backfill indexes every conversation into memory. Recall isn't yet scoped per agent or per Console user (#71).
+  - The gateway replays the auto-compact handoff only into the session that wrote it, not into every new session (the CLI and TUI are unchanged). In `per_surface` mode, one surface's handoff no longer carries over to another surface's session.
+
 ### Security
 - **App Engine runs scoped to an app, tenant or user no longer get the owner's context** (#70). Such runs went through as the owner, so a tenant's run carried the owner's `USER.md`, the memory index and owner-only invariants. They now get the non-owner treatment: no `USER.md`, memory index, owner-only invariants, handoff or onboarding seed, and in `pi-session` none of the owner's Pi resources. They keep their own scoped recall and rules marked `invariant_audience: all`. This covers both the gateway's `/agents/:id/runs` and the in-process `runMindStone` API. An App Engine run scoped only to the agent is still the owner's. A scoped run may use only session keys inside its own scope (a `403` or an error otherwise, so a tenant can no longer read or write the owner's main session), and an `appId`, `tenantId` or `userId` that is present but not a non-empty string (including `null`, or a value containing `:`) is refused rather than silently dropped. Whether a tenant run may recall the owner's unscoped memory is the open App Engine scope decision and is unchanged here.
 
