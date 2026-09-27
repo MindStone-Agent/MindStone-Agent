@@ -1754,7 +1754,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       }
     } catch (error) {
       if (!(error instanceof ApprovalActionError)) throw error;
-      refuse(error.status, { error: error.message, code: error.code }, { reason: error.code, approvalId: approvalMatch[1], decision });
+      refuse(error.status, { error: error.publicMessage, code: error.code }, { reason: error.code, approvalId: approvalMatch[1], decision });
     }
     return;
   }

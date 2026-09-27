@@ -676,10 +676,12 @@ expect "$(post "/admin/approvals/${G}/approve" '{}')" 409 "completing it again"
 printf 'OLD\n' > "${DATA}/memory/notes/uat.md"
 expect "$(post "/admin/approvals/${C}/approve" '{}')" 409 "a memory write over an existing file"
 grep -Eq '"code": ?"memory_exists"' "${BODY}" || { echo "expected memory_exists: $(cat "${BODY}")" >&2; exit 1; }
+grep -q "$(basename "${TEMP_RUNTIME}")" "${BODY}" && { echo "a refusal showed a host path: $(cat "${BODY}")" >&2; exit 1; }
+grep -q 'notes/uat.md' "${BODY}" || { echo "the refusal should name the memory file: $(cat "${BODY}")" >&2; exit 1; }
 [[ "$(action_field "${C}" status)" == "pending" && "$(cat "${DATA}/memory/notes/uat.md")" == "OLD" ]] || { echo "a refused memory write changed something" >&2; exit 1; }
 expect "$(post "/admin/approvals/${C}/approve" '{"force":true}')" 200 "a memory write with force"
 [[ "$(cat "${DATA}/memory/notes/uat.md")" == "MEMORY-SENTINEL-C" ]] || { echo "the memory file was not written" >&2; exit 1; }
-grep -q "${DATA}" "${BODY}" && { echo "the approve result showed a host path" >&2; exit 1; }
+grep -q "$(basename "${TEMP_RUNTIME}")" "${BODY}" && { echo "the approve result showed a host path" >&2; exit 1; }
 # A mutation goes to its own connector's queue.
 expect "$(post "/admin/approvals/${D}/approve" '{}')" 200 "approving a mutation"
 node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).result; process.exit(r.kind==="connector_mutation"&&r.connectorId==="calendar"?0:1)' "${BODY}" || { echo "mutation result: $(cat "${BODY}")" >&2; exit 1; }
@@ -690,6 +692,7 @@ printf 'held-by-smoke' > "${QUEUE}.lock"
 toucher_pid=$!
 expect "$(post "/admin/approvals/${H}/approve" '{}')" 409 "approving while the queue is locked"
 grep -q 'pending again' "${BODY}" || { echo "the locked-queue refusal should say the action is pending again: $(cat "${BODY}")" >&2; exit 1; }
+grep -q "$(basename "${TEMP_RUNTIME}")" "${BODY}" && { echo "a refusal showed a host path: $(cat "${BODY}")" >&2; exit 1; }
 kill "${toucher_pid}" 2>/dev/null || true; wait "${toucher_pid}" 2>/dev/null || true; rm -f "${QUEUE}.lock"
 [[ "$(action_field "${H}" status)" == "pending" && "$(queued_for "${H}")" == "0" ]] || { echo "a failed approve left the action decided or queued" >&2; exit 1; }
 # The CLI and the Console approving the same action at once: one decision, one entry.
@@ -711,6 +714,20 @@ try {
   console.error("an approve after a concurrent reject went through"); process.exit(1);
 } catch (error) {
   if (!(error instanceof core.ApprovalActionError) || error.code !== "already_decided" || error.status !== 409) { console.error("expected already_decided 409, got " + error); process.exit(1); }
+}
+// A decision that fails to save (the store is read-only) is a failure, not "already decided".
+const fs = await import("node:fs");
+const other = store.propose({ kind: "connector_send", connectorId: "email", summary: "io", send: { chatId: "c1", text: "IO" } });
+const ioCheck = core.checkApprovable(store, other.id);
+const dir = process.env.MINDSTONE_AGENT_RUNTIME_DIR + "/mindstone/approvals";
+fs.chmodSync(dir, 0o555);
+try {
+  core.approveProposedAction(store, ioCheck, { decidedBy: "console:x", memoryDir: "/nonexistent" });
+  console.error("an approve with a read-only store went through"); process.exit(1);
+} catch (error) {
+  if (error instanceof core.ApprovalActionError) { console.error("an I/O failure was reported as a refusal: " + error.code); process.exit(1); }
+} finally {
+  fs.chmodSync(dir, 0o700);
 }' || exit 1
 echo "approvals assertions passed"
 

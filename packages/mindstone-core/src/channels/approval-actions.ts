@@ -24,6 +24,8 @@ export class ApprovalActionError extends Error {
     message: string,
     readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload",
     readonly status: number,
+    /** For callers outside this host (the Console): the same refusal without host paths or CLI hints. */
+    readonly publicMessage: string = message,
   ) {
     super(message);
   }
@@ -61,7 +63,11 @@ function decideOrRefuse(store: ApprovalStore, id: string, decision: Parameters<A
   try {
     return store.decide(id, decision);
   } catch (error) {
-    throw new ApprovalActionError(error instanceof Error ? error.message : String(error), "already_decided", 409);
+    // Only "decided meanwhile" is a refusal; anything else (an I/O error, with
+    // the action still pending) is a failure and is thrown as it is.
+    const now = store.get(id);
+    if (!now || now.status === "pending") throw error;
+    throw new ApprovalActionError(`action ${now.id} is already ${now.status}`, "already_decided", 409);
   }
 }
 
@@ -161,6 +167,7 @@ export function approveProposedAction(
           `${reason}; undoing the approval also failed (${undoError instanceof Error ? undoError.message : String(undoError)}): the action is approved but not queued; once this command has exited, approve it again to queue it`,
           "queue_busy",
           409,
+          "the connector's delivery queue is busy or unreadable, and undoing the approval also failed: the action is approved but not queued; approve it again to queue it",
         );
       }
       throw new ApprovalActionError(
@@ -169,6 +176,9 @@ export function approveProposedAction(
           : `${reason}; the approval could not be undone (it changed meanwhile): check it with mindstone approvals show ${decided.id}`,
         "queue_busy",
         409,
+        undone
+          ? "the connector's delivery queue is busy or unreadable; the action is pending again, approve it once the queue is free"
+          : "the connector's delivery queue is busy or unreadable, and the approval could not be undone (it changed meanwhile); check the action",
       );
     }
     store.markQueued(decided.id, decided.decidedAt);
@@ -188,7 +198,12 @@ export function approveProposedAction(
     if (!safePath) throw new ApprovalActionError(`memory proposal path "${action.memory.path}" is not a safe relative path`, "unsafe_path", 422);
     const target = join(options.memoryDir, safePath);
     if (existsSync(target) && !options.force) {
-      throw new ApprovalActionError(`memory file already exists: ${target} (re-run with --force to overwrite)`, "memory_exists", 409);
+      throw new ApprovalActionError(
+        `memory file already exists: ${target} (re-run with --force to overwrite)`,
+        "memory_exists",
+        409,
+        `memory file already exists: ${safePath}; approve with force to overwrite it`,
+      );
     }
     decideOrRefuse(store, action.id, { status: "approved", decidedBy: options.decidedBy, now: now() });
     mkdirSync(dirname(target), { recursive: true });
