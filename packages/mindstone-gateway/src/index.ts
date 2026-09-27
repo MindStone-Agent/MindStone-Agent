@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -1725,7 +1725,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         return;
       }
       // A connector's token belongs to that connector, not to a model provider.
-      if (connectorTokenFiles(loaded.config, configPath, paths).some((file) => pointsAtSameFile(file, secretPath))) {
+      if (connectorTokenFiles(loaded.config, configPath, paths).all.some((file) => pointsAtSameFile(file, secretPath))) {
         refuse(422, { error: "that secret is a connector's token and can't be used as a provider key" }, { reason: "connector_secret", provider: presetId });
         return;
       }
@@ -1922,25 +1922,62 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       const secretsDir = `${paths.dataDir}/secrets`;
       const target = resolvePath(secretsDir, name);
       // The gateway's own credentials are set on the host, never from the Console.
-      const hostCredentials = hostCredentialFiles(loadMindStoneConfig(configPath).config, configPath);
-      if (hostCredentials.some((file) => sameFile(file, target))) {
+      const loadedSecretsConfig = loadMindStoneConfig(configPath).config;
+      const hostCredentials = hostCredentialFiles(loadedSecretsConfig, configPath);
+      if (hostCredentials.some((file) => pointsAtSameFile(file, target))) {
         refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
         return;
       }
       // Replacing a secret, or writing one a connector is configured to read
       // (its token file), needs the permission: either one changes who the
       // agent talks to (#75 review).
-      const connectorFiles = connectorTokenFiles(loadMindStoneConfig(configPath).config, configPath, paths);
-      if (
-        (existsSync(target) || connectorFiles.some((file) => pointsAtSameFile(file, target))) &&
-        !readAdminPermissions(paths.dataDir).advancedSettings
-      ) {
+      const connectorFiles = connectorTokenFiles(loadedSecretsConfig, configPath, paths);
+      const permitted = readAdminPermissions(paths.dataDir).advancedSettings;
+      const targetExists = pathEntryExists(target);
+      if ((targetExists || connectorFiles.all.some((file) => pointsAtSameFile(file, target))) && !permitted) {
         refuse(403, { error: "replacing a secret or setting a connector's token needs the advanced-settings permission" }, { reason: "advanced", secret: name });
         return;
       }
       mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
       chmodSync(secretsDir, 0o700);
-      writeFileAtomic(target, value, 0o600);
+      if (targetExists) {
+        // A secret stored from the Console is never a link. A link under this
+        // name was made on the host, and replacing it could turn a link chain
+        // into a live credential (#79 review), so it's changed there.
+        if (lstatSync(target).isSymbolicLink()) {
+          refuse(422, { error: "this secret name is a link made on the gateway host; change it there" }, { reason: "host_link", secret: name });
+          return;
+        }
+        writeFileAtomic(target, value, 0o600);
+      } else {
+        // A new name can still reach a protected file that doesn't exist yet
+        // through the filesystem's own folding (APFS treats "ß" as "ss" and
+        // "ſ" as "s") or a chain of dangling links, which no name comparison
+        // covers (#78 review). So the file is created exclusively, and if a
+        // protected file that was missing now exists, this name reached it:
+        // it's removed and refused, whatever the folding or link chain.
+        const missing = [...hostCredentials, ...connectorFiles.read].filter((file) => !existsSync(file));
+        if (!createFileExclusive(target, value, 0o600)) {
+          sendJson(res, 409, { ok: false, error: "a secret with this name was created meanwhile; try again" });
+          return;
+        }
+        const reached = missing.filter((file) => existsSync(file));
+        const reachedHost = reached.some((file) => hostCredentials.includes(file));
+        if (reachedHost || (reached.length > 0 && !permitted)) {
+          if (!removeOrEmpty(target)) {
+            // It couldn't be removed or emptied: fail closed, loudly.
+            appendAdminAudit(paths.dataDir, { userId, action: "failed", status: 500, reason: "plant_not_removed", secret: name });
+            sendJson(res, 500, { ok: false, error: "the admin API hit an internal error" });
+            return;
+          }
+          if (reachedHost) {
+            refuse(422, { error: "this secret is a gateway credential and can only be changed on the gateway host" }, { reason: "host_only", secret: name });
+          } else {
+            refuse(403, { error: "replacing a secret or setting a connector's token needs the advanced-settings permission" }, { reason: "advanced", secret: name });
+          }
+          return;
+        }
+      }
       appendAdminAudit(paths.dataDir, { userId, action: "secret_stored", secret: name });
       // The value is never echoed. Reference it from config as tokenFile: "secrets/<name>".
       sendJson(res, 200, { ok: true, name, tokenFile: `secrets/${name}` });
@@ -2026,20 +2063,28 @@ function sameFile(a: string, b: string): boolean {
  * Absolute paths of every file a connector is configured to read (any key
  * ending in "File" on a channel), resolved the way the connectors resolve
  * them (resolveConnectorSecretPath: under the data dir, trimmed) and, for
- * safety, also relative to the config file (#75 review).
+ * safety, also relative to the config file (#75 review). `read` holds only
+ * the paths the connectors actually read.
  */
-function connectorTokenFiles(config: MindStoneConfig | undefined, configPath: string, paths: MindStoneRuntimePaths): string[] {
-  const files: string[] = [];
+function connectorTokenFiles(
+  config: MindStoneConfig | undefined,
+  configPath: string,
+  paths: MindStoneRuntimePaths,
+): { all: string[]; read: string[] } {
+  const all: string[] = [];
+  const read: string[] = [];
   for (const section of Object.values((config?.channels ?? {}) as Record<string, unknown>)) {
     if (!section || typeof section !== "object") continue;
     for (const [key, value] of Object.entries(section as Record<string, unknown>)) {
       if (/file$/i.test(key) && typeof value === "string" && value.trim()) {
-        files.push(resolveConnectorSecretPath(value, paths));
-        if (!isAbsolute(value.trim())) files.push(resolvePath(dirname(configPath), value.trim()));
+        const resolved = resolveConnectorSecretPath(value, paths);
+        read.push(resolved);
+        all.push(resolved);
+        if (!isAbsolute(value.trim())) all.push(resolvePath(dirname(configPath), value.trim()));
       }
     }
   }
-  return files;
+  return { all, read };
 }
 
 /** A path and, when it is a symlink (even a dangling one), where it points. */
@@ -2199,12 +2244,72 @@ async function readAdminBody(req: IncomingMessage, res: ServerResponse): Promise
   return undefined;
 }
 
+/** Whether anything, even a dangling link, has this name. */
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Create a file that must not exist yet (an exclusive open, which fails if
+ * the name is taken, on every filesystem). False when it was taken.
+ */
+function createFileExclusive(path: string, content: string, mode: number): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, "wx", mode);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+  try {
+    writeFileSync(fd, content);
+    fsyncSync(fd);
+  } catch (error) {
+    closeSync(fd);
+    removeOrEmpty(path);
+    throw error;
+  }
+  closeSync(fd);
+  chmodSync(path, mode);
+  return true;
+}
+
+/** Remove a file just written, or at least empty it. False if neither worked. */
+function removeOrEmpty(path: string): boolean {
+  try {
+    unlinkSync(path);
+    return true;
+  } catch {
+    try {
+      writeFileSync(path, "");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 function writeFileAtomic(path: string, content: string, mode: number): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.tmp-${randomUUID().slice(0, 8)}`;
-  writeFileSync(temp, content, { mode });
-  chmodSync(temp, mode);
-  renameSync(temp, path);
+  try {
+    writeFileSync(temp, content, { mode });
+    chmodSync(temp, mode);
+    renameSync(temp, path);
+  } catch (error) {
+    // Don't leave the content (a secret, for the secrets endpoint) behind (#78).
+    try {
+      unlinkSync(temp);
+    } catch {
+      // Never written, or already gone.
+    }
+    throw error;
+  }
 }
 
 /** Append-only audit of admin writes and refusals, with the deciding user id. Never holds secret values. */
@@ -2247,7 +2352,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       await handleAdminRequest(req, res, url);
     } catch (error) {
       try {
-        appendAdminAudit(runtimePathsFromEnv().dataDir, { action: "failed", status: 500, method: req.method, path: url.pathname, error: String(error).slice(0, 200) });
+        appendAdminAudit(runtimePathsFromEnv().dataDir, {
+          userId: forwardedUser(req).userId ?? null,
+          action: "failed",
+          status: 500,
+          method: req.method,
+          path: url.pathname,
+          error: String(error).slice(0, 200),
+        });
       } catch {
         // The audit itself failed; the response still goes out.
       }
