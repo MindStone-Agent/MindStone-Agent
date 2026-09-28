@@ -113,6 +113,10 @@ import "./connectors/email.js";
 import "./connectors/calendar.js";
 import {
   loadRoutePersonaContextById,
+  personasDirFromConfig,
+  referencedPersonaIds,
+  PERSONA_PROPOSAL_INSTRUCTIONS,
+  discoverMindStonePersonas,
   resolveRoutePersonaContext,
   runMindStoneWorkflow,
   appendTranscriptEntry,
@@ -700,6 +704,17 @@ function consoleTurnCaller(req: IncomingMessage, input: Record<string, unknown>,
   return { forwarded, roleHeaderSent, audience, metadata, model, agentId, senderId, sessionKey };
 }
 
+/**
+ * A transcript entry as a response returns it: a non-owner doesn't see which
+ * persona answered or why (its route or workflow step); the transcript on
+ * disk keeps it (#105 review).
+ */
+function entryForAudience(entry: TranscriptEntry | undefined, audience: RouteAudience): TranscriptEntry | undefined {
+  if (!entry || audience === "owner" || !entry.metadata || !("personaContext" in entry.metadata)) return entry;
+  const { personaContext: _hidden, ...metadata } = entry.metadata;
+  return { ...entry, metadata };
+}
+
 function isTranscriptRole(value: unknown): value is TranscriptRole {
   return ["user", "assistant", "tool", "system", "event"].includes(String(value));
 }
@@ -1119,6 +1134,7 @@ async function runConfiguredRoute(input: {
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
         identityFormation: input.audience === "owner" ? input.identityFormation : undefined,
+        ownerInstructions: input.audience === "owner" && !input.scope ? PERSONA_PROPOSAL_INSTRUCTIONS : undefined,
         memoryRecall: {
           enabled: (input.audience === "owner" || input.audience === "tenant") && input.config?.memory?.autoRecall === true,
           provider: input.config?.memory?.vectorStore === "sqlite-vec"
@@ -1325,6 +1341,8 @@ async function runConfiguredRoute(input: {
       origin: source?.substrate ?? "gateway",
       source,
       runId: run.id,
+      // Only the owner's turns may propose a persona (#105).
+      allowPersona: input.audience === "owner" && !input.scope,
     });
 
     const assistantEntry = appendTranscriptEntry({
@@ -1341,6 +1359,8 @@ async function runConfiguredRoute(input: {
         model: model.id,
         usage: route.result.usage,
         runner: route.runner,
+        // Which persona answered (#105): the Console's transcripts say so per turn.
+        ...(route.personaContext ? { personaContext: route.personaContext } : {}),
         ...(input.scope ? { scope: input.scope } : {}),
         providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
       },
@@ -1878,7 +1898,15 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       sendJson(res, 404, { ok: false, error: `no proposed action matches id "${approvalMatch[1]}"` });
       return;
     }
-    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation } });
+    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation, persona: action.persona } });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/admin/personas") {
+    // The personas and the active one, for the Console's Personas page (#105).
+    // Switching is PATCH /admin/config/personas { active }.
+    const personasDir = personasDirFromConfig(gateConfig.config, paths);
+    const personas = discoverMindStonePersonas(personasDir).map(({ id, name, description, version, error }) => ({ id, name, description, version, ...(error ? { error: "this persona can't be loaded" } : {}) }));
+    sendJson(res, 200, { ok: true, active: gateConfig.config?.personas?.active ?? null, personas });
     return;
   }
   if (req.method === "GET" && url.pathname === "/admin/secrets") {
@@ -2020,13 +2048,19 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     };
     try {
       if (decision === "approve") {
-        const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
-          decidedBy: `console:${userId}`,
-          memoryDir: paths.memoryDir,
-          force: body.force === true,
-          onDecision,
+        // Under the admin write lock, like every config-adjacent write.
+        await withAdminWriteLock(() => {
+          const current = loadMindStoneConfig(configPath).config;
+          const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
+            decidedBy: `console:${userId}`,
+            memoryDir: paths.memoryDir,
+            force: body.force === true,
+            onDecision,
+            personasDir: personasDirFromConfig(current, paths),
+            referencedPersonaIds: referencedPersonaIds(current, paths),
+          });
+          sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
         });
-        sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
       } else {
         const rejected = rejectProposedAction(store, approvalMatch[1]!, {
           decidedBy: `console:${userId}`,
@@ -3607,7 +3641,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           sessionKey,
           identityContext: routedBody.identityContext,
           promptWindow: routedBody.promptWindow,
-          entries: [...persistedEntries, routedBody.entry].filter(Boolean),
+          entries: [...persistedEntries, entryForAudience(routedBody.entry, audience)].filter(Boolean),
         },
       });
       return;
@@ -3804,7 +3838,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           sessionKey,
           identityContext: routedBody.identityContext,
           promptWindow: routedBody.promptWindow,
-          entries: [...persistedEntries, routedBody.entry].filter(Boolean),
+          entries: [...persistedEntries, entryForAudience(routedBody.entry, audience)].filter(Boolean),
         },
       });
       return;
