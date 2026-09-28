@@ -363,6 +363,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'content-type: application/jso
 
 Non-streaming OpenResponses-compatible endpoint.
 
+Who the turn answers follows the same rules as `/v1/chat/completions`: a forwarded `x-mindstone-user-role` of `admin` is the owner; any other role, or a blank one, gets the non-owner context, can't choose `metadata.sessionKey` or `agentId`, and needs `x-mindstone-user-id` (`400` without it). With no role header, the service-token caller is the owner.
+
 Required body fields:
 
 | Field | Notes |

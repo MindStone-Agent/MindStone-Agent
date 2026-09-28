@@ -642,6 +642,64 @@ function forwardedUser(req: IncomingMessage): { userId?: string; userRole?: stri
   return { userId: h("x-mindstone-user-id"), userRole: h("x-mindstone-user-role"), conversationId: h("x-mindstone-conversation-id") };
 }
 
+/**
+ * Who a Console-facing turn answers, and in which session (#103). Chat
+ * completions and /v1/responses both use it, so a Console user can't reach
+ * the owner through either (#112 review).
+ * - A Console admin is the owner; any other Console user, or a role header
+ *   left blank, gets the non-owner context, as a connector's non-owner does.
+ *   A direct caller with the service token and no role header is the owner.
+ * - A non-owner can't choose its session or agent (metadata.sessionKey or
+ *   agentId), is known only by the forwarded user id (never the body's
+ *   `user`, which could name the owner), is keyed apart from the same user's
+ *   owner sessions, and without a conversation id gets its own session
+ *   rather than the owner's main one.
+ */
+function consoleTurnCaller(req: IncomingMessage, input: Record<string, unknown>, config: MindStoneConfig | undefined, channel: string):
+  | { error: string }
+  | {
+      forwarded: ReturnType<typeof forwardedUser>;
+      roleHeaderSent: boolean;
+      audience: RouteAudience;
+      metadata: Record<string, unknown>;
+      model: string;
+      agentId: string;
+      senderId: string;
+      sessionKey: string;
+    } {
+  const forwarded = forwardedUser(req);
+  const roleHeaderSent = req.headers["x-mindstone-user-role"] !== undefined;
+  const audience: RouteAudience = forwarded.userRole
+    ? (forwarded.userRole.toLowerCase() === "admin" ? "owner" : "non_owner")
+    : roleHeaderSent ? "non_owner" : "owner";
+  const requestMetadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
+  const metadata0 = audience === "owner"
+    ? requestMetadata
+    : Object.fromEntries(Object.entries(requestMetadata).filter(([key]) => key !== "sessionKey" && key !== "agentId"));
+  const metadata: Record<string, unknown> = { ...metadata0, ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}), ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}) };
+  const model = typeof input.model === "string" ? input.model : "mindstone/default";
+  const agentId = agentIdFromModel(config, model, metadata.agentId);
+  if (audience !== "owner" && !forwarded.userId) return { error: "a Console user's turn needs x-mindstone-user-id" };
+  const senderId = audience === "owner"
+    ? forwarded.userId ?? (typeof input.user === "string" ? input.user : model)
+    : `non-owner:${forwarded.userId}`;
+  // Each Console conversation is its own session (#38), so separate chats don't
+  // share a context window. They are all the same agent's transcripts, so the
+  // memory backfill indexes every one into that agent's memory.
+  const sessionKey = gatewaySessionKey({
+    config,
+    explicitSessionKey: metadata.sessionKey ?? (forwarded.conversationId
+      ? consoleConversationSessionKey(senderId, forwarded.conversationId)
+      : audience === "owner" ? undefined : consoleConversationSessionKey(senderId, "no-conversation")),
+    agentId,
+    substrate: "openai",
+    channel,
+    chatType: "internal",
+    senderId,
+  });
+  return { forwarded, roleHeaderSent, audience, metadata, model, agentId, senderId, sessionKey };
+}
+
 function isTranscriptRole(value: unknown): value is TranscriptRole {
   return ["user", "assistant", "tool", "system", "event"].includes(String(value));
 }
@@ -3503,19 +3561,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
 
-    const metadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
-    const model = typeof input.model === "string" ? input.model : "mindstone/default";
-    const agentId = typeof metadata.agentId === "string" ? metadata.agentId : "default";
-    const sessionKey = gatewaySessionKey({
-      config: loadedConfig.config,
-      explicitSessionKey: metadata.sessionKey,
-      agentId,
-      substrate: "openai",
-      channel: "openai-responses",
-      chatType: "internal",
-      senderId: typeof input.user === "string" ? input.user : model,
-    });
-    const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-responses", chatType: "internal", senderId: typeof input.user === "string" ? input.user : model });
+    // The same audience and session rules as chat completions (#112 review).
+    const caller = consoleTurnCaller(req, input, loadedConfig.config, "openai-responses");
+    if ("error" in caller) {
+      sendJson(res, 400, openAiError(caller.error, "invalid_request_error", "missing_user"));
+      return;
+    }
+    const { audience, metadata, model, agentId, senderId, sessionKey } = caller;
+    const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-responses", chatType: "internal", senderId });
     const persistedEntries = responseInputs.map((entry) => appendTranscriptEntry({
       sessionKey,
       agentId,
@@ -3530,7 +3583,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       },
     }));
 
-    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
     if (routed.routed && routed.status === 200) {
       const routedBody = routed.body as { entry?: TranscriptEntry; identityContext?: unknown; promptWindow?: unknown; runId?: string };
       const outputText = routedBody.entry?.text ?? "";
@@ -3624,52 +3677,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
 
-    const forwarded = forwardedUser(req);
-    // Who the turn answers (#103): a Console admin is the owner; any other
-    // Console user, or a role header left blank, gets the non-owner context,
-    // as a connector's non-owner does. A direct caller with the service token
-    // and no role header is the owner, as before.
-    const roleHeaderSent = req.headers["x-mindstone-user-role"] !== undefined;
-    const audience: RouteAudience = forwarded.userRole
-      ? (forwarded.userRole.toLowerCase() === "admin" ? "owner" : "non_owner")
-      : roleHeaderSent ? "non_owner" : "owner";
-    const requestMetadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
-    // A non-owner can't choose its session or agent: it would reach the
-    // owner's history that way (#103 review).
-    const metadata0 = audience === "owner"
-      ? requestMetadata
-      : Object.fromEntries(Object.entries(requestMetadata).filter(([key]) => key !== "sessionKey" && key !== "agentId"));
-    const metadata: Record<string, unknown> = { ...metadata0, ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}), ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}) };
-    const model = typeof input.model === "string" ? input.model : "mindstone/default";
-    const agentId = agentIdFromModel(loadedConfig.config, model, metadata.agentId);
-    // A non-owner is known only by the Console's forwarded user id, never by
-    // the body's `user` (which could name the owner), and always gets a
-    // Console session of its own: without a conversation id it would
-    // otherwise land in the owner's main session (#103 review).
-    if (audience !== "owner" && !forwarded.userId) {
-      sendJson(res, 400, openAiError("a Console user's turn needs x-mindstone-user-id", "invalid_request_error", "missing_user"));
+    const caller = consoleTurnCaller(req, input, loadedConfig.config, "openai-chat-completions");
+    if ("error" in caller) {
+      sendJson(res, 400, openAiError(caller.error, "invalid_request_error", "missing_user"));
       return;
     }
-    // A non-owner's sessions are keyed apart from the same user's owner
-    // sessions (an admin later demoted, or a blank role), so a non-owner turn
-    // never replays owner-audience history.
-    const senderId = audience === "owner"
-      ? forwarded.userId ?? (typeof input.user === "string" ? input.user : model)
-      : `non-owner:${forwarded.userId}`;
-    // Each Console conversation is its own session (#38), so separate chats don't
-    // share a context window. They are all the same agent's transcripts, so the
-    // memory backfill indexes every one into that agent's memory.
-    const sessionKey = gatewaySessionKey({
-      config: loadedConfig.config,
-      explicitSessionKey: metadata.sessionKey ?? (forwarded.conversationId
-        ? consoleConversationSessionKey(senderId, forwarded.conversationId)
-        : audience === "owner" ? undefined : consoleConversationSessionKey(senderId, "no-conversation")),
-      agentId,
-      substrate: "openai",
-      channel: "openai-chat-completions",
-      chatType: "internal",
-      senderId,
-    });
+    const { forwarded, roleHeaderSent, audience, metadata, model, agentId, senderId, sessionKey } = caller;
 
     const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-chat-completions", chatType: "internal", senderId });
     // The gateway already holds the conversation (#38): clients such as LibreChat

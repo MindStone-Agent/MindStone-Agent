@@ -72,7 +72,7 @@ p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "con
 c = json.loads(p.read_text())
 c.setdefault("gateway", {})["auth"] = {"mode": "token", "tokenEnv": "ONB_TOKEN"}
 c["gateway"]["admin"] = {"tokenEnv": "ONB_ADMIN_TOKEN"}
-c["gateway"]["http"] = {"chatCompletions": {"enabled": True}}
+c["gateway"]["http"] = {"chatCompletions": {"enabled": True}, "responses": {"enabled": True}}
 # A fresh Console install: no provider yet, no onboarding record.
 c["routing"] = {"mode": "placeholder", "defaultAgentId": "default"}
 c.pop("onboarding", None)
@@ -250,6 +250,21 @@ code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer
 curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-user-id: smoke-admin' -H 'x-mindstone-conversation-id: conv-first' \
   -d '{"model":"mindstone/default","messages":[{"role":"user","content":"demoted"}]}' "${BASE}/v1/chat/completions" >/dev/null
 cp "${CAPTURE}" "${TEMP_RUNTIME}/demoted.jsonl"
+# /v1/responses follows the same rules (#112 review): a Console user naming
+# the owner's session gets the non-owner context; an admin is the owner.
+responses() { # role user-id capture-name
+  : > "${CAPTURE}"
+  curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' \
+    -H "x-mindstone-user-role: $1" -H "x-mindstone-user-id: $2" -H 'x-mindstone-conversation-id: conv-responses' \
+    -d '{"model":"mindstone/default","metadata":{"sessionKey":"agent:console:console:smoke-admin:conv-first","agentId":"default"},"input":"via responses"}' "${BASE}/v1/responses" >"${TEMP_RUNTIME}/code"
+  [[ "$(cat "${TEMP_RUNTIME}/code")" == 200 ]] || { echo "responses as $1 failed: $(cat "${BODY}")" >&2; exit 1; }
+  cp "${CAPTURE}" "${TEMP_RUNTIME}/$3.jsonl"
+}
+responses user smoke-user responses-user
+responses admin smoke-admin responses-admin
+code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' \
+  -d '{"model":"mindstone/default","user":"smoke-admin","input":"anon via responses"}' "${BASE}/v1/responses")"
+[[ "${code}" == 400 ]] || { echo "a non-owner responses turn with no user id should be refused, got ${code}" >&2; exit 1; }
 # An agent that already has a real identity isn't sent back to formation.
 rm -f "${DATA}/identity-formation/default.json"
 printf '# Wren\n\nAn established identity the owner approved.\n' > "${DATA}/agents/default/IDENTITY.md"
@@ -279,6 +294,9 @@ if (!prompt("direct").includes("SYNTH-CONTEXT-102")) fail("a direct caller with 
 if (prompt("steal").includes("onb: Hi, I just set you up.")) fail("a Console user reached the owner's session through metadata.sessionKey");
 if (prompt("steal-main").includes("health probe")) fail("a Console user with no conversation id landed in the owner's main session");
 if (prompt("demoted").includes("onb: Hi, I just set you up.")) fail("the same user as a non-owner replayed their owner-audience history");
+if (prompt("responses-user").includes("SYNTH-CONTEXT-102")) fail("a Console user got the owner's USER.md through /v1/responses");
+if (prompt("responses-user").includes("onb: Hi, I just set you up.")) fail("a Console user reached the owner's session through /v1/responses");
+if (!prompt("responses-admin").includes("SYNTH-CONTEXT-102")) fail("control: a Console admin through /v1/responses is the owner");
 if (prompt("established").includes(FORMATION)) fail("an agent with an established identity was sent back to identity formation");
 if (prompt("established-default").includes(FORMATION)) fail("an established identity at the default path was sent back to identity formation");
 // The event is recorded once, in the first conversation's transcript.
