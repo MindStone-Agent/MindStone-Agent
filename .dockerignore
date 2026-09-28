@@ -7,8 +7,6 @@ packages/*/dist
 packages/*/*.tsbuildinfo
 vendor/pi/**/node_modules
 vendor/pi/**/dist
-vendor/pi/packages/ai/src/models.generated.ts
-vendor/pi/packages/ai/src/image-models.generated.ts
 .DS_Store
 .env
 .env.*
