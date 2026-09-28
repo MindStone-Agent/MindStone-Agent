@@ -11,8 +11,10 @@ CONFIG_PATH="${MINDSTONE_AGENT_CONFIG:-${MINDSTONE_AGENT_DATA_DIR}/config.json}"
 # --if-no-config (used by install-native.sh, so by install.sh): initialize only a
 # runtime that has no config.json yet. An existing runtime, onboarded or not, is
 # left exactly as it is: re-running the installer is also the update path (#108).
+# A symlink counts as existing even when it dangles: its target is never written.
+config_exists() { [[ -e "${CONFIG_PATH}" || -L "${CONFIG_PATH}" ]]; }
 if [[ "${1:-}" == "--if-no-config" ]]; then
-  if [[ -e "${CONFIG_PATH}" ]]; then
+  if config_exists; then
     echo "Runtime config already exists; left unchanged: ${CONFIG_PATH}"
     exit 0
   fi
@@ -84,8 +86,27 @@ Narrative/dream-cycle journals live here. They preserve experiential texture and
 EOF
 fi
 
-if [[ ! -f "${CONFIG_PATH}" ]]; then
-  cat >"${CONFIG_PATH}" <<'EOF'
+# Written to a temporary file in the same directory, then hard-linked into place:
+# link(2) fails if anything (a file, a symlink, a dangling symlink) already holds
+# the name, so a config created meanwhile is never overwritten. noclobber makes
+# the temporary file with the usual umask mode, as the onboarding wizard does.
+write_config_if_missing() {
+  local tmp="${CONFIG_PATH}.init.$$"
+  config_exists && return 0
+  rm -f "${tmp}"
+  (set -o noclobber; cat >"${tmp}")
+  if ! ln "${tmp}" "${CONFIG_PATH}" 2>/dev/null; then
+    if ! config_exists; then
+      # No hard links on this filesystem: fall back to an exclusive create.
+      (set -o noclobber; cat "${tmp}" >"${CONFIG_PATH}") 2>/dev/null || true
+    fi
+  fi
+  rm -f "${tmp}"
+  config_exists || { echo "Could not create ${CONFIG_PATH}" >&2; return 1; }
+}
+
+if ! config_exists; then
+  write_config_if_missing <<'EOF'
 {
   "workspace": {
     "root": "."
@@ -134,8 +155,7 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
   },
   "routing": {
     "mode": "placeholder",
-    "defaultAgentId": "default",
-    "defaultModel": "mindstone/default"
+    "defaultAgentId": "default"
   },
   "contextManagement": {
     "mode": "sliding_window",

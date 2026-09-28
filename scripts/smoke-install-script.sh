@@ -75,6 +75,75 @@ if (mode(process.env.CONFIG!) !== mode(process.env.WIZARD_COPY!)) {
 console.log(`fresh config: valid, routing placeholder, onboarded=false, mode ${mode(process.env.CONFIG!)}`);
 ')
 
+# --- #108 QA F1: the wizards over the fresh config, every default accepted --------
+# The fresh config must not preselect a model: the provider menu's default is
+# "Leave unset", so accepting every default keeps routing on "placeholder" (and the
+# gateway not onboarded) instead of pi-session with a model that doesn't exist.
+for wizard in onboard routing; do
+  cp "${CONFIG}" "${TMP_DIR}/wizard-${wizard}.json"
+  (umask 022; WIZARD="${wizard}" WCONFIG="${TMP_DIR}/wizard-${wizard}.json" PI_CODING_AGENT_DIR="${MINDSTONE_AGENT_RUNTIME_DIR}/pi-agent" npx tsx --eval '
+import { readFileSync } from "node:fs";
+import { runMindStoneConfigWizard, runMindStoneOnboardingWizard, type MindStonePrompter } from "./packages/mindstone-core/src/index.ts";
+import { onboardingSteps } from "./packages/mindstone-gateway/src/admin-api.ts";
+const fail = (message: string) => { console.error(`[${process.env.WIZARD}] ${message}`); process.exit(1); };
+const configPath = process.env.WCONFIG!;
+let prompts = 0;
+const providerDefaults: string[] = [];
+const guard = () => { if (++prompts > 200) fail("the wizard kept prompting (a loop?)"); };
+// Accept every default: the initial value, else the first option; confirm the default
+// (or yes). The one exception is the risk notice, which must be accepted to go on.
+const prompter: MindStonePrompter = {
+  intro: async () => undefined,
+  outro: async () => undefined,
+  note: async () => undefined,
+  confirm: async ({ message, initialValue }) => { guard(); return /risky\. Continue onboarding/.test(message) ? true : initialValue ?? true; },
+  select: async ({ message, options, initialValue }) => {
+    guard();
+    const value = initialValue ?? options[0]!.value;
+    if (/model provider/i.test(message)) providerDefaults.push(String(value));
+    return value;
+  },
+  text: async ({ initialValue, placeholder }) => { guard(); return initialValue ?? placeholder ?? "smoke default"; },
+};
+void (async () => {
+const models = [{ id: "example-model", provider: "example" }];
+const providers = [{ id: "example", name: "Example", modelCount: 1, availableModelCount: 1 }];
+if (process.env.WIZARD === "onboard") {
+  await runMindStoneOnboardingWizard(prompter, { configPath, showHeader: false, availableModels: models, availableProviders: providers });
+} else {
+  await runMindStoneConfigWizard(prompter, { configPath, sections: ["routing"], showHeader: false, availableModels: models, availableProviders: providers });
+}
+if (providerDefaults.length === 0) fail("the provider menu was never shown");
+if (providerDefaults.some((value) => value !== "unset")) fail(`the provider menu preselected ${providerDefaults.join(", ")}, want unset`);
+const config = JSON.parse(readFileSync(configPath, "utf8"));
+if (config.routing?.mode !== "placeholder") fail(`accepting every default set routing.mode ${config.routing?.mode}, want placeholder`);
+if (config.routing?.defaultModel !== undefined) fail(`accepting every default set routing.defaultModel ${config.routing.defaultModel}`);
+if (onboardingSteps(config).onboarded !== false) fail("accepting every default counted as onboarded");
+console.log(`${process.env.WIZARD} wizard, every default accepted: provider default unset, routing placeholder, not onboarded`);
+})().catch((error) => fail(error instanceof Error ? error.message : String(error)));
+') 2> >(grep -v -e ExperimentalWarning -e trace-warnings >&2)
+done
+
+# --- #108 QA F4: a symlink at config.json, even a dangling one, is never written through
+LINK_RUNTIME="${TMP_DIR}/link-runtime"
+mkdir -p "${LINK_RUNTIME}/mindstone"
+ln -s "${TMP_DIR}/elsewhere/config.json" "${LINK_RUNTIME}/mindstone/config.json"
+mkdir -p "${TMP_DIR}/elsewhere"
+for flag in --if-no-config ""; do
+  MINDSTONE_AGENT_RUNTIME_DIR="${LINK_RUNTIME}" ./scripts/init-runtime.sh ${flag} >"${TMP_DIR}/init-link.log" 2>&1 \
+    || { cat "${TMP_DIR}/init-link.log" >&2; echo "init-runtime.sh ${flag} failed on a dangling config symlink" >&2; exit 1; }
+  if [[ -e "${TMP_DIR}/elsewhere/config.json" ]]; then
+    echo "init-runtime.sh ${flag:-(no flag)} wrote through a dangling config.json symlink" >&2
+    exit 1
+  fi
+  [[ -L "${LINK_RUNTIME}/mindstone/config.json" ]] || { echo "init-runtime.sh replaced the config.json symlink" >&2; exit 1; }
+done
+if ls "${LINK_RUNTIME}/mindstone/" | grep -q '\.init\.'; then
+  echo "init-runtime.sh left a temporary config file behind" >&2
+  exit 1
+fi
+echo "dangling config.json symlink: not written through, not replaced"
+
 # --- #108: a re-run (the update path) leaves an existing runtime untouched --------
 snapshot() {
   node -e '

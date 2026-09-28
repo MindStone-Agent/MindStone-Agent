@@ -656,7 +656,7 @@ function isChatRunnableRoutingMode(mode: string): mode is "mock" | "pi-session" 
 
 function chatRoutingRequiredMessage(mode = "placeholder"): string {
   if (mode === "placeholder") {
-    return "MindStone chat is still in transcript-only setup mode. Start interactive `mindstone chat` from a TTY to choose an answer mode, or configure routing with `mindstone config --section routing`.";
+    return "MindStone chat is still in transcript-only setup mode. Run `mindstone onboard` for the full first-run setup (model, persona and identity), or finish setup in the web Console. To choose only an answer mode, start interactive `mindstone chat` from a TTY or run `mindstone config --section routing`.";
   }
   return `MindStone chat requires routing.mode to be mock, pi-session, or pi. Current mode is ${mode}.`;
 }
