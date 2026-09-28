@@ -451,6 +451,7 @@ export function buildPiAdapterSkillsContext(): { text: string; details: Record<s
     "```mindstone-skill-proposal",
     '{"id":"lowercase-with-hyphens","label":"Short name","description":"What it does","goal":"What it is for","whenToUse":["..."],"outputs":["..."],"safetyNotes":["..."],"instructions":"The skill\'s instructions, in markdown"}',
     "```",
+    "Before the block, tell the owner in a sentence or two what the skill does and that it is waiting for their approval on the Console's Approvals page.",
     "Only propose a skill when the owner asks for one. It is held for the owner's approval in the Console and does nothing until then.",
     "</mindstone-skills>",
   );
