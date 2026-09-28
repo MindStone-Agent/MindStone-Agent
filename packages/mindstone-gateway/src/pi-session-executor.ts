@@ -875,8 +875,17 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       if (!configured) throw new Error(`Pi model is known but not available in isolated runtime auth: ${explicit.provider}/${explicit.id}`);
       return explicit;
     }
+    // A requested id Pi doesn't know falls back to the configured default
+    // before "first available", and the fallback is logged, never silent (#126 J11).
+    if (requestModelId !== undefined && this.#defaultModel && requestModelId !== this.#defaultModel) {
+      console.warn(`[mindstone] Pi has no model "${requestModelId}"; using the configured default ${this.#defaultModel}`);
+      return this.#resolvePiModel(undefined);
+    }
     const available = registry.getAvailable();
-    if (available.length > 0) return available[0];
+    if (available.length > 0) {
+      console.warn(`[mindstone] no configured Pi model resolved; using the first available one, ${available[0].provider}/${available[0].id}`);
+      return available[0];
+    }
     throw new Error("No isolated Pi model is available/configured for session-backed MindStone-Agent routing");
   }
 

@@ -120,6 +120,7 @@ import {
   discoverMindStonePersonas,
   resolveRoutePersonaContext,
   runMindStoneWorkflow,
+  resolveAgentModelId,
   appendTranscriptEntry,
   buildPromptWindow,
   createSqliteMemoryRecallProvider,
@@ -412,11 +413,19 @@ function resolveRoutingMode(config: MindStoneConfig | undefined): "placeholder" 
   return config?.routing?.mode ?? "placeholder";
 }
 
-function resolveRouteModel(config: MindStoneConfig | undefined, agentId: string, metadata?: Record<string, unknown>): MindStoneModelInfo {
-  const metadataModel = typeof metadata?.model === "string" ? metadata.model : undefined;
-  const configuredAgent = config?.agents?.[agentId];
+/**
+ * The model a turn runs on:
+ * - a model the owner's request names, unless it is an agent alias, which
+ *   means "this agent's model" (#126 J11: the Console's "mindstone/default"
+ *   was sent to Pi as a model and fell through to the first available one);
+ * - then the agent's own defaultModel, then the install's routing.defaultModel
+ *   (the per-agent setting wins, #118).
+ * A non-owner turn can't choose the model (#118).
+ */
+function resolveRouteModel(config: MindStoneConfig | undefined, agentId: string, metadata?: Record<string, unknown>, audience: RouteAudience = "owner"): MindStoneModelInfo {
+  const requested = audience === "owner" && typeof metadata?.model === "string" ? metadata.model : undefined;
   return {
-    id: metadataModel ?? config?.routing?.defaultModel ?? configuredAgent?.defaultModel ?? `mindstone/${agentId}`,
+    id: resolveAgentModelId({ config, agentId, requested }),
     provider: resolveRoutingMode(config),
     contextWindowTokens: resolveContextWindowTokens(config, agentId, metadata),
   };
@@ -1111,7 +1120,7 @@ async function runConfiguredRoute(input: {
   const provider = resolveProvider(input.config);
   if (!provider) return { routed: false, status: 501, body: undefined };
 
-  const model = resolveRouteModel(input.config, input.agentId, input.metadata);
+  const model = resolveRouteModel(input.config, input.agentId, input.metadata, input.audience);
   const entries = readTranscriptEntries(input.sessionKey);
   const currentHandoff = readCurrentHandoff();
   // The handoff is the verbatim tail of an owner session: never replayed into

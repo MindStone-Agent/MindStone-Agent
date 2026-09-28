@@ -37,6 +37,12 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - Pi 0.87 ships the Azure OpenAI (Responses), Amazon Bedrock and Google Vertex providers that #126 builds on.
 
 ### Fixed
+- **A Console chat runs on the model chosen in setup** (#126 J11, #118). The Console sends `model: "mindstone/default"`, which reached Pi as an unknown model id and silently fell through to the first available provider. So with more than one provider configured, chats ignored the setup's choice.
+  - `mindstone/<agentId>` now names an agent, meaning that agent's model.
+  - An agent's own `agents.<id>.defaultModel` now beats the install's `routing.defaultModel`.
+  - A non-owner turn (a Console user, a connector's non-owner, a tenant run) can't choose the model; it gets the agent's.
+  - When Pi doesn't know a requested model, the session executor and the Pi provider use the configured default before the first available one, and log either fallback.
+  - New smoke: `scripts/smoke-model-selection.sh`.
 - **Hidden CLI prompts handle a pasted key and Ctrl-D** (#131). A key pasted together with its newline now submits, without a trailing `\r` (which Pi login secrets kept). Ctrl-D ends the prompt instead of adding `\x04`, other control keys are ignored, and an arrow key's escape sequence is dropped.
 - **Secrets typed at the CLI are no longer shown on screen, and Pi's cache warming stays off** (#129).
   - A hidden prompt, such as the wizard's API-key prompts or a login's secret prompt, closes the prompter's readline while it reads, since a real terminal echoed the secret even with the readline paused. New pty smoke: `scripts/smoke-cli-secret-echo.sh`.
