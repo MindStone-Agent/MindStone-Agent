@@ -114,6 +114,7 @@ import "./connectors/calendar.js";
 import {
   loadRoutePersonaContextById,
   personasDirFromConfig,
+  referencedPersonaIds,
   PERSONA_PROPOSAL_INSTRUCTIONS,
   discoverMindStonePersonas,
   resolveRoutePersonaContext,
@@ -2036,12 +2037,14 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       if (decision === "approve") {
         // Under the admin write lock, like every config-adjacent write.
         await withAdminWriteLock(() => {
+          const current = loadMindStoneConfig(configPath).config;
           const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
             decidedBy: `console:${userId}`,
             memoryDir: paths.memoryDir,
             force: body.force === true,
             onDecision,
-            personasDir: personasDirFromConfig(loadMindStoneConfig(configPath).config, paths),
+            personasDir: personasDirFromConfig(current, paths),
+            referencedPersonaIds: referencedPersonaIds(current, paths),
           });
           sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
         });

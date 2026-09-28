@@ -41,6 +41,7 @@ import {
   loadMindStoneSkill,
   mindStoneKbStatus,
   personasDirFromConfig,
+  referencedPersonaIds,
   renderPersonaMarkdown,
   resolveMindStonePersona,
   resolveSkillRefs,
@@ -2019,12 +2020,14 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
         prompter.close();
       }
     }
+    const cliConfig = loadMindStoneConfig(resolveConfigPath()).config;
     const result = approveProposedAction(store, check, {
       decidedBy: process.env.USER ?? "cli",
       memoryDir: runtimePathsFromEnv().memoryDir,
       force: hasOption(argv, "--force"),
       onDecision: appendApprovalAuditEvent,
-      personasDir: personasDirFromConfig(loadMindStoneConfig(resolveConfigPath()).config),
+      personasDir: personasDirFromConfig(cliConfig),
+      referencedPersonaIds: referencedPersonaIds(cliConfig),
     });
     if (result.outcome === "requeued") {
       output.write(`${gold("Queued")} — ${action.id} was approved earlier but never queued; it is queued now.\n`);

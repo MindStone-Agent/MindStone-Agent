@@ -12,6 +12,9 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - Approving it (Console or `mindstone approvals approve`) writes `personas/<id>/PERSONA.md` from a fixed template (Voice, Working style, Boundaries; headings in the proposal's text stay text) and `metadata.json`, and adds it to the Personas list. It does not make it active: switching to it is a separate, deliberate step (the Console's Personas page, `PATCH /admin/config/personas`, or `mindstone persona activate`). An existing id, or anything already at that path, is refused (`409`) and the approval stays pending. Rejecting writes nothing.
   - A proposal with characters the approver can't see (controls, bidi overrides, zero-width or tag characters) is refused, and code fences, setext headings and HTML comments in its text are quoted, so the approval card shows everything the persona holds. `mindstone approvals show` and the approve prompt show the persona as it will be written. At most 3 persona proposals wait at once.
   - `GET /admin/personas` lists the personas and the active one. Switching is the existing `PATCH /admin/config/personas`.
+  - Approving never makes a persona active: an id the config already uses (`personas.active`, a route rule, a workflow step) is refused with `409 persona_referenced`.
+  - The instruction tells the agent that a persona is used in every chat, other people's and connectors included, so private details about the user stay in USER.md.
+  - A proposal counts only as a top-level block: one shown inside another fence (an example, or the instructions echoed back) stays in the reply as text. A character with three or more stacked combining marks is refused. App Engine runs never propose a persona.
   - New smoke: `scripts/smoke-persona-proposals.sh`.
 
 ### Fixed

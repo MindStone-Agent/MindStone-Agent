@@ -23,7 +23,7 @@ import { PersonaExistsError, writeProposedPersona } from "../persona/create.js";
 export class ApprovalActionError extends Error {
   constructor(
     message: string,
-    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload" | "no_personas_dir" | "persona_exists",
+    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload" | "no_personas_dir" | "persona_exists" | "persona_referenced",
     readonly status: number,
     /** For callers outside this host (the Console): the same refusal without host paths or CLI hints. */
     readonly publicMessage: string = message,
@@ -128,6 +128,8 @@ export function approveProposedAction(
     onDecision?: ApprovalDecisionHook;
     /** persona_create (#105): where personas live. */
     personasDir?: string;
+    /** Persona ids the config already uses (referencedPersonaIds); approving one of them is refused. */
+    referencedPersonaIds?: ReadonlySet<string>;
   },
 ): ApproveResult {
   const { action, repair } = check;
@@ -226,6 +228,16 @@ export function approveProposedAction(
     // behind and an approval never exists without its files (#105).
     if (!options.personasDir) throw new ApprovalActionError("approving a persona needs the personas directory", "no_personas_dir", 422);
     const personaId = action.persona.id;
+    // An id the config already uses (active, a route rule, a workflow step)
+    // would answer as soon as it's saved, with no switch (#105 review).
+    if (!options.referencedPersonaIds) throw new ApprovalActionError("approving a persona needs the persona ids the config uses", "no_personas_dir", 422);
+    if (options.referencedPersonaIds.has(personaId)) {
+      throw new ApprovalActionError(
+        `the config already uses the persona id "${personaId}", so approving it would make it active without a switch; ask the agent for a new name, or reject this proposal`,
+        "persona_referenced",
+        409,
+      );
+    }
     let dir: string;
     try {
       dir = writeProposedPersona({ personasDir: options.personasDir, persona: action.persona, approvedBy: options.decidedBy, now: now() });

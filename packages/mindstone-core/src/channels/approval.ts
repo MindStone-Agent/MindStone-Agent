@@ -258,7 +258,54 @@ export function resolveConnectorSendPolicy(params: {
 /** Pending persona proposals kept at once (#105 review). */
 export const MAX_PENDING_PERSONAS = 3;
 
-const PROPOSAL_FENCE = /```mindstone-(memory|calendar|persona)-proposal\s*\n([\s\S]*?)```/g;
+const PROPOSAL_INFO = /^mindstone-(memory|calendar|persona)-proposal$/;
+
+/**
+ * The reply split into its text and its proposal blocks. A block counts only
+ * at the top level, outside any other fenced block (``` or ~~~): one shown
+ * inside another fence (an example, or instructions echoed back) is left in
+ * the text and never proposed (#105 review). As before, a proposal fence may
+ * open at the end of a line of text and close at the end of its last line;
+ * an unclosed one isn't a block.
+ */
+function splitProposalBlocks(replyText: string): { text: string; blocks: Array<{ kind: string; body: string }> } {
+  const lines = replyText.split("\n");
+  const kept: string[] = [];
+  const blocks: Array<{ kind: string; body: string }> = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    // A proposal fence opened after some text: the text stays, the fence starts its own line.
+    const inline = /^(.*?\S)[ \t]*(```mindstone-(?:memory|calendar|persona)-proposal[ \t]*\r?)$/.exec(line);
+    if (inline) {
+      lines.splice(i, 1, inline[1]!, inline[2]!);
+      continue;
+    }
+    const open = /^ {0,3}(`{3,}|~{3,})(.*?)\r?$/.exec(line);
+    if (!open || (open[1]![0] === "`" && open[2]!.includes("`"))) {
+      kept.push(line);
+      i += 1;
+      continue;
+    }
+    const marker = open[1]!;
+    const kind = PROPOSAL_INFO.exec(open[2]!.trim())?.[1];
+    const close = new RegExp(`^ {0,3}\\${marker[0]}{${marker.length},}[ \\t\\r]*$`);
+    // A proposal may also close at the end of its last line ("}```").
+    const closesInline = (text: string) => kind !== undefined && marker === "```" && /\S[ \t]*```[ \t]*\r?$/.test(text);
+    let j = i + 1;
+    while (j < lines.length && !close.test(lines[j]!) && !closesInline(lines[j]!)) j += 1;
+    if (kind && j < lines.length) {
+      const last = close.test(lines[j]!) ? [] : [lines[j]!.replace(/[ \t]*```[ \t]*\r?$/, "")];
+      blocks.push({ kind, body: [...lines.slice(i + 1, j), ...last].join("\n") });
+      // An empty line where the block was, as before, so the text around it stays apart.
+      kept.push("");
+    } else {
+      kept.push(...lines.slice(i, Math.min(j, lines.length - 1) + 1));
+    }
+    i = j + 1;
+  }
+  return { text: kept.join("\n"), blocks };
+}
 
 export type ExtractedActionProposals = {
   /** Reply text with every proposal block stripped. */
@@ -273,31 +320,29 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
   const mutations: ConnectorMutationPayload[] = [];
   let memory: MemoryWritePayload | undefined;
   let persona: PersonaProposalPayload | undefined;
-  const text = replyText
-    .replace(PROPOSAL_FENCE, (_, fenceKind: string, body: string) => {
-      try {
-        const parsed = JSON.parse(body);
-        if (fenceKind === "memory") {
-          const path = typeof parsed?.path === "string" ? parsed.path.trim() : "";
-          const content = typeof parsed?.content === "string" ? parsed.content : "";
-          if (path && content && !memory) memory = { path, content };
-        } else if (fenceKind === "persona") {
-          persona ??= parsePersonaProposal(parsed);
-        } else {
-          const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
-          const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
-          const data = parsed?.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? (parsed.data as Record<string, unknown>) : undefined;
-          if (operation && data) {
-            mutations.push({ connectorId: "calendar", operation, resource, data });
-          }
+  const split = splitProposalBlocks(replyText);
+  for (const { kind: fenceKind, body } of split.blocks) {
+    try {
+      const parsed = JSON.parse(body);
+      if (fenceKind === "memory") {
+        const path = typeof parsed?.path === "string" ? parsed.path.trim() : "";
+        const content = typeof parsed?.content === "string" ? parsed.content : "";
+        if (path && content && !memory) memory = { path, content };
+      } else if (fenceKind === "persona") {
+        persona ??= parsePersonaProposal(parsed);
+      } else {
+        const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
+        const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
+        const data = parsed?.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? (parsed.data as Record<string, unknown>) : undefined;
+        if (operation && data) {
+          mutations.push({ connectorId: "calendar", operation, resource, data });
         }
-      } catch {
-        // malformed proposal blocks are dropped from the reply, never applied
       }
-      return "";
-    })
-    .trim();
-  return { text, memory, mutations, persona };
+    } catch {
+      // malformed proposal blocks are dropped from the reply, never applied
+    }
+  }
+  return { text: split.text.trim(), memory, mutations, persona };
 }
 
 /** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
