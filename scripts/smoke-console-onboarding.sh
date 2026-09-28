@@ -91,6 +91,13 @@ patch() { curl -s -o "${BODY}" -w '%{http_code}' -X PATCH "${ADMIN[@]}" -d "$2" 
 expect() { local got="$1" want="$2" label="$3"; [[ "${got}" == "${want}" ]] || { echo "${label}: expected ${want}, got ${got}: $(cat "${BODY}")" >&2; exit 1; }; }
 field() { node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); let v=b; for (const k of process.argv[2].split(".")) v=v?.[k]; console.log(typeof v==="object"?JSON.stringify(v):String(v))' "${BODY}" "$1"; }
 
+# --- 0. Unit: an embedding provider from the environment counts for the memory step.
+MINDSTONE_EMBEDDING_PROVIDER="ollama:nomic-embed-text" npx tsx -e '
+import { onboardingSteps } from "./packages/mindstone-gateway/src/admin-api.ts";
+const steps = onboardingSteps({ memory: { vectorStore: "sqlite-vec" } } as never).steps;
+if (!steps.memory.done) { console.error("an embedding provider from the environment should count: " + JSON.stringify(steps.memory)); process.exit(1); }
+' || exit 1
+
 # --- 1. Nothing is set up: not onboarded, every step says what's missing.
 expect "$(get /admin/status)" 200 "status on a fresh install"
 [[ "$(field onboarded)" == false ]] || { echo "a fresh install counted as onboarded" >&2; exit 1; }
@@ -106,7 +113,7 @@ expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable ad
 # --- 3. Finishing setup needs a provider and a persona first.
 expect "$(post /admin/onboarding/complete '{}')" 409 "finishing setup before a provider is chosen"
 [[ ! -e "${DATA}/agents/default/IDENTITY.md.pre-onboarding-placeholder.bak" ]] || { echo "a refused finish wrote the scaffold" >&2; exit 1; }
-expect "$(patch routing '{"mode":"mock","defaultAgentId":"default","defaultModel":"mindstone/mock","mock":{"responsePrefix":"onb","captureFile":"'"${CAPTURE}"'"}}')" 200 "choosing the mock provider"
+expect "$(patch routing '{"mode":"mock","defaultAgentId":"default","defaultModel":"mindstone/mock","mock":{"responsePrefix":"onb","captureFile":"'"${CAPTURE}"'","failWhenTextIncludes":"PLEASE-FAIL"}}')" 200 "choosing the mock provider"
 # The persona step, as the Console does it: the profile in onboarding and on the agent.
 expect "$(patch onboarding '{"profile":{"id":"general_companion","label":"General Companion","description":"Broad utility partner.","selectedAt":"2026-09-28T00:00:00.000Z"}}')" 200 "the persona step's onboarding profile"
 expect "$(patch agents '{"default":{"id":"default","profileId":"general_companion"}}')" 200 "the persona step's agent profile"
@@ -190,6 +197,10 @@ chat blank conv-blank blank
 curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' \
   -d '{"model":"mindstone/default","messages":[{"role":"user","content":"health probe"}]}' "${BASE}/v1/chat/completions" >/dev/null
 [[ ! -e "${DATA}/identity-formation/default.json" ]] || { echo "a non-owner chat or a direct call started identity formation" >&2; exit 1; }
+# A formation turn that fails gives the claim back.
+curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: admin' -H 'x-mindstone-user-id: smoke-admin' -H 'x-mindstone-conversation-id: conv-fail' \
+  -d '{"model":"mindstone/default","messages":[{"role":"user","content":"PLEASE-FAIL"}]}' "${BASE}/v1/chat/completions" >/dev/null
+[[ ! -e "${DATA}/identity-formation/default.json" ]] || { echo "a failed formation turn kept the claim" >&2; exit 1; }
 chat admin conv-first first
 [[ -f "${DATA}/identity-formation/default.json" ]] || { echo "the owner's first chat should record identity formation" >&2; exit 1; }
 chat admin conv-second second
@@ -199,10 +210,23 @@ chat none conv-direct direct
 curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-user-id: smoke-user' -H 'x-mindstone-conversation-id: conv-steal' \
   -d '{"model":"mindstone/default","metadata":{"sessionKey":"agent:console:console:smoke-admin:conv-first","agentId":"default"},"messages":[{"role":"user","content":"steal"}]}' "${BASE}/v1/chat/completions" >/dev/null
 cp "${CAPTURE}" "${TEMP_RUNTIME}/steal.jsonl"
+# ...nor through the body's user field with no forwarded user id,
+: > "${CAPTURE}"
+curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-conversation-id: conv-first' \
+  -d '{"model":"mindstone/default","user":"smoke-admin","messages":[{"role":"user","content":"steal by user field"}]}' "${BASE}/v1/chat/completions" >/dev/null
+cp "${CAPTURE}" "${TEMP_RUNTIME}/steal-user.jsonl"
+# ...nor land in the owner's main session with no conversation id.
+: > "${CAPTURE}"
+curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-user-id: smoke-user' \
+  -d '{"model":"mindstone/default","messages":[{"role":"user","content":"steal main"}]}' "${BASE}/v1/chat/completions" >/dev/null
+cp "${CAPTURE}" "${TEMP_RUNTIME}/steal-main.jsonl"
 # An agent that already has a real identity isn't sent back to formation.
 rm -f "${DATA}/identity-formation/default.json"
 printf '# Wren\n\nAn established identity the owner approved.\n' > "${DATA}/agents/default/IDENTITY.md"
 chat admin conv-established established
+# Also when identityPath is left to its default.
+expect "$(patch agents '{"default":{"identityPath":null}}')" 200 "leaving identityPath to its default"
+chat admin conv-established-default established-default
 TR="${TEMP_RUNTIME}" node <<'NODE'
 const { readFileSync, readdirSync } = require("node:fs");
 const fail = (m) => { console.error(m); process.exit(1); };
@@ -223,7 +247,10 @@ for (const name of ["user", "blank"]) {
 }
 if (!prompt("direct").includes("SYNTH-CONTEXT-102")) fail("a direct caller with the service token is the owner");
 if (prompt("steal").includes("onb: Hi, I just set you up.")) fail("a Console user reached the owner's session through metadata.sessionKey");
+if (prompt("steal-user").includes("onb: Hi, I just set you up.")) fail("a Console user reached the owner's session through the body's user field");
+if (prompt("steal-main").includes("health probe")) fail("a Console user with no conversation id landed in the owner's main session");
 if (prompt("established").includes(FORMATION)) fail("an agent with an established identity was sent back to identity formation");
+if (prompt("established-default").includes(FORMATION)) fail("an established identity at the default path was sent back to identity formation");
 // The event is recorded once, in the first conversation's transcript.
 const dir = `${process.env.TR}/mindstone/transcripts`;
 const events = readdirSync(dir).filter((f) => f.endsWith(".jsonl"))

@@ -903,8 +903,18 @@ function pendingIdentityFormation(config: MindStoneConfig | undefined, configPat
   if (existsSync(identityFormationMarker(agentId))) return undefined;
   // An agent that already has a real identity isn't sent back to formation
   // (an install onboarded before this gateway recorded the marker).
-  const identity = loadRouteIdentityContext({ agentId, config, configPath })?.identityMarkdown;
-  if (identity && !isPendingMindStoneIdentity(identity)) return undefined;
+  // Read the file where the scaffold writer puts it (the default path when
+  // identityPath is unset), not through the identity loader, which needs both
+  // files configured.
+  const identityPath = config.agents[agentId]?.identityPath ?? `agents/${agentId}/IDENTITY.md`;
+  const resolvedIdentity = isAbsolute(identityPath) ? identityPath : resolvePath(dirname(configPath ?? join(runtimePathsFromEnv().dataDir, "config.json")), identityPath);
+  let identity: string | undefined;
+  try {
+    identity = readFileSync(resolvedIdentity, "utf-8");
+  } catch {
+    // Missing or unreadable: treated as pending.
+  }
+  if (identity?.trim() && !isPendingMindStoneIdentity(identity)) return undefined;
   return buildIdentityFormationPrompt({ agentId, entries: readTranscriptEntries(sessionKey), config });
 }
 
@@ -2243,7 +2253,12 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         ? { ok: true }
         : { ok: false, error: typeof parsed.error === "string" ? parsed.error : `Ollama answered ${response.status}` };
     } catch (error) {
-      result = { ok: false, error: error instanceof Error && error.name === "TimeoutError" ? "the download took too long" : "Ollama can't be reached from the gateway" };
+      result = {
+        ok: false,
+        error: clientGone.signal.aborted
+          ? "the download was stopped because the request was closed"
+          : error instanceof Error && error.name === "TimeoutError" ? "the download took too long" : "Ollama can't be reached from the gateway",
+      };
     } finally {
       ollamaPullRunning = false;
     }
@@ -3616,7 +3631,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const metadata: Record<string, unknown> = { ...metadata0, ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}), ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}) };
     const model = typeof input.model === "string" ? input.model : "mindstone/default";
     const agentId = agentIdFromModel(loadedConfig.config, model, metadata.agentId);
-    const senderId = forwarded.userId ?? (typeof input.user === "string" ? input.user : model);
+    // A non-owner is known only by the Console's forwarded user id, never by
+    // the body's `user` (which could name the owner), and always gets a
+    // Console session of its own: without a conversation id it would
+    // otherwise land in the owner's main session (#103 review).
+    const senderId = audience === "owner"
+      ? forwarded.userId ?? (typeof input.user === "string" ? input.user : model)
+      : forwarded.userId ?? "unknown-console-user";
     // Each Console conversation is its own session (#38), so separate chats don't
     // share a context window. They are all the same agent's transcripts, so the
     // memory backfill indexes every one into that agent's memory.
@@ -3624,7 +3645,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       config: loadedConfig.config,
       explicitSessionKey: metadata.sessionKey ?? (forwarded.conversationId
         ? consoleConversationSessionKey(senderId, forwarded.conversationId)
-        : undefined),
+        : audience === "owner" ? undefined : consoleConversationSessionKey(senderId, "no-conversation")),
       agentId,
       substrate: "openai",
       channel: "openai-chat-completions",
