@@ -44,6 +44,9 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - Pi 0.87 ships the Azure OpenAI (Responses), Amazon Bedrock and Google Vertex providers that #126 builds on.
 
 ### Fixed
+- **Secrets typed at the CLI are no longer shown on screen, and Pi's cache warming stays off** (#129).
+  - A hidden prompt, such as the wizard's API-key prompts or a login's secret prompt, closes the prompter's readline while it reads, since a real terminal echoed the secret even with the readline paused. New pty smoke: `scripts/smoke-cli-secret-echo.sh`.
+  - Only `off`, `streaming` or `idle` in the Pi agent dir's `settings.json` counts as a cache-warming choice; any other value is replaced with `off`, because Pi would fall back to `streaming`. `init-runtime.sh` now seeds `off` too, so `scripts/pi-agent` doesn't warm the cache before the first gateway turn.
 - **Console setup reaches a working agent, and only admins are the owner in Console chats** (#102, #103).
   - **Identity formation now runs in Console chats.** `/v1/chat/completions` never called the first-activation identity-formation prompt, so a Console-only install never started it, even after `mindstone onboard`. The owner's first Console conversation after setup now starts it, once per agent rather than once per conversation. It waits until setup has finished.
   - **`POST /admin/onboarding/complete`** finishes the Console's setup as `mindstone onboard` does: the onboarding record and the IDENTITY.md/USER.md scaffold, from the same core code. A placeholder is replaced with a backup; a real file is kept.

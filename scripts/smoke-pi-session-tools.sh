@@ -32,6 +32,15 @@ echo "== Pi session built-in tool allowlist smoke test =="
 
 npm run build:mindstone >/dev/null
 ./scripts/init-runtime.sh >/tmp/mindstone-agent-pi-tools-init.log
+# init-runtime seeds Pi's cache warming off (#129). Remove it again so the
+# session turns below show the gateway turns it off by itself too.
+PI_SETTINGS="${TEMP_RUNTIME}/pi-agent/settings.json" node -e '
+const fs = require("fs"); const p = process.env.PI_SETTINGS;
+if (!fs.existsSync(p)) { console.error("init-runtime should seed a Pi settings.json with cacheWarming off"); process.exit(1); }
+const s = JSON.parse(fs.readFileSync(p, "utf8"));
+if (s.cacheWarming !== "off") { console.error("init-runtime should seed cacheWarming off: " + JSON.stringify(s)); process.exit(1); }
+delete s.cacheWarming; fs.writeFileSync(p, JSON.stringify(s));
+'
 
 node "${PROJECT_ROOT}/scripts/stub-openai-server.mjs" >"${TEMP_RUNTIME}/stub.json" &
 STUB_PID=$!
@@ -142,7 +151,7 @@ NODE
 
 # Pi 0.87's paid cache warming (#128 review): off in MindStone's agent dir unless its settings.json names a mode.
 AGENT_DIR="${TEMP_RUNTIME}/pi-agent" node --input-type=module <<'NODE'
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { disablePiCacheWarmingUnlessSet } from "./packages/mindstone-gateway/dist/index.js";
@@ -158,12 +167,84 @@ if (!disablePiCacheWarmingUnlessSet({ settingsManager: manager, agentDir: fresh 
 if (manager.getCacheWarmingMode() !== "off") fail("the session's own settings should read cache warming as off");
 await manager.flush();
 if (SettingsManager.create(fresh, fresh).getCacheWarmingMode() !== "off") fail("Pi should read cache warming as off from the file");
+// An invalid value (a typo, null) is not a choice: Pi would fall back to streaming.
+for (const bad of [null, "Off", "warm"]) {
+  const dir = mkdtempSync(join(tmpdir(), "pi-warm-"));
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ cacheWarming: bad }));
+  const m = SettingsManager.create(dir, dir);
+  if (!disablePiCacheWarmingUnlessSet({ settingsManager: m, agentDir: dir })) fail("an invalid cacheWarming value should be replaced: " + JSON.stringify(bad));
+  if (m.getCacheWarmingMode() !== "off") fail("an invalid cacheWarming value left warming on: " + JSON.stringify(bad));
+}
+// A BOM is stripped before reading the choice; a file that doesn't parse is left alone.
+{
+  const dir = mkdtempSync(join(tmpdir(), "pi-warm-"));
+  writeFileSync(join(dir, "settings.json"), "\uFEFF" + JSON.stringify({ cacheWarming: "streaming" }));
+  if (disablePiCacheWarmingUnlessSet({ settingsManager: SettingsManager.create(dir, dir), agentDir: dir })) fail("a streaming choice behind a BOM should be kept");
+  const unset = mkdtempSync(join(tmpdir(), "pi-warm-"));
+  writeFileSync(join(unset, "settings.json"), "\uFEFF" + JSON.stringify({ theme: "dark" }));
+  if (!disablePiCacheWarmingUnlessSet({ settingsManager: SettingsManager.create(unset, unset), agentDir: unset })) fail("a settings file with a BOM and no choice should get warming off");
+}
+// Anything that isn't a valid choice in a file that parses: the session's mode
+// is off, and a file with the owner's content is never rewritten (Pi won't save
+// a settings file it couldn't load). An empty file is {} to Pi, so it gets off.
+for (const [label, content, keepsBytes] of [
+  ["trailing comma", '{"theme":"dark",}', true],
+  ["trailing comma with a choice", '{"theme":"dark","cacheWarming":"streaming",}', true],
+  ["empty file", "", false],
+  ["BOM only", "\uFEFF", false],
+  ["whitespace", "   ", false],
+  ["null", "null", false],
+  ["a string", '"hello"', false],
+  ["a number", "42", false],
+]) {
+  const dir = mkdtempSync(join(tmpdir(), "pi-warm-"));
+  const file = join(dir, "settings.json");
+  writeFileSync(file, content);
+  const m = SettingsManager.create(dir, dir);
+  if (!disablePiCacheWarmingUnlessSet({ settingsManager: m, agentDir: dir })) fail("warming should be turned off for: " + label);
+  if (m.getCacheWarmingMode() !== "off") fail("the session should run with warming off for: " + label);
+  await m.flush();
+  const after = readFileSync(file, "utf8");
+  if (keepsBytes && after !== content) fail("a settings file Pi could not load was rewritten (" + label + "): " + after);
+  if (!keepsBytes && after !== content && JSON.parse(after).cacheWarming !== "off") fail("a rewritten settings file should hold warming off (" + label + "): " + after);
+  if (label === "empty file" && JSON.parse(after).cacheWarming !== "off") fail("an empty settings file should end up with warming off: " + after);
+}
 // Chosen by the owner: left alone.
 const chosen = mkdtempSync(join(tmpdir(), "pi-warm-"));
 writeFileSync(join(chosen, "settings.json"), JSON.stringify({ cacheWarming: "streaming" }));
 if (disablePiCacheWarmingUnlessSet({ settingsManager: SettingsManager.create(chosen, chosen), agentDir: chosen })) fail("an owner's cache warming choice should be kept");
 if (SettingsManager.create(chosen, chosen).getCacheWarmingMode() !== "streaming") fail("the owner's streaming choice was changed");
+for (const entry of readdirSync(tmpdir())) if (entry.startsWith("pi-warm-")) rmSync(join(tmpdir(), entry), { recursive: true, force: true });
 console.log("ok: cache warming off unless chosen");
 NODE
+# init-runtime keeps an owner's choice, and replaces an invalid value.
+for pair in 'streaming:streaming' 'null:off'; do
+  given="${pair%%:*}" want="${pair##*:}"
+  RT="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-seed.XXXXXX")"
+  mkdir -p "${RT}/pi-agent"
+  if [[ "${given}" == null ]]; then printf '{"cacheWarming":null}' > "${RT}/pi-agent/settings.json"; else printf '{"cacheWarming":"%s"}' "${given}" > "${RT}/pi-agent/settings.json"; fi
+  MINDSTONE_AGENT_RUNTIME_DIR="${RT}" PI_CODING_AGENT_DIR="${RT}/pi-agent" ./scripts/init-runtime.sh >/dev/null
+  got="$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).cacheWarming))' "${RT}/pi-agent/settings.json")"
+  rm -rf "${RT}"
+  [[ "${got}" == "${want}" ]] || { echo "init-runtime with cacheWarming ${given} should leave ${want}, got ${got}" >&2; exit 1; }
+done
+# A settings file Pi can read but a plain JSON.parse cannot (a BOM), or one
+# that doesn't parse at all, is never replaced (#130 review).
+RT="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-seed.XXXXXX")"; mkdir -p "${RT}/pi-agent"
+printf '\xEF\xBB\xBF{"cacheWarming":"streaming","theme":"dark"}' > "${RT}/pi-agent/settings.json"
+MINDSTONE_AGENT_RUNTIME_DIR="${RT}" PI_CODING_AGENT_DIR="${RT}/pi-agent" ./scripts/init-runtime.sh >/dev/null
+grep -q '"theme":"dark"' "${RT}/pi-agent/settings.json" && grep -q '"cacheWarming":"streaming"' "${RT}/pi-agent/settings.json" || { echo "init-runtime replaced a settings file with a BOM: $(cat "${RT}/pi-agent/settings.json")" >&2; exit 1; }
+printf '\xEF\xBB\xBF{"theme":"dark"}' > "${RT}/pi-agent/settings.json"
+MINDSTONE_AGENT_RUNTIME_DIR="${RT}" PI_CODING_AGENT_DIR="${RT}/pi-agent" ./scripts/init-runtime.sh >/dev/null
+grep -q '"theme": "dark"' "${RT}/pi-agent/settings.json" && grep -q '"cacheWarming": "off"' "${RT}/pi-agent/settings.json" || { echo "init-runtime should read past a BOM, keep the file and seed off: $(cat "${RT}/pi-agent/settings.json")" >&2; exit 1; }
+: > "${RT}/pi-agent/settings.json"
+MINDSTONE_AGENT_RUNTIME_DIR="${RT}" PI_CODING_AGENT_DIR="${RT}/pi-agent" ./scripts/init-runtime.sh >/dev/null
+grep -q '"cacheWarming": "off"' "${RT}/pi-agent/settings.json" || { echo "init-runtime should seed off into an empty settings file: $(cat "${RT}/pi-agent/settings.json")" >&2; exit 1; }
+printf '{"theme":"dark","cacheWarming":"streaming",}' > "${RT}/pi-agent/settings.json"
+before="$(shasum "${RT}/pi-agent/settings.json" | cut -d" " -f1)"
+MINDSTONE_AGENT_RUNTIME_DIR="${RT}" PI_CODING_AGENT_DIR="${RT}/pi-agent" ./scripts/init-runtime.sh >/dev/null
+[[ "$(shasum "${RT}/pi-agent/settings.json" | cut -d" " -f1)" == "${before}" ]] || { echo "init-runtime rewrote a settings file it could not parse" >&2; exit 1; }
+rm -rf "${RT}"
+echo "ok: init-runtime seeds cache warming"
 
 echo "Pi session built-in tool allowlist smoke test passed."
