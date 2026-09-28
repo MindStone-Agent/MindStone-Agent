@@ -7,6 +7,11 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ## [Unreleased]
 
 ### Added
+- **Recall carries one chat into the next** (#106). With automatic recall on, a fact the owner tells the agent in one Console chat is recalled in a new chat, with no manual backfill.
+  - After each reply, the gateway indexes that turn's transcript (and new or changed memory files) into the sqlite-vec recall index in the background, and embeds the new chunks. Updates run one at a time. A failed update is logged and retried with the next turn. Recall waits briefly (up to 5 s) for updates already queued.
+  - Automatic recall is now on by default in setup (`mindstone onboard` and the configure wizard). Turning it off still needs no permission. Recall remains owner- and tenant-only.
+  - Console and REST turns now record `ownerTurn`. A Console user's turn is never indexed into the owner's recall, including older transcripts, which are recognized by their non-owner session key.
+  - The runtime's bookkeeping events (recall, index and invariant injections, identity formation, handoffs, pruning, routing and approval notices) are no longer indexed, so recall can't feed on itself. Tool activity stays recallable.
 - **The agent proposes its own persona, approved in the Console** (#105).
   - In an owner's turn, the agent can end a reply with a `mindstone-persona-proposal` block. It holds an id, name, description, voice, working style and boundaries, each with a length cap. The block is stripped from the reply and becomes a pending `persona_create` approval. A Console user's or connector non-owner's block is dropped. The owner's turns carry a short instruction describing the format, and identity formation now ends by proposing one.
   - Approving it (Console or `mindstone approvals approve`) writes `personas/<id>/PERSONA.md` from a fixed template (Voice, Working style, Boundaries; headings in the proposal's text stay text) and `metadata.json`, and adds it to the Personas list. It does not make it active: switching to it is a separate, deliberate step (the Console's Personas page, `PATCH /admin/config/personas`, or `mindstone persona activate`). An existing id, or anything already at that path, is refused (`409`) and the approval stays pending. Rejecting writes nothing.

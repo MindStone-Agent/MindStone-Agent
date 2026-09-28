@@ -328,10 +328,13 @@ function chunkText(text: string, maxChars = DEFAULT_CHUNK_CHARS, overlapChars = 
  * direct message from one of the connector's ownerSenders. Older email
  * entries never count, because nothing recorded whether the From header was
  * authenticated. Non-connector surfaces (webchat, REST, CLI, App Engine) are
- * the owner's own; App Engine tenants are separated by scope.
+ * the owner's own; App Engine tenants are separated by scope. A Console
+ * user's turn (#103) is never the owner's: new entries record `ownerTurn`,
+ * and older ones are known by their non-owner session key.
  */
 function userTurnIsOwner(entry: TranscriptEntry, config: MindStoneConfig | undefined): boolean {
   if (typeof entry.metadata?.ownerTurn === "boolean") return entry.metadata.ownerTurn;
+  if (entry.sessionKey?.includes(":non-owner%3A")) return false;
   const substrate = entry.source?.substrate ?? "";
   if (!substrate.startsWith("connector:")) return true;
   const connectorId = substrate.slice("connector:".length);
@@ -360,11 +363,31 @@ function recordScope(value: unknown): Record<string, string> | undefined {
  *   (the reply to it), is audience "non_owner" and is left out unless
  *   includeNonOwner is set.
  */
-function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNonOwner?: boolean; config?: MindStoneConfig } = {}): MemoryDocument[] {
+/** Runtime bookkeeping events left out of the recall index (#106). */
+const BOOKKEEPING_EVENTS = new Set([
+  "memory_recall_injected",
+  "memory_invariants_injected",
+  "memory_index_injected",
+  "identity_formation_prompted",
+  "handoff_replayed",
+  "context_window_pruned",
+  "auto_compact_warning",
+  "routing_not_implemented",
+  "routing_failed",
+  "abort_requested",
+  "persona_proposal_dropped",
+  "persona_load_failed",
+  "client_system_prompt_ignored",
+  "approval_proposed",
+  "approval_decided",
+]);
+
+function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNonOwner?: boolean; config?: MindStoneConfig; onlyFile?: string } = {}): MemoryDocument[] {
   if (!existsSync(paths.transcriptDir) || !statSync(paths.transcriptDir).isDirectory()) return [];
   const docs: MemoryDocument[] = [];
   for (const name of readdirSync(paths.transcriptDir).sort()) {
     if (!name.endsWith(".jsonl")) continue;
+    if (options.onlyFile !== undefined && name !== options.onlyFile) continue;
     const path = join(paths.transcriptDir, name);
     const lines = readFileSync(path, "utf-8").split(/\r?\n/).filter((line) => line.trim().length > 0);
     const entries: Array<{ entry: TranscriptEntry; index: number }> = [];
@@ -393,6 +416,11 @@ function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNon
       }
       const scope = recordScope(entry.metadata?.scope) ?? (entry.runId ? runScopes.get(entry.runId) : undefined) ?? turnScope;
       if (audience === "non_owner" && !options.includeNonOwner) continue;
+      // The runtime's bookkeeping events ("Injected 3 recalled memory
+      // chunks", "identity formation prompted") aren't the conversation:
+      // recalling them would feed recall back into itself (#106). Tool
+      // activity and other events stay recallable.
+      if (entry.role === "event" && BOOKKEEPING_EVENTS.has(String(entry.metadata?.event ?? ""))) continue;
       const text = entry.text?.trim();
       if (!text) continue;
       const sourceParts = [entry.source?.substrate, entry.source?.channel, entry.source?.chatType].filter(Boolean).join("/");
@@ -553,6 +581,62 @@ export function backfillSqliteMemoryIndex(options: SqliteMemoryBackfillOptions =
     transcriptDocuments: transcriptDocs.length,
     transcriptSourcesPruned,
   };
+}
+
+export type SqliteMemoryTurnIndexResult = {
+  databasePath: string;
+  sourcesIndexed: number;
+  chunksEmbedded: number;
+};
+
+/**
+ * Keep the recall index current as the agent works (#106): called after each
+ * reply, so a new chat can recall an earlier one without a manual backfill.
+ * It indexes the one transcript file the turn was written to, and memory
+ * files that are new or changed; a source whose text is unchanged is left as
+ * it is. Chunks without an embedding are then embedded when a provider is
+ * configured (otherwise recall uses the lexical fallback). The same audience
+ * rule as the backfill applies: turns that weren't the owner's are left out
+ * unless `memory.transcripts.includeNonOwner` is set.
+ */
+export async function indexSqliteMemoryTurn(options: {
+  transcriptFile: string;
+  config?: MindStoneConfig;
+  paths?: MindStoneRuntimePaths;
+  provider?: MemoryEmbeddingProvider;
+}): Promise<SqliteMemoryTurnIndexResult> {
+  const paths = options.paths ?? runtimePathsFromEnv();
+  const databasePath = sqliteMemoryDatabasePath(paths);
+  const documents = [
+    ...discoverFileMemoryDocuments({ config: options.config, paths }),
+    ...transcriptDocuments(paths, {
+      includeNonOwner: options.config?.memory?.transcripts?.includeNonOwner === true,
+      config: options.config,
+      onlyFile: basename(options.transcriptFile),
+    }),
+  ];
+  const db = openDatabase(databasePath);
+  initializeSchema(db);
+  let sourcesIndexed = 0;
+  const existingHash = db.prepare("SELECT content_hash FROM memory_sources WHERE id = ?");
+  db.exec("BEGIN");
+  try {
+    for (const document of documents) {
+      const row = existingHash.get(document.id) as { content_hash?: string } | undefined;
+      if (row?.content_hash === hashText(document.text)) continue;
+      indexDocument(db, document);
+      sourcesIndexed += 1;
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  } finally {
+    db.close();
+  }
+  const provider = options.provider ?? createMemoryEmbeddingProvider(options.config);
+  const embedded = provider ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider }) : undefined;
+  return { databasePath, sourcesIndexed, chunksEmbedded: embedded?.chunksEmbedded ?? 0 };
 }
 
 export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbeddingBackfillOptions = {}): Promise<SqliteMemoryEmbeddingBackfillResult> {

@@ -123,6 +123,8 @@ import {
   buildPromptWindow,
   createLocalMemoryRecallProvider,
   createSqliteMemoryRecallProvider,
+  indexSqliteMemoryTurn,
+  transcriptPathForSession,
   decideGatewayAuth,
   discoverFileMemoryDocuments,
   discoverKnowledgebaseRecallDocuments,
@@ -650,6 +652,39 @@ export function agentIdFromModel(config: MindStoneConfig | undefined, model: str
   return "default";
 }
 
+/**
+ * The recall index follows the conversation (#106): after each reply, the
+ * turn's transcript is indexed (and embedded) in the background, one update
+ * at a time, so a new chat can recall what an earlier one said without a
+ * manual backfill. A failed update is logged and retried with the next turn,
+ * since unembedded chunks are picked up then.
+ */
+let recallIndexTail: Promise<void> = Promise.resolve();
+
+function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: string): void {
+  if (config?.memory?.vectorStore !== "sqlite-vec") return;
+  const transcriptFile = transcriptPathForSession(sessionKey);
+  recallIndexTail = recallIndexTail
+    .then(async () => {
+      await indexSqliteMemoryTurn({ transcriptFile, config });
+    })
+    .catch((error: unknown) => {
+      console.warn(`[mindstone] recall index update failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+}
+
+/** Wait for queued recall index updates, at most `ms`: recall never hangs on a slow embedder. */
+async function awaitRecallIndex(ms = 5_000): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    recallIndexTail,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
 /** Identity a front end forwards on behalf of its logged-in user (LibreChat can set these from
  *  {{LIBRECHAT_USER_ID}} / {{LIBRECHAT_USER_ROLE}} / {{LIBRECHAT_BODY_CONVERSATIONID}} placeholders). */
 function forwardedUser(req: IncomingMessage): { userId?: string; userRole?: string; conversationId?: string } {
@@ -1105,6 +1140,11 @@ async function runConfiguredRoute(input: {
   }
 
   try {
+    // A turn indexed a moment ago is findable now: recall waits (briefly) for
+    // the index updates already queued (#106).
+    if ((input.audience === "owner" || input.audience === "tenant") && input.config?.memory?.autoRecall === true) {
+      await awaitRecallIndex();
+    }
     // Walked once and shared: the recall provider and the invariant tier both
     // read the same files, and the tier must not depend on the vector store.
     const fileMemoryDocuments = discoverFileMemoryDocuments({ config: input.config });
@@ -1380,6 +1420,7 @@ async function runConfiguredRoute(input: {
       },
     });
     runManager.complete(run.id);
+    queueRecallIndex(input.config, input.sessionKey);
 
     return {
       routed: true,
@@ -3807,6 +3848,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         source: "openai-responses",
         model,
         ...entry.metadata,
+        // Whose turn it was (#106), after the input's own metadata so it can't be set by the caller.
+        ownerTurn: audience === "owner",
       },
     }));
 
@@ -3930,6 +3973,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const commonMetadata = {
       source: "openai-chat-completions",
       model,
+      // Whose turn it was (#106): the recall index leaves out turns that weren't the owner's.
+      ownerTurn: audience === "owner",
       ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}),
       ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}),
     };
