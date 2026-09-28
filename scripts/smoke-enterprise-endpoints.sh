@@ -25,7 +25,7 @@ export MINDSTONE_AGENT_GATEWAY_PORT="${GATEWAY_PORT}"
 export PI_CODING_AGENT_DIR="${TEMP_RUNTIME}/pi-agent"
 export ENT_SMOKE_TOKEN="ent-smoke-service-token"
 export ENT_SMOKE_ADMIN_TOKEN="ent-smoke-admin-token"
-unset MINDSTONE_ENTERPRISE_PRIVATE_HOSTS MSA_ALLOW_HOST_PROVIDER_ENV AWS_BEDROCK_FORCE_HTTP1 AWS_ENDPOINT_URL AWS_ENDPOINT_URL_BEDROCK_RUNTIME HTTPS_PROXY https_proxy NO_PROXY AWS_BEARER_TOKEN_BEDROCK AWS_SESSION_TOKEN EMBEDDER_BASE_URL EMBEDDER_API_KEY AZURE_OPENAI_BASE_URL AZURE_OPENAI_API_VERSION
+unset MINDSTONE_ENTERPRISE_PRIVATE_HOSTS MSA_ALLOW_HOST_PROVIDER_ENV AWS_BEDROCK_FORCE_HTTP1 AWS_ENDPOINT_URL AWS_ENDPOINT_URL_BEDROCK_RUNTIME HTTPS_PROXY https_proxy AWS_BEARER_TOKEN_BEDROCK AWS_SESSION_TOKEN EMBEDDER_BASE_URL EMBEDDER_API_KEY AZURE_OPENAI_BASE_URL AZURE_OPENAI_API_VERSION
 cd "${PROJECT_ROOT}"
 echo "== Enterprise endpoints smoke test =="
 npm run build:mindstone
@@ -244,14 +244,15 @@ export MSA_ALLOW_HOST_PROVIDER_ENV=1
 export AWS_BEARER_TOKEN_BEDROCK="HOST-BEDROCK-6610"
 # The stub speaks HTTP/1; the AWS SDK uses HTTP/2 unless told otherwise.
 export AWS_BEDROCK_FORCE_HTTP1=1
-# A host AWS endpoint override (as LocalStack sets up) must never receive a Bedrock key; a refusing
-# proxy keeps the real regional address unreached from this test.
-export AWS_ENDPOINT_URL_BEDROCK_RUNTIME="http://127.0.0.1:${OTHER_PORT}" HTTPS_PROXY="http://127.0.0.1:9" NO_PROXY="127.0.0.1,localhost"
+# A host AWS endpoint override (as LocalStack sets up) must never receive a Bedrock key.
+export AWS_ENDPOINT_URL_BEDROCK_RUNTIME="http://127.0.0.1:${OTHER_PORT}"
 # A generic embedder in the gateway's environment: never used for an enterprise endpoint.
 export EMBEDDER_BASE_URL="http://127.0.0.1:9/not-used" EMBEDDER_API_KEY="ENV-EMBED-KEY"
 start_gateway
 grant
 expect "$(post /admin/providers/enterprise/bedrock '{"region":"us-east-1","models":["m"],"bearerTokenSecret":"bedrock.key"}')" 200 "a Bedrock API key while the host sets one"
+# A region with no address (zz-smoke-1): Bedrock's own address doesn't resolve, so nothing is sent to AWS.
+expect "$(post /admin/providers/enterprise/bedrock '{"region":"zz-smoke-1","models":["m"],"bearerTokenSecret":"bedrock.key"}')" 200 "registering Bedrock in a region with no address"
 expect "$(post /admin/providers/enterprise-bedrock/test '{}')" 200 "testing Bedrock at its regional address"
 grep -q 'BEDROCK-KEY-6610' "${OTHER_LOG}" && { echo "a host AWS endpoint setting received the Bedrock key: $(cat "${OTHER_LOG}")" >&2; exit 1; }
 # A Bedrock request carries the admin's key, not the host's AWS_BEARER_TOKEN_BEDROCK (sent to the stub in place of AWS).
