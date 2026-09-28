@@ -157,11 +157,13 @@ import { tmpdir } from "node:os";
 import { disablePiCacheWarmingUnlessSet } from "./packages/mindstone-gateway/dist/index.js";
 import { SettingsManager } from "./vendor/pi/packages/coding-agent/dist/core/settings-manager.js";
 const fail = (m) => { console.error(m); process.exit(1); };
+const created = [];
+const made = (dir) => { created.push(dir); return dir; };
 // The session turns above ran in this agent dir: warming was turned off there.
 const written = JSON.parse(readFileSync(join(process.env.AGENT_DIR, "settings.json"), "utf8"));
 if (written.cacheWarming !== "off") fail("a session turn should have turned cache warming off in the agent dir: " + JSON.stringify(written));
 // Unset: turned off, and Pi reads it back.
-const fresh = mkdtempSync(join(tmpdir(), "pi-warm-"));
+const fresh = made(mkdtempSync(join(tmpdir(), "pi-warm-")));
 const manager = SettingsManager.create(fresh, fresh);
 if (!disablePiCacheWarmingUnlessSet({ settingsManager: manager, agentDir: fresh })) fail("unset cache warming should be turned off");
 if (manager.getCacheWarmingMode() !== "off") fail("the session's own settings should read cache warming as off");
@@ -169,7 +171,7 @@ await manager.flush();
 if (SettingsManager.create(fresh, fresh).getCacheWarmingMode() !== "off") fail("Pi should read cache warming as off from the file");
 // An invalid value (a typo, null) is not a choice: Pi would fall back to streaming.
 for (const bad of [null, "Off", "warm"]) {
-  const dir = mkdtempSync(join(tmpdir(), "pi-warm-"));
+  const dir = made(mkdtempSync(join(tmpdir(), "pi-warm-")));
   writeFileSync(join(dir, "settings.json"), JSON.stringify({ cacheWarming: bad }));
   const m = SettingsManager.create(dir, dir);
   if (!disablePiCacheWarmingUnlessSet({ settingsManager: m, agentDir: dir })) fail("an invalid cacheWarming value should be replaced: " + JSON.stringify(bad));
@@ -177,10 +179,10 @@ for (const bad of [null, "Off", "warm"]) {
 }
 // A BOM is stripped before reading the choice; a file that doesn't parse is left alone.
 {
-  const dir = mkdtempSync(join(tmpdir(), "pi-warm-"));
+  const dir = made(mkdtempSync(join(tmpdir(), "pi-warm-")));
   writeFileSync(join(dir, "settings.json"), "\uFEFF" + JSON.stringify({ cacheWarming: "streaming" }));
   if (disablePiCacheWarmingUnlessSet({ settingsManager: SettingsManager.create(dir, dir), agentDir: dir })) fail("a streaming choice behind a BOM should be kept");
-  const unset = mkdtempSync(join(tmpdir(), "pi-warm-"));
+  const unset = made(mkdtempSync(join(tmpdir(), "pi-warm-")));
   writeFileSync(join(unset, "settings.json"), "\uFEFF" + JSON.stringify({ theme: "dark" }));
   if (!disablePiCacheWarmingUnlessSet({ settingsManager: SettingsManager.create(unset, unset), agentDir: unset })) fail("a settings file with a BOM and no choice should get warming off");
 }
@@ -196,8 +198,10 @@ for (const [label, content, keepsBytes] of [
   ["null", "null", false],
   ["a string", '"hello"', false],
   ["a number", "42", false],
+  // An array loads in Pi; merging cacheWarming into it is harmless (#131).
+  ["an array", '["x"]', false],
 ]) {
-  const dir = mkdtempSync(join(tmpdir(), "pi-warm-"));
+  const dir = made(mkdtempSync(join(tmpdir(), "pi-warm-")));
   const file = join(dir, "settings.json");
   writeFileSync(file, content);
   const m = SettingsManager.create(dir, dir);
@@ -210,11 +214,12 @@ for (const [label, content, keepsBytes] of [
   if (label === "empty file" && JSON.parse(after).cacheWarming !== "off") fail("an empty settings file should end up with warming off: " + after);
 }
 // Chosen by the owner: left alone.
-const chosen = mkdtempSync(join(tmpdir(), "pi-warm-"));
+const chosen = made(mkdtempSync(join(tmpdir(), "pi-warm-")));
 writeFileSync(join(chosen, "settings.json"), JSON.stringify({ cacheWarming: "streaming" }));
 if (disablePiCacheWarmingUnlessSet({ settingsManager: SettingsManager.create(chosen, chosen), agentDir: chosen })) fail("an owner's cache warming choice should be kept");
 if (SettingsManager.create(chosen, chosen).getCacheWarmingMode() !== "streaming") fail("the owner's streaming choice was changed");
-for (const entry of readdirSync(tmpdir())) if (entry.startsWith("pi-warm-")) rmSync(join(tmpdir(), entry), { recursive: true, force: true });
+// Only this run's directories: another checkout's run may be using its own (#131).
+for (const dir of created) rmSync(dir, { recursive: true, force: true });
 console.log("ok: cache warming off unless chosen");
 NODE
 # init-runtime keeps an owner's choice, and replaces an invalid value.

@@ -127,25 +127,33 @@ function inputHidden(io: TerminalIo, message: string, placeholder?: string, sign
       input.setRawMode(wasRaw);
     };
     signal?.addEventListener("abort", onAbort, { once: true });
+    // A chunk can hold several keys: a pasted key arrives with its newline in
+    // one chunk. Enter or Ctrl-D ends the prompt, Ctrl-C cancels, backspace
+    // deletes, other control keys are ignored, and a chunk that is an escape
+    // sequence (an arrow key) is dropped (#131).
     const onData = (chunk: Buffer) => {
       const data = chunk.toString("utf8");
-      if (data === "\u0003") {
-        cleanup();
-        output.write("\n");
-        reject(new Error("Cancelled"));
-        return;
+      if (data.startsWith("\u001b")) return;
+      for (const ch of data) {
+        if (ch === "\u0003") {
+          cleanup();
+          output.write("\n");
+          reject(new Error("Cancelled"));
+          return;
+        }
+        if (ch === "\r" || ch === "\n" || ch === "\u0004") {
+          cleanup();
+          output.write("\n");
+          resolve(value);
+          return;
+        }
+        if (ch === "\u007f" || ch === "\b") {
+          value = Array.from(value).slice(0, -1).join("");
+          continue;
+        }
+        if (ch < " ") continue;
+        value += ch;
       }
-      if (data === "\r" || data === "\n") {
-        cleanup();
-        output.write("\n");
-        resolve(value);
-        return;
-      }
-      if (data === "\u007f") {
-        value = value.slice(0, -1);
-        return;
-      }
-      value += data;
     };
     input.on("data", onData);
   });
