@@ -151,20 +151,33 @@ else
 fi
 
 log "Verifying CLI status..."
-"${MINDSTONE_CMD}" status >/tmp/mindstone-agent-install-status.txt
-cat /tmp/mindstone-agent-install-status.txt
+# A per-run file, so installs running at the same time can't overwrite each other's output (#108).
+STATUS_FILE="$(mktemp "${TMPDIR:-/tmp}/mindstone-agent-install-status.XXXXXX")"
+trap 'rm -f "${STATUS_FILE}"' EXIT
+if ! "${MINDSTONE_CMD}" status >"${STATUS_FILE}"; then
+  cat "${STATUS_FILE}"
+  fail "mindstone status failed after install"
+fi
+cat "${STATUS_FILE}"
+rm -f "${STATUS_FILE}"
 
 cat <<MSG
 
 MindStone-Agent installed.
 
-Next commands:
-  ${MINDSTONE_CMD} onboard
+Finish setup in one of two ways:
+  - in a terminal:        ${MINDSTONE_CMD} onboard
+  - in the web Console:   skip onboard; see "Install guide for AI agents", step 5, in README.md
+
+Other commands:
   ${MINDSTONE_CMD} config
   ${MINDSTONE_CMD} status
+  ${MINDSTONE_CMD} doctor
 
 Runtime state is isolated under:
   ${INSTALL_DIR}/.runtime
+The first install creates the runtime config ("Config:" above) with safe defaults;
+re-running the installer never changes an existing one.
 
 For OpenAI subscription/Codex auth, configure routing to Pi AgentSession, then use isolated Pi login when prompted:
   cd ${INSTALL_DIR}

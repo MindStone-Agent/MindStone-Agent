@@ -8,6 +8,19 @@ source "${SCRIPT_DIR}/env.sh"
 AGENT_DIR="${MINDSTONE_AGENT_DATA_DIR}/agents/default"
 CONFIG_PATH="${MINDSTONE_AGENT_CONFIG:-${MINDSTONE_AGENT_DATA_DIR}/config.json}"
 
+# --if-no-config (used by install-native.sh, so by install.sh): initialize only a
+# runtime that has no config.json yet. An existing runtime, onboarded or not, is
+# left exactly as it is: re-running the installer is also the update path (#108).
+if [[ "${1:-}" == "--if-no-config" ]]; then
+  if [[ -e "${CONFIG_PATH}" ]]; then
+    echo "Runtime config already exists; left unchanged: ${CONFIG_PATH}"
+    exit 0
+  fi
+elif [[ $# -gt 0 ]]; then
+  echo "Usage: init-runtime.sh [--if-no-config]" >&2
+  exit 2
+fi
+
 mkdir -p "${AGENT_DIR}" "$(dirname "${CONFIG_PATH}")" "${MINDSTONE_AGENT_MEMORY_DIR}" "${MINDSTONE_AGENT_JOURNAL_DIR}" "$(dirname "${MINDSTONE_AGENT_LOG_PATH}")" "$(dirname "${MINDSTONE_AGENT_MEMORY_INDEX_PATH}")"
 
 if [[ ! -f "${AGENT_DIR}/IDENTITY.md" ]]; then

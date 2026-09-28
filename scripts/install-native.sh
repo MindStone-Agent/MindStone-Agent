@@ -6,6 +6,12 @@ source "${SCRIPT_DIR}/env.sh"
 
 "${SCRIPT_DIR}/build-pi-base.sh"
 
+# A first install gets a runtime config with safe defaults: not onboarded,
+# routing.mode "placeholder", gateway on 127.0.0.1:19789 with auth "none". Setup
+# can then finish in a terminal (mindstone onboard) or in the web Console. An
+# existing config.json is never touched (#108).
+"${SCRIPT_DIR}/init-runtime.sh" --if-no-config
+
 cat <<MSG
 MindStone-Agent native foundation installed.
 
@@ -15,7 +21,7 @@ MindStone-Agent data dir:  ${MINDSTONE_AGENT_DATA_DIR}
 
 Run MindStone-Agent with:
   mindstone status
-  mindstone onboard
+  mindstone onboard     (or set it up in the web Console instead)
   mindstone config
 
 If the bare 'mindstone' command is not on PATH yet, link it intentionally with:
