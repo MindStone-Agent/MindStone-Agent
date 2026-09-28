@@ -116,6 +116,8 @@ CASES = [
     ("Ctrl-C cancels", [b"ab\x03"], None),
     ("Ctrl-D on an empty prompt cancels", [b"\x04"], None),
     ("Ctrl-D after typing submits", [b"xy\x04"], "xy"),
+    ("a lone Esc, then a pasted key", [b"\x1b", b"sk-abc\r"], "sk-abc"),
+    ("Ctrl-C inside an unterminated paste", [b"\x1b[200~abc\x03"], None),
 ]
 os.environ["CASES"] = str(len(CASES))
 pid, fd = pty.fork()

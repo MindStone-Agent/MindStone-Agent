@@ -181,9 +181,14 @@ function inputHidden(io: TerminalIo, message: string, placeholder?: string, sign
       }
       for (const ch of chunk.toString("utf8")) {
         if (escape === "esc") {
-          escape = ch === "[" ? "csi" : ch === "O" ? "ss3" : "";
           csiParams = "";
-          continue;
+          if (ch === "[" || ch === "O") {
+            escape = ch === "[" ? "csi" : "ss3";
+            continue;
+          }
+          // A lone Esc: the next key is an ordinary key, not part of a
+          // sequence, so it is handled below (#139 review).
+          escape = "";
         }
         if (escape === "ss3") {
           escape = "";
@@ -204,6 +209,8 @@ function inputHidden(io: TerminalIo, message: string, placeholder?: string, sign
           continue;
         }
         if (pasting) {
+          // Ctrl-C still cancels, even inside an unterminated paste (#139 review).
+          if (ch === "\u0003") return cancel();
           if (ch >= " " && ch !== "\u007f") value += ch;
           continue;
         }
