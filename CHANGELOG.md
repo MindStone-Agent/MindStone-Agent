@@ -17,6 +17,15 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - A proposal counts only as a top-level block: one shown inside another fence (an example, or the instructions echoed back) stays in the reply as text. A character with three or more stacked combining marks is refused. App Engine runs never propose a persona.
   - New smoke: `scripts/smoke-persona-proposals.sh`.
 
+### Changed
+- **Pi updated from 0.79.4 to 0.87.1** (#127). The vendored Pi (`vendor/pi`) is upstream v0.87.1, and `@earendil-works/pi-coding-agent` in the lock matches. What changed for MindStone:
+  - Models and provider auth now go through Pi's `ModelRuntime`. The gateway's Pi provider and the pi-session runner build it from the install's own `auth.json` and `models.json` (never Pi's global files) with no catalog fetches at run time, and sessions use the same runtime. The Pi provider completes through the runtime, so a provider's resolved base URL applies.
+  - `mindstone auth` OAuth login uses Pi's new login flow (`ModelRuntime.login`). The `auth.json` format is unchanged; `$ENV_VAR` references still resolve.
+  - Pi added a built-in `powershell` tool. It is off, like the other built-ins that aren't enabled.
+  - The CLI TUI uses Pi's `TuiMainScreen` renderer.
+  - **Model lists:** upstream no longer commits its model data. MindStone keeps it in the repo (`vendor/pi/packages/ai/src/providers/data`, hydrated from public catalogs on 2026-09-28), so install still builds offline from reviewed lists. `npm run build` in `vendor/pi` builds without fetching; `build:regen-models` refreshes the lists first, and `npm run hydrate:model-data` refreshes the data alone.
+  - Pi 0.87 ships the Azure OpenAI (Responses), Amazon Bedrock and Google Vertex providers that #126 builds on.
+
 ### Fixed
 - **Console setup reaches a working agent, and only admins are the owner in Console chats** (#102, #103).
   - **Identity formation now runs in Console chats.** `/v1/chat/completions` never called the first-activation identity-formation prompt, so a Console-only install never started it, even after `mindstone onboard`. The owner's first Console conversation after setup now starts it, once per agent rather than once per conversation. It waits until setup has finished.
