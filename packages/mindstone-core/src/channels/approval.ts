@@ -291,15 +291,21 @@ function splitProposalBlocks(replyText: string): { text: string; blocks: Array<{
       continue;
     }
     const marker = open[1]!;
-    const kind = PROPOSAL_INFO.exec(open[2]!.trim())?.[1];
+    // A bare ``` fence whose first line is the kind counts too: a model may
+    // break the line between the backticks and the name (#105 journey).
+    const kindOnNextLine = !open[2]!.trim() && marker === "```" && i + 1 < lines.length
+      ? PROPOSAL_INFO.exec(lines[i + 1]!.trim())?.[1]
+      : undefined;
+    const kind = PROPOSAL_INFO.exec(open[2]!.trim())?.[1] ?? kindOnNextLine;
+    const bodyStart = kindOnNextLine && !PROPOSAL_INFO.test(open[2]!.trim()) ? i + 2 : i + 1;
     const close = new RegExp(`^ {0,3}\\${marker[0]}{${marker.length},}[ \\t\\r]*$`);
     // A proposal may also close at the end of its last line ("}```").
     const closesInline = (text: string) => kind !== undefined && marker === "```" && /\S[ \t]*```[ \t]*\r?$/.test(text);
-    let j = i + 1;
+    let j = bodyStart;
     while (j < lines.length && !close.test(lines[j]!) && !closesInline(lines[j]!)) j += 1;
     if (kind && j < lines.length) {
       const last = close.test(lines[j]!) ? [] : [lines[j]!.replace(/[ \t]*```[ \t]*\r?$/, "")];
-      blocks.push({ kind, body: [...lines.slice(i + 1, j), ...last].join("\n") });
+      blocks.push({ kind, body: [...lines.slice(bodyStart, j), ...last].join("\n") });
       // An empty line where the block was, as before, so the text around it stays apart.
       kept.push("");
     } else {
@@ -408,10 +414,10 @@ export function applyActionProposalDiscipline(params: {
   allowPersona?: boolean;
 }): { text: string; content: unknown; events: TranscriptEntry[]; proposals: ProposedAction[] } {
   const extracted = extractActionProposals(params.replyText);
-  // Sanitize content whenever it plausibly carries a fence — proposals may
-  // exist in content even when text is already clean (diverging shapes).
-  const contentProbe = params.content !== undefined ? JSON.stringify(params.content) : undefined;
-  const content = contentProbe?.includes("```mindstone-") ? stripActionProposalsDeep(params.content) : params.content;
+  // Sanitize content always: proposals may exist in content even when text
+  // is already clean (diverging shapes), and a ~~~ or bare-fence block has
+  // no "```mindstone-" to probe for (#105 review).
+  const content = params.content !== undefined ? stripActionProposalsDeep(params.content) : params.content;
   // At most a few persona proposals wait at once: the instruction is on every
   // owner turn, so an agent that keeps proposing can't flood Approvals.
   const store = params.store ?? new ApprovalStore();

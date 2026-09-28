@@ -68,6 +68,16 @@ assert.equal(extractActionProposals('Here.\r\n```mindstone-persona-proposal\r\n{
 assert.equal(extractActionProposals('Sure. ```mindstone-persona-proposal\n{"id":"wren","name":"Wren","voice":"Warm."}\n```').persona?.id, "wren", "an opener after text on its line");
 assert.equal(extractActionProposals('Sure.\n```mindstone-persona-proposal\n{"id":"wren","name":"Wren","voice":"Warm."}```').persona?.id, "wren", "a closer at the end of the last line");
 assert.equal(extractActionProposals('Sure. ```mindstone-persona-proposal\n{"id":"wren","name":"Wren","voice":"Warm."}\n```').text, "Sure.");
+// A model may break the line between the backticks and the kind (#105 journey): a bare fence whose first line is the kind counts.
+const broken = extractActionProposals('Here.\n```\nmindstone-persona-proposal\n{"id":"wren","name":"Wren","voice":"Warm."}\n```');
+assert.equal(broken.persona?.id, "wren", "a bare fence with the kind on its first line proposes");
+assert.equal(broken.text, "Here.");
+assert.equal(extractActionProposals('Code:\n```\nconst x = 1;\n```').text, "Code:\n```\nconst x = 1;\n```", "an ordinary code block is untouched");
+assert.equal(extractActionProposals('Ex:\n````\n```\nmindstone-persona-proposal\n{"id":"shown","name":"S","voice":"x"}\n```\n````').persona, undefined, "a broken-line example inside another fence stays text");
+// Content is always stripped, including a ~~~ block the text path also finds.
+const tilde = '~~~mindstone-persona-proposal\n{"id":"wren","name":"Wren","voice":"Warm."}\n~~~';
+const discipline = applyActionProposalDiscipline({ replyText: `A.\n${tilde}`, content: [{ type: "text", text: `A.\n${tilde}` }], origin: "unit", store: new ApprovalStore({ path: join(mkdtempSync(join(tmpdir(), "persona-content-")), "approvals.json") }), allowPersona: false });
+assert.ok(!JSON.stringify(discipline.content).includes("mindstone-persona-proposal"), "a ~~~ block survived in content");
 // An empty line where the block was, so the text around it stays apart.
 assert.equal(extractActionProposals('A.\n```mindstone-persona-proposal\n{"id":"wren","name":"Wren","voice":"Warm."}\n```\nB.').text, "A.\n\nB.");
 // Structured content is stripped of exactly the blocks the text path finds.
@@ -160,7 +170,21 @@ mkdirSync(join(wfDir, "flow"), { recursive: true });
 writeFileSync(join(wfDir, "flow", "workflow.json"), JSON.stringify({ steps: [{ kind: "route", personaId: "by-step" }, { kind: "gate", gate: { personaLoadable: "by-gate" } }] }));
 // Lowercased, since persona directories match regardless of case on macOS and Windows.
 const refs = referencedPersonaIds({ personas: { active: "By-Active", routes: [{ personaId: "BY-ROUTE" }] }, workflows: { dir: wfDir } } as never);
-assert.deepEqual([...refs].sort(), ["by-active", "by-gate", "by-route", "by-step"]);
+assert.deepEqual([...refs].sort(), ["BY-ROUTE", "By-Active", "by-active", "by-gate", "by-route", "by-step"]);
+// A filesystem that folds more than case (APFS: "ſhadow" is "shadow") is caught by the directory itself.
+const foldDir = join(dir, "fold");
+const foldStore = new ApprovalStore({ path: join(dir, "fold.json") });
+const [shadow] = applyActionProposalDiscipline({ replyText: block("shadow"), origin: "unit", store: foldStore, allowPersona: true }).proposals;
+mkdirSync(join(foldDir, "probe-s"), { recursive: true });
+const foldsLongS = existsSync(join(foldDir, "probe-\u017F"));
+const approveShadow = () => approveProposedAction(foldStore, checkApprovable(foldStore, shadow!.id), { decidedBy: "unit", memoryDir: dir, personasDir: foldDir, referencedPersonaIds: referencedPersonaIds({ personas: { active: "\u017Fhadow" } } as never) });
+if (foldsLongS) {
+  assert.throws(approveShadow, (error) => error instanceof ApprovalActionError && error.code === "persona_referenced", "an id this filesystem folds to a referenced one is refused");
+  assert.ok(!existsSync(join(foldDir, "shadow")) && foldStore.get(shadow!.id)?.status === "pending", "a folded refusal leaves nothing and stays pending");
+} else {
+  assert.deepEqual(approveShadow(), { outcome: "approved", kind: "persona_create", personaId: "shadow" }, "where the filesystem doesn't fold, they are different personas");
+}
+console.log(`filesystem folds long s: ${foldsLongS}`);
 // Core chat: a non-owner turn's persona block is dropped, an owner's is kept.
 let lastPrompt = "";
 const echo = { id: "echo", listModels: () => [], async completeChat(r: { messages: { role: string; text?: string }[]; model: unknown }) { lastPrompt = r.messages.map((m) => m.text ?? "").join("\n"); return { role: "assistant" as const, text: [...r.messages].reverse().find((m) => m.role === "user")?.text ?? "", model: r.model as never }; } };
@@ -263,6 +287,13 @@ const c = entries[entries.length - 1].metadata?.personaContext;
 process.stdout.write(c?.injected ? c.personaId : "none");'; }
 [[ "$(persona_answered conv-next)" == wren ]] || { echo "the transcript should record that wren answered after the switch" >&2; exit 1; }
 [[ "$(persona_answered conv-before)" == none ]] || { echo "the transcript recorded a persona before the switch" >&2; exit 1; }
+# A non-owner's response doesn't say which persona answered or why; the owner's does.
+entries_have_persona() { node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit((b.mindstone?.entries??[]).some((e)=>e?.metadata?.personaContext) ? 0 : 1)' "${BODY}"; }
+chat admin conv-next2 "Owner again"
+entries_have_persona || { echo "control: the owner's response should carry personaContext" >&2; exit 1; }
+chat user conv-user-persona "Hello from a user"
+entries_have_persona && { echo "a Console user's response carried personaContext" >&2; exit 1; }
+[[ "$(persona_answered conv-user-persona)" == wren ]] || { echo "the transcript on disk should still record the persona for a user's turn" >&2; exit 1; }
 
 # The same id again: refused, left pending, nothing overwritten.
 chat admin conv-dup "$(block '{"id":"wren","name":"Other Wren","voice":"Different. DUP-SENTINEL-105."}')"

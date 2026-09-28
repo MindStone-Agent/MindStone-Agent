@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import type { ConnectorOutboundMessage } from "./connector.js";
@@ -246,6 +246,27 @@ export function approveProposedAction(
         throw new ApprovalActionError(`${error.message}; ask the agent for a new name, or reject this proposal`, "persona_exists", 409);
       }
       throw error;
+    }
+    // A filesystem that folds more than case (APFS: "ſhadow" is "shadow")
+    // can still put the new persona where a referenced id points: compare
+    // the directories themselves (#105 review).
+    const written = statSync(dir);
+    for (const referenced of options.referencedPersonaIds) {
+      if (!/^[^/\\]+$/.test(referenced) || referenced === "." || referenced === "..") continue;
+      let other;
+      try {
+        other = statSync(join(options.personasDir, referenced));
+      } catch {
+        continue;
+      }
+      if (other.ino === written.ino && other.dev === written.dev) {
+        rmSync(dir, { recursive: true, force: true });
+        throw new ApprovalActionError(
+          `the config already uses the persona id "${referenced}", which is the same directory as "${personaId}" on this filesystem, so approving it would make it active without a switch; ask the agent for a new name, or reject this proposal`,
+          "persona_referenced",
+          409,
+        );
+      }
     }
     try {
       decideOrRefuse(store, action.id, { status: "approved", decidedBy: options.decidedBy, now: now() });

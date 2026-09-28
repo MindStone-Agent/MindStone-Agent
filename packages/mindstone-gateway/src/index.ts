@@ -704,6 +704,17 @@ function consoleTurnCaller(req: IncomingMessage, input: Record<string, unknown>,
   return { forwarded, roleHeaderSent, audience, metadata, model, agentId, senderId, sessionKey };
 }
 
+/**
+ * A transcript entry as a response returns it: a non-owner doesn't see which
+ * persona answered or why (its route or workflow step); the transcript on
+ * disk keeps it (#105 review).
+ */
+function entryForAudience(entry: TranscriptEntry | undefined, audience: RouteAudience): TranscriptEntry | undefined {
+  if (!entry || audience === "owner" || !entry.metadata || !("personaContext" in entry.metadata)) return entry;
+  const { personaContext: _hidden, ...metadata } = entry.metadata;
+  return { ...entry, metadata };
+}
+
 function isTranscriptRole(value: unknown): value is TranscriptRole {
   return ["user", "assistant", "tool", "system", "event"].includes(String(value));
 }
@@ -3630,7 +3641,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           sessionKey,
           identityContext: routedBody.identityContext,
           promptWindow: routedBody.promptWindow,
-          entries: [...persistedEntries, routedBody.entry].filter(Boolean),
+          entries: [...persistedEntries, entryForAudience(routedBody.entry, audience)].filter(Boolean),
         },
       });
       return;
@@ -3827,7 +3838,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           sessionKey,
           identityContext: routedBody.identityContext,
           promptWindow: routedBody.promptWindow,
-          entries: [...persistedEntries, routedBody.entry].filter(Boolean),
+          entries: [...persistedEntries, entryForAudience(routedBody.entry, audience)].filter(Boolean),
         },
       });
       return;
