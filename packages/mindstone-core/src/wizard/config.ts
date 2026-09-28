@@ -188,7 +188,7 @@ export function formatConfigSummary(config: MindStoneConfig): string {
     `onboarding.preferences: ${selectedPreferencesSummary(config.onboarding?.preferences)}`,
     `onboarding.identity: ${selectedIdentitySummary(config.onboarding?.identity)}`,
     `contextManagement.mode: ${context.mode}`,
-    `memory.autoRecall: ${config.memory?.autoRecall ?? false}`,
+    `memory.autoRecall: ${config.memory?.autoRecall ?? true}`,
     `memory.vectorStore: ${config.memory?.vectorStore ?? "sqlite-vec"}`,
     `memory.embeddingProvider: ${config.memory?.embeddingProvider ?? "unset"}`,
   ].join("\n");
@@ -276,7 +276,8 @@ function withDefaultOnboardingConfig(config: MindStoneConfig): MindStoneConfig {
       ...config.session,
     },
     memory: {
-      autoRecall: false,
+      // On by default (#106): recall is what carries one chat into the next.
+      autoRecall: true,
       vectorStore: "sqlite-vec",
       ...config.memory,
       files: {
@@ -1413,7 +1414,7 @@ async function configureMemory(config: MindStoneConfig, prompter: MindStonePromp
   const memory = config.memory ?? {};
   const autoRecall = await prompter.confirm({
     message: "Enable automatic memory recall in prompt assembly?",
-    initialValue: memory.autoRecall ?? false,
+    initialValue: memory.autoRecall ?? true,
   });
   const vectorStore = await prompter.select<"lancedb" | "sqlite-vec" | "memory">({
     message: "Vector store",

@@ -3,9 +3,10 @@ import { buildPromptWindow } from "../context/index.js";
 import type { MindStoneConfig } from "../config/index.js";
 import { loadMindStoneIdentity } from "../identity/index.js";
 import {
-  createLocalMemoryRecallProvider,
   createSqliteMemoryRecallProvider,
   discoverFileMemoryDocuments,
+  isAutoRecallEnabled,
+  selectMemoryRecallProvider,
 } from "../memory/index.js";
 import { discoverKnowledgebaseRecallDocuments } from "../knowledgebase/index.js";
 import { providerDiagnosticsFromChatResult, type MindStoneModelInfo, type MindStoneModelProvider } from "../provider/index.js";
@@ -487,20 +488,18 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       identityFormation,
       ownerInstructions: ownerContext ? PERSONA_PROPOSAL_INSTRUCTIONS : undefined,
       memoryRecall: {
-        enabled: input.config?.memory?.autoRecall === true,
-        provider: input.config?.memory?.vectorStore === "sqlite-vec"
-          ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
-              ...(input.config?.memory?.localDocuments ?? []),
-              ...fileMemoryDocuments,
-              ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
-            ])
-          : createLocalMemoryRecallProvider([
-              ...(input.config?.memory?.localDocuments ?? []),
-              ...fileMemoryDocuments,
-              ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
-            ]),
+        enabled: isAutoRecallEnabled(input.config),
+        provider: selectMemoryRecallProvider({
+          sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config }) : undefined,
+          localDocuments: input.config?.memory?.localDocuments,
+          fileMemory: fileMemoryDocuments,
+          knowledgebases: discoverKnowledgebaseRecallDocuments({ config: input.config }),
+        }),
         config: input.config?.memory?.recall,
         scope: input.recallScope ?? input.scope,
+        // An App Engine run that isn't the owner's never gets the owner's chats,
+        // even when its recall scope comes out empty (#106 review).
+        excludeOwnerTranscripts: !ownerContext,
       },
       invariants: {
         enabled: input.config?.memory?.invariants?.enabled !== false,

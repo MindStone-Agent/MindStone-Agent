@@ -91,7 +91,7 @@ export function buildTuiStatusPanel(params: {
 export function buildTuiMemoryPanel(config: ReturnType<typeof loadMindStoneConfig>["config"], paths: ReturnType<typeof runtimePathsFromEnv>): string {
   const stats = getSqliteMemoryIndexStats(paths);
   return [
-    `- autoRecall: \`${config?.memory?.autoRecall === true ? "enabled" : "disabled"}\``,
+    `- autoRecall: \`${config?.memory?.autoRecall !== false ? "enabled" : "disabled"}\``,
     `- vector store: \`${config?.memory?.vectorStore ?? "memory"}\``,
     `- embedding provider: \`${config?.memory?.embeddingProvider ?? "not configured"}\``,
     `- index present: \`${stats.present}\``,
@@ -233,7 +233,7 @@ export function buildTuiConfigPanel(params: {
     `- session mode: \`${config?.session?.mode ?? "single"}\``,
     `- default session: \`${config?.session?.defaultSessionKey ?? "agent:default:main"}\``,
     `- context mode: \`${contextMode}\``,
-    `- memory autoRecall: \`${config?.memory?.autoRecall === true}\``,
+    `- memory autoRecall: \`${config?.memory?.autoRecall !== false}\``,
     `- memory vector store: \`${config?.memory?.vectorStore ?? "memory"}\``,
     `- embedding provider: \`${config?.memory?.embeddingProvider ?? "not configured"}\``,
     `- gateway: \`${config?.gateway?.host ?? "127.0.0.1"}:${config?.gateway?.port ?? 19789}\``,

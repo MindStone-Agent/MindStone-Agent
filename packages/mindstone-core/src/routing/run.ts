@@ -67,6 +67,8 @@ export type MindStoneRouteInput = {
     config?: MemoryRecallConfig;
     /** App Engine / Agent Mesh scope filter — scoped documents recall only at their exact scope. */
     scope?: Record<string, string>;
+    /** Not the owner's turn: the owner's chat transcripts are left out (#106 review). */
+    excludeOwnerTranscripts?: boolean;
   };
   /**
    * Always-in-force rules. Sourced from memory FILES rather than the vector
@@ -253,6 +255,7 @@ export async function planMindStoneRoute(input: MindStoneRouteInput): Promise<Mi
         provider: input.memoryRecall.provider,
         config: input.memoryRecall.config,
         scope: input.memoryRecall.scope,
+        excludeOwnerTranscripts: input.memoryRecall.excludeOwnerTranscripts,
       })
     : undefined;
   return buildMindStoneRoutePlan({ ...input, memoryRecall });

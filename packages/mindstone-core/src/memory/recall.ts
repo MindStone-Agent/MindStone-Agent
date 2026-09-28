@@ -24,6 +24,8 @@ export type MemoryRecallInput = {
    * documents never surface.
    */
   scope?: Record<string, string>;
+  /** Not the owner's turn: the owner's chat transcripts are left out (#106 review). */
+  excludeOwnerTranscripts?: boolean;
 };
 
 const DEFAULT_MAX_RESULTS = 8;
@@ -49,6 +51,11 @@ function lexicalScore(query: string, text: string): number {
     if (textWords.has(word)) matches += 1;
   }
   return matches / queryWords.size;
+}
+
+/** Letters and digits in any script, compared case- and width-insensitively (#106 review). */
+function normalizedQuestion(text: string): string {
+  return text.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
 function lastUserText(entries: TranscriptEntry[]): string | undefined {
@@ -85,6 +92,45 @@ export class LocalMemoryRecallProvider implements MemoryRecallProvider {
 
 export function createLocalMemoryRecallProvider(documents: MemoryDocument[] | undefined): MemoryRecallProvider | undefined {
   return documents?.length ? new LocalMemoryRecallProvider(documents) : undefined;
+}
+
+/** Several providers searched as one: their hits merged by score. */
+export class CombinedMemoryRecallProvider implements MemoryRecallProvider {
+  readonly id: string;
+  readonly #providers: MemoryRecallProvider[];
+
+  constructor(providers: MemoryRecallProvider[]) {
+    this.#providers = providers;
+    this.id = providers.map((provider) => provider.id).join("+");
+  }
+
+  async search(query: MemoryQuery): Promise<MemoryHit[]> {
+    const limit = query.limit ?? DEFAULT_MAX_RESULTS;
+    const results = await Promise.all(this.#providers.map((provider) => provider.search(query)));
+    return results
+      .flat()
+      .sort((a, b) => b.score - a.score || a.chunkId.localeCompare(b.chunkId))
+      .slice(0, limit);
+  }
+}
+
+/**
+ * The recall provider for a turn. With the sqlite-vec index present, it holds
+ * memory files and transcripts; knowledge-base documents and configured local
+ * documents aren't in it, so they are searched next to it (#106: live
+ * indexing creates the index on the first turn, which had dropped them).
+ * Without the index, everything is searched locally.
+ */
+export function selectMemoryRecallProvider(options: {
+  sqlite?: MemoryRecallProvider;
+  localDocuments?: MemoryDocument[];
+  fileMemory: MemoryDocument[];
+  knowledgebases: MemoryDocument[];
+}): MemoryRecallProvider | undefined {
+  const localDocuments = options.localDocuments ?? [];
+  if (!options.sqlite) return createLocalMemoryRecallProvider([...localDocuments, ...options.fileMemory, ...options.knowledgebases]);
+  const extra = createLocalMemoryRecallProvider([...localDocuments, ...options.knowledgebases]);
+  return extra ? new CombinedMemoryRecallProvider([options.sqlite, extra]) : options.sqlite;
 }
 
 function formatHit(hit: MemoryHit, index: number): string {
@@ -131,7 +177,13 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
   const limit = input.config?.maxResults ?? DEFAULT_MAX_RESULTS;
   const minScore = input.config?.minScore ?? DEFAULT_MIN_SCORE;
   const maxPromptTokens = input.config?.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS;
-  const rawHits = await provider.search({ text: query, limit: Math.max(limit * 3, limit), agentId: input.agentId, ...(input.scope ? { scope: input.scope } : {}) });
+  const rawHits = await provider.search({
+    text: query,
+    limit: Math.max(limit * 3, limit),
+    agentId: input.agentId,
+    ...(input.scope ? { scope: input.scope } : {}),
+    ...(input.excludeOwnerTranscripts ? { excludeOwnerTranscripts: true } : {}),
+  });
   const scopeRejected: Array<{ id: string; chunkId: string; reason: string }> = [];
   const scopedHits = rawHits.filter((hit) => {
     const documentScope = hit.metadata?.scope as Record<string, unknown> | undefined;
@@ -139,7 +191,29 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
     scopeRejected.push({ id: hit.id, chunkId: hit.chunkId, reason: "scope_mismatch" });
     return false;
   });
-  const thresholdHits = scopedHits.filter((hit) => hit.score >= minScore);
+  // An earlier chat that asked the same question carries no answer, and
+  // repeats of it could crowd out the chunk that does (#106 review).
+  const asked = normalizedQuestion(query);
+  const repeatRejected: Array<{ id: string; chunkId: string; reason: string }> = [];
+  // The same text said in several chats (a repeated reply) takes one slot:
+  // hits arrive best first, so the first copy is kept.
+  const seenTexts = new Set<string>();
+  const freshHits = scopedHits.filter((hit) => {
+    const text = normalizedQuestion(hit.text);
+    // Text with no letters or digits left never counts as a repeat.
+    if (!text) return true;
+    if (text === asked) {
+      repeatRejected.push({ id: hit.id, chunkId: hit.chunkId, reason: "duplicate-active-context" });
+      return false;
+    }
+    if (seenTexts.has(text)) {
+      repeatRejected.push({ id: hit.id, chunkId: hit.chunkId, reason: "duplicate_text" });
+      return false;
+    }
+    seenTexts.add(text);
+    return true;
+  });
+  const thresholdHits = freshHits.filter((hit) => hit.score >= minScore);
   const ranked = rankMemoryHitsWithScri(thresholdHits, {
     activeEntries: input.entries,
     dedupAgainstActiveContext: input.config?.dedupAgainstActiveContext,
@@ -155,7 +229,7 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
         rawHitCount: rawHits.length,
         rankedHitCount: ranked.hits.length,
         selectedHitCount: 0,
-        rejected: [...scopeRejected, ...ranked.rejected],
+        rejected: [...scopeRejected, ...repeatRejected, ...ranked.rejected],
       },
     };
   }
@@ -174,7 +248,7 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
       rawHitCount: rawHits.length,
       rankedHitCount: ranked.hits.length,
       selectedHitCount: prompt.hits.length,
-      rejected: [...scopeRejected, ...ranked.rejected],
+      rejected: [...scopeRejected, ...repeatRejected, ...ranked.rejected],
     },
   };
 }

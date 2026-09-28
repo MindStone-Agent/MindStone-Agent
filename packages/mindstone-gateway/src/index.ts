@@ -122,8 +122,11 @@ import {
   runMindStoneWorkflow,
   appendTranscriptEntry,
   buildPromptWindow,
-  createLocalMemoryRecallProvider,
   createSqliteMemoryRecallProvider,
+  selectMemoryRecallProvider,
+  indexSqliteMemoryTurn,
+  isAutoRecallEnabled,
+  transcriptPathForSession,
   decideGatewayAuth,
   discoverFileMemoryDocuments,
   discoverKnowledgebaseRecallDocuments,
@@ -651,6 +654,51 @@ export function agentIdFromModel(config: MindStoneConfig | undefined, model: str
   return "default";
 }
 
+/**
+ * The recall index follows the conversation (#106): after each reply, the
+ * turn's transcript is indexed (and embedded) in the background, one update
+ * at a time, so a new chat can recall what an earlier one said without a
+ * manual backfill. A failed update is logged and retried with the next turn,
+ * since unembedded chunks are picked up then.
+ * - Only while automatic recall is on: with it off, chats aren't indexed or
+ *   sent to the embedder (#106 review). `mindstone memory backfill` indexes
+ *   earlier chats on request.
+ */
+let recallIndexTail: Promise<void> = Promise.resolve();
+let recallIndexFailedAt = 0;
+
+function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: string): void {
+  if (config?.memory?.vectorStore !== "sqlite-vec" || !isAutoRecallEnabled(config)) return;
+  const transcriptFile = transcriptPathForSession(sessionKey);
+  recallIndexTail = recallIndexTail
+    .then(async () => {
+      await indexSqliteMemoryTurn({ transcriptFile, config });
+      recallIndexFailedAt = 0;
+    })
+    .catch((error: unknown) => {
+      recallIndexFailedAt = Date.now();
+      console.warn(`[mindstone] recall index update failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+}
+
+/**
+ * Wait for queued recall index updates, at most `ms`: recall never hangs on a
+ * slow embedder. After a failed update in the last minute, don't wait at all:
+ * a down embedder would otherwise add the wait to every turn (#106 review).
+ * Chunks not embedded yet are still found by their words.
+ */
+async function awaitRecallIndex(ms = 5_000): Promise<void> {
+  if (recallIndexFailedAt && Date.now() - recallIndexFailedAt < 60_000) return;
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    recallIndexTail,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
 /** Identity a front end forwards on behalf of its logged-in user (LibreChat can set these from
  *  {{LIBRECHAT_USER_ID}} / {{LIBRECHAT_USER_ROLE}} / {{LIBRECHAT_BODY_CONVERSATIONID}} placeholders). */
 function forwardedUser(req: IncomingMessage): { userId?: string; userRole?: string; conversationId?: string } {
@@ -763,7 +811,12 @@ export function consoleConversationSessionKey(userId: string, conversationId: st
     const encoded = encodeURIComponent(value);
     return encoded.length > 64 ? `h-${createHash("sha256").update(value).digest("hex").slice(0, 32)}` : encoded;
   };
-  return ["agent", "console", "console", part(userId), part(conversationId)].join(":");
+  // A long non-owner id is hashed after its prefix, so the key still says
+  // whose it is (the recall index reads it, #106 review).
+  const user = userId.startsWith("non-owner:") && encodeURIComponent(userId).length > 64
+    ? `non-owner%3A${part(userId.slice("non-owner:".length))}`
+    : part(userId);
+  return ["agent", "console", "console", user, part(conversationId)].join(":");
 }
 
 /** The session a handoff was written from (its "- Session: …" line), if any. */
@@ -1106,6 +1159,11 @@ async function runConfiguredRoute(input: {
   }
 
   try {
+    // A turn indexed a moment ago is findable now: recall waits (briefly) for
+    // the index updates already queued (#106).
+    if ((input.audience === "owner" || input.audience === "tenant") && isAutoRecallEnabled(input.config)) {
+      await awaitRecallIndex();
+    }
     // Walked once and shared: the recall provider and the invariant tier both
     // read the same files, and the tier must not depend on the vector store.
     const fileMemoryDocuments = discoverFileMemoryDocuments({ config: input.config });
@@ -1148,20 +1206,17 @@ async function runConfiguredRoute(input: {
         identityFormation: input.audience === "owner" ? input.identityFormation : undefined,
         ownerInstructions: input.audience === "owner" && !input.scope ? PERSONA_PROPOSAL_INSTRUCTIONS : undefined,
         memoryRecall: {
-          enabled: (input.audience === "owner" || input.audience === "tenant") && input.config?.memory?.autoRecall === true,
-          provider: input.config?.memory?.vectorStore === "sqlite-vec"
-            ? createSqliteMemoryRecallProvider({ config: input.config }) ?? createLocalMemoryRecallProvider([
-                ...(input.config?.memory?.localDocuments ?? []),
-                ...fileMemoryDocuments,
-                ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
-              ])
-            : createLocalMemoryRecallProvider([
-                ...(input.config?.memory?.localDocuments ?? []),
-                ...fileMemoryDocuments,
-                ...discoverKnowledgebaseRecallDocuments({ config: input.config }),
-              ]),
+          enabled: (input.audience === "owner" || input.audience === "tenant") && isAutoRecallEnabled(input.config),
+          provider: selectMemoryRecallProvider({
+            sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config }) : undefined,
+            localDocuments: input.config?.memory?.localDocuments,
+            fileMemory: fileMemoryDocuments,
+            knowledgebases: discoverKnowledgebaseRecallDocuments({ config: input.config }),
+          }),
           config: input.config?.memory?.recall,
           scope: input.recallScope ?? input.scope,
+          // A tenant run never gets the owner's chats, whatever its scope holds (#106 review).
+          excludeOwnerTranscripts: input.audience !== "owner",
         },
         invariants: {
           enabled: input.config?.memory?.invariants?.enabled !== false,
@@ -1329,6 +1384,9 @@ async function runConfiguredRoute(input: {
             providerScore: typeof hit.metadata?.providerScore === "number" ? hit.metadata.providerScore : undefined,
             recallMode: typeof hit.metadata?.recallMode === "string" ? hit.metadata.recallMode : undefined,
             scri: hit.metadata?.scri,
+            // Proof of what was injected and where it came from, without its text (#106).
+            sha256: createHash("sha256").update(hit.text ?? "").digest("hex"),
+            source: typeof hit.metadata?.sessionKey === "string" ? hit.metadata.sessionKey : hit.kind,
           })),
         },
       });
@@ -1376,11 +1434,23 @@ async function runConfiguredRoute(input: {
         runner: route.runner,
         // Which persona answered (#105): the Console's transcripts say so per turn.
         ...(route.personaContext ? { personaContext: route.personaContext } : {}),
+        // What recall put in this turn's prompt (#106); the chunks are on the memory_recall_injected event.
+        ...(route.memoryRecall
+          ? {
+              memoryRecall: {
+                query: route.memoryRecall.query,
+                hitCount: route.memoryRecall.hits.length,
+                promptTokens: route.memoryRecall.promptTokens,
+                chunkIds: route.memoryRecall.hits.map((hit) => hit.chunkId),
+              },
+            }
+          : {}),
         ...(input.scope ? { scope: input.scope } : {}),
         providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
       },
     });
     runManager.complete(run.id);
+    queueRecallIndex(input.config, input.sessionKey);
 
     return {
       routed: true,
@@ -3574,8 +3644,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     }
     const recallScope = recallScopeForMemoryScope(scope, memoryScope);
     const loadedConfig = loadGatewayConfig();
-    const config = memoryScope === "none" && loadedConfig.config?.memory?.autoRecall
-      ? { ...loadedConfig.config, memory: { ...loadedConfig.config.memory, autoRecall: false } }
+    const config = memoryScope === "none" && isAutoRecallEnabled(loadedConfig.config)
+      ? { ...loadedConfig.config, memory: { ...loadedConfig.config?.memory, autoRecall: false } }
       : loadedConfig.config;
     const metadata = typeof input.metadata === "object" && input.metadata !== null ? (input.metadata as Record<string, unknown>) : undefined;
     const source = gatewayTranscriptSource({ substrate: "gateway-app-engine", channel: "api", chatType: "internal", senderId: input.senderId, threadId: input.threadId });
@@ -3796,8 +3866,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
     const { audience, metadata, model, agentId, senderId, sessionKey } = caller;
+    // A Console user's input is their own words only: assistant, system and
+    // tool items would be stored as if the agent or runtime had said them
+    // (#106 review), as chat completions already drops their system prompts.
+    const turnInputs = audience === "owner" ? responseInputs : responseInputs.filter((entry) => entry.role === "user");
+    if (turnInputs.every((entry) => !entry.text?.trim())) {
+      sendJson(res, 400, openAiError("input must include a user message", "invalid_request_error", "invalid_input"));
+      return;
+    }
     const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-responses", chatType: "internal", senderId });
-    const persistedEntries = responseInputs.map((entry) => appendTranscriptEntry({
+    const persistedEntries = turnInputs.map((entry) => appendTranscriptEntry({
       sessionKey,
       agentId,
       role: entry.role,
@@ -3808,6 +3886,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         source: "openai-responses",
         model,
         ...entry.metadata,
+        // Whose turn it was (#106), after the input's own metadata so it can't be set by the caller.
+        ownerTurn: audience === "owner",
       },
     }));
 
@@ -3931,6 +4011,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const commonMetadata = {
       source: "openai-chat-completions",
       model,
+      // Whose turn it was (#106): the recall index leaves out turns that weren't the owner's.
+      ownerTurn: audience === "owner",
       ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}),
       ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}),
     };

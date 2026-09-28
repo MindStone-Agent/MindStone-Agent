@@ -144,7 +144,7 @@ if ! config_exists; then
     }
   },
   "memory": {
-    "autoRecall": false,
+    "autoRecall": true,
     "vectorStore": "sqlite-vec",
     "files": {
       "enabled": true,
