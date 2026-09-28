@@ -53,8 +53,9 @@ function lexicalScore(query: string, text: string): number {
   return matches / queryWords.size;
 }
 
+/** Letters and digits in any script, compared case- and width-insensitively (#106 review). */
 function normalizedQuestion(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return text.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
 function lastUserText(entries: TranscriptEntry[]): string | undefined {
@@ -199,6 +200,8 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
   const seenTexts = new Set<string>();
   const freshHits = scopedHits.filter((hit) => {
     const text = normalizedQuestion(hit.text);
+    // Text with no letters or digits left never counts as a repeat.
+    if (!text) return true;
     if (text === asked) {
       repeatRejected.push({ id: hit.id, chunkId: hit.chunkId, reason: "duplicate-active-context" });
       return false;

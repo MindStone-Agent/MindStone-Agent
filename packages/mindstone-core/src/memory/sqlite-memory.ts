@@ -890,8 +890,13 @@ export function maintainSqliteMemoryIndex(options: SqliteMemoryMaintenanceOption
   }
 }
 
+/**
+ * An app, tenant or user scope. An agentId alone is the owner's own App Engine
+ * run, which recalls the owner's chats (#106 review); a tenant's run carries
+ * excludeOwnerTranscripts whatever its scope holds.
+ */
 function isScopedQuery(scope: Record<string, string> | undefined): boolean {
-  return Boolean(scope && Object.values(scope).some((value) => typeof value === "string" && value !== ""));
+  return Boolean(scope && (["appId", "tenantId", "userId"] as const).some((dim) => typeof scope[dim] === "string" && scope[dim] !== ""));
 }
 
 /** The owner's unscoped chat transcripts stay out of this query: a scoped query, or one that says so. */

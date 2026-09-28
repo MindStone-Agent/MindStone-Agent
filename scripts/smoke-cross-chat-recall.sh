@@ -52,7 +52,7 @@ npx tsx -e '
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { createSqliteMemoryRecallProvider, indexSqliteMemoryTurn, runtimePathsFromEnv, sqliteMemoryDatabasePath } from "./packages/mindstone-core/src/index.ts";
+import { createSqliteMemoryRecallProvider, indexSqliteMemoryTurn, recallMindStoneMemory, runtimePathsFromEnv, sqliteMemoryDatabasePath } from "./packages/mindstone-core/src/index.ts";
 import { consoleConversationSessionKey } from "./packages/mindstone-gateway/src/index.ts";
 (async () => {
 const paths = runtimePathsFromEnv();
@@ -99,6 +99,19 @@ if (!hits.some((hit) => hit.text.includes("CANDIDATE-7129"))) fail("MEMORY.md fe
 rmSync(file);
 rmSync(join(paths.memoryDir, "MEMORY.md"));
 rmSync(sqliteMemoryDatabasePath(paths));
+// The repeated-question filter works in any script: a non-Latin fact is not
+// mistaken for the question, and non-Latin hits are not collapsed into one.
+const cases = [
+  ["Где живёт моя сестра Марина?", ["Моя сестра Марина живёт в Лиссабоне.", "Марина работает в порту."]],
+  ["私の猫の名前は何ですか？", ["私の猫の名前はミケです。", "ミケは三歳です。"]],
+];
+for (const [question, facts] of cases) {
+  const provider = { id: "unit", search: () => [...facts, question].map((text, i) => ({ id: "u" + i, chunkId: "u" + i + "#0", sourceId: "u" + i, kind: "file", text, score: 0.7 - i * 0.01 })) };
+  const result = await recallMindStoneMemory({ agentId: "default", entries: [{ id: "q", role: "user", text: question, timestamp: "t" }], provider });
+  const texts = (result?.hits ?? []).map((hit) => hit.text);
+  for (const fact of facts) if (!texts.includes(fact)) fail("a non-Latin fact was dropped as a repeat: " + fact + " kept: " + JSON.stringify(texts));
+  if (texts.includes(question)) fail("control: the question itself should still be dropped: " + question);
+}
 })().catch((error) => { console.error(error); process.exit(1); });
 ' || exit 1
 
@@ -111,7 +124,7 @@ const { createServer } = require("node:http");
 let failing = false;
 const embed = (text) => {
   const v = new Array(64).fill(0);
-  for (const word of String(text).toLowerCase().match(/[a-z0-9]+/g) ?? []) {
+  for (const word of String(text).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
     let h = 0;
     for (const c of word) h = (h * 31 + c.charCodeAt(0)) >>> 0;
     v[h % 64] += 1;
@@ -266,6 +279,32 @@ const asked = crypto.createHash("sha256").update("What is the admin phrase?").di
 if ((recall.metadata?.hits ?? []).some((hit) => hit.sha256 === asked)) { console.error("the question itself came back as a recall hit"); process.exit(1); }
 '
 
+
+# --- 5c. A fact in a non-Latin script carries over too.
+chat admin smoke-admin conv-ru-plant "Моя сестра Марина живёт в Лиссабоне."
+chat admin smoke-admin conv-ru-ask "Где живёт моя сестра Марина?"
+prompt_has conv-ru-ask 'Лиссабоне' || { echo "a Russian fact was not recalled in a new chat" >&2; exit 1; }
+
+# --- 5d. The in-process App Engine API (runMindStone) applies the same rule:
+# a tenant run gets none of the owner's chats even when its recall scope comes
+# out empty, and the owner's own run (scope holds only agentId) still does.
+MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
+import { loadMindStoneConfig, resolveConfigPath, runtimePathsFromEnv, runMindStone } from "./packages/mindstone-core/src/index.ts";
+import { MockMindStoneProvider } from "./packages/mindstone-gateway/src/mock-provider.ts";
+const paths = runtimePathsFromEnv();
+const configPath = resolveConfigPath(process.env, paths);
+const { config } = loadMindStoneConfig(configPath);
+let seen = "";
+const provider = new MockMindStoneProvider({ responsePrefix: "core" });
+const complete = provider.completeChat.bind(provider);
+provider.completeChat = async (request) => { seen = request.messages.map((m) => m.text ?? "").join("\n"); return complete(request); };
+const model = { id: "mindstone/mock", provider: "mock", contextWindowTokens: 128000 };
+const run = async (extra: Record<string, unknown>) => { seen = ""; await runMindStone({ agentId: "default", input: "What is the admin phrase?", ...extra } as never, { config, configPath, provider, model } as never); return seen; };
+for (const extra of [{ tenantId: "acme", userId: "cust42", memoryScope: "app" }, { userId: "cust42", memoryScope: "tenant" }]) {
+  if ((await run(extra)).includes("purple-otter-canyon")) { console.error("a core tenant run with an empty recall scope recalled the owner's chats: " + JSON.stringify(extra)); process.exit(1); }
+}
+if (!(await run({})).includes("purple-otter-canyon")) { console.error("control: the owner's own core run should recall the owner's chats"); process.exit(1); }
+TS
 
 # --- 6. A knowledge base is still searched once the recall index exists.
 chat admin smoke-admin conv-kb "Which keycard opens the north loading gate?"
