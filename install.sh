@@ -112,6 +112,11 @@ log "Install dir: ${INSTALL_DIR}"
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
   log "Existing checkout found."
   cd "${INSTALL_DIR}"
+  # Files an earlier install rewrites (npm's lockfiles, and Pi's model lists, which older installs
+  # regenerated from live provider APIs) would block the fast-forward pull or break the build.
+  # Restore the committed copies first; npm install below brings the lockfiles up to date again.
+  git checkout -- package-lock.json vendor/pi/package-lock.json \
+    vendor/pi/packages/ai/src/models.generated.ts vendor/pi/packages/ai/src/image-models.generated.ts 2>/dev/null || true
   if [[ "${UPDATE_EXISTING}" == "1" ]]; then
     log "Updating existing checkout..."
     git fetch origin "${BRANCH}"
@@ -140,7 +145,8 @@ if [[ "${LINK_CLI}" == "1" ]]; then
   npm run link:cli
   MINDSTONE_CMD="mindstone"
 else
-  log "Skipping global CLI link."
+  log "Skipping global CLI link; building the CLI in place..."
+  npm run build:mindstone
   MINDSTONE_CMD="${INSTALL_DIR}/node_modules/.bin/mindstone"
 fi
 
