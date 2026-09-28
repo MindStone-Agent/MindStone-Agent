@@ -200,7 +200,7 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
   const freshHits = scopedHits.filter((hit) => {
     const text = normalizedQuestion(hit.text);
     if (text === asked) {
-      repeatRejected.push({ id: hit.id, chunkId: hit.chunkId, reason: "repeats_query" });
+      repeatRejected.push({ id: hit.id, chunkId: hit.chunkId, reason: "duplicate-active-context" });
       return false;
     }
     if (seenTexts.has(text)) {
