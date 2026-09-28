@@ -77,6 +77,7 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - The memory index is injected every turn. When it doesn't fit, every entry is first cut to a bare pointer. Entries are dropped only if that still doesn't fit, and the prompt then says how many were left out.
 
 ### Documentation
+- **An install guide for AI agents in the README.** It covers the requirements, the installer and its options, onboarding (which needs a person at a terminal), starting the gateway, updating, and the gateway settings the web Console needs. Those settings are token auth from a file, chat completions, and the admin credential's hash. On Linux, the gateway's address comes from `MINDSTONE_AGENT_GATEWAY_HOST`; `gateway.host` in config doesn't set it. Every step ends with a check, and secrets are written to files, never printed.
 - **MindStone Console design draft** (#46): a LibreChat fork, with the assistant-surfaces notes.
 - **Microsoft 365 tenant integration design for a Digital Employee** (#45). It is a design only; nothing in it is implemented.
 - **Running MindStone-Agent on Qwen3.5 through Ollama Cloud** (#43, #44), written as instructions an agent can follow, with the sign-up steps.
