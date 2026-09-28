@@ -23,7 +23,7 @@ export type PiSessionResourceLoaderOptions = {
 };
 
 /** Every Pi built-in tool name (vendor/pi coding-agent src/core/tools/index.ts, allToolNames). */
-export const PI_BUILTIN_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+export const PI_BUILTIN_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"] as const;
 /** The built-ins `builtinTools` can re-enable: Pi's default active set (sdk.ts defaultActiveToolNames). */
 export const PI_ENABLEABLE_BUILTIN_TOOL_NAMES = ["read", "bash", "edit", "write"] as const;
 
@@ -153,11 +153,14 @@ export function applyPiSessionCompactionSettings(input: {
   };
 }
 
+/** Pi's model and auth runtime (Pi 0.87, #127); the registry is its synchronous view. */
+type PiModelRuntime = object;
+
 type PiSessionModules = {
   createAgentSession: (options?: Record<string, unknown>) => Promise<{ session: PiAgentSession; modelFallbackMessage?: string }>;
-  AuthStorage: { create(path?: string): unknown };
+  ModelRuntime: { create(options: { authPath: string; modelsPath: string | null; allowModelNetwork?: boolean }): Promise<PiModelRuntime> };
   DefaultResourceLoader: new (options: Record<string, unknown>) => PiResourceLoader;
-  ModelRegistry: { create(authStorage: unknown, modelsPath?: string): PiRegistry };
+  ModelRegistry: new (runtime: PiModelRuntime) => PiRegistry;
   SessionManager: { open(path: string, sessionDir?: string, cwdOverride?: string): unknown };
   SettingsManager: { create(cwd?: string, agentDir?: string): unknown };
 };
@@ -261,9 +264,9 @@ async function importFromProject<T>(projectRoot: string, path: string): Promise<
 }
 
 async function loadPiSessionModules(projectRoot: string): Promise<PiSessionModules> {
-  const [sdk, auth, resourceLoader, registry, sessionManager, settingsManager] = await Promise.all([
+  const [sdk, runtime, resourceLoader, registry, sessionManager, settingsManager] = await Promise.all([
     importFromProject<{ createAgentSession: PiSessionModules["createAgentSession"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/sdk.js"),
-    importFromProject<{ AuthStorage: PiSessionModules["AuthStorage"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/auth-storage.js"),
+    importFromProject<{ ModelRuntime: PiSessionModules["ModelRuntime"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/model-runtime.js"),
     importFromProject<{ DefaultResourceLoader: PiSessionModules["DefaultResourceLoader"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/resource-loader.js"),
     importFromProject<{ ModelRegistry: PiSessionModules["ModelRegistry"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/model-registry.js"),
     importFromProject<{ SessionManager: PiSessionModules["SessionManager"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/session-manager.js"),
@@ -271,7 +274,7 @@ async function loadPiSessionModules(projectRoot: string): Promise<PiSessionModul
   ]);
   return {
     createAgentSession: sdk.createAgentSession,
-    AuthStorage: auth.AuthStorage,
+    ModelRuntime: runtime.ModelRuntime,
     DefaultResourceLoader: resourceLoader.DefaultResourceLoader,
     ModelRegistry: registry.ModelRegistry,
     SessionManager: sessionManager.SessionManager,
@@ -773,6 +776,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
   readonly #builtinTools: string[];
   #modules?: PiSessionModules;
   #registry?: PiRegistry;
+  #runtime?: PiModelRuntime;
 
   constructor(options: PiSessionExecutorOptions = {}) {
     this.#projectRoot = resolve(options.projectRoot ?? projectRootFromEnv());
@@ -788,14 +792,22 @@ export class PiSessionExecutor implements MindStoneModelProvider {
     this.#resourceOptions = piSessionResourceOptions(options);
   }
 
-  async #load(): Promise<{ modules: PiSessionModules; registry: PiRegistry }> {
-    if (this.#modules && this.#registry) return { modules: this.#modules, registry: this.#registry };
+  async #load(): Promise<{ modules: PiSessionModules; registry: PiRegistry; runtime: PiModelRuntime }> {
+    if (this.#modules && this.#registry && this.#runtime) return { modules: this.#modules, registry: this.#registry, runtime: this.#runtime };
     const modules = await loadPiSessionModules(this.#projectRoot);
-    const authStorage = modules.AuthStorage.create(join(this.#agentDir, "auth.json"));
-    const registry = modules.ModelRegistry.create(authStorage, join(this.#agentDir, "models.json"));
+    // The agent dir's own auth.json and models.json, no catalog fetches at run
+    // time; sessions get this same runtime, so the model a turn resolved is the
+    // one it runs with (#127).
+    const runtime = await modules.ModelRuntime.create({
+      authPath: join(this.#agentDir, "auth.json"),
+      modelsPath: join(this.#agentDir, "models.json"),
+      allowModelNetwork: false,
+    });
+    const registry = new modules.ModelRegistry(runtime);
     this.#modules = modules;
     this.#registry = registry;
-    return { modules, registry };
+    this.#runtime = runtime;
+    return { modules, registry, runtime };
   }
 
   async listModels(): Promise<MindStoneModelInfo[]> {
@@ -866,7 +878,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    const { modules } = await this.#load();
+    const { modules, runtime } = await this.#load();
     const sessionFile = piSessionFileForKey(this.#sessionDir, input.sessionKey);
     return withPiSessionFileLock(sessionFile, async () => {
       mkdirSync(dirname(sessionFile), { recursive: true });
@@ -886,6 +898,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       const { session } = await modules.createAgentSession({
         cwd: this.#cwd,
         agentDir: this.#agentDir,
+        modelRuntime: runtime,
         model,
         sessionManager,
         settingsManager,
@@ -944,7 +957,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
   }
 
   async completeChat(request: MindStoneChatRequest): Promise<MindStoneChatResult> {
-    const { modules } = await this.#load();
+    const { modules, runtime } = await this.#load();
     const model = await this.#resolvePiModel(request.model.id);
     const sessionFile = piSessionFileForKey(this.#sessionDir, request.sessionKey);
     return withPiSessionFileLock(sessionFile, async () => {
@@ -966,6 +979,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       const { session, modelFallbackMessage } = await modules.createAgentSession({
         cwd: this.#cwd,
         agentDir: this.#agentDir,
+        modelRuntime: runtime,
         model,
         sessionManager,
         settingsManager,

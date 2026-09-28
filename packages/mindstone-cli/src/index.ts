@@ -354,24 +354,24 @@ async function discoverPiModels(): Promise<{ models: MindStoneModelInfo[]; provi
   }
 }
 
-type PiOAuthSelectPrompt = {
-  message: string;
-  options: Array<{ id: string; label: string }>;
-};
 
-type PiAuthStorage = {
-  login(providerId: string, callbacks: {
-    onAuth: (info: { url: string; instructions?: string }) => void;
-    onDeviceCode: (info: { userCode: string; verificationUri: string; intervalSeconds?: number; expiresInSeconds?: number }) => void;
-    onPrompt: (prompt: { message: string; placeholder?: string; allowEmpty?: boolean }) => Promise<string>;
-    onProgress?: (message: string) => void;
-    onSelect: (prompt: PiOAuthSelectPrompt) => Promise<string | undefined>;
-    signal?: AbortSignal;
-  }): Promise<void>;
-};
+/** Pi 0.87 login (#127): one prompt/notify interaction for api-key and OAuth flows. */
+type PiAuthPrompt =
+  | { type: "text" | "secret" | "manual_code"; message: string; placeholder?: string }
+  | { type: "select"; message: string; options: readonly { id: string; label: string; description?: string }[] };
 
-type PiAuthStorageModule = {
-  AuthStorage: { create(path?: string): PiAuthStorage };
+type PiAuthEvent =
+  | { type: "info"; message: string; links?: readonly { url: string; label?: string }[] }
+  | { type: "auth_url"; url: string; instructions?: string }
+  | { type: "device_code"; userCode: string; verificationUri: string; intervalSeconds?: number; expiresInSeconds?: number }
+  | { type: "progress"; message: string };
+
+type PiModelRuntimeModule = {
+  ModelRuntime: {
+    create(options: { authPath: string; modelsPath: string | null; allowModelNetwork?: boolean }): Promise<{
+      login(providerId: string, type: "oauth" | "api_key", interaction: { prompt(prompt: PiAuthPrompt): Promise<string>; notify(event: PiAuthEvent): void }): Promise<unknown>;
+    }>;
+  };
 };
 
 async function importFromProject<T>(projectRoot: string, relativePath: string): Promise<T> {
@@ -400,11 +400,12 @@ async function runProviderOAuthLogin(prompter: MindStonePrompter, providerId: st
   const authPath = join(paths.piAgentDir, "auth.json");
   mkdirSync(dirname(authPath), { recursive: true, mode: 0o700 });
 
-  const { AuthStorage } = await importFromProject<PiAuthStorageModule>(
+  const { ModelRuntime } = await importFromProject<PiModelRuntimeModule>(
     paths.root,
-    "vendor/pi/packages/coding-agent/dist/core/auth-storage.js",
+    "vendor/pi/packages/coding-agent/dist/core/model-runtime.js",
   );
-  const authStorage = AuthStorage.create(authPath);
+  const modelsPath = join(paths.piAgentDir, "models.json");
+  const runtime = await ModelRuntime.create({ authPath, modelsPath: existsSync(modelsPath) ? modelsPath : null, allowModelNetwork: false });
 
   await prompter.note(
     [
@@ -415,37 +416,40 @@ async function runProviderOAuthLogin(prompter: MindStonePrompter, providerId: st
     "Connect account",
   );
 
-  await authStorage.login(providerId, {
-    onAuth: (info) => {
-      const opened = openAuthUrl(info.url);
-      output.write(`${bold("OAuth browser login")}\n`);
-      if (opened) output.write("Opened the login URL in your browser.\n");
-      output.write(`${info.instructions ? `${info.instructions}\n` : ""}`);
-      output.write(`${info.url}\n\n`);
+  await runtime.login(providerId, "oauth", {
+    notify: (event) => {
+      if (event.type === "auth_url") {
+        const opened = openAuthUrl(event.url);
+        output.write(`${bold("OAuth browser login")}\n`);
+        if (opened) output.write("Opened the login URL in your browser.\n");
+        output.write(`${event.instructions ? `${event.instructions}\n` : ""}`);
+        output.write(`${event.url}\n\n`);
+      } else if (event.type === "device_code") {
+        const opened = openAuthUrl(event.verificationUri);
+        output.write(`${bold("OAuth device login")}\n`);
+        if (opened) output.write("Opened the verification URL in your browser.\n");
+        output.write(`Verification URL: ${event.verificationUri}\n`);
+        output.write(`Code: ${bold(event.userCode)}\n`);
+        if (event.expiresInSeconds) output.write(`Expires in: ${event.expiresInSeconds}s\n`);
+        output.write("\n");
+      } else {
+        output.write(`${dim(event.message)}\n`);
+        for (const link of event.type === "info" ? event.links ?? [] : []) output.write(`${link.label ? `${link.label}: ` : ""}${link.url}\n`);
+      }
     },
-    onDeviceCode: (info) => {
-      const opened = openAuthUrl(info.verificationUri);
-      output.write(`${bold("OAuth device login")}\n`);
-      if (opened) output.write("Opened the verification URL in your browser.\n");
-      output.write(`Verification URL: ${info.verificationUri}\n`);
-      output.write(`Code: ${bold(info.userCode)}\n`);
-      if (info.expiresInSeconds) output.write(`Expires in: ${info.expiresInSeconds}s\n`);
-      output.write("\n");
-    },
-    onPrompt: async (prompt) => prompter.text({
-      message: prompt.message,
-      placeholder: prompt.placeholder,
-      validate: prompt.allowEmpty ? undefined : (value) => value.trim() ? undefined : "Required",
-    }),
-    onProgress: (message) => {
-      output.write(`${dim(message)}\n`);
-    },
-    onSelect: async (prompt) => {
-      if (prompt.options.length === 0) return undefined;
-      return prompter.select({
+    prompt: async (prompt) => {
+      if (prompt.type === "select") {
+        if (prompt.options.length === 0) throw new Error("Login offered no options to choose from.");
+        return prompter.select({
+          message: prompt.message,
+          options: prompt.options.map((option) => ({ value: option.id, label: option.label })),
+          initialValue: prompt.options[0]?.id,
+        });
+      }
+      return prompter.text({
         message: prompt.message,
-        options: prompt.options.map((option) => ({ value: option.id, label: option.label })),
-        initialValue: prompt.options[0]?.id,
+        placeholder: prompt.placeholder,
+        validate: (value) => value.trim() ? undefined : "Required",
       });
     },
   });
