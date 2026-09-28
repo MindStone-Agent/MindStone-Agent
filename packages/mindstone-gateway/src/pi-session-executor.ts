@@ -1,3 +1,4 @@
+import { guardEnterpriseEndpoints } from "./enterprise-redirect-guard.js";
 import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
@@ -800,6 +801,8 @@ export class PiSessionExecutor implements MindStoneModelProvider {
   constructor(options: PiSessionExecutorOptions = {}) {
     this.#projectRoot = resolve(options.projectRoot ?? projectRootFromEnv());
     this.#agentDir = resolve(options.agentDir ?? process.env.PI_CODING_AGENT_DIR ?? join(this.#projectRoot, ".runtime", "pi-agent"));
+    // Enterprise endpoints never follow a redirect with their key (#126).
+    guardEnterpriseEndpoints(this.#agentDir);
     this.#sessionDir = resolve(options.sessionDir ?? process.env.PI_CODING_AGENT_SESSION_DIR ?? join(this.#projectRoot, ".runtime", "pi-sessions"));
     this.#cwd = resolve(options.cwd ?? this.#projectRoot);
     this.#defaultProvider = options.defaultProvider;

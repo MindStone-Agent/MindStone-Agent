@@ -27,8 +27,9 @@ import {
   mergeConfigPatch,
   type AdminPermissions,
 } from "./admin-api.js";
-import { PiMindStoneProvider } from "./pi-provider.js";
+import { PiMindStoneProvider, piProviderCredential, piProviderCredentialType, setPiProviderCredential, type PiProviderCredential } from "./pi-provider.js";
 import { PiSessionMindStoneProvider } from "./pi-session-provider.js";
+import { guardEnterpriseEndpoints, invalidateEnterpriseOrigins } from "./enterprise-redirect-guard.js";
 import { PiSessionAgentRunner } from "./pi-session-runner.js";
 import { GatewayRunManager } from "./run-manager.js";
 import { WEBCHAT_UI_HTML } from "./webchat-ui.js";
@@ -200,6 +201,16 @@ import {
   type MindStoneRuntimePaths,
   LOCAL_PROVIDER_PRESETS,
   type LocalProviderPresetId,
+  ENTERPRISE_KINDS,
+  enterpriseKindForProvider,
+  enterpriseSecretNames,
+  isEnterpriseKind,
+  isVertexPlaceholderKey,
+  sanitizeServiceAccountKey,
+  vertexServiceAccountPath,
+  enterpriseProviderOrigins,
+  parseEnterpriseRegistration,
+  removeIsolatedProvider,
   literalConfigValue,
   probeOpenAiCompatibleModels,
   readIsolatedModelsConfig,
@@ -1904,6 +1915,15 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         baseUrl: preset.baseUrl,
         needsKey: !preset.placeholderApiKey,
       })),
+      // Enterprise endpoints (#126): the fields each kind takes. Keys are
+      // stored secrets, named in the registration.
+      enterprise: Object.values(ENTERPRISE_KINDS).map((kind) => ({
+        kind: kind.kind,
+        providerId: kind.providerId,
+        name: kind.name,
+        listsModels: kind.listsModels,
+        fields: kind.fields,
+      })),
       registered: registered.providers,
       ...(registered.unreadable ? { registeredError: "the isolated models.json can't be read" } : {}),
       providers,
@@ -2331,6 +2351,271 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     return;
   }
 
+  const enterpriseMatch = /^\/admin\/providers\/enterprise\/([a-z-]{1,40})$/.exec(url.pathname);
+  if (req.method === "POST" && enterpriseMatch) {
+    // An enterprise model endpoint (#126): Azure OpenAI / AI Foundry, Amazon
+    // Bedrock, Google Vertex AI or an OpenAI-compatible enterprise gateway.
+    // Keys come from stored secrets and only ever go to the address chosen
+    // here (#80); everything is written for that one provider.
+    const kind = enterpriseMatch[1]!;
+    if (!isEnterpriseKind(kind)) {
+      refuse(404, { error: `unknown enterprise endpoint kind: ${kind}` }, { reason: "unknown_kind", provider: kind });
+      return;
+    }
+    const info = ENTERPRISE_KINDS[kind];
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    // Private-network endpoints are the host owner's call, made in the gateway's own environment.
+    const parsed = parseEnterpriseRegistration(kind, body, { allowPrivateHosts: process.env.MINDSTONE_ENTERPRISE_PRIVATE_HOSTS === "1" });
+    if ("error" in parsed) {
+      refuse(400, { error: parsed.error }, { reason: "invalid", provider: info.providerId });
+      return;
+    }
+    const loaded = loadMindStoneConfig(configPath);
+    if (loaded.error) {
+      sendJson(res, 503, { ok: false, error: CONFIG_UNREADABLE });
+      return;
+    }
+    if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+      refuse(403, { error: "registering a model provider needs the advanced-settings permission" }, { reason: "advanced", provider: info.providerId });
+      return;
+    }
+    // Every secret is read now, with the same guards as a local provider's
+    // key: never a gateway credential, never a connector's token, never a link.
+    const secretValues = new Map<string, { value: string; path: string }>();
+    for (const name of enterpriseSecretNames(parsed)) {
+      const read = readProviderSecret(name, loaded.config, configPath, paths);
+      if ("error" in read) {
+        refuse(read.status, { error: read.error }, { reason: read.reason, provider: info.providerId, secret: name });
+        return;
+      }
+      secretValues.set(name, read);
+    }
+    const secretValue = (name: string) => secretValues.get(name)!.value;
+    const agentDir = loaded.config?.routing?.pi?.agentDir ?? paths.piAgentDir;
+    const env: Record<string, string> = {};
+    // A Vertex service account key: checked and reduced to a plain service
+    // account (Google's own token address, nothing that runs a command or
+    // fetches a URL), then copied to a file the gateway owns. Google's client
+    // re-reads the file on every request, so it must never be a secret the
+    // Console can replace afterwards (#126 review).
+    let serviceAccountKey: string | undefined;
+    for (const [variable, value] of Object.entries(parsed.env)) {
+      if (typeof value === "string") env[variable] = value;
+      else if ("secret" in value) env[variable] = secretValue(value.secret);
+      else {
+        serviceAccountKey = sanitizeServiceAccountKey(secretValue(value.secretFile));
+        if (!serviceAccountKey) {
+          refuse(400, { error: `${value.secretFile} must hold a Google service account key (JSON with "type": "service_account", a private key and a client email, and no other token address or universe domain)` }, { reason: "not_service_account", provider: info.providerId, secret: value.secretFile });
+          return;
+        }
+        env[variable] = vertexServiceAccountPath(agentDir);
+      }
+    }
+    // Pi treats these as "no key" and signs in with the gateway host's own Google login.
+    if (kind === "vertex" && "secret" in parsed.key && isVertexPlaceholderKey(secretValue(parsed.key.secret))) {
+      refuse(400, { error: "that value isn't a Vertex API key" }, { reason: "vertex_placeholder_key", provider: info.providerId });
+      return;
+    }
+    // Pi falls back to the gateway's own environment for any variable the
+    // provider leaves unset: a Bedrock API key there wins over access keys,
+    // and a session token there would be sent with them.
+    if (kind === "bedrock" && env.AWS_ACCESS_KEY_ID && !env.AWS_SESSION_TOKEN && process.env.AWS_SESSION_TOKEN) {
+      refuse(409, { error: "the gateway host sets AWS_SESSION_TOKEN, which would be sent with these access keys; add the session token here, or remove it on the host" }, { reason: "host_session_token", provider: info.providerId });
+      return;
+    }
+    if (kind === "bedrock" && env.AWS_ACCESS_KEY_ID && process.env.AWS_BEARER_TOKEN_BEDROCK) {
+      refuse(409, { error: "the gateway host sets AWS_BEARER_TOKEN_BEDROCK, which would be used instead of these access keys; register a Bedrock API key, or remove it on the host" }, { reason: "host_bedrock_token", provider: info.providerId });
+      return;
+    }
+    const key = "secret" in parsed.key ? literalConfigValue(secretValue(parsed.key.secret)) : parsed.key.placeholder;
+    const headers = parsed.headers
+      ? Object.fromEntries(Object.entries(parsed.headers).map(([name, value]) => [name, literalConfigValue(typeof value === "string" ? value : secretValue(value.secret))]))
+      : undefined;
+    const keySources = enterpriseSecretNames(parsed).map((name) => `secret:${name}`);
+    let models = parsed.models;
+    if (!models) {
+      const probe = await probeOpenAiCompatibleModels({
+        baseUrl: parsed.baseUrl,
+        apiKey: secretValue((parsed.key as { secret: string }).secret),
+        headers: parsed.headers ? Object.fromEntries(Object.entries(parsed.headers).map(([name, value]) => [name, typeof value === "string" ? value : secretValue(value.secret)])) : undefined,
+        followRedirects: false,
+        timeoutMs: 5_000,
+      });
+      if (!probe.ok) {
+        refuse(422, { error: `couldn't list models: ${probe.error}. Send "models": ["<id>", …] to register without listing.` }, { reason: "probe_failed", provider: info.providerId, host: parsed.host, keySources });
+        return;
+      }
+      models = probe.models.slice(0, 500).map((model) => model.id);
+    }
+    const registeredModels = models;
+    await withAdminWriteLock(async () => {
+      if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "registering a model provider needs the advanced-settings permission" }, { reason: "advanced", provider: info.providerId });
+        return;
+      }
+      const current = readIsolatedModelsConfig(agentDir);
+      if (current.error) {
+        refuse(409, { error: "the isolated models.json can't be read; fix or remove it on the gateway host" }, { reason: "models_json_unreadable", provider: info.providerId });
+        return;
+      }
+      const existing = Object.hasOwn(current.config.providers, info.providerId) ? current.config.providers[info.providerId] : undefined;
+      if (existing && (existing.authHeader !== undefined || existing.modelOverrides)) {
+        refuse(409, { error: `${info.name} has settings made on the gateway host (overrides); change it there` }, { reason: "host_settings", provider: info.providerId });
+        return;
+      }
+      let previous: Awaited<ReturnType<typeof piProviderCredential>>;
+      try {
+        previous = await piProviderCredential(agentDir, info.providerId);
+      } catch {
+        refuse(409, { error: "the isolated auth.json can't be read; fix or remove it on the gateway host" }, { reason: "auth_json_unreadable", provider: info.providerId });
+        return;
+      }
+      if (previous && previous.type !== "api_key") {
+        refuse(409, { error: `${info.name} has a sign-in made on the gateway host; change it there` }, { reason: "host_login", provider: info.providerId });
+        return;
+      }
+      // The key file in place of the previous one, which a failed write puts back.
+      const keyFilePath = vertexServiceAccountPath(agentDir);
+      const previousKeyFile = serviceAccountKey && existsSync(keyFilePath) ? readFileSync(keyFilePath, "utf-8") : undefined;
+      const restoreKeyFile = () => {
+        if (!serviceAccountKey) return;
+        if (previousKeyFile !== undefined) writePrivateFile(keyFilePath, previousKeyFile);
+        else rmSync(keyFilePath, { force: true });
+      };
+      if (serviceAccountKey) writePrivateFile(keyFilePath, serviceAccountKey);
+      invalidateEnterpriseOrigins();
+      // auth.json first: without its entry the provider isn't written, so it
+      // never runs on the gateway host's own cloud credentials.
+      try {
+        await setPiProviderCredential(agentDir, info.providerId, { type: "api_key", key, ...(Object.keys(env).length ? { env } : {}) });
+      } catch {
+        restoreKeyFile();
+        refuse(409, { error: "the isolated auth.json can't be written; fix it on the gateway host" }, { reason: "auth_json_unwritable", provider: info.providerId });
+        return;
+      }
+      let result: ReturnType<typeof upsertIsolatedProvider> | undefined;
+      try {
+        result = upsertIsolatedProvider(agentDir, info.providerId, {
+          name: info.name,
+          baseUrl: parsed.baseUrl,
+          api: info.api,
+          // The key is in auth.json. This one only makes the provider valid for
+          // Pi and is never a placeholder Google reads as "use this machine's login".
+          apiKey: "configured-in-auth-json",
+          ...(headers ? { headers } : {}),
+          models: registeredModels.map((id) => ({ id })),
+        }, { replace: true });
+      } catch {
+        result = undefined;
+      }
+      if (!result || result.error) {
+        // The new key must not stay next to the old address: auth.json and the key file go back to what they were.
+        restoreKeyFile();
+        const rolledBack = await setPiProviderCredential(agentDir, info.providerId, previous as PiProviderCredential | undefined).then(() => true, () => false);
+        invalidateEnterpriseOrigins();
+        if (!rolledBack) {
+          appendAdminAudit(paths.dataDir, { userId, action: "refused", status: 500, reason: "models_json_unwritable", provider: info.providerId, partial: "auth_json" });
+          sendJson(res, 500, { ok: false, error: "models.json can't be written, and the isolated auth.json still holds this registration's key and settings; remove them on the gateway host" });
+          return;
+        }
+        refuse(409, { error: "the isolated models.json can't be written; fix or remove it on the gateway host" }, { reason: "models_json_unwritable", provider: info.providerId });
+        return;
+      }
+      invalidateEnterpriseOrigins();
+      // An API key registration leaves no service account key behind.
+      if (kind === "vertex" && !serviceAccountKey) rmSync(vertexServiceAccountPath(agentDir), { force: true });
+      appendAdminAudit(paths.dataDir, { userId, action: "provider_registered", provider: info.providerId, kind, host: parsed.host, keySources, models: registeredModels.length });
+      sendJson(res, 200, { ok: true, providerId: info.providerId, kind, host: parsed.host, modelCount: result.modelCount, models: registeredModels.map((id) => `${info.providerId}/${id}`) });
+    });
+    return;
+  }
+
+  const providerTestMatch = /^\/admin\/providers\/([a-z0-9][a-z0-9-]{0,59})\/test$/.exec(url.pathname);
+  if (req.method === "POST" && providerTestMatch) {
+    // The Console's live Test: one short completion through Pi, exactly as a
+    // chat would send it, to one registered model.
+    const providerId = providerTestMatch[1]!;
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const unknown = Object.keys(body).filter((key) => key !== "model");
+    if (unknown.length || (body.model !== undefined && (typeof body.model !== "string" || body.model.length > 200))) {
+      refuse(400, { error: "send { model?: \"<model id>\" }" }, { reason: "invalid", provider: providerId });
+      return;
+    }
+    const loaded = loadMindStoneConfig(configPath);
+    if (loaded.error) {
+      sendJson(res, 503, { ok: false, error: CONFIG_UNREADABLE });
+      return;
+    }
+    // A test spends tokens on the provider's account.
+    if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+      refuse(403, { error: "testing a model provider needs the advanced-settings permission" }, { reason: "advanced", provider: providerId });
+      return;
+    }
+    const agentDir = loaded.config?.routing?.pi?.agentDir ?? paths.piAgentDir;
+    const providers = readIsolatedModelsConfig(agentDir).config.providers;
+    const provider = Object.hasOwn(providers, providerId) ? providers[providerId] : undefined;
+    if (!provider) {
+      refuse(404, { error: `no registered provider named ${providerId}` }, { reason: "not_found", provider: providerId });
+      return;
+    }
+    const requested = typeof body.model === "string" ? (body.model.startsWith(`${providerId}/`) ? body.model.slice(providerId.length + 1) : body.model) : undefined;
+    const modelId = requested ?? provider.models?.[0]?.id;
+    if (!modelId || !provider.models?.some((model) => model.id === modelId)) {
+      refuse(400, { error: requested ? `${providerId} has no model named ${requested}` : `${providerId} has no models` }, { reason: "no_model", provider: providerId });
+      return;
+    }
+    const result = await new PiMindStoneProvider({ agentDir }).testModel(providerId, modelId, PROVIDER_TEST_MS);
+    appendAdminAudit(paths.dataDir, { userId, action: "provider_tested", provider: providerId, model: modelId, ok: result.ok });
+    if (result.ok) {
+      sendJson(res, 200, { ok: true, providerId, model: result.model, latencyMs: result.latencyMs, reply: maskInlineSecrets(result.reply) });
+    } else {
+      sendJson(res, 200, { ok: false, providerId, model: result.model ?? `${providerId}/${modelId}`, ...(result.latencyMs !== undefined ? { latencyMs: result.latencyMs } : {}), error: maskInlineSecrets(result.error).slice(0, 500) });
+    }
+    return;
+  }
+
+  const enterpriseDeleteMatch = /^\/admin\/providers\/(enterprise-[a-z]{1,20})$/.exec(url.pathname);
+  if (req.method === "DELETE" && enterpriseDeleteMatch) {
+    // Removing an enterprise provider removes its models and its credentials.
+    const providerId = enterpriseDeleteMatch[1]!;
+    if (!enterpriseKindForProvider(providerId)) {
+      refuse(404, { error: `no enterprise provider named ${providerId}` }, { reason: "not_found", provider: providerId });
+      return;
+    }
+    const loaded = loadMindStoneConfig(configPath);
+    if (loaded.error) {
+      sendJson(res, 503, { ok: false, error: CONFIG_UNREADABLE });
+      return;
+    }
+    if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+      refuse(403, { error: "removing a model provider needs the advanced-settings permission" }, { reason: "advanced", provider: providerId });
+      return;
+    }
+    const agentDir = loaded.config?.routing?.pi?.agentDir ?? paths.piAgentDir;
+    await withAdminWriteLock(async () => {
+      const removed = removeIsolatedProvider(agentDir, providerId);
+      if (removed.error) {
+        refuse(409, { error: "the isolated models.json can't be read; fix or remove it on the gateway host" }, { reason: "models_json_unreadable", provider: providerId });
+        return;
+      }
+      if (providerId === "enterprise-vertex") rmSync(vertexServiceAccountPath(agentDir), { force: true });
+      try {
+        if ((await piProviderCredentialType(agentDir, providerId)) === "api_key") await setPiProviderCredential(agentDir, providerId, undefined);
+      } catch {
+        // The provider is gone (nothing uses the key now), but its key is still on disk.
+        appendAdminAudit(paths.dataDir, { userId, action: "provider_removed", provider: providerId, partial: "auth_json" });
+        sendJson(res, 500, { ok: false, providerId, removed: removed.removed, error: "the provider is removed, but its key couldn't be removed from the isolated auth.json; remove it on the gateway host" });
+        return;
+      }
+      invalidateEnterpriseOrigins();
+      appendAdminAudit(paths.dataDir, { userId, action: "provider_removed", provider: providerId });
+      sendJson(res, 200, { ok: true, providerId, removed: removed.removed });
+    });
+    return;
+  }
+
   const providerMatch = /^\/admin\/providers\/([a-z-]{1,40})$/.exec(url.pathname);
   if (req.method === "POST" && providerMatch) {
     const presetId = providerMatch[1]!;
@@ -2534,7 +2819,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     if (!body) return;
     const spec = body.embeddingProvider;
     if (Object.keys(body).some((key) => key !== "embeddingProvider") || typeof spec !== "string" || !EMBEDDING_SPEC.test(spec)) {
-      refuse(400, { error: 'send { "embeddingProvider": "ollama:<model>" } (or openai: / openai-compatible:)' }, { reason: "invalid" });
+      refuse(400, { error: 'send { "embeddingProvider": "ollama:<model>" } (or openai: / openai-compatible: / enterprise-azure: / enterprise-openai:)' }, { reason: "invalid" });
       return;
     }
     if (!readAdminPermissions(paths.dataDir).advancedSettings) {
@@ -2878,7 +3163,7 @@ const CONFIG_UNREADABLE = "the config file doesn't load; run mindstone doctor on
 
 /** Admin writes run one at a time, so each reads the config and permission it writes against. */
 let adminWriteChain: Promise<void> = Promise.resolve();
-function withAdminWriteLock(work: () => void): Promise<void> {
+function withAdminWriteLock(work: () => void | Promise<void>): Promise<void> {
   const run = adminWriteChain.then(work);
   adminWriteChain = run.catch(() => undefined);
   return run;
@@ -3032,7 +3317,7 @@ function isGatewayCredentialValue(value: string, config: MindStoneConfig | undef
 /** Providers in the isolated models.json for the Console: URL credentials masked, and the key only named, never shown. */
 function registeredProviders(agentDir: string): {
   unreadable: boolean;
-  providers: Array<{ providerId: string; name?: string; baseUrl?: string; api?: string; modelCount: number; auth: string }>;
+  providers: Array<{ providerId: string; name?: string; baseUrl?: string; api?: string; modelCount: number; auth: string; kind?: string }>;
 } {
   const read = readIsolatedModelsConfig(agentDir);
   return {
@@ -3045,10 +3330,59 @@ function registeredProviders(agentDir: string): {
         baseUrl: typeof provider.baseUrl === "string" ? maskUrlCredentials(provider.baseUrl) : undefined,
         api: provider.api,
         modelCount: provider.models?.length ?? 0,
-        auth: !provider.apiKey ? "none" : envRef ? `env: ${envRef[1]}` : "stored key",
+        auth: enterpriseKindForProvider(providerId) ? "stored credentials" : !provider.apiKey ? "none" : envRef ? `env: ${envRef[1]}` : "stored key",
+        ...(enterpriseKindForProvider(providerId) ? { kind: enterpriseKindForProvider(providerId) } : {}),
       };
     }),
   };
+}
+
+/** A 0600 file written to a temporary name and renamed into place, so it is never partly written or wider-mode. */
+function writePrivateFile(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = `${path}.tmp-${randomUUID().slice(0, 8)}`;
+  try {
+    writeFileSync(temp, content, { mode: 0o600 });
+    chmodSync(temp, 0o600);
+    renameSync(temp, path);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+}
+
+/** How long the Console's provider Test waits: inside the Console proxy's 15 s timeout. */
+const PROVIDER_TEST_MS = 12_000;
+
+/**
+ * A stored secret for a model provider, with the guards every provider key
+ * gets: a regular file (not a link), not a gateway credential, and not a
+ * connector's token.
+ */
+function readProviderSecret(
+  name: string,
+  config: MindStoneConfig | undefined,
+  configPath: string,
+  paths: MindStoneRuntimePaths,
+): { value: string; path: string } | { status: number; error: string; reason: string } {
+  const secretPath = resolvePath(`${paths.dataDir}/secrets`, name);
+  if (hostCredentialFiles(config, configPath).some((file) => sameFile(file, secretPath))) {
+    return { status: 422, error: "that is a gateway credential and can't be used as a provider key", reason: "host_only" };
+  }
+  if (connectorTokenFiles(config, configPath, paths).all.some((file) => pointsAtSameFile(file, secretPath))) {
+    return { status: 422, error: "that secret is a connector's token and can't be used as a provider key", reason: "connector_secret" };
+  }
+  let value = "";
+  try {
+    if (lstatSync(secretPath).isFile()) value = readFileSync(secretPath, "utf-8").trim();
+  } catch {
+    // Missing: handled below.
+  }
+  if (!value) return { status: 400, error: `no stored secret named ${name}; store it with POST /admin/secrets/${name} first`, reason: "no_secret" };
+  if (isGatewayCredentialValue(value, config, configPath)) {
+    return { status: 422, error: "that is a gateway credential and can't be used as a provider key", reason: "host_only" };
+  }
+  return { value, path: secretPath };
 }
 
 /** Loopback, private-network (RFC 1918, IPv6 ULA and link-local) or .local host names. */
@@ -3339,7 +3673,7 @@ const LOG_TAIL_BYTES = 512 * 1024;
 
 /** A promise's value, or `fallback` once `ms` have passed. */
 /** An embedding provider spec the Console may check: provider:model (#102). */
-const EMBEDDING_SPEC = /^(ollama|openai|openai-compatible):[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
+const EMBEDDING_SPEC = /^(ollama|openai|openai-compatible|enterprise-azure|enterprise-openai):[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
 /**
  * An Ollama model from the default registry: `name[:tag]`, or a
  * `namespace/name[:tag]` there. No host (a dot in the first segment), no
@@ -4531,6 +4865,11 @@ export async function stopConfiguredConnectors(): Promise<void> {
 export async function startGateway(options: GatewayOptions = {}): Promise<{ close(): Promise<void>; url: string }> {
   const host = options.host ?? process.env.MINDSTONE_AGENT_GATEWAY_HOST ?? "127.0.0.1";
   const port = options.port ?? Number(process.env.MINDSTONE_AGENT_GATEWAY_PORT ?? "19789");
+  // Enterprise endpoints never follow a redirect with their key (#126).
+  {
+    const paths = runtimePathsFromEnv();
+    guardEnterpriseEndpoints(loadMindStoneConfig(resolveConfigPath(process.env, paths)).config?.routing?.pi?.agentDir ?? paths.piAgentDir);
+  }
   const server = createServer((req, res) => {
     void handleRequest(req, res).catch((error: unknown) => {
       sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });

@@ -96,6 +96,12 @@ export function literalConfigValue(value: string): string {
   return escaped.startsWith("!") ? `$!${escaped.slice(1)}` : escaped;
 }
 
+/** The value literalConfigValue escaped, as it was stored. */
+export function literalConfigValueText(stored: string): string {
+  const unbanged = stored.startsWith("$!") ? `!${stored.slice(2)}` : stored;
+  return unbanged.replace(/\$\$/g, "$");
+}
+
 /** A model id a provider listing may register: short, printable, no spaces or control/bidi characters. */
 export const MODEL_ID_PATTERN = /^[^\s\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]{1,200}$/;
 
@@ -165,18 +171,22 @@ export function upsertIsolatedProvider(
   agentDir: string,
   providerId: string,
   provider: IsolatedProviderConfig,
-  options: { dryRun?: boolean } = {},
+  options: { dryRun?: boolean; replace?: boolean } = {},
 ): UpsertIsolatedProviderResult {
   const current = readIsolatedModelsConfig(agentDir);
   if (current.error) {
     return { path: current.path, wrote: false, providerId, modelCount: 0, error: current.error };
   }
   const existing = current.config.providers[providerId];
-  const merged: IsolatedProviderConfig = {
-    ...existing,
-    ...provider,
-    models: mergeModelLists(existing?.models, provider.models),
-  };
+  // replace: the definition is written as given, so nothing from an earlier
+  // registration (models, headers) carries over to a new address.
+  const merged: IsolatedProviderConfig = options.replace
+    ? provider
+    : {
+        ...existing,
+        ...provider,
+        models: mergeModelLists(existing?.models, provider.models),
+      };
   const nextConfig: IsolatedModelsConfig = {
     providers: { ...current.config.providers, [providerId]: merged },
   };
@@ -184,14 +194,30 @@ export function upsertIsolatedProvider(
   if (options.dryRun) {
     return { path: current.path, wrote: false, providerId, modelCount };
   }
+  writeIsolatedModelsConfig(agentDir, current.path, nextConfig);
+  return { path: current.path, wrote: true, providerId, modelCount };
+}
+
+/** Removes a provider from the isolated models.json; refuses to rewrite a file that can't be parsed. */
+export function removeIsolatedProvider(agentDir: string, providerId: string): { path: string; removed: boolean; error?: string } {
+  const current = readIsolatedModelsConfig(agentDir);
+  if (current.error) return { path: current.path, removed: false, error: current.error };
+  if (!Object.hasOwn(current.config.providers, providerId)) return { path: current.path, removed: false };
+  const providers = { ...current.config.providers };
+  delete providers[providerId];
+  writeIsolatedModelsConfig(agentDir, current.path, { providers });
+  return { path: current.path, removed: true };
+}
+
+function writeIsolatedModelsConfig(agentDir: string, path: string, nextConfig: IsolatedModelsConfig): void {
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
   // Written to a new 0600 file and renamed over the old one, so a crash can't
   // leave a truncated models.json and the key is never in a wider-mode file.
-  const temp = `${current.path}.tmp-${randomUUID().slice(0, 8)}`;
+  const temp = `${path}.tmp-${randomUUID().slice(0, 8)}`;
   try {
     writeFileSync(temp, `${JSON.stringify(nextConfig, null, 2)}\n`, { mode: 0o600 });
     chmodSync(temp, 0o600);
-    renameSync(temp, current.path);
+    renameSync(temp, path);
   } catch (error) {
     try {
       unlinkSync(temp);
@@ -200,7 +226,6 @@ export function upsertIsolatedProvider(
     }
     throw error;
   }
-  return { path: current.path, wrote: true, providerId, modelCount };
 }
 
 export type ProbeModelsResult =
@@ -221,6 +246,10 @@ const PROBE_MAX_BYTES = 1024 * 1024;
 export async function probeOpenAiCompatibleModels(params: {
   baseUrl: string;
   apiKey?: string;
+  /** Extra request headers (an enterprise gateway's), sent with the key. */
+  headers?: Record<string, string>;
+  /** false: a redirect is an error, so the key and headers only reach this address. */
+  followRedirects?: boolean;
   timeoutMs?: number;
 }): Promise<ProbeModelsResult> {
   const baseUrl = normalizeBaseUrl(params.baseUrl);
@@ -228,7 +257,8 @@ export async function probeOpenAiCompatibleModels(params: {
   const timeout = setTimeout(() => controller.abort(), params.timeoutMs ?? 5_000);
   try {
     const response = await fetch(`${baseUrl}/models`, {
-      headers: params.apiKey ? { Authorization: `Bearer ${params.apiKey}` } : undefined,
+      headers: params.apiKey || params.headers ? { ...params.headers, ...(params.apiKey ? { Authorization: `Bearer ${params.apiKey}` } : {}) } : undefined,
+      redirect: params.followRedirects === false ? "error" : "follow",
       signal: controller.signal,
     });
     if (!response.ok) {
