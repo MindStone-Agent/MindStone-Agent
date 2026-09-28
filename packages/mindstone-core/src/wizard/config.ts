@@ -1994,11 +1994,13 @@ export function writeOnboardingIdentityScaffold(params: {
   const profile = params.config.onboarding?.profile;
   const profileDefinition = getBuiltInMindStoneProfile(profile?.id);
   const profileLines = selectedProfileToLines(profile);
-  const preferenceLines = selectedPreferencesToLines(params.config.onboarding?.preferences);
+  const quoteHeadings = (value: string) => value.replace(/^(\s*)#/gm, "$1\\#").replace(/^(\s*)(=+|-+)(\s*)$/gm, "$1\\$2$3");
+  // The owner's own words (preferences, project context, purpose) go in
+  // USER.md only: non-owner turns get IDENTITY.md but not USER.md (#103 review).
+  const preferenceLines = selectedPreferencesToLines(params.config.onboarding?.preferences).map(quoteHeadings);
   const identityLines = selectedIdentityToLines(params.config.onboarding?.identity);
   // The user's own words: a heading in them is shown as text, so it can't
   // pose as one of the scaffold's sections.
-  const quoteHeadings = (value: string) => value.replace(/^(\s*)#/gm, "$1\\#");
   const purpose = quoteHeadings(markdownEscape(params.purpose ?? ""));
   const userContext = quoteHeadings(markdownEscape(params.userContext ?? ""));
   const createdBy = params.createdBy ?? "`mindstone onboard`";
@@ -2013,17 +2015,13 @@ The agent has not yet established a durable name, voice, or self-description. On
 
 ${profileLines.join("\n")}
 
-## Preference seed
-
-${preferenceLines.join("\n")}
-
 ## Identity emergence seed
 
 ${identityLines.join("\n")}
 
 ## Purpose seed
 
-${purpose || profileDefinition?.purposeSeed || profile?.description || "No purpose seed provided."}
+${profileDefinition?.purposeSeed || profile?.description || "No purpose seed provided."} The user's own purpose, preferences and context are in USER.md.
 
 ## Operating notes
 

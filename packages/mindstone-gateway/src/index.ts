@@ -2203,10 +2203,12 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const probe = await withTimeout(probeMemoryEmbeddingProvider(candidate), MEMORY_CHECK_MS, undefined);
     const ok = Boolean(probe && !probe.error && probe.dimensions);
     const error = !probe ? `no answer within ${MEMORY_CHECK_MS / 1000} s` : probe.error ?? (probe.dimensions ? undefined : "the provider returned no embedding");
+    const missingModel = !ok && spec.startsWith("ollama:") && /not found|pull/i.test(error ?? "");
+    lastMissingOllamaModel = missingModel ? spec.slice("ollama:".length) : undefined;
     appendAdminAudit(paths.dataDir, { userId, action: "memory_checked", embeddingProvider: spec, ok });
     sendJson(res, 200, ok
       ? { ok: true, providerId: probe!.providerId, model: probe!.model, dimensions: probe!.dimensions }
-      : { ok: false, error, missingModel: spec.startsWith("ollama:") && /not found|pull/i.test(error ?? "") });
+      : { ok: false, error, missingModel });
     return;
   }
 
@@ -2226,6 +2228,12 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     }
     if (ollamaPullRunning) {
       refuse(409, { error: "a model download is already running; wait for it to finish" }, { reason: "busy" });
+      return;
+    }
+    // Only the embedding model the last check found missing: not any model
+    // from the registry, which could be any size.
+    if (model !== lastMissingOllamaModel) {
+      refuse(409, { error: "download the model the memory check reported missing: run the check first" }, { reason: "not_checked" });
       return;
     }
     const resolved = resolveMemoryEmbeddingProviderConfig({ memory: { embeddingProvider: `ollama:${model}` } });
@@ -2262,6 +2270,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     } finally {
       ollamaPullRunning = false;
     }
+    if (result.ok) lastMissingOllamaModel = undefined;
     appendAdminAudit(paths.dataDir, { userId, action: "memory_model_pulled", model, ok: result.ok });
     sendJson(res, 200, result);
     return;
@@ -2993,6 +3002,8 @@ const OLLAMA_MODEL_NAME = /^(?:[a-z0-9][a-z0-9_-]{0,63}\/)?[a-z0-9][a-z0-9_-]*(?
 const MEMORY_CHECK_MS = 20_000;
 const OLLAMA_PULL_MS = 15 * 60_000;
 let ollamaPullRunning = false;
+/** The Ollama model the last memory check reported missing: the only one a pull may fetch (#111 review). */
+let lastMissingOllamaModel: string | undefined;
 
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;

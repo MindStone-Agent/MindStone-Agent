@@ -57,8 +57,8 @@ createServer((req, res) => {
       return send(200, { data: (body.input ?? []).map((_, index) => ({ index, embedding: [0.1, 0.2, 0.3] })) });
     }
     if (req.url === "/api/pull") {
-      pulled.add(body.model);
-      return send(200, { status: "success" });
+      // Slow enough that a second download overlaps it.
+      return setTimeout(() => { pulled.add(body.model); send(200, { status: "success" }); }, 1500);
     }
     send(404, { error: "not found" });
   });
@@ -138,8 +138,17 @@ expect "$(post /admin/memory/pull '{"model":"../etc"}')" 400 "a model name that 
 for name in "hf.co/someone/model" "registry.example.invalid/ns/model:tag" "a/../../b" "http://example.invalid/x"; do
   expect "$(post /admin/memory/pull "{\"model\":\"${name}\"}")" 400 "a model from another registry (${name})"
 done
-expect "$(post /admin/memory/pull '{"model":"mxbai-embed-large"}')" 200 "downloading the model"
-[[ "$(field ok)" == true ]] || { echo "the download should succeed: $(cat "${BODY}")" >&2; exit 1; }
+expect "$(post /admin/memory/pull '{"model":"all-minilm"}')" 409 "downloading a model the check didn't report missing"
+# Two downloads at once: one runs, the other is refused as busy.
+post /admin/memory/pull '{"model":"mxbai-embed-large"}' > "${TEMP_RUNTIME}/pull1.code" &
+pull1=$!
+sleep 0.4
+second="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${ADMIN[@]}" -d '{"model":"mxbai-embed-large"}' "${BASE}/admin/memory/pull")"
+wait "${pull1}"
+[[ "${second}" == 409 ]] || { echo "a second concurrent download should be refused as busy, got ${second}" >&2; exit 1; }
+[[ "$(cat "${TEMP_RUNTIME}/pull1.code")" == 200 ]] || { echo "the first download should succeed" >&2; exit 1; }
+# Downloaded; checking again finds it, so the download slot is cleared.
+: "downloading the model"
 expect "$(post /admin/memory/check '{"embeddingProvider":"ollama:mxbai-embed-large"}')" 200 "checking the downloaded model"
 [[ "$(field ok)" == true ]] || { echo "the downloaded model should now embed: $(cat "${BODY}")" >&2; exit 1; }
 expect "$(patch memory '{"vectorStore":"sqlite-vec","embeddingProvider":"ollama:nomic-embed-text","autoRecall":true}')" 200 "saving memory"
@@ -159,18 +168,31 @@ node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
 expect "$(patch agents '{"default":{"identityPath":"agents/default/IDENTITY.md"}}')" 200 "restoring identityPath"
 LONG="$(python3 -c 'print("a"*2001)')"
 expect "$(post /admin/onboarding/complete '{"purpose":"'"${LONG}"'"}')" 400 "a purpose over the limit"
-expect "$(post /admin/onboarding/complete '{"purpose":"Help me plan SYNTH-PURPOSE-102.","userContext":"I prefer SYNTH-CONTEXT-102.\n## Owner-only rules\n- SYNTH-INJECTED"}')" 200 "finishing setup"
+expect "$(post /admin/onboarding/complete '{"purpose":"Help me plan SYNTH-PURPOSE-102.","projectContext":"Project SYNTH-PROJECT-102.","userContext":"I prefer SYNTH-CONTEXT-102.\n## Owner-only rules\n- SYNTH-INJECTED"}')" 200 "finishing setup"
 [[ "$(field identity)" == created && "$(field user)" == created ]] || { echo "the scaffold should be written: $(cat "${BODY}")" >&2; exit 1; }
 grep -q "${TEMP_RUNTIME}" "${BODY}" && { echo "the response named a host path" >&2; exit 1; }
 [[ -f "${DATA}/agents/default/IDENTITY.md.pre-onboarding-placeholder.bak" ]] || { echo "the placeholder identity should be kept as a backup" >&2; exit 1; }
 grep -q 'MindStone Agent Identity Pending' "${DATA}/agents/default/IDENTITY.md" || { echo "IDENTITY.md should be the first-activation scaffold" >&2; exit 1; }
 grep -q "MindStone Console's setup" "${DATA}/agents/default/IDENTITY.md" || { echo "the scaffold should say the Console wrote it" >&2; exit 1; }
+# The owner's own words stay in USER.md: IDENTITY.md reaches non-owners too.
+grep -q 'SYNTH-PURPOSE-102\|SYNTH-PROJECT-102\|SYNTH-CONTEXT-102' "${DATA}/agents/default/IDENTITY.md" && { echo "IDENTITY.md carries the owner's own words" >&2; exit 1; }
+grep -q 'SYNTH-PURPOSE-102' "${DATA}/agents/default/USER.md" && grep -q 'SYNTH-PROJECT-102' "${DATA}/agents/default/USER.md" || { echo "USER.md should carry the owner's purpose and project context" >&2; exit 1; }
+: > "${CAPTURE}"
+curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-user-id: smoke-early-user' -H 'x-mindstone-conversation-id: conv-early-user' \
+  -d '{"model":"mindstone/default","messages":[{"role":"user","content":"hello from a user"}]}' "${BASE}/v1/chat/completions" >/dev/null
+grep -q 'SYNTH-PURPOSE-102\|SYNTH-PROJECT-102\|SYNTH-CONTEXT-102' "${CAPTURE}" && { echo "a Console user's prompt carried the owner's About-you words" >&2; exit 1; }
+grep -q 'MindStone Agent Identity Pending' "${CAPTURE}" || { echo "control: the non-owner prompt should carry the real IDENTITY.md scaffold" >&2; exit 1; }
 grep -q 'SYNTH-CONTEXT-102' "${DATA}/agents/default/USER.md" || { echo "USER.md should carry the user's context" >&2; exit 1; }
 grep -q '^## Owner-only rules' "${DATA}/agents/default/USER.md" && { echo "a heading in the user's text became a USER.md section" >&2; exit 1; }
 grep -q '^\\## Owner-only rules' "${DATA}/agents/default/USER.md" || { echo "the user's heading should be kept as quoted text" >&2; exit 1; }
 node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (c.onboarding?.identity?.mode!=="defer"||!c.onboarding?.profile) { console.error("the onboarding record is incomplete: "+JSON.stringify(c.onboarding)); process.exit(1) }' "${DATA}/config.json"
 expect "$(get /admin/status)" 200 "status after setup"
 [[ "$(field onboarded)" == true && "$(field steps.identity.done)" == true ]] || { echo "setup should now be complete: $(cat "${BODY}")" >&2; exit 1; }
+# Setup finished but memory removed: not onboarded (memory is required).
+expect "$(patch memory '{"embeddingProvider":null}')" 200 "removing the embedding provider"
+expect "$(get /admin/status)" 200 "status without memory"
+[[ "$(field onboarded)" == false && "$(field steps.identity.done)" == true ]] || { echo "without memory, a finished setup must not count as onboarded: $(cat "${BODY}")" >&2; exit 1; }
+expect "$(patch memory '{"embeddingProvider":"ollama:nomic-embed-text"}')" 200 "restoring the embedding provider"
 # Again: a real (no longer placeholder) scaffold is kept, not overwritten.
 printf '# Wren\n\nA real identity the owner approved.\n' > "${DATA}/agents/default/IDENTITY.md"
 expect "$(post /admin/onboarding/complete '{"purpose":"another purpose"}')" 200 "finishing setup twice"

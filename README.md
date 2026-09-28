@@ -216,7 +216,7 @@ It updates the `config.json` the installer created. To change settings later, us
 This path needs no interactive terminal (TTY): steps 3 and 5 are still shell commands, but none of them prompts. Don't run `mindstone onboard`. Instead:
 1. start the gateway (step 3);
 2. set the gateway up for the Console (step 5);
-3. install the Console and run its guided setup, following the [Console README](https://github.com/MindStone-Agent/mindstone-console). Guided setup chooses the model provider, the model and the persona, then sets up memory (an embedding model with a live check; with local Ollama the Console can download it), optional chat connectors, and a short **About you** step that writes the identity scaffold. The gateway reports itself as onboarded once all of these are done (`GET /admin/status` shows each step), and the first Console chat starts identity formation.
+3. install the Console and run its guided setup, following the [Console README](https://github.com/MindStone-Agent/mindstone-console). Guided setup chooses the model provider, the model and the persona, then sets up memory (an embedding model with a live check; with local Ollama the Console can download it), optional chat connectors, and a short **About you** step that writes the identity scaffold. The gateway reports itself as onboarded once the provider, model, persona, memory and About you steps are done; connectors are optional (`GET /admin/status` shows each step), and the first Console chat starts identity formation.
 
 Until then the gateway reports itself as not onboarded, and the Console shows a **Set up MindStone** banner.
 
