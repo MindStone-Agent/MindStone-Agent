@@ -8,6 +8,21 @@ source "${SCRIPT_DIR}/env.sh"
 AGENT_DIR="${MINDSTONE_AGENT_DATA_DIR}/agents/default"
 CONFIG_PATH="${MINDSTONE_AGENT_CONFIG:-${MINDSTONE_AGENT_DATA_DIR}/config.json}"
 
+# --if-no-config (used by install-native.sh, so by install.sh): initialize only a
+# runtime that has no config.json yet. An existing runtime, onboarded or not, is
+# left exactly as it is: re-running the installer is also the update path (#108).
+# A symlink counts as existing even when it dangles: its target is never written.
+config_exists() { [[ -e "${CONFIG_PATH}" || -L "${CONFIG_PATH}" ]]; }
+if [[ "${1:-}" == "--if-no-config" ]]; then
+  if config_exists; then
+    echo "Runtime config already exists; left unchanged: ${CONFIG_PATH}"
+    exit 0
+  fi
+elif [[ $# -gt 0 ]]; then
+  echo "Usage: init-runtime.sh [--if-no-config]" >&2
+  exit 2
+fi
+
 mkdir -p "${AGENT_DIR}" "$(dirname "${CONFIG_PATH}")" "${MINDSTONE_AGENT_MEMORY_DIR}" "${MINDSTONE_AGENT_JOURNAL_DIR}" "$(dirname "${MINDSTONE_AGENT_LOG_PATH}")" "$(dirname "${MINDSTONE_AGENT_MEMORY_INDEX_PATH}")"
 
 if [[ ! -f "${AGENT_DIR}/IDENTITY.md" ]]; then
@@ -71,8 +86,35 @@ Narrative/dream-cycle journals live here. They preserve experiential texture and
 EOF
 fi
 
-if [[ ! -f "${CONFIG_PATH}" ]]; then
-  cat >"${CONFIG_PATH}" <<'EOF'
+# Written to a temporary file in the same directory, then hard-linked into place:
+# link(2) fails if anything (a file, a symlink, a dangling symlink) already holds
+# the name, so a config created meanwhile is never overwritten. noclobber makes
+# the temporary file with the usual umask mode, as the onboarding wizard does.
+write_config_if_missing() {
+  local tmp="${CONFIG_PATH}.init.$$"
+  config_exists && return 0
+  rm -f "${tmp}"
+  # The temp file never outlives this call, even if writing it fails or the run is interrupted.
+  trap 'rm -f "${tmp}"' EXIT INT TERM HUP
+  if ! (set -o noclobber; cat >"${tmp}"); then
+    rm -f "${tmp}"
+    echo "Could not write ${tmp}" >&2
+    return 1
+  fi
+  if ! ln "${tmp}" "${CONFIG_PATH}" 2>/dev/null; then
+    if ! config_exists; then
+      # No hard links on this filesystem: fall back to a rename that refuses to overwrite,
+      # so the whole file appears at once and a failed copy can't leave an empty config.
+      mv -n "${tmp}" "${CONFIG_PATH}" 2>/dev/null || true
+    fi
+  fi
+  rm -f "${tmp}"
+  trap - EXIT INT TERM HUP
+  config_exists || { echo "Could not create ${CONFIG_PATH}" >&2; return 1; }
+}
+
+if ! config_exists; then
+  write_config_if_missing <<'EOF'
 {
   "workspace": {
     "root": "."
@@ -121,8 +163,7 @@ if [[ ! -f "${CONFIG_PATH}" ]]; then
   },
   "routing": {
     "mode": "placeholder",
-    "defaultAgentId": "default",
-    "defaultModel": "mindstone/default"
+    "defaultAgentId": "default"
   },
   "contextManagement": {
     "mode": "sliding_window",
