@@ -120,6 +120,7 @@ export function loadMindStoneSkillArtifact(dir: string, skillId: string, source:
         id,
         label,
         description,
+        goal: typeof record.goal === "string" && record.goal.trim() ? record.goal : undefined,
         whenToUse: stringList(record.whenToUse),
         outputs: stringList(record.outputs),
         safetyNotes: stringList(record.safetyNotes),
@@ -193,6 +194,8 @@ export type BuildSkillDraftInput = {
   id?: string;
   label?: string;
   description?: string;
+  /** What the skill is for (#104). */
+  goal?: string;
   whenToUse?: string[];
   outputs?: string[];
   safetyNotes?: string[];
@@ -221,6 +224,7 @@ export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkil
       id,
       label: input.label ?? builtin.artifact.label,
       description: input.description ?? builtin.artifact.description,
+      goal: input.goal ?? builtin.artifact.goal,
       origin: `builtin:${builtin.artifact.id}`,
       createdAt: input.now,
     };
@@ -235,6 +239,7 @@ export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkil
       id: input.id,
       label: input.label,
       description: input.description,
+      goal: input.goal?.trim() || undefined,
       whenToUse: input.whenToUse ?? [],
       outputs: input.outputs ?? [],
       safetyNotes: input.safetyNotes ?? [],
@@ -249,6 +254,7 @@ export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkil
         "",
         artifact.description,
         "",
+        ...(artifact.goal ? ["## Goal", "", artifact.goal, ""] : []),
         ...(artifact.whenToUse.length ? ["## When to use", "", ...artifact.whenToUse.map((item) => `- ${item}`), ""] : []),
         ...(artifact.outputs.length ? ["## Outputs", "", ...artifact.outputs.map((item) => `- ${item}`), ""] : []),
         ...(artifact.safetyNotes.length ? ["## Safety notes", "", ...artifact.safetyNotes.map((item) => `- ${item}`), ""] : []),

@@ -18,7 +18,7 @@ import type { ConnectorOutboundMessage } from "./connector.js";
  * skills, personas, workflows, config) and adds a UI + defer on top of this
  * same store.
  */
-export type ProposedActionKind = "connector_send" | "memory_write" | "connector_mutation";
+export type ProposedActionKind = "connector_send" | "memory_write" | "connector_mutation" | "skill_install";
 
 export type ProposedActionStatus = "pending" | "approved" | "rejected";
 
@@ -45,6 +45,26 @@ export type ConnectorMutationPayload = {
   data: Record<string, unknown>;
 };
 
+/**
+ * A skill the agent proposes to install (#104). It is held in the proposal
+ * only: nothing is written under the skills directory until the owner
+ * approves it, so model output never creates files on its own.
+ */
+export type SkillInstallPayload = {
+  id: string;
+  label: string;
+  description: string;
+  goal?: string;
+  whenToUse: string[];
+  outputs: string[];
+  safetyNotes: string[];
+  /** The SKILL.md body; generated from the fields when the proposal has none. */
+  instructions?: string;
+};
+
+/** Size limits for a proposed skill, so a reply can't park megabytes in the approvals store. */
+export const SKILL_PROPOSAL_LIMITS = { text: 2_000, list: 12, instructions: 16_000 } as const;
+
 export type ProposedAction = {
   id: string;
   kind: ProposedActionKind;
@@ -61,6 +81,8 @@ export type ProposedAction = {
   memory?: MemoryWritePayload;
   /** connector_mutation: the external-service mutation to apply on approval. */
   mutation?: ConnectorMutationPayload;
+  /** skill_install: the skill to draft and install on approval (#104). */
+  skill?: SkillInstallPayload;
   status: ProposedActionStatus;
   decidedAt?: string;
   decidedBy?: string;
@@ -252,23 +274,60 @@ export function resolveConnectorSendPolicy(params: {
 // applied directly.
 // ---------------------------------------------------------------------------
 
-const PROPOSAL_FENCE = /```mindstone-(memory|calendar)-proposal\s*\n([\s\S]*?)```/g;
+const PROPOSAL_FENCE = /```mindstone-(memory|calendar|skill)-proposal\s*\n([\s\S]*?)```/g;
+
+const SKILL_PROPOSAL_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function boundedText(value: unknown, max: number): string | undefined {
+  return typeof value === "string" && value.trim() && value.length <= max ? value.trim() : undefined;
+}
+
+function boundedList(value: unknown): string[] | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > SKILL_PROPOSAL_LIMITS.list) return undefined;
+  const items = value.map((item) => boundedText(item, SKILL_PROPOSAL_LIMITS.text));
+  return items.every((item): item is string => item !== undefined) ? items : undefined;
+}
+
+/** A proposed skill (#104), or undefined when any field is missing, malformed or too large. */
+export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undefined {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  const id = typeof record.id === "string" && SKILL_PROPOSAL_ID.test(record.id) && record.id !== "drafts" ? record.id : undefined;
+  const label = boundedText(record.label, SKILL_PROPOSAL_LIMITS.text);
+  const description = boundedText(record.description, SKILL_PROPOSAL_LIMITS.text);
+  const goal = record.goal === undefined ? undefined : boundedText(record.goal, SKILL_PROPOSAL_LIMITS.text);
+  const whenToUse = boundedList(record.whenToUse);
+  const outputs = boundedList(record.outputs);
+  const safetyNotes = boundedList(record.safetyNotes);
+  const instructions = record.instructions === undefined ? undefined : boundedText(record.instructions, SKILL_PROPOSAL_LIMITS.instructions);
+  if (!id || !label || !description || !whenToUse || !outputs || !safetyNotes) return undefined;
+  if (record.goal !== undefined && goal === undefined) return undefined;
+  if (record.instructions !== undefined && instructions === undefined) return undefined;
+  return { id, label, description, goal, whenToUse, outputs, safetyNotes, instructions };
+}
 
 export type ExtractedActionProposals = {
   /** Reply text with every proposal block stripped. */
   text: string;
   memory?: MemoryWritePayload;
   mutations: ConnectorMutationPayload[];
+  /** At most one proposed skill per reply (#104). */
+  skill?: SkillInstallPayload;
 };
 
 export function extractActionProposals(replyText: string): ExtractedActionProposals {
   const mutations: ConnectorMutationPayload[] = [];
   let memory: MemoryWritePayload | undefined;
+  let skill: SkillInstallPayload | undefined;
   const text = replyText
     .replace(PROPOSAL_FENCE, (_, fenceKind: string, body: string) => {
       try {
         const parsed = JSON.parse(body);
-        if (fenceKind === "memory") {
+        if (fenceKind === "skill") {
+          const proposal = parseSkillProposal(parsed);
+          if (proposal && !skill) skill = proposal;
+        } else if (fenceKind === "memory") {
           const path = typeof parsed?.path === "string" ? parsed.path.trim() : "";
           const content = typeof parsed?.content === "string" ? parsed.content : "";
           if (path && content && !memory) memory = { path, content };
@@ -286,7 +345,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
       return "";
     })
     .trim();
-  return { text, memory, mutations };
+  return { text, memory, mutations, skill };
 }
 
 /** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
@@ -297,7 +356,7 @@ export function extractMemoryProposal(replyText: string): { text: string; propos
 
 /** Strip proposal fences from a string WITHOUT proposing; no-op (identity) when none present. */
 export function stripProposalFences(text: string): string {
-  const fence = /```mindstone-(?:memory|calendar)-proposal\s*\n[\s\S]*?```/g;
+  const fence = /```mindstone-(?:memory|calendar|skill)-proposal\s*\n[\s\S]*?```/g;
   if (!fence.test(text)) return text;
   fence.lastIndex = 0;
   return text.replace(fence, "").trim();
@@ -346,7 +405,7 @@ export function applyActionProposalDiscipline(params: {
   // exist in content even when text is already clean (diverging shapes).
   const contentProbe = params.content !== undefined ? JSON.stringify(params.content) : undefined;
   const content = contentProbe?.includes("```mindstone-") ? stripActionProposalsDeep(params.content) : params.content;
-  if (!extracted.memory && !extracted.mutations.length) {
+  if (!extracted.memory && !extracted.mutations.length && !extracted.skill) {
     return { text: extracted.text, content, events: [], proposals: [] };
   }
   const approvals = params.store ?? new ApprovalStore();
@@ -360,6 +419,17 @@ export function applyActionProposalDiscipline(params: {
           createdAt: new Date().toISOString(),
           summary: `memory write proposal from ${params.origin}: ${extracted.memory.path}`,
           memory: extracted.memory,
+        })]
+      : []),
+    ...(extracted.skill
+      ? [approvals.propose({
+          kind: "skill_install" as const,
+          connectorId: params.origin,
+          sessionKey: params.sessionKey,
+          agentId: params.agentId,
+          createdAt: new Date().toISOString(),
+          summary: `install skill ${extracted.skill.id}: ${extracted.skill.label}`,
+          skill: extracted.skill,
         })]
       : []),
     ...extracted.mutations.map((mutation) =>
