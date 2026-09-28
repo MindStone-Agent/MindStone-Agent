@@ -54,10 +54,14 @@ const c = JSON.parse(fs.readFileSync(p, "utf8"));
 c.gateway = { ...(c.gateway ?? {}), auth: { mode: "token", tokenEnv: "MS_SMOKE_TOKEN" }, http: { chatCompletions: { enabled: true } } };
 c.routing = { mode: "pi-session", defaultAgentId: "default", defaultModel: process.env.DEFAULT_MODEL, pi: { agentDir: process.env.MINDSTONE_AGENT_RUNTIME_DIR + "/pi-agent" } };
 c.memory = { ...(c.memory ?? {}), autoRecall: false };
-c.agents = process.env.AGENT_MODEL ? { default: { id: "default", defaultModel: process.env.AGENT_MODEL } } : {};
+// Without an agent model, the agent keeps the init-runtime alias
+// "mindstone/default", as on a fresh install.
+c.agents = { ...(c.agents ?? {}), default: { ...(c.agents?.default ?? { id: "default" }), defaultModel: process.env.AGENT_MODEL || "mindstone/default" } };
 fs.writeFileSync(p, JSON.stringify(c, null, 2));
 '
 }
+# A fresh install names the alias "mindstone/default" as the default agent's model.
+grep -q '"defaultModel": "mindstone/default"' "${DATA}/config.json" || { echo "expected init-runtime to name mindstone/default as the agent model" >&2; exit 1; }
 config "beta/stub-model"
 
 env -i HOME="${HOME}" PATH="${PATH}" MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}" MINDSTONE_AGENT_GATEWAY_PORT="${GATEWAY_PORT}" MS_SMOKE_TOKEN="model-selection-smoke-token" \
@@ -77,6 +81,8 @@ expect() { [[ "$1" == *"$2"* ]] || { echo "$3: expected $2, got: ${1:0:300}" >&2
 
 # 1. The Console's "mindstone/default" means the model chosen in setup (beta), not the first available (alpha).
 expect "$(chat admin mindstone/default c1)" BETA-ANSWERED "a Console chat should use the model chosen in setup"
+# ...directly, not by way of the unknown-model fallback.
+grep -q 'Pi has no model\|using the first available' "${TEMP_RUNTIME}/gateway.log" && { echo "the Console chat reached the setup model only through a fallback: $(grep 'Pi has no model\|first available' "${TEMP_RUNTIME}/gateway.log" | head -1)" >&2; exit 1; }
 # 2. The agent's own default beats the install default (#118).
 config "beta/stub-model" "alpha/stub-model"
 expect "$(chat admin mindstone/default c2)" ALPHA-ANSWERED "the agent's own defaultModel should win over routing.defaultModel"

@@ -430,8 +430,12 @@ function resolveRouteModel(config: MindStoneConfig | undefined, agentId: string,
   const requested = typeof metadata?.model === "string" ? metadata.model : undefined;
   const metadataModel = audience === "owner" && requested && !isAgentModelAlias(requested) ? requested : undefined;
   const configuredAgent = config?.agents?.[agentId];
+  // The installer writes the alias "mindstone/default" as the default agent's
+  // model; an alias there is a placeholder, not a choice, so setup's
+  // routing.defaultModel applies.
+  const agentModel = configuredAgent?.defaultModel && !isAgentModelAlias(configuredAgent.defaultModel) ? configuredAgent.defaultModel : undefined;
   return {
-    id: metadataModel ?? configuredAgent?.defaultModel ?? config?.routing?.defaultModel ?? `mindstone/${agentId}`,
+    id: metadataModel ?? agentModel ?? config?.routing?.defaultModel ?? configuredAgent?.defaultModel ?? `mindstone/${agentId}`,
     provider: resolveRoutingMode(config),
     contextWindowTokens: resolveContextWindowTokens(config, agentId, metadata),
   };
