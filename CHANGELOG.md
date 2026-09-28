@@ -6,6 +6,14 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 
 ## [Unreleased]
 
+### Added
+- **The agent proposes its own persona, approved in the Console** (#105).
+  - In an owner's turn, the agent can end a reply with a `mindstone-persona-proposal` block. It holds an id, name, description, voice, working style and boundaries, each with a length cap. The block is stripped from the reply and becomes a pending `persona_create` approval. A Console user's or connector non-owner's block is dropped. The owner's turns carry a short instruction describing the format, and identity formation now ends by proposing one.
+  - Approving it (Console or `mindstone approvals approve`) writes `personas/<id>/PERSONA.md` from a fixed template (Voice, Working style, Boundaries; headings in the proposal's text stay text) and `metadata.json`, and adds it to the Personas list. It does not make it active: switching to it is a separate, deliberate step (the Console's Personas page, `PATCH /admin/config/personas`, or `mindstone persona activate`). An existing id, or anything already at that path, is refused (`409`) and the approval stays pending. Rejecting writes nothing.
+  - A proposal with characters the approver can't see (controls, bidi overrides, zero-width or tag characters) is refused, and code fences, setext headings and HTML comments in its text are quoted, so the approval card shows everything the persona holds. `mindstone approvals show` and the approve prompt show the persona as it will be written. At most 3 persona proposals wait at once.
+  - `GET /admin/personas` lists the personas and the active one. Switching is the existing `PATCH /admin/config/personas`.
+  - New smoke: `scripts/smoke-persona-proposals.sh`.
+
 ### Fixed
 - **Console setup reaches a working agent, and only admins are the owner in Console chats** (#102, #103).
   - **Identity formation now runs in Console chats.** `/v1/chat/completions` never called the first-activation identity-formation prompt, so a Console-only install never started it, even after `mindstone onboard`. The owner's first Console conversation after setup now starts it, once per agent rather than once per conversation. It waits until setup has finished.

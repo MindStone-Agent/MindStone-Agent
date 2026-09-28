@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import type { ConnectorOutboundMessage } from "./connector.js";
 import { ApprovalStore, sanitizeMemoryProposalPath, type ProposedAction } from "./approval.js";
 import { ConnectorDeliveryQueue } from "./queue.js";
+import { PersonaExistsError, writeProposedPersona } from "../persona/create.js";
 
 /**
  * Approving and rejecting proposed actions, shared by `mindstone approvals`
@@ -22,7 +23,7 @@ import { ConnectorDeliveryQueue } from "./queue.js";
 export class ApprovalActionError extends Error {
   constructor(
     message: string,
-    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload",
+    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload" | "no_personas_dir" | "persona_exists",
     readonly status: number,
     /** For callers outside this host (the Console): the same refusal without host paths or CLI hints. */
     readonly publicMessage: string = message,
@@ -103,6 +104,7 @@ export type ApproveResult =
   | { outcome: "approved"; kind: "connector_send"; connectorId: string }
   | { outcome: "approved"; kind: "connector_mutation"; connectorId: string }
   | { outcome: "approved"; kind: "memory_write"; memoryFile: string }
+  | { outcome: "approved"; kind: "persona_create"; personaId: string }
   | { outcome: "requeued"; kind: "connector_send" | "connector_mutation"; connectorId: string }
   | { outcome: "already_queued"; kind: "connector_send" | "connector_mutation"; connectorId: string };
 
@@ -118,7 +120,15 @@ export type ApproveResult =
 export function approveProposedAction(
   store: ApprovalStore,
   check: ApprovalCheck,
-  options: { decidedBy: string; memoryDir: string; force?: boolean; now?: () => string; onDecision?: ApprovalDecisionHook },
+  options: {
+    decidedBy: string;
+    memoryDir: string;
+    force?: boolean;
+    now?: () => string;
+    onDecision?: ApprovalDecisionHook;
+    /** persona_create (#105): where personas live. */
+    personasDir?: string;
+  },
 ): ApproveResult {
   const { action, repair } = check;
   const now = options.now ?? (() => new Date().toISOString());
@@ -210,6 +220,31 @@ export function approveProposedAction(
     writeFileSync(target, action.memory.content.endsWith("\n") ? action.memory.content : `${action.memory.content}\n`);
     options.onDecision?.(action, "approved", `memory file written: ${safePath}`);
     return { outcome: "approved", kind: "memory_write", memoryFile: target };
+  }
+  if (action.kind === "persona_create" && action.persona) {
+    // Written before the decision, so a refused decision leaves nothing
+    // behind and an approval never exists without its files (#105).
+    if (!options.personasDir) throw new ApprovalActionError("approving a persona needs the personas directory", "no_personas_dir", 422);
+    const personaId = action.persona.id;
+    let dir: string;
+    try {
+      dir = writeProposedPersona({ personasDir: options.personasDir, persona: action.persona, approvedBy: options.decidedBy, now: now() });
+    } catch (error) {
+      if (error instanceof PersonaExistsError) {
+        throw new ApprovalActionError(`${error.message}; ask the agent for a new name, or reject this proposal`, "persona_exists", 409);
+      }
+      throw error;
+    }
+    try {
+      decideOrRefuse(store, action.id, { status: "approved", decidedBy: options.decidedBy, now: now() });
+    } catch (error) {
+      rmSync(dir, { recursive: true, force: true });
+      throw error;
+    }
+    // Saved to the list only: making it active is a separate, deliberate
+    // switch on the Personas page (Clint, #105).
+    options.onDecision?.(action, "approved", `persona saved: ${personaId} (not active until switched to)`);
+    return { outcome: "approved", kind: "persona_create", personaId };
   }
   throw new ApprovalActionError(`action ${action.id} has kind "${action.kind}" but no matching payload; refusing to approve`, "no_payload", 422);
 }

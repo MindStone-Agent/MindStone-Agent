@@ -113,6 +113,9 @@ import "./connectors/email.js";
 import "./connectors/calendar.js";
 import {
   loadRoutePersonaContextById,
+  personasDirFromConfig,
+  PERSONA_PROPOSAL_INSTRUCTIONS,
+  discoverMindStonePersonas,
   resolveRoutePersonaContext,
   runMindStoneWorkflow,
   appendTranscriptEntry,
@@ -1119,6 +1122,7 @@ async function runConfiguredRoute(input: {
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
         identityFormation: input.audience === "owner" ? input.identityFormation : undefined,
+        ownerInstructions: input.audience === "owner" && !input.scope ? PERSONA_PROPOSAL_INSTRUCTIONS : undefined,
         memoryRecall: {
           enabled: (input.audience === "owner" || input.audience === "tenant") && input.config?.memory?.autoRecall === true,
           provider: input.config?.memory?.vectorStore === "sqlite-vec"
@@ -1325,6 +1329,8 @@ async function runConfiguredRoute(input: {
       origin: source?.substrate ?? "gateway",
       source,
       runId: run.id,
+      // Only the owner's turns may propose a persona (#105).
+      allowPersona: input.audience === "owner" && !input.scope,
     });
 
     const assistantEntry = appendTranscriptEntry({
@@ -1878,7 +1884,15 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       sendJson(res, 404, { ok: false, error: `no proposed action matches id "${approvalMatch[1]}"` });
       return;
     }
-    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation } });
+    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation, persona: action.persona } });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/admin/personas") {
+    // The personas and the active one, for the Console's Personas page (#105).
+    // Switching is PATCH /admin/config/personas { active }.
+    const personasDir = personasDirFromConfig(gateConfig.config, paths);
+    const personas = discoverMindStonePersonas(personasDir).map(({ id, name, description, version, error }) => ({ id, name, description, version, ...(error ? { error: "this persona can't be loaded" } : {}) }));
+    sendJson(res, 200, { ok: true, active: gateConfig.config?.personas?.active ?? null, personas });
     return;
   }
   if (req.method === "GET" && url.pathname === "/admin/secrets") {
@@ -2020,13 +2034,17 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     };
     try {
       if (decision === "approve") {
-        const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
-          decidedBy: `console:${userId}`,
-          memoryDir: paths.memoryDir,
-          force: body.force === true,
-          onDecision,
+        // Under the admin write lock, like every config-adjacent write.
+        await withAdminWriteLock(() => {
+          const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
+            decidedBy: `console:${userId}`,
+            memoryDir: paths.memoryDir,
+            force: body.force === true,
+            onDecision,
+            personasDir: personasDirFromConfig(loadMindStoneConfig(configPath).config, paths),
+          });
+          sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
         });
-        sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
       } else {
         const rejected = rejectProposedAction(store, approvalMatch[1]!, {
           decidedBy: `console:${userId}`,

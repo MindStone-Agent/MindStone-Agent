@@ -58,6 +58,8 @@ export type MindStoneRouteInput = {
   protectedEntryIds?: string[];
   handoffReplay?: MindStoneHandoffReplay;
   identityFormation?: MindStoneIdentityFormationPrompt;
+  /** Standing instructions for the owner's turns only, e.g. how to propose a persona (#105). */
+  ownerInstructions?: string;
   memoryRecall?: {
     enabled?: boolean;
     provider?: MemoryRecallProvider;
@@ -178,7 +180,7 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     entries: input.entries,
     contextWindowTokens,
     policy: input.contextManagement,
-    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (personaContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (invariants?.tokens ?? 0) + (memoryIndex?.tokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0),
+    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (personaContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (invariants?.tokens ?? 0) + (memoryIndex?.tokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0) + (input.ownerInstructions ? estimatePromptTokens(input.ownerInstructions) : 0),
     protectedEntryIds: input.protectedEntryIds,
   });
   const messages = promptWindow.promptEntries.map(transcriptEntryToChatMessage).filter((message): message is MindStoneChatMessage => Boolean(message));
@@ -196,6 +198,9 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
   }
   if (input.identityFormation?.enabled && input.identityFormation.promptText.trim()) {
     messages.unshift({ role: "system", text: input.identityFormation.promptText.trim() });
+  }
+  if (input.ownerInstructions?.trim()) {
+    messages.unshift({ role: "system", text: input.ownerInstructions.trim() });
   }
   if (personaPromptText) {
     messages.unshift({ role: "system", text: personaPromptText });

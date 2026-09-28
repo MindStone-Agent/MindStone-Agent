@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { appendTranscriptEntry, type TranscriptEntry, type TranscriptSource } from "../transcript/index.js";
 import type { ConnectorOutboundMessage } from "./connector.js";
+import { parsePersonaProposal, type PersonaProposalPayload } from "../persona/create.js";
 
 /**
  * Durable proposed-action store (issue #21, designed to be absorbed by the
@@ -18,7 +19,7 @@ import type { ConnectorOutboundMessage } from "./connector.js";
  * skills, personas, workflows, config) and adds a UI + defer on top of this
  * same store.
  */
-export type ProposedActionKind = "connector_send" | "memory_write" | "connector_mutation";
+export type ProposedActionKind = "connector_send" | "memory_write" | "connector_mutation" | "persona_create";
 
 export type ProposedActionStatus = "pending" | "approved" | "rejected";
 
@@ -61,6 +62,8 @@ export type ProposedAction = {
   memory?: MemoryWritePayload;
   /** connector_mutation: the external-service mutation to apply on approval. */
   mutation?: ConnectorMutationPayload;
+  /** persona_create: the persona the agent proposed for itself (#105). */
+  persona?: PersonaProposalPayload;
   status: ProposedActionStatus;
   decidedAt?: string;
   decidedBy?: string;
@@ -252,18 +255,24 @@ export function resolveConnectorSendPolicy(params: {
 // applied directly.
 // ---------------------------------------------------------------------------
 
-const PROPOSAL_FENCE = /```mindstone-(memory|calendar)-proposal\s*\n([\s\S]*?)```/g;
+/** Pending persona proposals kept at once (#105 review). */
+export const MAX_PENDING_PERSONAS = 3;
+
+const PROPOSAL_FENCE = /```mindstone-(memory|calendar|persona)-proposal\s*\n([\s\S]*?)```/g;
 
 export type ExtractedActionProposals = {
   /** Reply text with every proposal block stripped. */
   text: string;
   memory?: MemoryWritePayload;
   mutations: ConnectorMutationPayload[];
+  /** The first well-formed persona proposal (#105). */
+  persona?: PersonaProposalPayload;
 };
 
 export function extractActionProposals(replyText: string): ExtractedActionProposals {
   const mutations: ConnectorMutationPayload[] = [];
   let memory: MemoryWritePayload | undefined;
+  let persona: PersonaProposalPayload | undefined;
   const text = replyText
     .replace(PROPOSAL_FENCE, (_, fenceKind: string, body: string) => {
       try {
@@ -272,6 +281,8 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
           const path = typeof parsed?.path === "string" ? parsed.path.trim() : "";
           const content = typeof parsed?.content === "string" ? parsed.content : "";
           if (path && content && !memory) memory = { path, content };
+        } else if (fenceKind === "persona") {
+          persona ??= parsePersonaProposal(parsed);
         } else {
           const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
           const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
@@ -286,7 +297,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
       return "";
     })
     .trim();
-  return { text, memory, mutations };
+  return { text, memory, mutations, persona };
 }
 
 /** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
@@ -297,7 +308,7 @@ export function extractMemoryProposal(replyText: string): { text: string; propos
 
 /** Strip proposal fences from a string WITHOUT proposing; no-op (identity) when none present. */
 export function stripProposalFences(text: string): string {
-  const fence = /```mindstone-(?:memory|calendar)-proposal\s*\n[\s\S]*?```/g;
+  const fence = /```mindstone-(?:memory|calendar|persona)-proposal\s*\n[\s\S]*?```/g;
   if (!fence.test(text)) return text;
   fence.lastIndex = 0;
   return text.replace(fence, "").trim();
@@ -340,16 +351,42 @@ export function applyActionProposalDiscipline(params: {
   source?: TranscriptSource;
   runId?: string;
   store?: ApprovalStore;
+  /**
+   * Whether this turn may propose a persona (#105): the owner's turns only.
+   * Otherwise a persona block is stripped and dropped.
+   */
+  allowPersona?: boolean;
 }): { text: string; content: unknown; events: TranscriptEntry[]; proposals: ProposedAction[] } {
   const extracted = extractActionProposals(params.replyText);
   // Sanitize content whenever it plausibly carries a fence — proposals may
   // exist in content even when text is already clean (diverging shapes).
   const contentProbe = params.content !== undefined ? JSON.stringify(params.content) : undefined;
   const content = contentProbe?.includes("```mindstone-") ? stripActionProposalsDeep(params.content) : params.content;
-  if (!extracted.memory && !extracted.mutations.length) {
-    return { text: extracted.text, content, events: [], proposals: [] };
+  // At most a few persona proposals wait at once: the instruction is on every
+  // owner turn, so an agent that keeps proposing can't flood Approvals.
+  const store = params.store ?? new ApprovalStore();
+  const capped = Boolean(params.allowPersona && extracted.persona)
+    && store.pending().filter((action) => action.kind === "persona_create" && (action.agentId ?? "default") === (params.agentId ?? "default")).length >= MAX_PENDING_PERSONAS;
+  const persona = params.allowPersona && !capped ? extracted.persona : undefined;
+  // A dropped proposal is said, not swallowed: the owner reads why in the reply.
+  const cappedNote = capped
+    ? `\n\n(The persona proposal wasn't saved: ${MAX_PENDING_PERSONAS} persona proposals are already waiting on the Approvals page. Approve or reject those first.)`
+    : "";
+  if (!extracted.memory && !extracted.mutations.length && !persona) {
+    const cappedEvents = capped && params.sessionKey
+      ? [appendTranscriptEntry({
+          sessionKey: params.sessionKey,
+          agentId: params.agentId ?? "default",
+          role: "event",
+          text: `persona proposal dropped: ${MAX_PENDING_PERSONAS} already pending`,
+          source: params.source,
+          runId: params.runId,
+          metadata: { event: "persona_proposal_dropped", reason: "too_many_pending", origin: params.origin },
+        })]
+      : [];
+    return { text: `${extracted.text}${cappedNote}`, content, events: cappedEvents, proposals: [] };
   }
-  const approvals = params.store ?? new ApprovalStore();
+  const approvals = store;
   const proposals: ProposedAction[] = [
     ...(extracted.memory
       ? [approvals.propose({
@@ -360,6 +397,17 @@ export function applyActionProposalDiscipline(params: {
           createdAt: new Date().toISOString(),
           summary: `memory write proposal from ${params.origin}: ${extracted.memory.path}`,
           memory: extracted.memory,
+        })]
+      : []),
+    ...(persona
+      ? [approvals.propose({
+          kind: "persona_create" as const,
+          connectorId: params.origin,
+          sessionKey: params.sessionKey,
+          agentId: params.agentId,
+          createdAt: new Date().toISOString(),
+          summary: `persona proposal from ${params.origin}: ${persona.name} (${persona.id})`,
+          persona,
         })]
       : []),
     ...extracted.mutations.map((mutation) =>
@@ -387,7 +435,7 @@ export function applyActionProposalDiscipline(params: {
         }),
       )
     : [];
-  return { text: extracted.text, content, events, proposals };
+  return { text: `${extracted.text}${cappedNote}`, content, events, proposals };
 }
 
 /**
