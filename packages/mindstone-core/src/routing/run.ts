@@ -1,4 +1,5 @@
 import { buildPromptWindow, estimatePromptTokens, type PromptWindowBuildResult } from "../context/index.js";
+import { buildMindStoneSkillsPrompt, type MindStoneSkillsPromptResult } from "../skills/prompt.js";
 import type { ContextManagementPolicy } from "../context/index.js";
 import {
   buildInvariantPromptFromDocuments,
@@ -86,6 +87,11 @@ export type MindStoneRouteInput = {
     documents?: MemoryDocument[];
     maxPromptTokens?: number;
   };
+  /** Installed skills (#104): the owner's turns only. */
+  skills?: {
+    enabled?: boolean;
+    skillsDir?: string;
+  };
   signal?: AbortSignal;
   metadata?: Record<string, unknown>;
 };
@@ -102,6 +108,7 @@ export type MindStoneRoutePlan = {
   memoryRecall?: MemoryRecallResult;
   invariants?: InvariantPromptResult;
   memoryIndex?: MemoryIndexPromptResult;
+  skills?: Omit<MindStoneSkillsPromptResult, "promptText">;
   handoffReplay?: MindStoneHandoffReplay;
 };
 
@@ -174,11 +181,12 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     : buildMemoryIndexPromptFromDocuments(input.memoryIndex.documents, {
         maxPromptTokens: input.memoryIndex.maxPromptTokens ?? defaultMemoryIndexBudgetTokens(contextWindowTokens),
       });
+  const skills = input.skills?.enabled && input.skills.skillsDir ? buildMindStoneSkillsPrompt(input.skills.skillsDir) : undefined;
   const promptWindow = buildPromptWindow({
     entries: input.entries,
     contextWindowTokens,
     policy: input.contextManagement,
-    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (personaContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (invariants?.tokens ?? 0) + (memoryIndex?.tokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0),
+    reservedTokens: (input.reservedTokens ?? 0) + (identityContext?.tokenEstimate ?? 0) + (personaContext?.tokenEstimate ?? 0) + (input.memoryRecall?.promptTokens ?? 0) + (invariants?.tokens ?? 0) + (memoryIndex?.tokens ?? 0) + (skills?.tokens ?? 0) + (input.handoffReplay?.tokenEstimate ?? 0) + (input.identityFormation?.enabled ? estimatePromptTokens(input.identityFormation.promptText) : 0),
     protectedEntryIds: input.protectedEntryIds,
   });
   const messages = promptWindow.promptEntries.map(transcriptEntryToChatMessage).filter((message): message is MindStoneChatMessage => Boolean(message));
@@ -196,6 +204,9 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
   }
   if (input.identityFormation?.enabled && input.identityFormation.promptText.trim()) {
     messages.unshift({ role: "system", text: input.identityFormation.promptText.trim() });
+  }
+  if (skills?.promptText) {
+    messages.unshift({ role: "system", text: skills.promptText });
   }
   if (personaPromptText) {
     messages.unshift({ role: "system", text: personaPromptText });
@@ -224,6 +235,7 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     memoryRecall: input.memoryRecall,
     invariants,
     memoryIndex,
+    skills: skills ? { tokens: skills.tokens, installed: skills.installed, inPrompt: skills.inPrompt, listedOnly: skills.listedOnly } : undefined,
     handoffReplay: input.handoffReplay,
   };
 }

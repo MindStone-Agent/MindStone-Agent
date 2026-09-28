@@ -196,6 +196,7 @@ import {
   loadMindStoneSkill,
   loadMindStoneSkillArtifact,
   parseSkillProposal,
+  buildMindStoneSkillsPrompt,
   skillDraftsDir,
   skillsDirFromConfig,
   validateSkillId,
@@ -1034,6 +1035,8 @@ async function runConfiguredRoute(input: {
           documents: fileMemoryDocuments,
           maxPromptTokens: input.config?.memory?.index?.maxPromptTokens,
         },
+        // Installed skills, and how to propose one (#104): the owner's turns only.
+        skills: { enabled: input.audience === "owner", skillsDir: skillsDirFromConfig(input.config) },
         signal: run.abortController.signal,
         metadata: input.metadata,
         runContext: {
@@ -1760,12 +1763,15 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     // The Skill Builder (#104): built-in, installed and draft skills. Errors
     // name paths relative to the skills directory, never the host's.
     const skillsDir = skillsDirFromConfig(gateConfig.config, paths);
+    // Which installed skills the owner's prompt holds in full; the rest are over the budget.
+    const inPrompt = new Set(buildMindStoneSkillsPrompt(skillsDir).inPrompt);
     const skills = discoverMindStoneSkills(skillsDir).map((skill) => ({
       id: skill.id,
       label: skill.label,
       description: skill.description,
       version: skill.version,
       source: skill.source,
+      ...(skill.source === "installed" && !skill.error ? { inPrompt: inPrompt.has(skill.id) } : {}),
       ...(skill.error ? { error: publicSkillText(skill.error, skillsDir) } : {}),
     }));
     sendJson(res, 200, { ok: true, skills });
@@ -2014,8 +2020,11 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     await withAdminWriteLock(() => {
       const result = installMindStoneSkill(skillsDir, id, { force: body.force === true });
       if (!result.ok) {
+        // Already installed: 409. No draft: 404. A draft that doesn't load (bad JSON, no SKILL.md): 422.
         const exists = /already installed/.test(result.error);
-        refuse(exists ? 409 : 404, { error: publicSkillText(result.error, skillsDir), code: exists ? "skill_exists" : "not_found" }, { reason: exists ? "skill_exists" : "no_draft", skill: id });
+        const missing = !existsSync(join(skillDraftsDir(skillsDir), id, "skill.json"));
+        const [status, code] = exists ? [409, "skill_exists"] : missing ? [404, "not_found"] : [422, "invalid_skill"];
+        refuse(status, { error: publicSkillText(result.error, skillsDir), code }, { reason: code, skill: id });
         return;
       }
       appendAdminAudit(paths.dataDir, { userId, action: "skill_installed", skill: id });

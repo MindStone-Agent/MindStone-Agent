@@ -27,6 +27,7 @@ import {
   type TranscriptSource,
 } from "../transcript/index.js";
 import { applyActionProposalDiscipline } from "../channels/approval.js";
+import { skillsDirFromConfig } from "../skills/artifacts.js";
 
 export type MindStoneRunnerStreamTranscriptOptions = {
   persistTranscriptEvents?: boolean;
@@ -498,6 +499,8 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
         documents: fileMemoryDocuments,
         maxPromptTokens: input.config?.memory?.index?.maxPromptTokens,
       },
+      // Installed skills, and how to propose one (#104): the owner's turns only.
+      skills: { enabled: ownerContext, skillsDir: skillsDirFromConfig(input.config) },
       signal: input.signal,
       metadata: input.metadata,
       runContext: {

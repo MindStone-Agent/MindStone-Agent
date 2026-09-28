@@ -30,6 +30,8 @@ import {
   maintainSqliteMemoryIndex,
   appendTranscriptEntry,
   buildMindStoneSkillDraft,
+  composeMindStoneSkillDraft,
+  renderMindStoneSkillForPrompt,
   discoverMindStoneKnowledgebases,
   discoverMindStonePersonas,
   discoverMindStoneSkills,
@@ -1985,10 +1987,14 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`--- content ---\n${action.memory.content}\n--- end content ---\n`);
     }
     if (action.skill) {
+      // Exactly what the agent reads once it is installed (#104).
+      const composed = composeMindStoneSkillDraft({ ...action.skill, skillMarkdown: action.skill.instructions });
       output.write(`Skill: ${action.skill.id} (${action.skill.label})\n`);
-      output.write(`Description: ${action.skill.description}\n`);
-      if (action.skill.goal) output.write(`Goal: ${action.skill.goal}\n`);
-      if (action.skill.instructions) output.write(`--- instructions ---\n${action.skill.instructions}\n--- end instructions ---\n`);
+      output.write(
+        composed.ok
+          ? `--- what the agent reads ---\n${renderMindStoneSkillForPrompt(composed.artifact, composed.skillMarkdown)}\n--- end ---\n`
+          : `This proposal is not a valid skill: ${composed.error}\n`,
+      );
     }
     if (action.mutation) {
       output.write(`Mutation: ${action.mutation.operation} ${action.mutation.resource} via ${action.mutation.connectorId}\n`);

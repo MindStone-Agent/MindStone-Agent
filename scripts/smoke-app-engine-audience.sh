@@ -25,6 +25,12 @@ printf -- '---\nname: feedback_private_rule\ndescription: Owner-only rule.\ntype
 printf -- '---\nname: feedback_public_rule\ndescription: Rule for all.\ntype: feedback\ncritical: true\ninvariant: Always be polite (SAGE-INVARIANT-PUBLIC).\ninvariant_audience: all\n---\n\nBody.\n' > "${DATA}/memory/feedback_public_rule.md"
 mkdir -p "${DATA}/transcripts"
 printf '# Handoff\n\n- Session: agent:default:main\n\nCORAL-HANDOFF-TAIL\n' > "${DATA}/transcripts/.handoff.md"
+# An installed skill (#104): in the owner's prompt with every reviewed field, never in a scoped run's.
+DATA="${DATA}" node --input-type=module -e '
+const core = await import(process.cwd() + "/packages/mindstone-core/dist/index.js");
+const c = core.composeMindStoneSkillDraft({ id: "audience-skill", label: "Audience skill", description: "Audience", safetyNotes: ["INDIGO-SKILL-SAFETY"], skillMarkdown: "INDIGO-SKILL-BODY" });
+if (!c.ok) throw new Error(c.error);
+core.writeInstalledMindStoneSkill(process.env.DATA + "/skills", c.artifact, c.skillMarkdown);'
 python3 - <<'PY'
 import json, os, pathlib
 p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
@@ -54,14 +60,14 @@ const prompt = (name) => {
 const owner = prompt("owner.jsonl");
 // (No handoff here: any scoped route, App Engine included, skips handoff replay since #62.)
 const INDEX_HEADER = "Index of the agent's durable memories";
-for (const s of ["TEAL-OWNER-PROFILE", INDEX_HEADER, "PLUM-INVARIANT-PRIVATE", "SAGE-INVARIANT-PUBLIC"]) {
+for (const s of ["TEAL-OWNER-PROFILE", INDEX_HEADER, "PLUM-INVARIANT-PRIVATE", "SAGE-INVARIANT-PUBLIC", "<mindstone-skills>", "INDIGO-SKILL-BODY", "INDIGO-SKILL-SAFETY", "mindstone-skill-proposal"]) {
   if (!owner.includes(s)) fail(`control: the unscoped (owner) run is missing ${s}`);
 }
 for (const name of ["tenant.jsonl", "appuser.jsonl"]) {
   const p = prompt(name);
   // Recall of the owner's unscoped memory in tenant runs is the open App Engine
   // scope decision, so this checks the memory index block, not the pointer text.
-  for (const s of ["TEAL-OWNER-PROFILE", INDEX_HEADER, "PLUM-INVARIANT-PRIVATE"]) {
+  for (const s of ["TEAL-OWNER-PROFILE", INDEX_HEADER, "PLUM-INVARIANT-PRIVATE", "<mindstone-skills>", "INDIGO-SKILL-BODY"]) {
     if (p.includes(s)) fail(`${name}: a scoped run got the owner's ${s}`);
   }
   if (!p.includes("SAGE-INVARIANT-PUBLIC")) fail(`${name}: lost the rule marked invariant_audience: all`);
@@ -123,7 +129,8 @@ assert.ok(freshOwner.includes("MOSS-ONBOARDING-CONTEXT"), "control: a fresh owne
 assert.ok(!freshTenant.includes("MOSS-ONBOARDING-CONTEXT"), "in-process tenant run got the owner's onboarding seed");
 assert.ok(tenant.includes("TENANT-DOC-SENTINEL"), "in-process tenant run lost its own scoped recall");
 assert.ok(owner.includes("TEAL-OWNER-PROFILE") && owner.includes("Index of the agent's durable memories"), "control: the unscoped in-process run keeps owner context");
-for (const s of ["TEAL-OWNER-PROFILE", "Index of the agent's durable memories", "PLUM-INVARIANT-PRIVATE", "CORAL-HANDOFF-TAIL"]) {
+assert.ok(owner.includes("INDIGO-SKILL-BODY") && owner.includes("mindstone-skill-proposal"), "control: the unscoped in-process run gets the installed skill (#104)");
+for (const s of ["TEAL-OWNER-PROFILE", "Index of the agent's durable memories", "PLUM-INVARIANT-PRIVATE", "CORAL-HANDOFF-TAIL", "<mindstone-skills>"]) {
   assert.ok(!tenant.includes(s), `in-process tenant run got the owner's ${s}`);
 }
 assert.ok(tenant.includes("SAGE-INVARIANT-PUBLIC"), "in-process tenant run lost the invariant_audience: all rule");

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { ConnectorOutboundMessage } from "./connector.js";
 import { ApprovalStore, sanitizeMemoryProposalPath, type ProposedAction } from "./approval.js";
 import { ConnectorDeliveryQueue } from "./queue.js";
-import { buildMindStoneSkillDraft, installMindStoneSkill, validateSkillId } from "../skills/artifacts.js";
+import { composeMindStoneSkillDraft, validateSkillId, writeInstalledMindStoneSkill } from "../skills/artifacts.js";
 
 /**
  * Approving and rejecting proposed actions, shared by `mindstone approvals`
@@ -23,7 +23,7 @@ import { buildMindStoneSkillDraft, installMindStoneSkill, validateSkillId } from
 export class ApprovalActionError extends Error {
   constructor(
     message: string,
-    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload" | "skill_exists" | "invalid_skill",
+    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload" | "skill_exists" | "invalid_skill" | "install_failed",
     readonly status: number,
     /** For callers outside this host (the Console): the same refusal without host paths or CLI hints. */
     readonly publicMessage: string = message,
@@ -235,9 +235,7 @@ export function approveProposedAction(
         `skill "${skill.id}" is already installed; approve with force to replace it`,
       );
     }
-    decideOrRefuse(store, action.id, { status: "approved", decidedBy: options.decidedBy, now: now() });
-    const drafted = buildMindStoneSkillDraft({
-      skillsDir: options.skillsDir,
+    const composed = composeMindStoneSkillDraft({
       id: skill.id,
       label: skill.label,
       description: skill.description,
@@ -246,12 +244,23 @@ export function approveProposedAction(
       outputs: skill.outputs,
       safetyNotes: skill.safetyNotes,
       skillMarkdown: skill.instructions,
-      force: true,
       now: now(),
     });
-    if (!drafted.ok) throw new Error(`the approved skill ${skill.id} could not be drafted: ${drafted.error}`);
-    const installed = installMindStoneSkill(options.skillsDir, skill.id, { force: true });
-    if (!installed.ok) throw new Error(`the approved skill ${skill.id} could not be installed: ${installed.error}`);
+    if (!composed.ok) throw new ApprovalActionError(`proposed skill is not valid: ${composed.error}`, "invalid_skill", 422);
+    const decided = decideOrRefuse(store, action.id, { status: "approved", decidedBy: options.decidedBy, now: now() });
+    try {
+      // Installed directly: drafts/ is the admin's, and an approval never touches it.
+      writeInstalledMindStoneSkill(options.skillsDir, composed.artifact, composed.skillMarkdown);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const undone = store.undoApproval(decided.id, decided.decidedAt);
+      throw new ApprovalActionError(
+        `the skill ${skill.id} could not be installed (${reason}); ${undone ? "the action is pending again" : "the approval could not be undone (it changed meanwhile)"}`,
+        "install_failed",
+        500,
+        `the skill could not be installed; ${undone ? "the action is pending again" : "check the action"}`,
+      );
+    }
     options.onDecision?.(action, "approved", `skill installed: ${skill.id}`);
     return { outcome: "approved", kind: "skill_install", skillId: skill.id };
   }

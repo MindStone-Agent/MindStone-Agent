@@ -209,7 +209,12 @@ export type BuildSkillDraftResult =
   | { ok: false; error: string };
 
 /** Generate a skill DRAFT artifact. Drafts are not usable until explicitly installed. */
-export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkillDraftResult {
+export type ComposeSkillDraftResult =
+  | { ok: true; artifact: MindStoneSkillArtifact; skillMarkdown: string }
+  | { ok: false; error: string };
+
+/** A draft's skill.json and SKILL.md, checked but not written anywhere. */
+export function composeMindStoneSkillDraft(input: Omit<BuildSkillDraftInput, "skillsDir" | "force">): ComposeSkillDraftResult {
   let artifact: MindStoneSkillArtifact;
   let skillMarkdown: string;
 
@@ -260,7 +265,13 @@ export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkil
         ...(artifact.safetyNotes.length ? ["## Safety notes", "", ...artifact.safetyNotes.map((item) => `- ${item}`), ""] : []),
       ].join("\n");
   }
+  return { ok: true, artifact, skillMarkdown };
+}
 
+export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkillDraftResult {
+  const composed = composeMindStoneSkillDraft(input);
+  if (!composed.ok) return composed;
+  const { artifact, skillMarkdown } = composed;
   const draftDir = join(skillDraftsDir(input.skillsDir), artifact.id);
   if (existsSync(join(draftDir, "skill.json")) && !input.force) {
     return { ok: false, error: `Draft already exists at ${draftDir} (use --force to overwrite)` };
@@ -287,11 +298,24 @@ export function installMindStoneSkill(skillsDir: string, skillId: string, option
   if (existsSync(join(installedDir, "skill.json")) && !options.force) {
     return { ok: false, error: `Skill "${skillId}" is already installed at ${installedDir} (use --force to replace)` };
   }
-  mkdirSync(installedDir, { recursive: true });
-  writeFileSync(join(installedDir, "skill.json"), `${JSON.stringify(loaded.skill.artifact, null, 2)}\n`);
-  writeFileSync(join(installedDir, "SKILL.md"), loaded.skill.skillMarkdown ?? "");
+  writeInstalledMindStoneSkill(skillsDir, loaded.skill.artifact, loaded.skill.skillMarkdown ?? "");
   rmSync(join(draftsDir, skillId), { recursive: true, force: true });
   return { ok: true, skillId, dir: installedDir };
+}
+
+/**
+ * Write an installed skill directly, without a draft: an approved chat
+ * proposal (#104) never touches drafts/, so an admin's draft with the same id
+ * is left alone. Replaces an installed skill of that id.
+ */
+export function writeInstalledMindStoneSkill(skillsDir: string, artifact: MindStoneSkillArtifact, skillMarkdown: string): string {
+  const idError = validateSkillId(artifact.id);
+  if (idError) throw new Error(idError);
+  const installedDir = join(skillsDir, artifact.id);
+  mkdirSync(installedDir, { recursive: true });
+  writeFileSync(join(installedDir, "skill.json"), `${JSON.stringify(artifact, null, 2)}\n`);
+  writeFileSync(join(installedDir, "SKILL.md"), skillMarkdown.endsWith("\n") ? skillMarkdown : `${skillMarkdown}\n`);
+  return installedDir;
 }
 
 /** Resolve persona/workflow skills[] references against the discoverable skill surfaces. */

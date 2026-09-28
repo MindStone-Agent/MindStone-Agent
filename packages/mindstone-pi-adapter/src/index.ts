@@ -16,6 +16,7 @@ import {
   runMindStoneConfigWizard,
   runtimePathsFromEnv,
   skillsDirFromConfig,
+  buildMindStoneSkillsPrompt,
   sqliteMemoryDatabasePath,
   SqliteMemoryRecallProvider,
   transcriptPathForSession,
@@ -413,7 +414,6 @@ async function buildPiAdapterRecallContext(event: PiBeforeAgentStartEvent): Prom
 }
 
 /** The most of installed skills' SKILL.md put in the prompt; past it, a skill is listed by label and description only (#104). */
-const SKILLS_PROMPT_BUDGET = 12_000;
 
 /**
  * Installed skills and how to propose a new one (#104). The adapter only runs
@@ -421,41 +421,10 @@ const SKILLS_PROMPT_BUDGET = 12_000;
  * agent proposes is held for the owner's approval; nothing installs itself.
  */
 export function buildPiAdapterSkillsContext(): { text: string; details: Record<string, unknown> } {
+  // The same section the gateway and core chat put in the owner's prompt (#104).
   const { config } = defaultAgentAndSession();
-  const skillsDir = skillsDirFromConfig(config, runtimePathsFromEnv());
-  const installed = discoverMindStoneSkills(skillsDir).filter((skill) => skill.source === "installed" && !skill.error);
-  const full: string[] = [];
-  const listed: string[] = [];
-  let used = 0;
-  for (const summary of installed) {
-    const loaded = loadMindStoneSkillArtifact(skillsDir, summary.id, "installed");
-    if (!loaded.ok) continue;
-    const body = (loaded.skill.skillMarkdown ?? "").trim();
-    const block = [`<skill id="${summary.id}">`, body, "</skill>"].join("\n");
-    if (used + block.length <= SKILLS_PROMPT_BUDGET) {
-      full.push(block);
-      used += block.length;
-    } else {
-      listed.push(`- ${summary.id}: ${summary.label}. ${summary.description ?? ""}`.trim());
-    }
-  }
-  const lines = ["<mindstone-skills>"];
-  if (full.length || listed.length) {
-    lines.push("Installed skills. Follow a skill's instructions when the owner's request matches it.", ...full);
-    if (listed.length) lines.push("More installed skills (over the prompt budget; ask the owner if you need one's details):", ...listed);
-  } else {
-    lines.push("No skills are installed yet.");
-  }
-  lines.push(
-    "When the owner asks you to create a skill, draft it and propose it for install by ending your reply with one fenced block:",
-    "```mindstone-skill-proposal",
-    '{"id":"lowercase-with-hyphens","label":"Short name","description":"What it does","goal":"What it is for","whenToUse":["..."],"outputs":["..."],"safetyNotes":["..."],"instructions":"The skill\'s instructions, in markdown"}',
-    "```",
-    "Before the block, tell the owner in a sentence or two what the skill does and that it is waiting for their approval on the Console's Approvals page.",
-    "Only propose a skill when the owner asks for one. It is held for the owner's approval in the Console and does nothing until then.",
-    "</mindstone-skills>",
-  );
-  return { text: lines.join("\n"), details: { installed: installed.length, inPrompt: full.length, listedOnly: listed.length } };
+  const skills = buildMindStoneSkillsPrompt(skillsDirFromConfig(config, runtimePathsFromEnv()));
+  return { text: skills.promptText, details: { installed: skills.installed, inPrompt: skills.inPrompt.length, listedOnly: skills.listedOnly.length } };
 }
 
 async function injectPiAdapterPromptContext(event: PiBeforeAgentStartEvent): Promise<PiBeforeAgentStartResult | undefined> {

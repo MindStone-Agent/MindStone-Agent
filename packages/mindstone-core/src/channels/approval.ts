@@ -274,7 +274,10 @@ export function resolveConnectorSendPolicy(params: {
 // applied directly.
 // ---------------------------------------------------------------------------
 
-const PROPOSAL_FENCE = /```mindstone-(memory|calendar|skill)-proposal\s*\n([\s\S]*?)```/g;
+// The closing fence is the first ``` at the start of a line: a proposal's JSON
+// can hold a code block of its own (a skill's instructions, #104), and a JSON
+// string never holds a raw newline, so the inner one can't end the block.
+const PROPOSAL_FENCE = /```mindstone-(memory|calendar|skill)-proposal[ \t]*\n([\s\S]*?)\n[ \t]*```/g;
 
 const SKILL_PROPOSAL_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -356,7 +359,7 @@ export function extractMemoryProposal(replyText: string): { text: string; propos
 
 /** Strip proposal fences from a string WITHOUT proposing; no-op (identity) when none present. */
 export function stripProposalFences(text: string): string {
-  const fence = /```mindstone-(?:memory|calendar|skill)-proposal\s*\n[\s\S]*?```/g;
+  const fence = /```mindstone-(?:memory|calendar|skill)-proposal[ \t]*\n[\s\S]*?\n[ \t]*```/g;
   if (!fence.test(text)) return text;
   fence.lastIndex = 0;
   return text.replace(fence, "").trim();
