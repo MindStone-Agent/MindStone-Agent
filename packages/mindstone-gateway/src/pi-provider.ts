@@ -185,8 +185,16 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
     const modelId = parsed.modelId ?? this.#defaultModel ?? settings.defaultModel;
     const explicit = provider && modelId ? registry.find(provider, modelId) : undefined;
     if (explicit) return explicit;
+    // As in the session executor: the configured default before "first available", logged (#126 J11).
+    if (requestModelId !== undefined && (this.#defaultModel ?? settings.defaultModel) && requestModelId !== (this.#defaultModel ?? settings.defaultModel)) {
+      console.warn(`[mindstone] Pi has no model "${requestModelId}"; using the configured default`);
+      return this.#resolvePiModel(undefined);
+    }
     const available = registry.getAvailable();
-    if (available.length > 0) return available[0];
+    if (available.length > 0) {
+      console.warn(`[mindstone] no configured Pi model resolved; using the first available one, ${available[0].provider}/${available[0].id}`);
+      return available[0];
+    }
     throw new Error("No isolated Pi model is available/configured for MindStone-Agent routing");
   }
 

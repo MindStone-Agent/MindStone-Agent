@@ -412,11 +412,26 @@ function resolveRoutingMode(config: MindStoneConfig | undefined): "placeholder" 
   return config?.routing?.mode ?? "placeholder";
 }
 
-function resolveRouteModel(config: MindStoneConfig | undefined, agentId: string, metadata?: Record<string, unknown>): MindStoneModelInfo {
-  const metadataModel = typeof metadata?.model === "string" ? metadata.model : undefined;
+/** "mindstone/<agentId>" names an agent (the Console sends "mindstone/default"), not a model. */
+function isAgentModelAlias(id: string): boolean {
+  return /^mindstone\/[A-Za-z0-9_.-]+$/.test(id);
+}
+
+/**
+ * The model a turn runs on:
+ * - a model the owner's request names, unless it is an agent alias, which
+ *   means "this agent's model" (#126 J11: the Console's "mindstone/default"
+ *   was sent to Pi as a model and fell through to the first available one);
+ * - then the agent's own defaultModel, then the install's routing.defaultModel
+ *   (the per-agent setting wins, #118).
+ * A non-owner turn can't choose the model (#118).
+ */
+function resolveRouteModel(config: MindStoneConfig | undefined, agentId: string, metadata?: Record<string, unknown>, audience: RouteAudience = "owner"): MindStoneModelInfo {
+  const requested = typeof metadata?.model === "string" ? metadata.model : undefined;
+  const metadataModel = audience === "owner" && requested && !isAgentModelAlias(requested) ? requested : undefined;
   const configuredAgent = config?.agents?.[agentId];
   return {
-    id: metadataModel ?? config?.routing?.defaultModel ?? configuredAgent?.defaultModel ?? `mindstone/${agentId}`,
+    id: metadataModel ?? configuredAgent?.defaultModel ?? config?.routing?.defaultModel ?? `mindstone/${agentId}`,
     provider: resolveRoutingMode(config),
     contextWindowTokens: resolveContextWindowTokens(config, agentId, metadata),
   };
@@ -1111,7 +1126,7 @@ async function runConfiguredRoute(input: {
   const provider = resolveProvider(input.config);
   if (!provider) return { routed: false, status: 501, body: undefined };
 
-  const model = resolveRouteModel(input.config, input.agentId, input.metadata);
+  const model = resolveRouteModel(input.config, input.agentId, input.metadata, input.audience);
   const entries = readTranscriptEntries(input.sessionKey);
   const currentHandoff = readCurrentHandoff();
   // The handoff is the verbatim tail of an owner session: never replayed into
