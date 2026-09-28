@@ -3635,9 +3635,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     // the body's `user` (which could name the owner), and always gets a
     // Console session of its own: without a conversation id it would
     // otherwise land in the owner's main session (#103 review).
+    if (audience !== "owner" && !forwarded.userId) {
+      sendJson(res, 400, openAiError("a Console user's turn needs x-mindstone-user-id", "invalid_request_error", "missing_user"));
+      return;
+    }
+    // A non-owner's sessions are keyed apart from the same user's owner
+    // sessions (an admin later demoted, or a blank role), so a non-owner turn
+    // never replays owner-audience history.
     const senderId = audience === "owner"
       ? forwarded.userId ?? (typeof input.user === "string" ? input.user : model)
-      : forwarded.userId ?? "unknown-console-user";
+      : `non-owner:${forwarded.userId}`;
     // Each Console conversation is its own session (#38), so separate chats don't
     // share a context window. They are all the same agent's transcripts, so the
     // memory backfill indexes every one into that agent's memory.

@@ -210,16 +210,24 @@ chat none conv-direct direct
 curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-user-id: smoke-user' -H 'x-mindstone-conversation-id: conv-steal' \
   -d '{"model":"mindstone/default","metadata":{"sessionKey":"agent:console:console:smoke-admin:conv-first","agentId":"default"},"messages":[{"role":"user","content":"steal"}]}' "${BASE}/v1/chat/completions" >/dev/null
 cp "${CAPTURE}" "${TEMP_RUNTIME}/steal.jsonl"
-# ...nor through the body's user field with no forwarded user id,
-: > "${CAPTURE}"
-curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-conversation-id: conv-first' \
-  -d '{"model":"mindstone/default","user":"smoke-admin","messages":[{"role":"user","content":"steal by user field"}]}' "${BASE}/v1/chat/completions" >/dev/null
-cp "${CAPTURE}" "${TEMP_RUNTIME}/steal-user.jsonl"
+# ...nor through the body's user field with no forwarded user id (refused outright).
+code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-conversation-id: conv-first' \
+  -d '{"model":"mindstone/default","user":"smoke-admin","messages":[{"role":"user","content":"steal by user field"}]}' "${BASE}/v1/chat/completions")"
+[[ "${code}" == 400 ]] || { echo "a Console user naming the owner in the body's user field should be refused, got ${code}: $(cat "${BODY}")" >&2; exit 1; }
 # ...nor land in the owner's main session with no conversation id.
 : > "${CAPTURE}"
 curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-user-id: smoke-user' \
   -d '{"model":"mindstone/default","messages":[{"role":"user","content":"steal main"}]}' "${BASE}/v1/chat/completions" >/dev/null
 cp "${CAPTURE}" "${TEMP_RUNTIME}/steal-main.jsonl"
+# A non-owner with no forwarded user id is refused.
+code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-conversation-id: conv-anon' \
+  -d '{"model":"mindstone/default","messages":[{"role":"user","content":"anon"}]}' "${BASE}/v1/chat/completions")"
+[[ "${code}" == 400 ]] || { echo "a non-owner turn with no user id should be refused, got ${code}" >&2; exit 1; }
+# The admin's own conversation, reopened with a user role (demoted), doesn't replay owner history.
+: > "${CAPTURE}"
+curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${ONB_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: user' -H 'x-mindstone-user-id: smoke-admin' -H 'x-mindstone-conversation-id: conv-first' \
+  -d '{"model":"mindstone/default","messages":[{"role":"user","content":"demoted"}]}' "${BASE}/v1/chat/completions" >/dev/null
+cp "${CAPTURE}" "${TEMP_RUNTIME}/demoted.jsonl"
 # An agent that already has a real identity isn't sent back to formation.
 rm -f "${DATA}/identity-formation/default.json"
 printf '# Wren\n\nAn established identity the owner approved.\n' > "${DATA}/agents/default/IDENTITY.md"
@@ -247,8 +255,8 @@ for (const name of ["user", "blank"]) {
 }
 if (!prompt("direct").includes("SYNTH-CONTEXT-102")) fail("a direct caller with the service token is the owner");
 if (prompt("steal").includes("onb: Hi, I just set you up.")) fail("a Console user reached the owner's session through metadata.sessionKey");
-if (prompt("steal-user").includes("onb: Hi, I just set you up.")) fail("a Console user reached the owner's session through the body's user field");
 if (prompt("steal-main").includes("health probe")) fail("a Console user with no conversation id landed in the owner's main session");
+if (prompt("demoted").includes("onb: Hi, I just set you up.")) fail("the same user as a non-owner replayed their owner-audience history");
 if (prompt("established").includes(FORMATION)) fail("an agent with an established identity was sent back to identity formation");
 if (prompt("established-default").includes(FORMATION)) fail("an established identity at the default path was sent back to identity formation");
 // The event is recorded once, in the first conversation's transcript.
