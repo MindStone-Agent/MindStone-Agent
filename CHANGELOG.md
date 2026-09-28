@@ -44,6 +44,11 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - Pi 0.87 ships the Azure OpenAI (Responses), Amazon Bedrock and Google Vertex providers that #126 builds on.
 
 ### Fixed
+- **Hidden CLI prompts: escape sequences, pasted text and Ctrl-D** (#133).
+  - Escape sequences such as arrow keys are skipped whole, even when they arrive split across input chunks, so no `[A` ends up in a key.
+  - A bracketed paste keeps its text, with line breaks removed.
+  - Input that arrives within 40 ms after Enter (the rest of a multi-line paste, or the LF of a split CRLF) is discarded instead of becoming the next answer.
+  - Ctrl-D on an empty prompt now cancels it, like Ctrl-C. It used to submit an empty value, which made the wizard skip auth.
 - **A Console chat runs on the model chosen in setup** (#126 J11, #118). The Console sends `model: "mindstone/default"`, which reached Pi as an unknown model id and silently fell through to the first available provider. So with more than one provider configured, chats ignored the setup's choice.
   - `mindstone/<agentId>` now names an agent, meaning that agent's model.
   - An agent's own `agents.<id>.defaultModel` now beats the install's `routing.defaultModel`.
