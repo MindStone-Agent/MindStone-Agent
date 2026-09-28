@@ -67,13 +67,12 @@ export const ENTERPRISE_KINDS: Record<EnterpriseKind, EnterpriseKindInfo> = {
     name: "Amazon Bedrock",
     api: "bedrock-converse-stream",
     listsModels: false,
+    // A Bedrock API key only: Pi 0.87 sends the stored key as Bedrock's bearer token
+    // (bedrock-converse-stream.ts), so access keys can't be signed with (#126 review).
     fields: [
       { name: "region", label: "Region", type: "text", required: true, hint: "for example us-east-1" },
       { name: "models", label: "Model ids", type: "list", required: true, hint: "for example anthropic.claude-sonnet-4-5-20250929-v1:0" },
-      { name: "accessKeyIdSecret", label: "Access key id", type: "secret", required: "one-of", group: "keys" },
-      { name: "secretAccessKeySecret", label: "Secret access key", type: "secret", required: "one-of", group: "keys" },
-      { name: "sessionTokenSecret", label: "Session token (optional)", type: "secret", required: false },
-      { name: "bearerTokenSecret", label: "Bedrock API key", type: "secret", required: "one-of", group: "bearer" },
+      { name: "bearerTokenSecret", label: "Bedrock API key", type: "secret", required: true },
     ],
   },
   vertex: {
@@ -266,6 +265,9 @@ export function parseEnterpriseRegistration(
 ): { error: string } | EnterpriseRegistration {
   const info = ENTERPRISE_KINDS[kind];
   const allowed = new Set(info.fields.map((field) => field.name));
+  if (kind === "bedrock" && ["accessKeyIdSecret", "secretAccessKeySecret", "sessionTokenSecret"].some((key) => Object.hasOwn(body, key))) {
+    return { error: "Bedrock access keys aren't supported: Pi sends the stored key as a Bedrock API key. Register a Bedrock API key (bearerTokenSecret)" };
+  }
   const unknown = Object.keys(body).filter((key) => !allowed.has(key));
   if (unknown.length) return { error: `unknown field: ${unknown[0]} (a key is given as the name of a stored secret, never as a value)` };
   const base = { kind, providerId: info.providerId, name: info.name, api: info.api };
@@ -299,33 +301,18 @@ export function parseEnterpriseRegistration(
     if (typeof body.region !== "string" || !AWS_REGION.test(body.region)) return { error: "region must be an AWS region such as us-east-1" };
     const models = modelList(body.models, true);
     if (!models || "error" in models) return models ?? { error: "models must list 1 to 100 model ids" };
-    const accessKeyId = secretName(body.accessKeyIdSecret, "accessKeyIdSecret");
-    const secretAccessKey = secretName(body.secretAccessKeySecret, "secretAccessKeySecret");
-    const sessionToken = secretName(body.sessionTokenSecret, "sessionTokenSecret");
     const bearer = secretName(body.bearerTokenSecret, "bearerTokenSecret");
-    for (const parsed of [accessKeyId, secretAccessKey, sessionToken, bearer]) if (parsed && typeof parsed !== "string") return parsed;
-    const keys = typeof accessKeyId === "string" && typeof secretAccessKey === "string";
-    if (typeof bearer === "string" && (accessKeyId || secretAccessKey || sessionToken)) return { error: "send either a Bedrock API key or access keys, not both" };
-    if (!keys && typeof bearer !== "string") return { error: "credentials are required: an access key id and secret access key, or a Bedrock API key" };
-    if (!keys && (accessKeyId || secretAccessKey)) return { error: "access keys need both the access key id and the secret access key" };
+    if (bearer && typeof bearer !== "string") return bearer;
+    if (typeof bearer !== "string") return { error: "a Bedrock API key is required: store it, then send its name as bearerTokenSecret" };
     const host = `bedrock-runtime.${body.region}.amazonaws.com`;
     return {
       ...base,
       baseUrl: `https://${host}`,
       host,
       models,
-      // Bedrock signs its own requests and never reads a key; Pi still needs one for a custom provider.
-      key: { placeholder: "<bedrock>" },
-      env: {
-        AWS_REGION: body.region,
-        ...(keys
-          ? {
-              AWS_ACCESS_KEY_ID: { secret: accessKeyId as string },
-              AWS_SECRET_ACCESS_KEY: { secret: secretAccessKey as string },
-              ...(typeof sessionToken === "string" ? { AWS_SESSION_TOKEN: { secret: sessionToken } } : {}),
-            }
-          : { AWS_BEARER_TOKEN_BEDROCK: { secret: bearer as string } }),
-      },
+      // Pi sends the stored key as Bedrock's bearer token, ahead of any AWS_BEARER_TOKEN_BEDROCK in the environment.
+      key: { secret: bearer },
+      env: { AWS_REGION: body.region },
     };
   }
 

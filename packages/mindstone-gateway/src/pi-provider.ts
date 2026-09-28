@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { guardEnterpriseEndpoints } from "./enterprise-redirect-guard.js";
@@ -136,7 +136,11 @@ export type PiProviderCredential = { type: "api_key"; key: string; env?: Record<
  */
 export async function setPiProviderCredential(agentDir: string, provider: string, credential: PiProviderCredential | undefined, projectRoot?: string): Promise<void> {
   const modules = await loadPiProviderModules(resolve(projectRoot ?? projectRootFromEnv()));
-  const storage = modules.AuthStorage.create(join(resolve(agentDir), "auth.json"));
+  const path = join(resolve(agentDir), "auth.json");
+  // Pi 0.87 applies 0600 only when it creates the file (auth-storage.ts), so an
+  // existing one is narrowed first: a key never goes into a looser file.
+  if (existsSync(path)) chmodSync(path, 0o600);
+  const storage = modules.AuthStorage.create(path);
   if (credential) await storage.modify(provider, async () => credential);
   else await storage.delete(provider);
 }

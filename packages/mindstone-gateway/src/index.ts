@@ -2417,17 +2417,6 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       refuse(400, { error: "that value isn't a Vertex API key" }, { reason: "vertex_placeholder_key", provider: info.providerId });
       return;
     }
-    // Pi falls back to the gateway's own environment for any variable the
-    // provider leaves unset: a Bedrock API key there wins over access keys,
-    // and a session token there would be sent with them.
-    if (kind === "bedrock" && env.AWS_ACCESS_KEY_ID && !env.AWS_SESSION_TOKEN && process.env.AWS_SESSION_TOKEN) {
-      refuse(409, { error: "the gateway host sets AWS_SESSION_TOKEN, which would be sent with these access keys; add the session token here, or remove it on the host" }, { reason: "host_session_token", provider: info.providerId });
-      return;
-    }
-    if (kind === "bedrock" && env.AWS_ACCESS_KEY_ID && process.env.AWS_BEARER_TOKEN_BEDROCK) {
-      refuse(409, { error: "the gateway host sets AWS_BEARER_TOKEN_BEDROCK, which would be used instead of these access keys; register a Bedrock API key, or remove it on the host" }, { reason: "host_bedrock_token", provider: info.providerId });
-      return;
-    }
     const key = "secret" in parsed.key ? literalConfigValue(secretValue(parsed.key.secret)) : parsed.key.placeholder;
     const headers = parsed.headers
       ? Object.fromEntries(Object.entries(parsed.headers).map(([name, value]) => [name, literalConfigValue(typeof value === "string" ? value : secretValue(value.secret))]))

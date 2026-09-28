@@ -25,7 +25,7 @@ export MINDSTONE_AGENT_GATEWAY_PORT="${GATEWAY_PORT}"
 export PI_CODING_AGENT_DIR="${TEMP_RUNTIME}/pi-agent"
 export ENT_SMOKE_TOKEN="ent-smoke-service-token"
 export ENT_SMOKE_ADMIN_TOKEN="ent-smoke-admin-token"
-unset MINDSTONE_ENTERPRISE_PRIVATE_HOSTS MSA_ALLOW_HOST_PROVIDER_ENV AWS_BEARER_TOKEN_BEDROCK AWS_SESSION_TOKEN EMBEDDER_BASE_URL EMBEDDER_API_KEY AZURE_OPENAI_BASE_URL AZURE_OPENAI_API_VERSION
+unset MINDSTONE_ENTERPRISE_PRIVATE_HOSTS MSA_ALLOW_HOST_PROVIDER_ENV AWS_BEDROCK_FORCE_HTTP1 AWS_BEARER_TOKEN_BEDROCK AWS_SESSION_TOKEN EMBEDDER_BASE_URL EMBEDDER_API_KEY AZURE_OPENAI_BASE_URL AZURE_OPENAI_API_VERSION
 cd "${PROJECT_ROOT}"
 echo "== Enterprise endpoints smoke test =="
 npm run build:mindstone
@@ -128,11 +128,15 @@ AUTH_JSON="${AUTH_JSON}" node --input-type=module -e '
 const { resolveConfigValue } = await import(process.argv[1]);
 const a = JSON.parse((await import("node:fs")).readFileSync(process.env.AUTH_JSON, "utf8"))["enterprise-azure"];
 if (resolveConfigValue(a.key, a.env) !== "$HOME!AZ-KEY-6610") { console.error("the stored key did not stay literal"); process.exit(1); }' "${PI_RESOLVE}" || exit 1
+# An auth.json left looser on the host is narrowed before a key goes in (Pi 0.87 only sets 0600 when it creates it).
+chmod 644 "${AUTH_JSON}"
 expect "$(post /admin/providers/enterprise/bedrock '{"region":"eu-west-2","models":["anthropic.claude-sonnet-4-5-20250929-v1:0"],"bearerTokenSecret":"bedrock.key"}')" 200 "registering Bedrock with an API key"
 [[ "$(jsonv "${MODELS_JSON}" 'j.providers["enterprise-bedrock"].baseUrl')" == "https://bedrock-runtime.eu-west-2.amazonaws.com" ]] || { echo "Bedrock base URL" >&2; exit 1; }
-[[ "$(jsonv "${AUTH_JSON}" 'j["enterprise-bedrock"].env.AWS_REGION+" "+j["enterprise-bedrock"].env.AWS_BEARER_TOKEN_BEDROCK')" == "eu-west-2 BEDROCK-KEY-6610" ]] || { echo "Bedrock auth.json env: $(cat "${AUTH_JSON}")" >&2; exit 1; }
-expect "$(post /admin/providers/enterprise/bedrock '{"region":"us-east-1","models":["m"],"accessKeyIdSecret":"aws.id","secretAccessKeySecret":"aws.secret"}')" 200 "re-registering Bedrock with access keys"
-[[ "$(jsonv "${AUTH_JSON}" 'Object.keys(j["enterprise-bedrock"].env).sort().join(",")')" == "AWS_ACCESS_KEY_ID,AWS_REGION,AWS_SECRET_ACCESS_KEY" ]] || { echo "switching Bedrock to access keys must drop the API key: $(cat "${AUTH_JSON}")" >&2; exit 1; }
+[[ "$(mode_of "${AUTH_JSON}")" == "600" ]] || { echo "auth.json must be 0600 before a key goes in, even if the host left it looser" >&2; exit 1; }
+[[ "$(jsonv "${AUTH_JSON}" 'j["enterprise-bedrock"].key+" "+JSON.stringify(j["enterprise-bedrock"].env)')" == 'BEDROCK-KEY-6610 {"AWS_REGION":"eu-west-2"}' ]] || { echo "Bedrock's API key is its stored key, with only the region as a setting: $(cat "${AUTH_JSON}")" >&2; exit 1; }
+# Pi 0.87 sends a Bedrock provider's stored key as its bearer token, so access keys can't be used.
+expect "$(post /admin/providers/enterprise/bedrock '{"region":"us-east-1","models":["m"],"accessKeyIdSecret":"aws.id","secretAccessKeySecret":"aws.secret"}')" 400 "Bedrock access keys"
+grep -q "access keys aren't supported" "${BODY}" || { echo "the refusal should say access keys aren't supported: $(cat "${BODY}")" >&2; exit 1; }
 expect "$(post /admin/providers/enterprise/vertex '{"models":["gemini-2.5-flash"],"serviceAccountSecret":"vertex.sa","project":"smoke-proj","location":"us-central1"}')" 200 "registering Vertex with a service account"
 SA_COPY="${PI_CODING_AGENT_DIR}/enterprise-vertex-service-account.json"
 [[ "$(jsonv "${AUTH_JSON}" 'j["enterprise-vertex"].env.GOOGLE_APPLICATION_CREDENTIALS')" == "$(node -e 'console.log(require("path").resolve(process.argv[1]))' "${SA_COPY}")" ]] || { echo "Vertex should read the gateway's own copy of the key, never a secret: $(cat "${AUTH_JSON}")" >&2; exit 1; }
@@ -179,7 +183,7 @@ stop_gateway
 echo "registration assertions passed"
 
 # 3. Against a stub, with the host's switch for private hosts: the live Test
-#    through Pi, a Bedrock API key on the host, and redirects.
+#    through Pi, Bedrock with a Bedrock API key on the host, and redirects.
 STUB_LOG="${TEMP_RUNTIME}/stub.log"
 OTHER_LOG="${TEMP_RUNTIME}/other.log"
 : > "${OTHER_LOG}"
@@ -237,17 +241,19 @@ STUB="http://127.0.0.1:${STUB_PORT}"
 export MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1
 # scripts/env.sh drops host provider variables unless the host opts in; this host does.
 export MSA_ALLOW_HOST_PROVIDER_ENV=1
-export AWS_BEARER_TOKEN_BEDROCK="HOST-BEDROCK-6610" AWS_SESSION_TOKEN="HOST-SESSION-6610"
+export AWS_BEARER_TOKEN_BEDROCK="HOST-BEDROCK-6610"
+# The stub speaks HTTP/1; the AWS SDK uses HTTP/2 unless told otherwise.
+export AWS_BEDROCK_FORCE_HTTP1=1
 # A generic embedder in the gateway's environment: never used for an enterprise endpoint.
 export EMBEDDER_BASE_URL="http://127.0.0.1:9/not-used" EMBEDDER_API_KEY="ENV-EMBED-KEY"
 start_gateway
 grant
-expect "$(post /admin/providers/enterprise/bedrock '{"region":"us-east-1","models":["m"],"accessKeyIdSecret":"aws.id","secretAccessKeySecret":"aws.secret"}')" 409 "access keys while the host sets a session token"
-grep -q 'AWS_SESSION_TOKEN' "${BODY}" || { echo "the refusal should name the host's session token: $(cat "${BODY}")" >&2; exit 1; }
-secret aws.session 'AWS-SESSION-6610'
-expect "$(post /admin/providers/enterprise/bedrock '{"region":"us-east-1","models":["m"],"accessKeyIdSecret":"aws.id","secretAccessKeySecret":"aws.secret","sessionTokenSecret":"aws.session"}')" 409 "access keys while the host sets a Bedrock API key"
-grep -q 'AWS_BEARER_TOKEN_BEDROCK' "${BODY}" || { echo "the refusal should name the host's Bedrock API key: $(cat "${BODY}")" >&2; exit 1; }
 expect "$(post /admin/providers/enterprise/bedrock '{"region":"us-east-1","models":["m"],"bearerTokenSecret":"bedrock.key"}')" 200 "a Bedrock API key while the host sets one"
+# A Bedrock request carries the admin's key, not the host's AWS_BEARER_TOKEN_BEDROCK (sent to the stub in place of AWS).
+node -e 'const f=process.argv[1]; const fs=require("fs"); const c=JSON.parse(fs.readFileSync(f,"utf8")); c.providers["enterprise-bedrock"].baseUrl=process.argv[2]; fs.writeFileSync(f, JSON.stringify(c,null,2))' "${MODELS_JSON}" "${STUB}"
+expect "$(post /admin/providers/enterprise-bedrock/test '{}')" 200 "testing Bedrock against the stub"
+grep -q '"url":"/model/m/converse-stream","auth":"Bearer BEDROCK-KEY-6610"' "${STUB_LOG}" || { echo "Bedrock should send the registered API key: $(grep converse "${STUB_LOG}")" >&2; exit 1; }
+grep -q 'HOST-BEDROCK-6610' "${STUB_LOG}" && { echo "the host's Bedrock API key was sent" >&2; exit 1; }
 expect "$(post /admin/providers/enterprise/azure-openai '{"endpoint":"http://10.1.2.3/openai/v1","models":["gpt-4o"],"secret":"az.key"}')" 400 "plain http to a private host, even with the switch"
 expect "$(post /admin/providers/enterprise/azure-openai '{"endpoint":"https://10.1.2.3/openai/v1","models":["gpt-4o"],"secret":"az.key"}')" 200 "https to a private host with the switch"
 secret az.key 'AZ-KEY-6610'
