@@ -11,7 +11,7 @@ import { discoverKnowledgebaseRecallDocuments } from "../knowledgebase/index.js"
 import { providerDiagnosticsFromChatResult, type MindStoneModelInfo, type MindStoneModelProvider } from "../provider/index.js";
 import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
-import { loadRoutePersonaContextById, resolveRoutePersonaContext } from "../persona/index.js";
+import { loadRoutePersonaContextById, PERSONA_PROPOSAL_INSTRUCTIONS, resolveRoutePersonaContext } from "../persona/index.js";
 import { runMindStoneWorkflow } from "../workflow/index.js";
 import {
   createProviderRouteAgentRunner,
@@ -215,7 +215,7 @@ export function buildIdentityFormationPrompt(input: {
       "- If the onboarding seed already gives enough signal, you may offer 1–3 tentative candidate names, but do not treat any name as final until the user approves it.",
       "- If there is a candidate name seed, treat it as a seed, not final, unless the user clearly approved it.",
       "- If the user asks your name or you are continuing after a provider-identity mistake, explicitly correct course: you should answer as the MindStone companion, not default to the underlying model identity.",
-      "- Make clear that after the user answers, you can propose a concise working identity summary for approval.",
+      "- Make clear that after the user answers, you'll put a working persona up for their approval (the persona proposal format is in your instructions).",
       "- Do not write or claim to have written IDENTITY.md, USER.md, memory, or config. Durable identity changes require explicit user approval in a later step.",
       "- Keep the response warm, direct, and not corporate. This is a working identity formation conversation, not a performance.",
     ].join("\n"),
@@ -485,6 +485,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       reservedTokens: reservedPromptTokens(input.metadata),
       handoffReplay,
       identityFormation,
+      ownerInstructions: ownerContext ? PERSONA_PROPOSAL_INSTRUCTIONS : undefined,
       memoryRecall: {
         enabled: input.config?.memory?.autoRecall === true,
         provider: input.config?.memory?.vectorStore === "sqlite-vec"
@@ -682,6 +683,8 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     origin: input.source?.substrate ?? "chat",
     source: input.source,
     runId,
+    // Only the owner's turns may propose a persona (#105).
+    allowPersona: ownerContext,
     allowSkill: ownerContext,
   });
   events.push(...extracted.events);

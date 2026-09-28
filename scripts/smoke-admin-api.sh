@@ -919,6 +919,29 @@ for (const bad of [{ ...ok, id: "Bad Id" }, { ...ok, instructions: "x".repeat(16
   const b = core.applyActionProposalDiscipline({ replyText: block(bad), origin: "chat", allowSkill: true });
   if (b.proposals.length !== 0 || b.text !== "") { console.error("a malformed skill block should be dropped: " + JSON.stringify(bad).slice(0, 80)); process.exit(1); }
 }
+// The shapes a model writes: each proposes exactly its skill, leaks no block, and keeps the text around it.
+{
+  const { mkdtempSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const store = new core.ApprovalStore({ path: join(mkdtempSync(join(tmpdir(), "skill-shapes-")), "actions.json") });
+  const j = (id) => JSON.stringify({ id, label: id, description: id, instructions: "Run:\n```sh\nls\n```\ndone" });
+  const shapes = {
+    "a closing fence on the JSON line": ["Sure.\n```mindstone-skill-proposal\n" + j("inline-close") + "```\nAfter.", ["inline-close"], "Sure.\n\nAfter."],
+    "CRLF line ends": ["Sure.\r\n```mindstone-skill-proposal\r\n" + j("crlf-skill") + "\r\n```\r\nAfter.", ["crlf-skill"], "Sure.\r\n\nAfter."],
+    "an empty block, then a real one": ["```mindstone-skill-proposal\n```\nThen:\n```mindstone-skill-proposal\n" + j("after-empty") + "\n```", ["after-empty"], "Then:"],
+    "a proposal shown inside another fence": ["Example:\n~~~\n```mindstone-skill-proposal\n" + j("example-only") + "\n```\n~~~", [], null],
+    "a closing fence on the JSON line, then a code block": ["```mindstone-skill-proposal\n" + j("then-code") + "```\nAnd code:\n```js\nx()\n```", ["then-code"], "And code:\n```js\nx()\n```"],
+  };
+  for (const [name, [replyText, ids, text]] of Object.entries(shapes)) {
+    const out = core.applyActionProposalDiscipline({ replyText, origin: "chat", allowSkill: true, store });
+    const got = out.proposals.map((p) => p.skill.id);
+    const leaked = ids.length > 0 && out.text.includes("mindstone-skill-proposal");
+    if (JSON.stringify(got) !== JSON.stringify(ids) || leaked || (text !== null && out.text.replace(/\r/g, "") !== text.replace(/\r/g, ""))) {
+      console.error(`proposal shape "${name}": proposed ${JSON.stringify(got)}, text ${JSON.stringify(out.text)}`); process.exit(1);
+    }
+  }
+}
 // A reply to anyone but the owner never proposes a skill; the block is still stripped.
 const n = core.applyActionProposalDiscipline({ replyText: "Hi.\n" + block({ ...ok, id: "non-owner-skill" }), origin: "telegram" });
 if (n.proposals.length !== 0 || n.text !== "Hi.") { console.error("a non-owner reply should not propose a skill: " + JSON.stringify(n)); process.exit(1); }

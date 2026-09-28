@@ -43,6 +43,8 @@ import {
   loadMindStoneSkill,
   mindStoneKbStatus,
   personasDirFromConfig,
+  referencedPersonaIds,
+  renderPersonaMarkdown,
   resolveMindStonePersona,
   resolveSkillRefs,
   searchMindStoneKnowledgebase,
@@ -2000,6 +2002,11 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`Mutation: ${action.mutation.operation} ${action.mutation.resource} via ${action.mutation.connectorId}\n`);
       output.write(`--- data ---\n${JSON.stringify(action.mutation.data, null, 2)}\n--- end data ---\n`);
     }
+    if (action.persona) {
+      // Everything the persona holds, as it would be written (#105).
+      output.write(`Persona: ${action.persona.name} (${action.persona.id}); approving saves it (switching to it is separate)\n`);
+      output.write(`--- PERSONA.md ---\n${renderPersonaMarkdown(action.persona)}--- end PERSONA.md ---\n`);
+    }
     if (action.status !== "pending") {
       output.write(`Decided: ${action.decidedAt ?? "?"} by ${action.decidedBy ?? "?"}${action.decisionNote ? ` — ${action.decisionNote}` : ""}\n`);
     }
@@ -2014,8 +2021,14 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       if (!input.isTTY || !output.isTTY) throw new Error("Refusing non-interactive approve without --yes");
       const prompter = makeTerminalPrompter();
       try {
-        const preview = action.send?.text ?? action.memory?.content ?? (action.mutation ? JSON.stringify(action.mutation, null, 2) : "");
-        await prompter.note(`${action.summary}\n\n${preview}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
+        const preview = action.send?.text ?? action.memory?.content ?? (action.mutation ? JSON.stringify(action.mutation, null, 2) : "") ?? "";
+        const personaPreview = action.persona ? `${renderPersonaMarkdown(action.persona)}\nApproving saves it; switching to it is separate.` : "";
+        // A skill is shown exactly as the agent will read it (#104).
+        const composedSkill = action.skill ? composeMindStoneSkillDraft({ ...action.skill, skillMarkdown: action.skill.instructions }) : undefined;
+        const skillPreview = composedSkill?.ok
+          ? `${renderMindStoneSkillForPrompt(composedSkill.artifact, composedSkill.skillMarkdown)}\nApproving installs it: the agent reads it on your turns from the next message.`
+          : "";
+        await prompter.note(`${action.summary}\n\n${personaPreview || skillPreview || preview}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
         const accepted = await prompter.confirm({ message: repair ? "Queue it now?" : "Approve this action now?", initialValue: false });
         if (!accepted) {
           output.write(repair ? "Cancelled — nothing queued.\n" : "Approval cancelled — the action stays pending.\n");
@@ -2025,15 +2038,15 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
         prompter.close();
       }
     }
+    const cliConfig = loadMindStoneConfig(resolveConfigPath()).config;
     const result = approveProposedAction(store, check, {
       decidedBy: process.env.USER ?? "cli",
       memoryDir: runtimePathsFromEnv().memoryDir,
-      skillsDir: (() => {
-        const approvalPaths = runtimePathsFromEnv();
-        return skillsDirFromConfig(loadMindStoneConfig(resolveConfigPath(process.env, approvalPaths)).config, approvalPaths);
-      })(),
+      skillsDir: skillsDirFromConfig(cliConfig, runtimePathsFromEnv()),
       force: hasOption(argv, "--force"),
       onDecision: appendApprovalAuditEvent,
+      personasDir: personasDirFromConfig(cliConfig),
+      referencedPersonaIds: referencedPersonaIds(cliConfig),
     });
     if (result.outcome === "requeued") {
       output.write(`${gold("Queued")} — ${action.id} was approved earlier but never queued; it is queued now.\n`);
@@ -2045,6 +2058,8 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
     } else if (result.kind === "connector_mutation") {
       output.write(`${gold("Approved")} — ${action.mutation?.operation} ${action.mutation?.resource} enqueued for apply via ${result.connectorId}.\n`);
       output.write("A running Gateway applies it within seconds; a stopped one on next start.\n");
+    } else if (result.kind === "persona_create") {
+      output.write(`${gold("Approved")} — persona ${result.personaId} saved. It isn't active until you switch to it: mindstone persona activate ${result.personaId}\n`);
     } else if (result.kind === "skill_install") {
       output.write(`${gold("Approved")} — skill installed: ${result.skillId}. The agent sees it from its next turn.\n`);
     } else {

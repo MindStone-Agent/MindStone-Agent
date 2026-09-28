@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { appendTranscriptEntry, type TranscriptEntry, type TranscriptSource } from "../transcript/index.js";
 import type { ConnectorOutboundMessage } from "./connector.js";
+import { parsePersonaProposal, type PersonaProposalPayload } from "../persona/create.js";
 
 /**
  * Durable proposed-action store (issue #21, designed to be absorbed by the
@@ -18,7 +19,7 @@ import type { ConnectorOutboundMessage } from "./connector.js";
  * skills, personas, workflows, config) and adds a UI + defer on top of this
  * same store.
  */
-export type ProposedActionKind = "connector_send" | "memory_write" | "connector_mutation" | "skill_install";
+export type ProposedActionKind = "connector_send" | "memory_write" | "connector_mutation" | "persona_create" | "skill_install";
 
 export type ProposedActionStatus = "pending" | "approved" | "rejected";
 
@@ -81,6 +82,8 @@ export type ProposedAction = {
   memory?: MemoryWritePayload;
   /** connector_mutation: the external-service mutation to apply on approval. */
   mutation?: ConnectorMutationPayload;
+  /** persona_create: the persona the agent proposed for itself (#105). */
+  persona?: PersonaProposalPayload;
   /** skill_install: the skill to draft and install on approval (#104). */
   skill?: SkillInstallPayload;
   status: ProposedActionStatus;
@@ -274,11 +277,6 @@ export function resolveConnectorSendPolicy(params: {
 // applied directly.
 // ---------------------------------------------------------------------------
 
-// The closing fence is the first ``` at the start of a line: a proposal's JSON
-// can hold a code block of its own (a skill's instructions, #104), and a JSON
-// string never holds a raw newline, so the inner one can't end the block.
-const PROPOSAL_FENCE = /```mindstone-(memory|calendar|skill)-proposal[ \t]*\n([\s\S]*?)\n[ \t]*```/g;
-
 const SKILL_PROPOSAL_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 function boundedText(value: unknown, max: number): string | undefined {
@@ -310,11 +308,74 @@ export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undef
   return { id, label, description, goal, whenToUse, outputs, safetyNotes, instructions };
 }
 
+/** Pending persona proposals kept at once (#105 review). */
+export const MAX_PENDING_PERSONAS = 3;
+
+/** The proposal kinds, in one place: every fence pattern below is built from it. */
+const PROPOSAL_KINDS = "memory|calendar|persona|skill";
+const PROPOSAL_INFO = new RegExp(`^mindstone-(${PROPOSAL_KINDS})-proposal$`);
+const PROPOSAL_INLINE_OPENER = new RegExp(`^(.*?\\S)[ \\t]*(\`\`\`mindstone-(?:${PROPOSAL_KINDS})-proposal[ \\t]*\\r?)$`);
+
+/**
+ * The reply split into its text and its proposal blocks. A block counts only
+ * at the top level, outside any other fenced block (``` or ~~~): one shown
+ * inside another fence (an example, or instructions echoed back) is left in
+ * the text and never proposed (#105 review). As before, a proposal fence may
+ * open at the end of a line of text and close at the end of its last line;
+ * an unclosed one isn't a block.
+ */
+function splitProposalBlocks(replyText: string): { text: string; blocks: Array<{ kind: string; body: string }> } {
+  const lines = replyText.split("\n");
+  const kept: string[] = [];
+  const blocks: Array<{ kind: string; body: string }> = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    // A proposal fence opened after some text: the text stays, the fence starts its own line.
+    const inline = PROPOSAL_INLINE_OPENER.exec(line);
+    if (inline) {
+      lines.splice(i, 1, inline[1]!, inline[2]!);
+      continue;
+    }
+    const open = /^ {0,3}(`{3,}|~{3,})(.*?)\r?$/.exec(line);
+    if (!open || (open[1]![0] === "`" && open[2]!.includes("`"))) {
+      kept.push(line);
+      i += 1;
+      continue;
+    }
+    const marker = open[1]!;
+    // A bare ``` fence whose first line is the kind counts too: a model may
+    // break the line between the backticks and the name (#105 journey).
+    const kindOnNextLine = !open[2]!.trim() && marker === "```" && i + 1 < lines.length
+      ? PROPOSAL_INFO.exec(lines[i + 1]!.trim())?.[1]
+      : undefined;
+    const kind = PROPOSAL_INFO.exec(open[2]!.trim())?.[1] ?? kindOnNextLine;
+    const bodyStart = kindOnNextLine && !PROPOSAL_INFO.test(open[2]!.trim()) ? i + 2 : i + 1;
+    const close = new RegExp(`^ {0,3}\\${marker[0]}{${marker.length},}[ \\t\\r]*$`);
+    // A proposal may also close at the end of its last line ("}```").
+    const closesInline = (text: string) => kind !== undefined && marker === "```" && /\S[ \t]*```[ \t]*\r?$/.test(text);
+    let j = bodyStart;
+    while (j < lines.length && !close.test(lines[j]!) && !closesInline(lines[j]!)) j += 1;
+    if (kind && j < lines.length) {
+      const last = close.test(lines[j]!) ? [] : [lines[j]!.replace(/[ \t]*```[ \t]*\r?$/, "")];
+      blocks.push({ kind, body: [...lines.slice(bodyStart, j), ...last].join("\n") });
+      // An empty line where the block was, as before, so the text around it stays apart.
+      kept.push("");
+    } else {
+      kept.push(...lines.slice(i, Math.min(j, lines.length - 1) + 1));
+    }
+    i = j + 1;
+  }
+  return { text: kept.join("\n"), blocks };
+}
+
 export type ExtractedActionProposals = {
   /** Reply text with every proposal block stripped. */
   text: string;
   memory?: MemoryWritePayload;
   mutations: ConnectorMutationPayload[];
+  /** The first well-formed persona proposal (#105). */
+  persona?: PersonaProposalPayload;
   /** At most one proposed skill per reply (#104). */
   skill?: SkillInstallPayload;
 };
@@ -322,33 +383,33 @@ export type ExtractedActionProposals = {
 export function extractActionProposals(replyText: string): ExtractedActionProposals {
   const mutations: ConnectorMutationPayload[] = [];
   let memory: MemoryWritePayload | undefined;
+  let persona: PersonaProposalPayload | undefined;
   let skill: SkillInstallPayload | undefined;
-  const text = replyText
-    .replace(PROPOSAL_FENCE, (_, fenceKind: string, body: string) => {
-      try {
-        const parsed = JSON.parse(body);
-        if (fenceKind === "skill") {
-          const proposal = parseSkillProposal(parsed);
-          if (proposal && !skill) skill = proposal;
-        } else if (fenceKind === "memory") {
-          const path = typeof parsed?.path === "string" ? parsed.path.trim() : "";
-          const content = typeof parsed?.content === "string" ? parsed.content : "";
-          if (path && content && !memory) memory = { path, content };
-        } else {
-          const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
-          const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
-          const data = parsed?.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? (parsed.data as Record<string, unknown>) : undefined;
-          if (operation && data) {
-            mutations.push({ connectorId: "calendar", operation, resource, data });
-          }
+  const split = splitProposalBlocks(replyText);
+  for (const { kind: fenceKind, body } of split.blocks) {
+    try {
+      const parsed = JSON.parse(body);
+      if (fenceKind === "memory") {
+        const path = typeof parsed?.path === "string" ? parsed.path.trim() : "";
+        const content = typeof parsed?.content === "string" ? parsed.content : "";
+        if (path && content && !memory) memory = { path, content };
+      } else if (fenceKind === "persona") {
+        persona ??= parsePersonaProposal(parsed);
+      } else if (fenceKind === "skill") {
+        skill ??= parseSkillProposal(parsed);
+      } else {
+        const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
+        const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
+        const data = parsed?.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? (parsed.data as Record<string, unknown>) : undefined;
+        if (operation && data) {
+          mutations.push({ connectorId: "calendar", operation, resource, data });
         }
-      } catch {
-        // malformed proposal blocks are dropped from the reply, never applied
       }
-      return "";
-    })
-    .trim();
-  return { text, memory, mutations, skill };
+    } catch {
+      // malformed proposal blocks are dropped from the reply, never applied
+    }
+  }
+  return { text: split.text.trim(), memory, mutations, persona, skill };
 }
 
 /** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
@@ -357,12 +418,14 @@ export function extractMemoryProposal(replyText: string): { text: string; propos
   return { text: extracted.text, proposal: extracted.memory };
 }
 
-/** Strip proposal fences from a string WITHOUT proposing; no-op (identity) when none present. */
+/**
+ * Strip proposal blocks from a string WITHOUT proposing; no-op (identity)
+ * when none present. The same blocks the text path finds (#105 review), so
+ * structured content and text never disagree.
+ */
 export function stripProposalFences(text: string): string {
-  const fence = /```mindstone-(?:memory|calendar|skill)-proposal[ \t]*\n[\s\S]*?\n[ \t]*```/g;
-  if (!fence.test(text)) return text;
-  fence.lastIndex = 0;
-  return text.replace(fence, "").trim();
+  const split = splitProposalBlocks(text);
+  return split.blocks.length === 0 ? text : split.text.trim();
 }
 
 /**
@@ -403,22 +466,48 @@ export function applyActionProposalDiscipline(params: {
   runId?: string;
   store?: ApprovalStore;
   /**
+   * Whether this turn may propose a persona (#105): the owner's turns only.
+   * Otherwise a persona block is stripped and dropped.
+   */
+  allowPersona?: boolean;
+  /**
    * Skill proposals are the owner's (#104): an installed skill joins the
    * owner's prompt, so a reply to anyone else never proposes one. The block is
    * still stripped from the reply.
    */
   allowSkill?: boolean;
 }): { text: string; content: unknown; events: TranscriptEntry[]; proposals: ProposedAction[] } {
-  const found = extractActionProposals(params.replyText);
-  const extracted = params.allowSkill ? found : { ...found, skill: undefined };
-  // Sanitize content whenever it plausibly carries a fence — proposals may
-  // exist in content even when text is already clean (diverging shapes).
-  const contentProbe = params.content !== undefined ? JSON.stringify(params.content) : undefined;
-  const content = contentProbe?.includes("```mindstone-") ? stripActionProposalsDeep(params.content) : params.content;
-  if (!extracted.memory && !extracted.mutations.length && !extracted.skill) {
-    return { text: extracted.text, content, events: [], proposals: [] };
+  const extracted = extractActionProposals(params.replyText);
+  // Sanitize content always: proposals may exist in content even when text
+  // is already clean (diverging shapes), and a ~~~ or bare-fence block has
+  // no "```mindstone-" to probe for (#105 review).
+  const content = params.content !== undefined ? stripActionProposalsDeep(params.content) : params.content;
+  // At most a few persona proposals wait at once: the instruction is on every
+  // owner turn, so an agent that keeps proposing can't flood Approvals.
+  const store = params.store ?? new ApprovalStore();
+  const capped = Boolean(params.allowPersona && extracted.persona)
+    && store.pending().filter((action) => action.kind === "persona_create" && (action.agentId ?? "default") === (params.agentId ?? "default")).length >= MAX_PENDING_PERSONAS;
+  const persona = params.allowPersona && !capped ? extracted.persona : undefined;
+  const skill = params.allowSkill ? extracted.skill : undefined;
+  // A dropped proposal is said, not swallowed: the owner reads why in the reply.
+  const cappedNote = capped
+    ? `\n\n(The persona proposal wasn't saved: ${MAX_PENDING_PERSONAS} persona proposals are already waiting on the Approvals page. Approve or reject those first.)`
+    : "";
+  const cappedEvents = capped && params.sessionKey
+    ? [appendTranscriptEntry({
+        sessionKey: params.sessionKey,
+        agentId: params.agentId ?? "default",
+        role: "event",
+        text: `persona proposal dropped: ${MAX_PENDING_PERSONAS} already pending`,
+        source: params.source,
+        runId: params.runId,
+        metadata: { event: "persona_proposal_dropped", reason: "too_many_pending", origin: params.origin },
+      })]
+    : [];
+  if (!extracted.memory && !extracted.mutations.length && !persona && !skill) {
+    return { text: `${extracted.text}${cappedNote}`, content, events: cappedEvents, proposals: [] };
   }
-  const approvals = params.store ?? new ApprovalStore();
+  const approvals = store;
   const proposals: ProposedAction[] = [
     ...(extracted.memory
       ? [approvals.propose({
@@ -431,15 +520,26 @@ export function applyActionProposalDiscipline(params: {
           memory: extracted.memory,
         })]
       : []),
-    ...(extracted.skill
+    ...(persona
+      ? [approvals.propose({
+          kind: "persona_create" as const,
+          connectorId: params.origin,
+          sessionKey: params.sessionKey,
+          agentId: params.agentId,
+          createdAt: new Date().toISOString(),
+          summary: `persona proposal from ${params.origin}: ${persona.name} (${persona.id})`,
+          persona,
+        })]
+      : []),
+    ...(skill
       ? [approvals.propose({
           kind: "skill_install" as const,
           connectorId: params.origin,
           sessionKey: params.sessionKey,
           agentId: params.agentId,
           createdAt: new Date().toISOString(),
-          summary: `install skill ${extracted.skill.id}: ${extracted.skill.label}`,
-          skill: extracted.skill,
+          summary: `install skill ${skill.id}: ${skill.label}`,
+          skill,
         })]
       : []),
     ...extracted.mutations.map((mutation) =>
@@ -467,7 +567,7 @@ export function applyActionProposalDiscipline(params: {
         }),
       )
     : [];
-  return { text: extracted.text, content, events, proposals };
+  return { text: `${extracted.text}${cappedNote}`, content, events: [...cappedEvents, ...events], proposals };
 }
 
 /**
