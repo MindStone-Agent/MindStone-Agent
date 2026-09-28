@@ -1799,7 +1799,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const body = await readAdminBody(req, res);
     if (!body) return;
     const enabled = body.enabled === true;
-    if (enabled && body.confirm !== ADVANCED_CONFIRMATION) {
+    if (enabled && normalizeConfirmation(body.confirm) !== ADVANCED_CONFIRMATION) {
       sendJson(res, 400, { ok: false, error: `to grant advanced settings, send confirm: "${ADVANCED_CONFIRMATION}"` });
       return;
     }
@@ -2273,6 +2273,14 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
 }
 
 const ADVANCED_CONFIRMATION = "enable advanced settings";
+/**
+ * The confirmation guards against accidents, not attackers (console #18):
+ * case, surrounding whitespace and repeated spaces don't matter, but the
+ * words must match exactly. The Console normalizes the same way.
+ */
+function normalizeConfirmation(value: unknown): string | undefined {
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ").toLowerCase() : undefined;
+}
 const CONFIG_UNREADABLE = "the config file doesn't load; run mindstone doctor on the gateway host";
 
 /** Admin writes run one at a time, so each reads the config and permission it writes against. */
