@@ -94,14 +94,22 @@ write_config_if_missing() {
   local tmp="${CONFIG_PATH}.init.$$"
   config_exists && return 0
   rm -f "${tmp}"
-  (set -o noclobber; cat >"${tmp}")
+  # The temp file never outlives this call, even if writing it fails or the run is interrupted.
+  trap 'rm -f "${tmp}"' EXIT INT TERM HUP
+  if ! (set -o noclobber; cat >"${tmp}"); then
+    rm -f "${tmp}"
+    echo "Could not write ${tmp}" >&2
+    return 1
+  fi
   if ! ln "${tmp}" "${CONFIG_PATH}" 2>/dev/null; then
     if ! config_exists; then
-      # No hard links on this filesystem: fall back to an exclusive create.
-      (set -o noclobber; cat "${tmp}" >"${CONFIG_PATH}") 2>/dev/null || true
+      # No hard links on this filesystem: fall back to a rename that refuses to overwrite,
+      # so the whole file appears at once and a failed copy can't leave an empty config.
+      mv -n "${tmp}" "${CONFIG_PATH}" 2>/dev/null || true
     fi
   fi
   rm -f "${tmp}"
+  trap - EXIT INT TERM HUP
   config_exists || { echo "Could not create ${CONFIG_PATH}" >&2; return 1; }
 }
 

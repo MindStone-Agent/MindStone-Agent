@@ -49,6 +49,10 @@ fi
 
 (umask 022; ./scripts/init-runtime.sh --if-no-config >"${TMP_DIR}/init-1.log")
 [[ -f "${CONFIG}" ]] || { echo "init-runtime.sh --if-no-config made no config.json" >&2; exit 1; }
+if ls "$(dirname "${CONFIG}")" | grep -q '\.init\.'; then
+  echo "init-runtime.sh left a temporary config file behind after a fresh init" >&2
+  exit 1
+fi
 
 # The config validates, routing is a placeholder, it isn't onboarded (so the Console
 # shows its setup banner), and its file mode is what the onboarding wizard writes.
