@@ -30,6 +30,8 @@ import {
   maintainSqliteMemoryIndex,
   appendTranscriptEntry,
   buildMindStoneSkillDraft,
+  composeMindStoneSkillDraft,
+  renderMindStoneSkillForPrompt,
   discoverMindStoneKnowledgebases,
   discoverMindStonePersonas,
   discoverMindStoneSkills,
@@ -96,7 +98,7 @@ function usage(): string {
     "  mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]",
     "                         Synthesize first-activation identity from onboarding seed",
     "  mindstone skill list   Show built-in, installed, and draft skill surfaces",
-    "  mindstone skill build [--from-builtin ID | --id ID --label TEXT --description TEXT] [--force] [--json]",
+    "  mindstone skill build [--from-builtin ID | --id ID --label TEXT --description TEXT] [--goal TEXT] [--force] [--json]",
     "                         Generate a skill DRAFT artifact (not usable until installed)",
     "  mindstone skill install <id> [--force] [--json]",
     "                         Approve a draft skill: promote it to installed",
@@ -1431,6 +1433,7 @@ async function runSkillCommand(argv: string[]): Promise<void> {
       id: optionValue(argv, "--id"),
       label: optionValue(argv, "--label"),
       description: optionValue(argv, "--description"),
+      goal: optionValue(argv, "--goal"),
       whenToUse: optionValues(argv, "--when"),
       outputs: optionValues(argv, "--output"),
       safetyNotes: optionValues(argv, "--safety"),
@@ -1985,6 +1988,16 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`Memory path: ${action.memory.path}\n`);
       output.write(`--- content ---\n${action.memory.content}\n--- end content ---\n`);
     }
+    if (action.skill) {
+      // Exactly what the agent reads once it is installed (#104).
+      const composed = composeMindStoneSkillDraft({ ...action.skill, skillMarkdown: action.skill.instructions });
+      output.write(`Skill: ${action.skill.id} (${action.skill.label})\n`);
+      output.write(
+        composed.ok
+          ? `--- what the agent reads ---\n${renderMindStoneSkillForPrompt(composed.artifact, composed.skillMarkdown)}\n--- end ---\n`
+          : `This proposal is not a valid skill: ${composed.error}\n`,
+      );
+    }
     if (action.mutation) {
       output.write(`Mutation: ${action.mutation.operation} ${action.mutation.resource} via ${action.mutation.connectorId}\n`);
       output.write(`--- data ---\n${JSON.stringify(action.mutation.data, null, 2)}\n--- end data ---\n`);
@@ -2010,7 +2023,12 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       try {
         const preview = action.send?.text ?? action.memory?.content ?? (action.mutation ? JSON.stringify(action.mutation, null, 2) : "") ?? "";
         const personaPreview = action.persona ? `${renderPersonaMarkdown(action.persona)}\nApproving saves it; switching to it is separate.` : "";
-        await prompter.note(`${action.summary}\n\n${personaPreview || preview}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
+        // A skill is shown exactly as the agent will read it (#104).
+        const composedSkill = action.skill ? composeMindStoneSkillDraft({ ...action.skill, skillMarkdown: action.skill.instructions }) : undefined;
+        const skillPreview = composedSkill?.ok
+          ? `${renderMindStoneSkillForPrompt(composedSkill.artifact, composedSkill.skillMarkdown)}\nApproving installs it: the agent reads it on your turns from the next message.`
+          : "";
+        await prompter.note(`${action.summary}\n\n${personaPreview || skillPreview || preview}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
         const accepted = await prompter.confirm({ message: repair ? "Queue it now?" : "Approve this action now?", initialValue: false });
         if (!accepted) {
           output.write(repair ? "Cancelled — nothing queued.\n" : "Approval cancelled — the action stays pending.\n");
@@ -2024,6 +2042,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
     const result = approveProposedAction(store, check, {
       decidedBy: process.env.USER ?? "cli",
       memoryDir: runtimePathsFromEnv().memoryDir,
+      skillsDir: skillsDirFromConfig(cliConfig, runtimePathsFromEnv()),
       force: hasOption(argv, "--force"),
       onDecision: appendApprovalAuditEvent,
       personasDir: personasDirFromConfig(cliConfig),
@@ -2041,6 +2060,8 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write("A running Gateway applies it within seconds; a stopped one on next start.\n");
     } else if (result.kind === "persona_create") {
       output.write(`${gold("Approved")} — persona ${result.personaId} saved. It isn't active until you switch to it: mindstone persona activate ${result.personaId}\n`);
+    } else if (result.kind === "skill_install") {
+      output.write(`${gold("Approved")} — skill installed: ${result.skillId}. The agent sees it from its next turn.\n`);
     } else {
       output.write(`${gold("Approved")} — memory file written: ${result.memoryFile}\n`);
     }

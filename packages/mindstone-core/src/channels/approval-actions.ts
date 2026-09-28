@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type { ConnectorOutboundMessage } from "./connector.js";
 import { ApprovalStore, sanitizeMemoryProposalPath, type ProposedAction } from "./approval.js";
 import { ConnectorDeliveryQueue } from "./queue.js";
+import { composeMindStoneSkillDraft, validateSkillId, writeInstalledMindStoneSkill } from "../skills/artifacts.js";
 import { PersonaExistsError, writeProposedPersona } from "../persona/create.js";
 
 /**
@@ -23,7 +24,7 @@ import { PersonaExistsError, writeProposedPersona } from "../persona/create.js";
 export class ApprovalActionError extends Error {
   constructor(
     message: string,
-    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload" | "no_personas_dir" | "persona_exists" | "persona_referenced" | "no_persona_references",
+    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload" | "no_personas_dir" | "persona_exists" | "persona_referenced" | "no_persona_references" | "skill_exists" | "invalid_skill" | "install_failed",
     readonly status: number,
     /** For callers outside this host (the Console): the same refusal without host paths or CLI hints. */
     readonly publicMessage: string = message,
@@ -105,6 +106,7 @@ export type ApproveResult =
   | { outcome: "approved"; kind: "connector_mutation"; connectorId: string }
   | { outcome: "approved"; kind: "memory_write"; memoryFile: string }
   | { outcome: "approved"; kind: "persona_create"; personaId: string }
+  | { outcome: "approved"; kind: "skill_install"; skillId: string }
   | { outcome: "requeued"; kind: "connector_send" | "connector_mutation"; connectorId: string }
   | { outcome: "already_queued"; kind: "connector_send" | "connector_mutation"; connectorId: string };
 
@@ -130,6 +132,8 @@ export function approveProposedAction(
     personasDir?: string;
     /** Persona ids the config already uses (referencedPersonaIds); approving one of them is refused. */
     referencedPersonaIds?: ReadonlySet<string>;
+    /** Where skills are installed (#104); required to approve a skill_install. */
+    skillsDir?: string;
   },
 ): ApproveResult {
   const { action, repair } = check;
@@ -222,6 +226,49 @@ export function approveProposedAction(
     writeFileSync(target, action.memory.content.endsWith("\n") ? action.memory.content : `${action.memory.content}\n`);
     options.onDecision?.(action, "approved", `memory file written: ${safePath}`);
     return { outcome: "approved", kind: "memory_write", memoryFile: target };
+  }
+  if (action.kind === "skill_install" && action.skill && options.skillsDir) {
+    // The proposal holds the whole skill (#104); nothing was written before
+    // this approval. Checks first, then the decision, then the files.
+    const skill = action.skill;
+    const idError = validateSkillId(skill.id);
+    if (idError) throw new ApprovalActionError(`proposed skill id is not valid: ${idError}`, "invalid_skill", 422);
+    if (existsSync(join(options.skillsDir, skill.id, "skill.json")) && !options.force) {
+      throw new ApprovalActionError(
+        `skill "${skill.id}" is already installed at ${join(options.skillsDir, skill.id)} (re-run with --force to replace it)`,
+        "skill_exists",
+        409,
+        `skill "${skill.id}" is already installed; approve with force to replace it`,
+      );
+    }
+    const composed = composeMindStoneSkillDraft({
+      id: skill.id,
+      label: skill.label,
+      description: skill.description,
+      goal: skill.goal,
+      whenToUse: skill.whenToUse,
+      outputs: skill.outputs,
+      safetyNotes: skill.safetyNotes,
+      skillMarkdown: skill.instructions,
+      now: now(),
+    });
+    if (!composed.ok) throw new ApprovalActionError(`proposed skill is not valid: ${composed.error}`, "invalid_skill", 422);
+    const decided = decideOrRefuse(store, action.id, { status: "approved", decidedBy: options.decidedBy, now: now() });
+    try {
+      // Installed directly: drafts/ is the admin's, and an approval never touches it.
+      writeInstalledMindStoneSkill(options.skillsDir, composed.artifact, composed.skillMarkdown);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const undone = store.undoApproval(decided.id, decided.decidedAt);
+      throw new ApprovalActionError(
+        `the skill ${skill.id} could not be installed (${reason}); ${undone ? "the action is pending again" : "the approval could not be undone (it changed meanwhile)"}`,
+        "install_failed",
+        500,
+        `the skill could not be installed; ${undone ? "the action is pending again" : "check the action"}`,
+      );
+    }
+    options.onDecision?.(action, "approved", `skill installed: ${skill.id}`);
+    return { outcome: "approved", kind: "skill_install", skillId: skill.id };
   }
   if (action.kind === "persona_create" && action.persona) {
     // Written before the decision, so a refused decision leaves nothing

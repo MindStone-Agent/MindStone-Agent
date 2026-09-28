@@ -3,16 +3,20 @@ import {
   createLocalMemoryRecallProvider,
   createMemoryEmbeddingProvider,
   discoverFileMemoryDocuments,
+  discoverMindStoneSkills,
   formatMindStoneChannelCatalog,
   getSqliteMemoryIndexStats,
   listTranscriptSessions,
   loadMindStoneConfig,
   logRecallUsage,
   loadMindStoneIdentity,
+  loadMindStoneSkillArtifact,
   recallMindStoneMemory,
   resolveConfigPath,
   runMindStoneConfigWizard,
   runtimePathsFromEnv,
+  skillsDirFromConfig,
+  buildMindStoneSkillsPrompt,
   sqliteMemoryDatabasePath,
   SqliteMemoryRecallProvider,
   transcriptPathForSession,
@@ -409,10 +413,25 @@ async function buildPiAdapterRecallContext(event: PiBeforeAgentStartEvent): Prom
   };
 }
 
+/** The most of installed skills' SKILL.md put in the prompt; past it, a skill is listed by label and description only (#104). */
+
+/**
+ * Installed skills and how to propose a new one (#104). The adapter only runs
+ * on owner turns, so a non-owner never gets the owner's skills. A skill the
+ * agent proposes is held for the owner's approval; nothing installs itself.
+ */
+export function buildPiAdapterSkillsContext(): { text: string; details: Record<string, unknown> } {
+  // The same section the gateway and core chat put in the owner's prompt (#104).
+  const { config } = defaultAgentAndSession();
+  const skills = buildMindStoneSkillsPrompt(skillsDirFromConfig(config, runtimePathsFromEnv()));
+  return { text: skills.promptText, details: { installed: skills.installed, inPrompt: skills.inPrompt.length, listedOnly: skills.listedOnly.length } };
+}
+
 async function injectPiAdapterPromptContext(event: PiBeforeAgentStartEvent): Promise<PiBeforeAgentStartResult | undefined> {
   const identityContext = buildPiAdapterPromptContext();
   const recallContext = await buildPiAdapterRecallContext(event);
-  const sections = [identityContext.text, recallContext.text].filter((section): section is string => Boolean(section));
+  const skillsContext = buildPiAdapterSkillsContext();
+  const sections = [identityContext.text, recallContext.text, skillsContext.text].filter((section): section is string => Boolean(section));
   if (sections.length === 0) return undefined;
   return {
     systemPrompt: [event.systemPrompt, "", ...sections].filter(Boolean).join("\n"),

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { MindStoneConfig } from "../config/types.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
@@ -108,7 +108,14 @@ export function loadMindStoneSkillArtifact(dir: string, skillId: string, source:
   if (!description) return { ok: false, skillId, error: "skill.json is missing required string field: description" };
 
   const skillMdPath = join(skillDir, "SKILL.md");
-  const skillMarkdown = existsSync(skillMdPath) ? readFileSync(skillMdPath, "utf-8") : undefined;
+  // An unreadable SKILL.md (permissions, a directory in its place) is this
+  // skill's error, never a throw: skills are loaded on every owner turn (#104).
+  let skillMarkdown: string | undefined;
+  try {
+    skillMarkdown = existsSync(skillMdPath) ? readFileSync(skillMdPath, "utf-8") : undefined;
+  } catch (error) {
+    return { ok: false, skillId, error: `SKILL.md can't be read at ${skillMdPath}: ${error instanceof Error ? error.message : String(error)}` };
+  }
   if (!skillMarkdown?.trim()) {
     return { ok: false, skillId, error: `SKILL.md missing or empty at ${skillMdPath}` };
   }
@@ -120,6 +127,7 @@ export function loadMindStoneSkillArtifact(dir: string, skillId: string, source:
         id,
         label,
         description,
+        goal: typeof record.goal === "string" && record.goal.trim() ? record.goal : undefined,
         whenToUse: stringList(record.whenToUse),
         outputs: stringList(record.outputs),
         safetyNotes: stringList(record.safetyNotes),
@@ -193,6 +201,8 @@ export type BuildSkillDraftInput = {
   id?: string;
   label?: string;
   description?: string;
+  /** What the skill is for (#104). */
+  goal?: string;
   whenToUse?: string[];
   outputs?: string[];
   safetyNotes?: string[];
@@ -206,7 +216,12 @@ export type BuildSkillDraftResult =
   | { ok: false; error: string };
 
 /** Generate a skill DRAFT artifact. Drafts are not usable until explicitly installed. */
-export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkillDraftResult {
+export type ComposeSkillDraftResult =
+  | { ok: true; artifact: MindStoneSkillArtifact; skillMarkdown: string }
+  | { ok: false; error: string };
+
+/** A draft's skill.json and SKILL.md, checked but not written anywhere. */
+export function composeMindStoneSkillDraft(input: Omit<BuildSkillDraftInput, "skillsDir" | "force">): ComposeSkillDraftResult {
   let artifact: MindStoneSkillArtifact;
   let skillMarkdown: string;
 
@@ -221,6 +236,7 @@ export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkil
       id,
       label: input.label ?? builtin.artifact.label,
       description: input.description ?? builtin.artifact.description,
+      goal: input.goal ?? builtin.artifact.goal,
       origin: `builtin:${builtin.artifact.id}`,
       createdAt: input.now,
     };
@@ -235,6 +251,7 @@ export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkil
       id: input.id,
       label: input.label,
       description: input.description,
+      goal: input.goal?.trim() || undefined,
       whenToUse: input.whenToUse ?? [],
       outputs: input.outputs ?? [],
       safetyNotes: input.safetyNotes ?? [],
@@ -242,19 +259,30 @@ export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkil
       origin: "custom",
       createdAt: input.now,
     };
-    skillMarkdown =
-      input.skillMarkdown ??
-      [
-        `# ${artifact.label}`,
-        "",
-        artifact.description,
-        "",
-        ...(artifact.whenToUse.length ? ["## When to use", "", ...artifact.whenToUse.map((item) => `- ${item}`), ""] : []),
-        ...(artifact.outputs.length ? ["## Outputs", "", ...artifact.outputs.map((item) => `- ${item}`), ""] : []),
-        ...(artifact.safetyNotes.length ? ["## Safety notes", "", ...artifact.safetyNotes.map((item) => `- ${item}`), ""] : []),
-      ].join("\n");
+    skillMarkdown = input.skillMarkdown ?? skillOutlineMarkdown(artifact);
   }
+  return { ok: true, artifact, skillMarkdown };
+}
 
+/** The SKILL.md a draft gets when no instructions are given: an outline of its fields. */
+export function skillOutlineMarkdown(artifact: MindStoneSkillArtifact): string {
+  const list = (items?: string[]) => (items ?? []).map((item) => `- ${item}`);
+  return [
+    `# ${artifact.label}`,
+    "",
+    artifact.description,
+    "",
+    ...(artifact.goal ? ["## Goal", "", artifact.goal, ""] : []),
+    ...(artifact.whenToUse?.length ? ["## When to use", "", ...list(artifact.whenToUse), ""] : []),
+    ...(artifact.outputs?.length ? ["## Outputs", "", ...list(artifact.outputs), ""] : []),
+    ...(artifact.safetyNotes?.length ? ["## Safety notes", "", ...list(artifact.safetyNotes), ""] : []),
+  ].join("\n");
+}
+
+export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkillDraftResult {
+  const composed = composeMindStoneSkillDraft(input);
+  if (!composed.ok) return composed;
+  const { artifact, skillMarkdown } = composed;
   const draftDir = join(skillDraftsDir(input.skillsDir), artifact.id);
   if (existsSync(join(draftDir, "skill.json")) && !input.force) {
     return { ok: false, error: `Draft already exists at ${draftDir} (use --force to overwrite)` };
@@ -281,11 +309,36 @@ export function installMindStoneSkill(skillsDir: string, skillId: string, option
   if (existsSync(join(installedDir, "skill.json")) && !options.force) {
     return { ok: false, error: `Skill "${skillId}" is already installed at ${installedDir} (use --force to replace)` };
   }
-  mkdirSync(installedDir, { recursive: true });
-  writeFileSync(join(installedDir, "skill.json"), `${JSON.stringify(loaded.skill.artifact, null, 2)}\n`);
-  writeFileSync(join(installedDir, "SKILL.md"), loaded.skill.skillMarkdown ?? "");
+  writeInstalledMindStoneSkill(skillsDir, loaded.skill.artifact, loaded.skill.skillMarkdown ?? "");
   rmSync(join(draftsDir, skillId), { recursive: true, force: true });
   return { ok: true, skillId, dir: installedDir };
+}
+
+/**
+ * Write an installed skill directly, without a draft: an approved chat
+ * proposal (#104) never touches drafts/, so an admin's draft with the same id
+ * is left alone. Replaces an installed skill of that id.
+ */
+export function writeInstalledMindStoneSkill(skillsDir: string, artifact: MindStoneSkillArtifact, skillMarkdown: string): string {
+  const idError = validateSkillId(artifact.id);
+  if (idError) throw new Error(idError);
+  const installedDir = join(skillsDir, artifact.id);
+  mkdirSync(installedDir, { recursive: true });
+  // Both files are written in full first, then renamed into place, SKILL.md
+  // before skill.json: a failure part-way never pairs a new skill.json with
+  // an old or missing SKILL.md.
+  const md = join(installedDir, ".SKILL.md.tmp");
+  const json = join(installedDir, ".skill.json.tmp");
+  try {
+    writeFileSync(md, skillMarkdown.endsWith("\n") ? skillMarkdown : `${skillMarkdown}\n`);
+    writeFileSync(json, `${JSON.stringify(artifact, null, 2)}\n`);
+    renameSync(md, join(installedDir, "SKILL.md"));
+    renameSync(json, join(installedDir, "skill.json"));
+  } finally {
+    rmSync(md, { force: true });
+    rmSync(json, { force: true });
+  }
+  return installedDir;
 }
 
 /** Resolve persona/workflow skills[] references against the discoverable skill surfaces. */

@@ -25,6 +25,12 @@ printf -- '---\nname: feedback_private_rule\ndescription: Owner-only rule.\ntype
 printf -- '---\nname: feedback_public_rule\ndescription: Rule for all.\ntype: feedback\ncritical: true\ninvariant: Always be polite (SAGE-INVARIANT-PUBLIC).\ninvariant_audience: all\n---\n\nBody.\n' > "${DATA}/memory/feedback_public_rule.md"
 mkdir -p "${DATA}/transcripts"
 printf '# Handoff\n\n- Session: agent:default:main\n\nCORAL-HANDOFF-TAIL\n' > "${DATA}/transcripts/.handoff.md"
+# An installed skill (#104): in the owner's prompt with every reviewed field, never in a scoped run's.
+DATA="${DATA}" node --input-type=module -e '
+const core = await import(process.cwd() + "/packages/mindstone-core/dist/index.js");
+const c = core.composeMindStoneSkillDraft({ id: "audience-skill", label: "Audience skill", description: "Audience", safetyNotes: ["INDIGO-SKILL-SAFETY"], skillMarkdown: "INDIGO-SKILL-BODY" });
+if (!c.ok) throw new Error(c.error);
+core.writeInstalledMindStoneSkill(process.env.DATA + "/skills", c.artifact, c.skillMarkdown);'
 python3 - <<'PY'
 import json, os, pathlib
 p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
@@ -54,14 +60,14 @@ const prompt = (name) => {
 const owner = prompt("owner.jsonl");
 // (No handoff here: any scoped route, App Engine included, skips handoff replay since #62.)
 const INDEX_HEADER = "Index of the agent's durable memories";
-for (const s of ["TEAL-OWNER-PROFILE", INDEX_HEADER, "PLUM-INVARIANT-PRIVATE", "SAGE-INVARIANT-PUBLIC"]) {
+for (const s of ["TEAL-OWNER-PROFILE", INDEX_HEADER, "PLUM-INVARIANT-PRIVATE", "SAGE-INVARIANT-PUBLIC", "<mindstone-skills>", "INDIGO-SKILL-BODY", "INDIGO-SKILL-SAFETY", "mindstone-skill-proposal"]) {
   if (!owner.includes(s)) fail(`control: the unscoped (owner) run is missing ${s}`);
 }
 for (const name of ["tenant.jsonl", "appuser.jsonl"]) {
   const p = prompt(name);
   // Recall of the owner's unscoped memory in tenant runs is the open App Engine
   // scope decision, so this checks the memory index block, not the pointer text.
-  for (const s of ["TEAL-OWNER-PROFILE", INDEX_HEADER, "PLUM-INVARIANT-PRIVATE"]) {
+  for (const s of ["TEAL-OWNER-PROFILE", INDEX_HEADER, "PLUM-INVARIANT-PRIVATE", "<mindstone-skills>", "INDIGO-SKILL-BODY"]) {
     if (p.includes(s)) fail(`${name}: a scoped run got the owner's ${s}`);
   }
   if (!p.includes("SAGE-INVARIANT-PUBLIC")) fail(`${name}: lost the rule marked invariant_audience: all`);
@@ -79,6 +85,22 @@ code() { curl -s -o "${TEMP_RUNTIME}/code.json" -w '%{http_code}' -X POST -H "Au
 [[ "$(code '{"text":"hi","tenantId":null}')" == "400" ]] || { echo "a null tenantId must be refused, not read as an owner run" >&2; exit 1; }
 [[ "$(code '{"text":"hi","tenantId":"t1:user:u1"}')" == "400" ]] || { echo "a tenantId containing a colon must be refused" >&2; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${AE_TOKEN}" -H 'content-type: application/json' -d '{"text":"hi","tenantId":"t1"}' "http://127.0.0.1:${GATEWAY_PORT}/agents/a%3Ab/runs")" == "400" ]] || { echo "a scoped run on an agent id containing a colon must be refused" >&2; exit 1; }
+
+# A skill proposal in a reply to anyone but the owner is stripped, never proposed
+# (#104). The mock model echoes the prompt, so the block comes back in the reply.
+SKILL_BLOCK='```mindstone-skill-proposal\n{\"id\":\"ID\",\"label\":\"L\",\"description\":\"D\"}\n```'
+skill_run() { run "{\"text\":\"${SKILL_BLOCK//ID/$1}\"$2}" "${TEMP_RUNTIME}/skill.jsonl"; }
+skill_run tenant-skill ',"tenantId":"t1"'
+skill_run app-skill ',"appId":"app-9","userId":"u2"'
+skill_run owner-skill ''
+DATA="${DATA}" node <<'NODE'
+const { readFileSync } = require("node:fs");
+const fail = (m) => { console.error(m); process.exit(1); };
+const skills = JSON.parse(readFileSync(`${process.env.DATA}/approvals/actions.json`, "utf8")).actions.filter((a) => a.kind === "skill_install").map((a) => a.skill.id);
+if (!skills.includes("owner-skill")) fail("control: the owner's reply should propose its skill: " + JSON.stringify(skills));
+for (const id of ["tenant-skill", "app-skill"]) if (skills.includes(id)) fail(`a scoped run proposed a skill (${id})`);
+console.log("gateway skill-proposal audience assertions passed");
+NODE
 
 # The in-process API (runMindStone) applies the same audience.
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
@@ -107,7 +129,8 @@ assert.ok(freshOwner.includes("MOSS-ONBOARDING-CONTEXT"), "control: a fresh owne
 assert.ok(!freshTenant.includes("MOSS-ONBOARDING-CONTEXT"), "in-process tenant run got the owner's onboarding seed");
 assert.ok(tenant.includes("TENANT-DOC-SENTINEL"), "in-process tenant run lost its own scoped recall");
 assert.ok(owner.includes("TEAL-OWNER-PROFILE") && owner.includes("Index of the agent's durable memories"), "control: the unscoped in-process run keeps owner context");
-for (const s of ["TEAL-OWNER-PROFILE", "Index of the agent's durable memories", "PLUM-INVARIANT-PRIVATE", "CORAL-HANDOFF-TAIL"]) {
+assert.ok(owner.includes("INDIGO-SKILL-BODY") && owner.includes("mindstone-skill-proposal"), "control: the unscoped in-process run gets the installed skill (#104)");
+for (const s of ["TEAL-OWNER-PROFILE", "Index of the agent's durable memories", "PLUM-INVARIANT-PRIVATE", "CORAL-HANDOFF-TAIL", "<mindstone-skills>"]) {
   assert.ok(!tenant.includes(s), `in-process tenant run got the owner's ${s}`);
 }
 assert.ok(tenant.includes("SAGE-INVARIANT-PUBLIC"), "in-process tenant run lost the invariant_audience: all rule");
@@ -119,6 +142,14 @@ await assert.rejects(run({ tenantId: "t1", agentId: "a:b" }), /agentId must be n
 {
   const padded = await run({ tenantId: " t1 " });
   assert.equal(padded.sessionKey, "tenant:t1:agent:default:main", "core trims scope ids the way the gateway does");
+}
+{
+  const block = (id: string) => "```mindstone-skill-proposal\n" + JSON.stringify({ id, label: "L", description: "D" }) + "\n```";
+  const store = () => JSON.parse(readFileSync(`${paths.dataDir}/approvals/actions.json`, "utf8")).actions.filter((a: { kind: string }) => a.kind === "skill_install").map((a: { skill: { id: string } }) => a.skill.id);
+  await runMindStone({ agentId: "default", input: block("core-tenant-skill"), tenantId: "t1" } as never, { config, configPath, provider, model } as never);
+  await runMindStone({ agentId: "default", input: block("core-owner-skill") } as never, { config, configPath, provider, model } as never);
+  assert.ok(store().includes("core-owner-skill"), "control: an in-process owner reply proposes its skill");
+  assert.ok(!store().includes("core-tenant-skill"), "an in-process tenant reply proposed a skill");
 }
 const tenantPi = piSessionRunnerOptions({ routing: { mode: "pi-session", pi: { builtinTools: ["bash"] } } } as never, "tenant");
 assert.deepEqual(tenantPi.builtinTools, [], "tenant Pi turns get no built-in tools");

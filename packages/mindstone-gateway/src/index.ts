@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync, readSync, fstatSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync, readSync, fstatSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -200,6 +200,17 @@ import {
   probeOpenAiCompatibleModels,
   readIsolatedModelsConfig,
   upsertIsolatedProvider,
+  buildMindStoneSkillDraft,
+  builtinMindStoneSkills,
+  discoverMindStoneSkills,
+  installMindStoneSkill,
+  loadMindStoneSkill,
+  loadMindStoneSkillArtifact,
+  parseSkillProposal,
+  buildMindStoneSkillsPrompt,
+  skillDraftsDir,
+  skillsDirFromConfig,
+  validateSkillId,
 } from "@mindstone-agent/core";
 
 export type GatewayOptions = {
@@ -1165,6 +1176,8 @@ async function runConfiguredRoute(input: {
           documents: fileMemoryDocuments,
           maxPromptTokens: input.config?.memory?.index?.maxPromptTokens,
         },
+        // Installed skills, and how to propose one (#104): the owner's turns only.
+        skills: { enabled: input.audience === "owner", skillsDir: skillsDirFromConfig(input.config) },
         signal: run.abortController.signal,
         metadata: input.metadata,
         runContext: {
@@ -1343,6 +1356,7 @@ async function runConfiguredRoute(input: {
       runId: run.id,
       // Only the owner's turns may propose a persona (#105).
       allowPersona: input.audience === "owner" && !input.scope,
+      allowSkill: input.audience === "owner",
     });
 
     const assistantEntry = appendTranscriptEntry({
@@ -1898,7 +1912,49 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       sendJson(res, 404, { ok: false, error: `no proposed action matches id "${approvalMatch[1]}"` });
       return;
     }
-    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation, persona: action.persona } });
+    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation, persona: action.persona, skill: action.skill } });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/admin/skills") {
+    // The Skill Builder (#104): built-in, installed and draft skills. Errors
+    // name paths relative to the skills directory, never the host's.
+    const skillsDir = skillsDirFromConfig(gateConfig.config, paths);
+    // Which installed skills the owner's prompt holds in full; the rest are over the budget.
+    const inPrompt = new Set(buildMindStoneSkillsPrompt(skillsDir).inPrompt);
+    const skills = discoverMindStoneSkills(skillsDir).map((skill) => ({
+      id: skill.id,
+      label: skill.label,
+      description: skill.description,
+      version: skill.version,
+      source: skill.source,
+      ...(skill.source === "installed" && !skill.error ? { inPrompt: inPrompt.has(skill.id) } : {}),
+      ...(skill.error ? { error: publicSkillText(skill.error, skillsDir) } : {}),
+    }));
+    sendJson(res, 200, { ok: true, skills });
+    return;
+  }
+  const skillReadMatch = /^\/admin\/skills\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname);
+  if (req.method === "GET" && skillReadMatch && skillReadMatch[1] !== "drafts") {
+    // One skill with its SKILL.md: ?source=installed|draft|builtin, or the one that applies.
+    const skillsDir = skillsDirFromConfig(gateConfig.config, paths);
+    const id = skillReadMatch[1]!;
+    const source = url.searchParams.get("source");
+    let loaded: ReturnType<typeof loadMindStoneSkill>;
+    if (source === "installed") loaded = loadMindStoneSkillArtifact(skillsDir, id, "installed");
+    else if (source === "draft") loaded = loadMindStoneSkillArtifact(skillDraftsDir(skillsDir), id, "draft");
+    else if (source === "builtin") {
+      const builtin = builtinMindStoneSkills().find((skill) => skill.artifact.id === id);
+      loaded = builtin ? { ok: true, skill: builtin } : { ok: false, skillId: id, error: `no built-in skill "${id}"` };
+    } else if (source === null) loaded = loadMindStoneSkill(skillsDir, id);
+    else {
+      sendJson(res, 400, { ok: false, error: "source must be installed, draft or builtin" });
+      return;
+    }
+    if (!loaded.ok) {
+      sendJson(res, 404, { ok: false, error: publicSkillText(loaded.error, skillsDir) });
+      return;
+    }
+    sendJson(res, 200, { ok: true, skill: { ...loaded.skill.artifact, source: loaded.skill.source, skillMarkdown: loaded.skill.skillMarkdown ?? "" } });
     return;
   }
   if (req.method === "GET" && url.pathname === "/admin/personas") {
@@ -2020,6 +2076,127 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/admin/skills/drafts") {
+    // Build a skill draft (#104): from a built-in, or from scratch with an id,
+    // label, description and goal. A draft does nothing until it is installed.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const skillsDir = skillsDirFromConfig(gateConfig.config, paths);
+    const fromBuiltin = typeof body.fromBuiltin === "string" && body.fromBuiltin ? body.fromBuiltin : undefined;
+    if (body.force !== undefined && typeof body.force !== "boolean") {
+      sendJson(res, 400, { ok: false, error: "force must be true or false" });
+      return;
+    }
+    let draftInput: Parameters<typeof buildMindStoneSkillDraft>[0];
+    if (fromBuiltin) {
+      if (!builtinMindStoneSkills().some((skill) => skill.artifact.id === fromBuiltin)) {
+        sendJson(res, 400, { ok: false, error: `no built-in skill "${fromBuiltin}"` });
+        return;
+      }
+      // Fields given with a built-in override it; they are checked like a proposal's.
+      const overrides = parseSkillProposal({
+        id: body.id ?? fromBuiltin,
+        label: body.label ?? "x",
+        description: body.description ?? "x",
+        goal: body.goal,
+      });
+      if (!overrides) {
+        sendJson(res, 400, { ok: false, error: "id must be lowercase letters, digits and hyphens; label, description and goal at most 2000 characters" });
+        return;
+      }
+      draftInput = {
+        skillsDir,
+        fromBuiltin,
+        id: overrides.id,
+        label: typeof body.label === "string" ? overrides.label : undefined,
+        description: typeof body.description === "string" ? overrides.description : undefined,
+        goal: overrides.goal,
+        force: body.force === true,
+        now: new Date().toISOString(),
+      };
+    } else {
+      const skill = parseSkillProposal(body);
+      if (!skill) {
+        sendJson(res, 400, {
+          ok: false,
+          error: "a skill needs an id (lowercase letters, digits, hyphens), a label and a description; goal, whenToUse, outputs, safetyNotes and instructions are optional and bounded",
+        });
+        return;
+      }
+      draftInput = {
+        skillsDir,
+        id: skill.id,
+        label: skill.label,
+        description: skill.description,
+        goal: skill.goal,
+        whenToUse: skill.whenToUse,
+        outputs: skill.outputs,
+        safetyNotes: skill.safetyNotes,
+        skillMarkdown: skill.instructions,
+        force: body.force === true,
+        now: new Date().toISOString(),
+      };
+    }
+    await withAdminWriteLock(() => {
+      const result = buildMindStoneSkillDraft(draftInput);
+      if (!result.ok) {
+        refuse(409, { error: publicSkillText(result.error, skillsDir) }, { reason: "skill_draft", skill: draftInput.id ?? fromBuiltin });
+        return;
+      }
+      appendAdminAudit(paths.dataDir, { userId, action: "skill_drafted", skill: result.skillId, origin: result.artifact.origin });
+      sendJson(res, 200, { ok: true, skill: { ...result.artifact, source: "draft" } });
+    });
+    return;
+  }
+  const skillDraftMatch = /^\/admin\/skills\/drafts\/([a-z0-9][a-z0-9-]{0,63})$/.exec(url.pathname);
+  if (req.method === "DELETE" && skillDraftMatch) {
+    // Discard a draft (#104). Installed skills aren't touched here.
+    const skillsDir = skillsDirFromConfig(gateConfig.config, paths);
+    const id = skillDraftMatch[1]!;
+    await withAdminWriteLock(() => {
+      const dir = join(skillDraftsDir(skillsDir), id);
+      if (validateSkillId(id) || !existsSync(join(dir, "skill.json"))) {
+        sendJson(res, 404, { ok: false, error: `no draft named "${id}"` });
+        return;
+      }
+      rmSync(dir, { recursive: true, force: true });
+      appendAdminAudit(paths.dataDir, { userId, action: "skill_draft_discarded", skill: id });
+      sendJson(res, 200, { ok: true });
+    });
+    return;
+  }
+  const skillInstallMatch = /^\/admin\/skills\/([a-z0-9][a-z0-9-]{0,63})\/install$/.exec(url.pathname);
+  if (req.method === "POST" && skillInstallMatch) {
+    // Install a draft (#104): it changes what the agent is told on every
+    // turn, so it needs the advanced-settings permission.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    if (body.force !== undefined && typeof body.force !== "boolean") {
+      sendJson(res, 400, { ok: false, error: "force must be true or false" });
+      return;
+    }
+    const skillsDir = skillsDirFromConfig(gateConfig.config, paths);
+    const id = skillInstallMatch[1]!;
+    if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+      refuse(403, { error: "installing a skill needs the advanced-settings permission" }, { reason: "advanced", skill: id });
+      return;
+    }
+    await withAdminWriteLock(() => {
+      const result = installMindStoneSkill(skillsDir, id, { force: body.force === true });
+      if (!result.ok) {
+        // Already installed: 409. No draft: 404. A draft that doesn't load (bad JSON, no SKILL.md): 422.
+        const exists = /already installed/.test(result.error);
+        const missing = !existsSync(join(skillDraftsDir(skillsDir), id, "skill.json"));
+        const [status, code] = exists ? [409, "skill_exists"] : missing ? [404, "not_found"] : [422, "invalid_skill"];
+        refuse(status, { error: publicSkillText(result.error, skillsDir), code }, { reason: code, skill: id });
+        return;
+      }
+      appendAdminAudit(paths.dataDir, { userId, action: "skill_installed", skill: id });
+      sendJson(res, 200, { ok: true, skill: { id, source: "installed" } });
+    });
+    return;
+  }
+
   if (req.method === "POST" && approvalMatch && approvalMatch[2]) {
     // Approve or reject a proposed action (#84), with the same guards as
     // `mindstone approvals` (core's approval actions). No advanced-settings
@@ -2046,6 +2223,12 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       });
       appendAdminAudit(paths.dataDir, { userId, action: `approval_${decided}`, approvalId: action.id, kind: action.kind, connector: action.connectorId });
     };
+    // Installing a skill changes what the agent is told on every turn, so it
+    // needs the advanced-settings permission, as installing from the Skills page does (#104).
+    if (decision === "approve" && store.get(approvalMatch[1]!)?.kind === "skill_install" && !readAdminPermissions(paths.dataDir).advancedSettings) {
+      refuse(403, { error: "installing a skill needs the advanced-settings permission", code: "advanced" }, { reason: "advanced", approvalId: approvalMatch[1], decision });
+      return;
+    }
     try {
       if (decision === "approve") {
         // Under the admin write lock, like every config-adjacent write.
@@ -2054,6 +2237,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
           const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
             decidedBy: `console:${userId}`,
             memoryDir: paths.memoryDir,
+            skillsDir: skillsDirFromConfig(current, paths),
             force: body.force === true,
             onDecision,
             personasDir: personasDirFromConfig(current, paths),
@@ -3138,6 +3322,15 @@ function readLogTail(path: string, count: number): string[] | undefined {
 const APPROVAL_PATH = /^\/admin\/approvals\/([0-9a-f-]{8,36})(?:\/(approve|reject))?$/;
 
 /** What the approvals list shows: no draft text, memory content or mutation data. */
+/** A skill error for the Console: paths relative to the skills directory, and no CLI flags (#104). */
+function publicSkillText(text: string, skillsDir: string): string {
+  return text
+    .split(skillsDir)
+    .join("skills")
+    .replace(/ \(use --force to [^)]*\)/g, "; send force to replace it")
+    .replace(/ \(--[a-z-]+( or --[a-z-]+)?\)/g, "");
+}
+
 function approvalSummary(action: ProposedAction) {
   return {
     id: action.id,

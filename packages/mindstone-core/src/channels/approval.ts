@@ -19,7 +19,7 @@ import { parsePersonaProposal, type PersonaProposalPayload } from "../persona/cr
  * skills, personas, workflows, config) and adds a UI + defer on top of this
  * same store.
  */
-export type ProposedActionKind = "connector_send" | "memory_write" | "connector_mutation" | "persona_create";
+export type ProposedActionKind = "connector_send" | "memory_write" | "connector_mutation" | "persona_create" | "skill_install";
 
 export type ProposedActionStatus = "pending" | "approved" | "rejected";
 
@@ -46,6 +46,26 @@ export type ConnectorMutationPayload = {
   data: Record<string, unknown>;
 };
 
+/**
+ * A skill the agent proposes to install (#104). It is held in the proposal
+ * only: nothing is written under the skills directory until the owner
+ * approves it, so model output never creates files on its own.
+ */
+export type SkillInstallPayload = {
+  id: string;
+  label: string;
+  description: string;
+  goal?: string;
+  whenToUse: string[];
+  outputs: string[];
+  safetyNotes: string[];
+  /** The SKILL.md body; generated from the fields when the proposal has none. */
+  instructions?: string;
+};
+
+/** Size limits for a proposed skill, so a reply can't park megabytes in the approvals store. */
+export const SKILL_PROPOSAL_LIMITS = { text: 2_000, list: 12, instructions: 16_000 } as const;
+
 export type ProposedAction = {
   id: string;
   kind: ProposedActionKind;
@@ -64,6 +84,8 @@ export type ProposedAction = {
   mutation?: ConnectorMutationPayload;
   /** persona_create: the persona the agent proposed for itself (#105). */
   persona?: PersonaProposalPayload;
+  /** skill_install: the skill to draft and install on approval (#104). */
+  skill?: SkillInstallPayload;
   status: ProposedActionStatus;
   decidedAt?: string;
   decidedBy?: string;
@@ -255,11 +277,42 @@ export function resolveConnectorSendPolicy(params: {
 // applied directly.
 // ---------------------------------------------------------------------------
 
+const SKILL_PROPOSAL_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+function boundedText(value: unknown, max: number): string | undefined {
+  return typeof value === "string" && value.trim() && value.length <= max ? value.trim() : undefined;
+}
+
+function boundedList(value: unknown): string[] | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > SKILL_PROPOSAL_LIMITS.list) return undefined;
+  const items = value.map((item) => boundedText(item, SKILL_PROPOSAL_LIMITS.text));
+  return items.every((item): item is string => item !== undefined) ? items : undefined;
+}
+
+/** A proposed skill (#104), or undefined when any field is missing, malformed or too large. */
+export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undefined {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  const id = typeof record.id === "string" && SKILL_PROPOSAL_ID.test(record.id) && record.id !== "drafts" ? record.id : undefined;
+  const label = boundedText(record.label, SKILL_PROPOSAL_LIMITS.text);
+  const description = boundedText(record.description, SKILL_PROPOSAL_LIMITS.text);
+  const goal = record.goal === undefined ? undefined : boundedText(record.goal, SKILL_PROPOSAL_LIMITS.text);
+  const whenToUse = boundedList(record.whenToUse);
+  const outputs = boundedList(record.outputs);
+  const safetyNotes = boundedList(record.safetyNotes);
+  const instructions = record.instructions === undefined ? undefined : boundedText(record.instructions, SKILL_PROPOSAL_LIMITS.instructions);
+  if (!id || !label || !description || !whenToUse || !outputs || !safetyNotes) return undefined;
+  if (record.goal !== undefined && goal === undefined) return undefined;
+  if (record.instructions !== undefined && instructions === undefined) return undefined;
+  return { id, label, description, goal, whenToUse, outputs, safetyNotes, instructions };
+}
+
 /** Pending persona proposals kept at once (#105 review). */
 export const MAX_PENDING_PERSONAS = 3;
 
 /** The proposal kinds, in one place: every fence pattern below is built from it. */
-const PROPOSAL_KINDS = "memory|calendar|persona";
+const PROPOSAL_KINDS = "memory|calendar|persona|skill";
 const PROPOSAL_INFO = new RegExp(`^mindstone-(${PROPOSAL_KINDS})-proposal$`);
 const PROPOSAL_INLINE_OPENER = new RegExp(`^(.*?\\S)[ \\t]*(\`\`\`mindstone-(?:${PROPOSAL_KINDS})-proposal[ \\t]*\\r?)$`);
 
@@ -323,12 +376,15 @@ export type ExtractedActionProposals = {
   mutations: ConnectorMutationPayload[];
   /** The first well-formed persona proposal (#105). */
   persona?: PersonaProposalPayload;
+  /** At most one proposed skill per reply (#104). */
+  skill?: SkillInstallPayload;
 };
 
 export function extractActionProposals(replyText: string): ExtractedActionProposals {
   const mutations: ConnectorMutationPayload[] = [];
   let memory: MemoryWritePayload | undefined;
   let persona: PersonaProposalPayload | undefined;
+  let skill: SkillInstallPayload | undefined;
   const split = splitProposalBlocks(replyText);
   for (const { kind: fenceKind, body } of split.blocks) {
     try {
@@ -339,6 +395,8 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
         if (path && content && !memory) memory = { path, content };
       } else if (fenceKind === "persona") {
         persona ??= parsePersonaProposal(parsed);
+      } else if (fenceKind === "skill") {
+        skill ??= parseSkillProposal(parsed);
       } else {
         const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
         const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
@@ -351,7 +409,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
       // malformed proposal blocks are dropped from the reply, never applied
     }
   }
-  return { text: split.text.trim(), memory, mutations, persona };
+  return { text: split.text.trim(), memory, mutations, persona, skill };
 }
 
 /** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
@@ -412,6 +470,12 @@ export function applyActionProposalDiscipline(params: {
    * Otherwise a persona block is stripped and dropped.
    */
   allowPersona?: boolean;
+  /**
+   * Skill proposals are the owner's (#104): an installed skill joins the
+   * owner's prompt, so a reply to anyone else never proposes one. The block is
+   * still stripped from the reply.
+   */
+  allowSkill?: boolean;
 }): { text: string; content: unknown; events: TranscriptEntry[]; proposals: ProposedAction[] } {
   const extracted = extractActionProposals(params.replyText);
   // Sanitize content always: proposals may exist in content even when text
@@ -424,6 +488,7 @@ export function applyActionProposalDiscipline(params: {
   const capped = Boolean(params.allowPersona && extracted.persona)
     && store.pending().filter((action) => action.kind === "persona_create" && (action.agentId ?? "default") === (params.agentId ?? "default")).length >= MAX_PENDING_PERSONAS;
   const persona = params.allowPersona && !capped ? extracted.persona : undefined;
+  const skill = params.allowSkill ? extracted.skill : undefined;
   // A dropped proposal is said, not swallowed: the owner reads why in the reply.
   const cappedNote = capped
     ? `\n\n(The persona proposal wasn't saved: ${MAX_PENDING_PERSONAS} persona proposals are already waiting on the Approvals page. Approve or reject those first.)`
@@ -439,7 +504,7 @@ export function applyActionProposalDiscipline(params: {
         metadata: { event: "persona_proposal_dropped", reason: "too_many_pending", origin: params.origin },
       })]
     : [];
-  if (!extracted.memory && !extracted.mutations.length && !persona) {
+  if (!extracted.memory && !extracted.mutations.length && !persona && !skill) {
     return { text: `${extracted.text}${cappedNote}`, content, events: cappedEvents, proposals: [] };
   }
   const approvals = store;
@@ -464,6 +529,17 @@ export function applyActionProposalDiscipline(params: {
           createdAt: new Date().toISOString(),
           summary: `persona proposal from ${params.origin}: ${persona.name} (${persona.id})`,
           persona,
+        })]
+      : []),
+    ...(skill
+      ? [approvals.propose({
+          kind: "skill_install" as const,
+          connectorId: params.origin,
+          sessionKey: params.sessionKey,
+          agentId: params.agentId,
+          createdAt: new Date().toISOString(),
+          summary: `install skill ${skill.id}: ${skill.label}`,
+          skill,
         })]
       : []),
     ...extracted.mutations.map((mutation) =>
