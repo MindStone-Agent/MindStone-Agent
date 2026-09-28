@@ -71,6 +71,13 @@ if (!identity.includes("# Bridgewright")) throw new Error("Activated identity ti
 if (!identity.includes("mindstone identity activate")) throw new Error("Activation provenance missing");
 if (!identity.includes("Prior identity state: pending scaffold")) throw new Error("Prior state missing");
 if (!identity.includes("Ask before destructive filesystem")) throw new Error("Operating boundary missing");
+// Non-owner turns get IDENTITY.md, so the owner's words and host paths stay out of it.
+for (const ownerWords of ["Build integrations and channel adapters safely", "Ask before network-exposed", "Credentials and pairing tokens"]) {
+  if (identity.includes(ownerWords)) throw new Error(`Activated identity carries the owner's words: ${ownerWords}`);
+}
+if (identity.includes(runtime)) throw new Error("Activated identity carries a host path");
+if (!identity.includes("The user's notes and project context are in USER.md.")) throw new Error("Activated identity does not point at USER.md for the notes");
+if (!identity.includes("Approval mode: strict")) throw new Error("Activated identity lost the preference labels");
 
 const skipped = synthesizeMindStoneIdentityActivation({ configPath, now: "2026-06-18T12:01:00.000Z" });
 if (skipped.wrote) throw new Error("Second activation overwrote non-pending identity without force");

@@ -137,7 +137,21 @@ function hasReplayedHandoff(entries: TranscriptEntry[], sha256: string): boolean
   });
 }
 
-function buildIdentityFormationPrompt(input: {
+/**
+ * A seed value on one line, so what the user typed can't start a heading,
+ * setext underline or fence of its own inside the prompt, or open a comment.
+ */
+function seedValue(value: string | undefined): string | undefined {
+  const line = value?.replace(/\s*[\r\n\u2028\u2029]+\s*/g, " ").trim();
+  return line ? line.replace(/<!--/g, "<\\!--") : undefined;
+}
+
+/**
+ * The first-activation identity-formation prompt for an owner's first turn,
+ * or undefined when onboarding hasn't run or this session is past its first
+ * turn. The gateway's chat-completions route uses it too (#102).
+ */
+export function buildIdentityFormationPrompt(input: {
   agentId: string;
   entries: TranscriptEntry[];
   config?: MindStoneConfig;
@@ -149,12 +163,12 @@ function buildIdentityFormationPrompt(input: {
   const userTurns = input.entries.filter((entry) => entry.role === "user").length;
   if (userTurns > 1) return undefined;
 
-  const profile = onboarding.profile?.label ?? input.config?.agents?.[input.agentId]?.profileId ?? "MindStone agent";
-  const projectContext = onboarding.preferences?.projectContext;
+  const profile = seedValue(onboarding.profile?.label) ?? input.config?.agents?.[input.agentId]?.profileId ?? "MindStone agent";
+  const projectContext = seedValue(onboarding.preferences?.projectContext);
   const mode = onboarding.identity?.mode ?? "defer";
-  const candidateName = onboarding.identity?.candidateName;
-  const identityDirection = onboarding.identity?.identityDirection;
-  const namingNotes = onboarding.identity?.namingNotes;
+  const candidateName = seedValue(onboarding.identity?.candidateName);
+  const identityDirection = seedValue(onboarding.identity?.identityDirection);
+  const namingNotes = seedValue(onboarding.identity?.namingNotes);
 
   const seedLines = [
     `- Agent id: ${input.agentId}`,

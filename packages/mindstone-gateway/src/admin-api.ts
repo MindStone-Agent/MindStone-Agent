@@ -13,6 +13,7 @@ import { existsSync, readFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
+  resolveMemoryEmbeddingProviderConfig,
   getMindStoneSystemStatus,
   resolveGatewayAuthRequirement,
   type MindStoneConfig,
@@ -315,12 +316,13 @@ export type OnboardingStep = { done: boolean; detail: string };
 
 /**
  * What the Console's onboarding flow still needs. Onboarded means a model
- * provider is chosen and at least one persona exists; memory and connectors
- * are reported but optional.
+ * provider is chosen, a persona exists, memory has a vector store and an
+ * embedding provider, and setup has written the identity scaffold (#102:
+ * memory is required). Connectors are reported but optional.
  */
 export function onboardingSteps(config: MindStoneConfig | undefined): {
   onboarded: boolean;
-  steps: Record<"provider" | "persona" | "memory" | "connectors", OnboardingStep>;
+  steps: Record<"provider" | "persona" | "memory" | "identity" | "connectors", OnboardingStep>;
 } {
   const mode = config?.routing?.mode ?? "placeholder";
   const provider: OnboardingStep = mode === "placeholder"
@@ -330,10 +332,19 @@ export function onboardingSteps(config: MindStoneConfig | undefined): {
   const persona: OnboardingStep = agentIds.length
     ? { done: true, detail: `${agentIds.length} persona${agentIds.length === 1 ? "" : "s"}: ${agentIds.join(", ")}` }
     : { done: false, detail: "no persona configured (agents is empty)" };
-  const memory: OnboardingStep = {
-    done: Boolean(config?.memory),
-    detail: config?.memory ? `vector store ${config.memory.vectorStore ?? "default"}, autoRecall ${config.memory.autoRecall === true ? "on" : "off"}` : "memory not configured",
-  };
+  const missingMemory = [
+    config?.memory?.vectorStore ? undefined : "no vector store",
+    // The environment's MINDSTONE_EMBEDDING_PROVIDER counts, as the embedder reads it.
+    resolveMemoryEmbeddingProviderConfig(config) ? undefined : "no embedding provider",
+  ].filter((item): item is string => Boolean(item));
+  const memory: OnboardingStep = missingMemory.length === 0
+    ? { done: true, detail: `vector store ${config!.memory!.vectorStore}, embeddings ${config?.memory?.embeddingProvider ?? "from the environment"}, autoRecall ${config!.memory!.autoRecall === true ? "on" : "off"}` }
+    : { done: false, detail: `memory isn't set up: ${missingMemory.join(" and ")}` };
+  // The persona step writes onboarding.profile; only finishing setup (or
+  // `mindstone onboard`) writes onboarding.identity with the scaffold.
+  const identity: OnboardingStep = config?.onboarding?.identity
+    ? { done: true, detail: `identity formation: ${config.onboarding.identity.mode ?? "defer"}` }
+    : { done: false, detail: "setup hasn't finished: the agent's identity scaffold isn't written yet" };
   const channelIds = Object.entries((config?.channels ?? {}) as Record<string, unknown>)
     .filter(([, section]) => !(section && typeof section === "object" && (section as Record<string, unknown>).enabled === false))
     .map(([id]) => id);
@@ -341,7 +352,10 @@ export function onboardingSteps(config: MindStoneConfig | undefined): {
     done: channelIds.length > 0,
     detail: channelIds.length ? channelIds.join(", ") : "no connectors (optional)",
   };
-  return { onboarded: provider.done && persona.done, steps: { provider, persona, memory, connectors } };
+  return {
+    onboarded: provider.done && persona.done && memory.done && identity.done,
+    steps: { provider, persona, memory, identity, connectors },
+  };
 }
 
 /** GET /admin/status body. */

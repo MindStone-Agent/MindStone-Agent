@@ -207,7 +207,7 @@ console.log("admin read assertions passed");
 NODE
 stop_gateway
 
-# 3. A provider and a persona make it onboarded.
+# 3. A provider and a persona are done; onboarded also needs memory and the identity scaffold (#102).
 configure token mock
 chmod 640 "${CONFIG}"
 # The config is a symlink to the real file: writes must go through to it (#75 review).
@@ -217,7 +217,9 @@ start_gateway
 curl -s "${AUTH[@]}" "${ADMIN_TOK[@]}" -H 'x-mindstone-user-role: admin' "${BASE}/admin/status" | node -e '
 let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
   const status = JSON.parse(s);
-  if (status.onboarded !== true) { console.error(`mock routing plus the default persona should be onboarded: ${JSON.stringify(status.steps)}`); process.exit(1); }
+  if (status.steps?.provider?.done !== true || status.steps?.persona?.done !== true) { console.error(`mock routing plus the default persona should be done: ${JSON.stringify(status.steps)}`); process.exit(1); }
+  if (status.onboarded !== (status.steps.memory.done && status.steps.identity.done)) { console.error(`onboarded should need memory and identity too: ${JSON.stringify(status)}`); process.exit(1); }
+  if (status.onboarded) { console.error(`this config has no identity scaffold, so it is not onboarded: ${JSON.stringify(status.steps)}`); process.exit(1); }
   const ids = (status.profiles ?? []).map((p) => p.id);
   if (!ids.includes("general_companion") || !status.profiles.every((p) => p.label && p.description)) { console.error(`status should list the base personas: ${JSON.stringify(status.profiles)}`); process.exit(1); }
   console.log("onboarding assertions passed");

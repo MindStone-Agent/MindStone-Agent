@@ -15,6 +15,7 @@ import {
   configEtag,
   decideAdminAccess,
   EDITABLE_SECTIONS,
+  onboardingSteps,
   ADVANCED_GRANT_MS,
   effectivePermissions,
   ifMatchSatisfied,
@@ -136,6 +137,12 @@ import {
   ConnectorDeliveryQueue,
   getMindStoneDoctorReport,
   probeMemoryEmbeddingProvider,
+  resolveMemoryEmbeddingProviderConfig,
+  buildIdentityFormationPrompt,
+  isPendingMindStoneIdentity,
+  writeOnboardingIdentityScaffold,
+  getBuiltInMindStoneProfile,
+  type MindStoneIdentityFormationPrompt,
   applyActionProposalDiscipline,
   configuredConnectorIds,
   connectorAccessPolicyFromChannelConfig,
@@ -646,6 +653,64 @@ function forwardedUser(req: IncomingMessage): { userId?: string; userRole?: stri
   return { userId: h("x-mindstone-user-id"), userRole: h("x-mindstone-user-role"), conversationId: h("x-mindstone-conversation-id") };
 }
 
+/**
+ * Who a Console-facing turn answers, and in which session (#103). Chat
+ * completions and /v1/responses both use it, so a Console user can't reach
+ * the owner through either (#112 review).
+ * - A Console admin is the owner; any other Console user, or a role header
+ *   left blank, gets the non-owner context, as a connector's non-owner does.
+ *   A direct caller with the service token and no role header is the owner.
+ * - A non-owner can't choose its session or agent (metadata.sessionKey or
+ *   agentId), is known only by the forwarded user id (never the body's
+ *   `user`, which could name the owner), is keyed apart from the same user's
+ *   owner sessions, and without a conversation id gets its own session
+ *   rather than the owner's main one.
+ */
+function consoleTurnCaller(req: IncomingMessage, input: Record<string, unknown>, config: MindStoneConfig | undefined, channel: string):
+  | { error: string }
+  | {
+      forwarded: ReturnType<typeof forwardedUser>;
+      roleHeaderSent: boolean;
+      audience: RouteAudience;
+      metadata: Record<string, unknown>;
+      model: string;
+      agentId: string;
+      senderId: string;
+      sessionKey: string;
+    } {
+  const forwarded = forwardedUser(req);
+  const roleHeaderSent = req.headers["x-mindstone-user-role"] !== undefined;
+  const audience: RouteAudience = forwarded.userRole
+    ? (forwarded.userRole.toLowerCase() === "admin" ? "owner" : "non_owner")
+    : roleHeaderSent ? "non_owner" : "owner";
+  const requestMetadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
+  const metadata0 = audience === "owner"
+    ? requestMetadata
+    : Object.fromEntries(Object.entries(requestMetadata).filter(([key]) => key !== "sessionKey" && key !== "agentId"));
+  const metadata: Record<string, unknown> = { ...metadata0, ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}), ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}) };
+  const model = typeof input.model === "string" ? input.model : "mindstone/default";
+  const agentId = agentIdFromModel(config, model, metadata.agentId);
+  if (audience !== "owner" && !forwarded.userId) return { error: "a Console user's turn needs x-mindstone-user-id" };
+  const senderId = audience === "owner"
+    ? forwarded.userId ?? (typeof input.user === "string" ? input.user : model)
+    : `non-owner:${forwarded.userId}`;
+  // Each Console conversation is its own session (#38), so separate chats don't
+  // share a context window. They are all the same agent's transcripts, so the
+  // memory backfill indexes every one into that agent's memory.
+  const sessionKey = gatewaySessionKey({
+    config,
+    explicitSessionKey: metadata.sessionKey ?? (forwarded.conversationId
+      ? consoleConversationSessionKey(senderId, forwarded.conversationId)
+      : audience === "owner" ? undefined : consoleConversationSessionKey(senderId, "no-conversation")),
+    agentId,
+    substrate: "openai",
+    channel,
+    chatType: "internal",
+    senderId,
+  });
+  return { forwarded, roleHeaderSent, audience, metadata, model, agentId, senderId, sessionKey };
+}
+
 function isTranscriptRole(value: unknown): value is TranscriptRole {
   return ["user", "assistant", "tool", "system", "event"].includes(String(value));
 }
@@ -889,6 +954,63 @@ function withoutOwnerProfile(
   return { ...context, userMarkdown: undefined, userPath: undefined };
 }
 
+/** Where the gateway records that an agent's identity formation has started (#102). */
+function identityFormationMarker(agentId: string): string {
+  return join(runtimePathsFromEnv().dataDir, "identity-formation", `${encodeURIComponent(agentId)}.json`);
+}
+
+/**
+ * The identity-formation prompt for this turn (#102), when: setup has
+ * finished (onboarding.identity is set), the agent is a configured one, its
+ * IDENTITY.md is still the pending scaffold (or the initializer placeholder,
+ * or missing), this is the session's first turn, and the agent's formation
+ * hasn't started. The caller claims the marker before the turn runs.
+ */
+function pendingIdentityFormation(config: MindStoneConfig | undefined, configPath: string | undefined, agentId: string, sessionKey: string): MindStoneIdentityFormationPrompt | undefined {
+  if (!config?.onboarding?.identity) return undefined;
+  if (!config.agents || !Object.hasOwn(config.agents, agentId)) return undefined;
+  if (existsSync(identityFormationMarker(agentId))) return undefined;
+  // An agent that already has a real identity isn't sent back to formation
+  // (an install onboarded before this gateway recorded the marker).
+  // Read the file where the scaffold writer puts it (the default path when
+  // identityPath is unset), not through the identity loader, which needs both
+  // files configured.
+  const identityPath = config.agents[agentId]?.identityPath ?? `agents/${agentId}/IDENTITY.md`;
+  const resolvedIdentity = isAbsolute(identityPath) ? identityPath : resolvePath(dirname(configPath ?? join(runtimePathsFromEnv().dataDir, "config.json")), identityPath);
+  let identity: string | undefined;
+  try {
+    identity = readFileSync(resolvedIdentity, "utf-8");
+  } catch {
+    // Missing or unreadable: treated as pending.
+  }
+  if (identity?.trim() && !isPendingMindStoneIdentity(identity)) return undefined;
+  return buildIdentityFormationPrompt({ agentId, entries: readTranscriptEntries(sessionKey), config });
+}
+
+/**
+ * Claim the agent's formation turn before it runs, exclusively, so two first
+ * conversations at once don't both start it. False when already claimed.
+ */
+function claimIdentityFormation(agentId: string, sessionKey: string): boolean {
+  const marker = identityFormationMarker(agentId);
+  try {
+    mkdirSync(dirname(marker), { recursive: true, mode: 0o700 });
+    writeFileSync(marker, `${JSON.stringify({ agentId, sessionKey, promptedAt: new Date().toISOString() })}\n`, { mode: 0o600, flag: "wx" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A formation turn that didn't complete gives the claim back, so the next conversation starts it. */
+function releaseIdentityFormation(agentId: string): void {
+  try {
+    unlinkSync(identityFormationMarker(agentId));
+  } catch {
+    // Already gone.
+  }
+}
+
 async function runConfiguredRoute(input: {
   sessionKey: string;
   agentId: string;
@@ -910,6 +1032,8 @@ async function runConfiguredRoute(input: {
   recallScope?: Record<string, string>;
   /** Deterministic request-level routing: forced persona wins over workflow decisions; forced workflow bypasses selection. */
   route?: { personaId?: string; workflowId?: string };
+  /** The first-activation identity-formation prompt, for an owner's first turn (#102). */
+  identityFormation?: MindStoneIdentityFormationPrompt;
 }): Promise<{
   routed: boolean;
   status: number;
@@ -1005,6 +1129,7 @@ async function runConfiguredRoute(input: {
         contextManagement: input.config?.contextManagement,
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
+        identityFormation: input.audience === "owner" ? input.identityFormation : undefined,
         memoryRecall: {
           enabled: (input.audience === "owner" || input.audience === "tenant") && input.config?.memory?.autoRecall === true,
           provider: input.config?.memory?.vectorStore === "sqlite-vec"
@@ -1047,6 +1172,17 @@ async function runConfiguredRoute(input: {
       },
     });
 
+    if (route.identityFormation?.enabled) {
+      appendTranscriptEntry({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        role: "event",
+        text: "Injected first-activation identity formation prompt into context.",
+        runId: run.id,
+        source,
+        metadata: { event: "identity_formation_prompted", mode: route.identityFormation.mode, durable: false },
+      });
+    }
     if (route.handoffReplay) {
       appendTranscriptEntry({
         sessionKey: input.sessionKey,
@@ -2214,6 +2350,174 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/admin/onboarding/complete") {
+    // The Console's setup finishes what `mindstone onboard` does (#102): the
+    // onboarding record and the IDENTITY.md/USER.md scaffold, so the owner's
+    // first chat starts identity formation. The answers are the user's own
+    // words; nothing here names a file or a command.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const limits: Record<string, number> = { purpose: 2000, userContext: 4000, projectContext: 2000 };
+    const answers: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(body)) {
+      const max = Object.hasOwn(limits, key) ? limits[key] : undefined;
+      if (max === undefined || (value !== undefined && typeof value !== "string") || (typeof value === "string" && value.length > max)) {
+        refuse(400, { error: "send { purpose?, userContext?, projectContext? } as short text" }, { reason: "invalid", key });
+        return;
+      }
+      answers[key] = typeof value === "string" && value.trim() ? value.trim() : undefined;
+    }
+    await withAdminWriteLock(() => {
+      const loaded = loadMindStoneConfig(configPath);
+      if (loaded.error) {
+        sendJson(res, 503, { ok: false, error: CONFIG_UNREADABLE });
+        return;
+      }
+      if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "finishing setup needs the advanced-settings permission" }, { reason: "advanced" });
+        return;
+      }
+      const config = (loaded.config ?? {}) as MindStoneConfig;
+      const steps = onboardingSteps(config).steps;
+      if (!steps.provider.done || !steps.persona.done) {
+        refuse(409, { error: "choose a model provider and a persona first" }, { reason: "not_ready" });
+        return;
+      }
+      const now = new Date().toISOString();
+      const agentId = config.routing?.defaultAgentId ?? "default";
+      const builtIn = getBuiltInMindStoneProfile(config.agents?.[agentId]?.profileId);
+      const next: MindStoneConfig = {
+        ...config,
+        onboarding: {
+          ...config.onboarding,
+          profile: config.onboarding?.profile ?? (builtIn ? { id: builtIn.id, label: builtIn.label, description: builtIn.description, selectedAt: now } : undefined),
+          preferences: { ...config.onboarding?.preferences, ...(answers.projectContext ? { projectContext: answers.projectContext } : {}) },
+          identity: { mode: "defer", selectedAt: now, ...config.onboarding?.identity },
+        },
+      };
+      const issues = validateMindStoneConfig(next);
+      if (issues.length > 0) {
+        refuse(422, { error: "the change doesn't validate", errors: issues.map((issue) => ({ error: issue })) }, { reason: "invalid" });
+        return;
+      }
+      // The scaffold first: setup counts as finished only once its files exist.
+      let scaffold: ReturnType<typeof writeOnboardingIdentityScaffold>;
+      try {
+        scaffold = writeOnboardingIdentityScaffold({
+          config: next,
+          configPath,
+          purpose: answers.purpose,
+          userContext: answers.userContext,
+          createdBy: "the MindStone Console's setup",
+        });
+      } catch {
+        refuse(409, { error: "the identity files couldn't be written; check the agent's identityPath and userPath on the gateway host" }, { reason: "scaffold_failed" });
+        return;
+      }
+      const configTarget = realConfigPath(configPath);
+      writeFileAtomic(configTarget, `${JSON.stringify(next, null, 2)}\n`, fileMode(configTarget, 0o600));
+      appendAdminAudit(paths.dataDir, { userId, action: "onboarding_completed", identityCreated: scaffold.identityCreated, userCreated: scaffold.userCreated });
+      sendJson(res, 200, { ok: true, identity: scaffold.identityCreated ? "created" : "kept", user: scaffold.userCreated ? "created" : "kept" });
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/admin/memory/check") {
+    // A live embed with the embedding provider setup is about to save (#102):
+    // the same probe as doctor, on the candidate instead of the saved config.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const spec = body.embeddingProvider;
+    if (Object.keys(body).some((key) => key !== "embeddingProvider") || typeof spec !== "string" || !EMBEDDING_SPEC.test(spec)) {
+      refuse(400, { error: 'send { "embeddingProvider": "ollama:<model>" } (or openai: / openai-compatible:)' }, { reason: "invalid" });
+      return;
+    }
+    if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+      refuse(403, { error: "checking an embedding provider needs the advanced-settings permission" }, { reason: "advanced" });
+      return;
+    }
+    const loaded = loadMindStoneConfig(configPath);
+    if (loaded.error) {
+      sendJson(res, 503, { ok: false, error: CONFIG_UNREADABLE });
+      return;
+    }
+    const candidate: MindStoneConfig = { ...loaded.config, memory: { ...loaded.config?.memory, embeddingProvider: spec } };
+    const probe = await withTimeout(probeMemoryEmbeddingProvider(candidate), MEMORY_CHECK_MS, undefined);
+    const ok = Boolean(probe && !probe.error && probe.dimensions);
+    const error = !probe ? `no answer within ${MEMORY_CHECK_MS / 1000} s` : probe.error ?? (probe.dimensions ? undefined : "the provider returned no embedding");
+    const missingModel = !ok && spec.startsWith("ollama:") && /not found|pull/i.test(error ?? "");
+    lastMissingOllamaModel = missingModel ? spec.slice("ollama:".length) : undefined;
+    appendAdminAudit(paths.dataDir, { userId, action: "memory_checked", embeddingProvider: spec, ok });
+    sendJson(res, 200, ok
+      ? { ok: true, providerId: probe!.providerId, model: probe!.model, dimensions: probe!.dimensions }
+      : { ok: false, error, missingModel });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/admin/memory/pull") {
+    // Download an Ollama embedding model, so a missing one doesn't need a
+    // terminal on the gateway host (#102). One download at a time.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const model = body.model;
+    if (Object.keys(body).some((key) => key !== "model") || typeof model !== "string" || !OLLAMA_MODEL_NAME.test(model)) {
+      refuse(400, { error: 'send { "model": "<ollama model name>" }' }, { reason: "invalid" });
+      return;
+    }
+    if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+      refuse(403, { error: "downloading a model needs the advanced-settings permission" }, { reason: "advanced" });
+      return;
+    }
+    if (ollamaPullRunning) {
+      refuse(409, { error: "a model download is already running; wait for it to finish" }, { reason: "busy" });
+      return;
+    }
+    // Only the embedding model the last check found missing: not any model
+    // from the registry, which could be any size.
+    if (model !== lastMissingOllamaModel) {
+      refuse(409, { error: "download the model the memory check reported missing: run the check first" }, { reason: "not_checked" });
+      return;
+    }
+    const resolved = resolveMemoryEmbeddingProviderConfig({ memory: { embeddingProvider: `ollama:${model}` } });
+    const root = (resolved?.baseUrl ?? "http://127.0.0.1:11434/v1").replace(/\/v1$/, "");
+    ollamaPullRunning = true;
+    // A client that gives up frees the slot: the download is stopped.
+    const clientGone = new AbortController();
+    res.on("close", () => clientGone.abort());
+    let result: { ok: true } | { ok: false; error: string };
+    try {
+      const response = await fetch(`${root}/api/pull`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, stream: false }),
+        signal: AbortSignal.any([AbortSignal.timeout(OLLAMA_PULL_MS), clientGone.signal]),
+      });
+      const text = await response.text();
+      let parsed: { status?: unknown; error?: unknown } = {};
+      try {
+        parsed = JSON.parse(text) as typeof parsed;
+      } catch {
+        // Not JSON: reported below.
+      }
+      result = response.ok && parsed.status === "success"
+        ? { ok: true }
+        : { ok: false, error: typeof parsed.error === "string" ? parsed.error : `Ollama answered ${response.status}` };
+    } catch (error) {
+      result = {
+        ok: false,
+        error: clientGone.signal.aborted
+          ? "the download was stopped because the request was closed"
+          : error instanceof Error && error.name === "TimeoutError" ? "the download took too long" : "Ollama can't be reached from the gateway",
+      };
+    } finally {
+      ollamaPullRunning = false;
+    }
+    if (result.ok) lastMissingOllamaModel = undefined;
+    appendAdminAudit(paths.dataDir, { userId, action: "memory_model_pulled", model, ok: result.ok });
+    sendJson(res, 200, result);
+    return;
+  }
+
   const sectionMatch = /^\/admin\/config\/([A-Za-z]+)$/.exec(url.pathname);
   if (req.method === "PATCH" && sectionMatch) {
     const section = sectionMatch[1]!;
@@ -2929,6 +3233,20 @@ const DOCTOR_PROBE_MS = 8_000;
 const LOG_TAIL_BYTES = 512 * 1024;
 
 /** A promise's value, or `fallback` once `ms` have passed. */
+/** An embedding provider spec the Console may check: provider:model (#102). */
+const EMBEDDING_SPEC = /^(ollama|openai|openai-compatible):[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
+/**
+ * An Ollama model from the default registry: `name[:tag]`, or a
+ * `namespace/name[:tag]` there. No host (a dot in the first segment), no
+ * `..`, so nothing is pulled from another registry.
+ */
+const OLLAMA_MODEL_NAME = /^(?:[a-z0-9][a-z0-9_-]{0,63}\/)?[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9_-]+)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,63})?$/;
+const MEMORY_CHECK_MS = 20_000;
+const OLLAMA_PULL_MS = 15 * 60_000;
+let ollamaPullRunning = false;
+/** The Ollama model the last memory check reported missing: the only one a pull may fetch (#111 review). */
+let lastMissingOllamaModel: string | undefined;
+
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
@@ -3436,19 +3754,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
 
-    const metadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
-    const model = typeof input.model === "string" ? input.model : "mindstone/default";
-    const agentId = typeof metadata.agentId === "string" ? metadata.agentId : "default";
-    const sessionKey = gatewaySessionKey({
-      config: loadedConfig.config,
-      explicitSessionKey: metadata.sessionKey,
-      agentId,
-      substrate: "openai",
-      channel: "openai-responses",
-      chatType: "internal",
-      senderId: typeof input.user === "string" ? input.user : model,
-    });
-    const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-responses", chatType: "internal", senderId: typeof input.user === "string" ? input.user : model });
+    // The same audience and session rules as chat completions (#112 review).
+    const caller = consoleTurnCaller(req, input, loadedConfig.config, "openai-responses");
+    if ("error" in caller) {
+      sendJson(res, 400, openAiError(caller.error, "invalid_request_error", "missing_user"));
+      return;
+    }
+    const { audience, metadata, model, agentId, senderId, sessionKey } = caller;
+    const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-responses", chatType: "internal", senderId });
     const persistedEntries = responseInputs.map((entry) => appendTranscriptEntry({
       sessionKey,
       agentId,
@@ -3463,7 +3776,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       },
     }));
 
-    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
     if (routed.routed && routed.status === 200) {
       const routedBody = routed.body as { entry?: TranscriptEntry; identityContext?: unknown; promptWindow?: unknown; runId?: string };
       const outputText = routedBody.entry?.text ?? "";
@@ -3557,26 +3870,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return;
     }
 
-    const forwarded = forwardedUser(req);
-    const metadata0 = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
-    const metadata: Record<string, unknown> = { ...metadata0, ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}), ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}) };
-    const model = typeof input.model === "string" ? input.model : "mindstone/default";
-    const agentId = agentIdFromModel(loadedConfig.config, model, metadata.agentId);
-    const senderId = forwarded.userId ?? (typeof input.user === "string" ? input.user : model);
-    // Each Console conversation is its own session (#38), so separate chats don't
-    // share a context window. They are all the same agent's transcripts, so the
-    // memory backfill indexes every one into that agent's memory.
-    const sessionKey = gatewaySessionKey({
-      config: loadedConfig.config,
-      explicitSessionKey: metadata.sessionKey ?? (forwarded.conversationId
-        ? consoleConversationSessionKey(senderId, forwarded.conversationId)
-        : undefined),
-      agentId,
-      substrate: "openai",
-      channel: "openai-chat-completions",
-      chatType: "internal",
-      senderId,
-    });
+    const caller = consoleTurnCaller(req, input, loadedConfig.config, "openai-chat-completions");
+    if ("error" in caller) {
+      sendJson(res, 400, openAiError(caller.error, "invalid_request_error", "missing_user"));
+      return;
+    }
+    const { forwarded, roleHeaderSent, audience, metadata, model, agentId, senderId, sessionKey } = caller;
 
     const source = gatewayTranscriptSource({ substrate: "openai", channel: "openai-chat-completions", chatType: "internal", senderId });
     // The gateway already holds the conversation (#38): clients such as LibreChat
@@ -3592,7 +3891,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       .filter((text): text is string => Boolean(text));
     // A role header that is present but blank (LibreChat blanks a placeholder it
     // can't fill) is an unknown user, not a trusted caller.
-    const roleHeaderSent = req.headers["x-mindstone-user-role"] !== undefined;
     const keepClientSystem = forwarded.userRole ? forwarded.userRole.toLowerCase() === "admin" : !roleHeaderSent;
     const keptSystemEntries: TranscriptEntry[] = [];
     const commonMetadata = {
@@ -3651,7 +3949,22 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 400, openAiError("the last message must be a user message", "invalid_request_error", "invalid_messages"));
       return;
     }
-    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    // The owner's first Console conversation after setup starts identity
+    // formation, once per agent, not once per conversation (#102). Only a
+    // Console conversation: a script calling with the service token doesn't
+    // use it up.
+    const pending = audience === "owner" && forwarded.conversationId
+      ? pendingIdentityFormation(loadedConfig.config, loadedConfig.path, agentId, sessionKey)
+      : undefined;
+    const identityFormation = pending && claimIdentityFormation(agentId, sessionKey) ? pending : undefined;
+    let routed: Awaited<ReturnType<typeof runConfiguredRoute>>;
+    try {
+      routed = await runConfiguredRoute({ sessionKey, agentId, audience, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model }, identityFormation });
+    } catch (error) {
+      if (identityFormation) releaseIdentityFormation(agentId);
+      throw error;
+    }
+    if (identityFormation && !(routed.routed && routed.status === 200)) releaseIdentityFormation(agentId);
     if (routed.routed && routed.status === 200 && input.stream === true) {
       // OpenAI-compatible server-sent events. LibreChat (and the openai/langchain clients generally)
       // send `stream: true` unconditionally and cannot parse a plain chat.completion body, so a
