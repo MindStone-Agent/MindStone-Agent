@@ -802,6 +802,107 @@ rm -f "${SECRETS}/lnk" "${SECRETS}/hardlink"; rmdir "${SECRETS}/adir"
 printf '{"advancedSettings":false}\n' > "${PERMS}"
 echo "secrets list and delete assertions passed"
 
+# 7b. The Skill Builder (#104): list, draft, review, install and discard from
+#     the Console; a skill proposed in a reply becomes a skill_install approval
+#     and nothing is written before it is approved; installed skills reach the
+#     owner's prompt.
+SKILLS="${TEMP_RUNTIME}/mindstone/skills"
+RUNTIME_BASE="$(basename "${TEMP_RUNTIME}")"
+no_host_path() { grep -q "${RUNTIME_BASE}" "${BODY}" && { echo "$1 showed a host path: $(cat "${BODY}")" >&2; exit 1; }; return 0; }
+printf '{"advancedSettings":false}\n' > "${PERMS}"
+expect "$(get /admin/skills)" 200 "listing skills"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const s=b.skills.find(x=>x.id==="integration-builder"); process.exit(s&&s.source==="builtin"?0:1)' "${BODY}" || { echo "the built-in skill should be listed: $(cat "${BODY}")" >&2; exit 1; }
+expect "$(get /admin/skills/integration-builder)" 200 "showing a built-in skill"
+grep -q '"skillMarkdown"' "${BODY}" || { echo "a skill's detail should carry SKILL.md" >&2; exit 1; }
+expect "$(get '/admin/skills/integration-builder?source=weird')" 400 "a skill with an unknown source"
+expect "$(get /admin/skills/no-such-skill)" 404 "an unknown skill"
+no_host_path "an unknown skill"
+# Drafts: from scratch and from a built-in; bad input is refused.
+expect "$(post /admin/skills/drafts '{"id":"Bad Id","label":"x","description":"y"}')" 400 "a draft with a bad id"
+expect "$(post /admin/skills/drafts '{"id":"drafts","label":"x","description":"y"}')" 400 "a draft named drafts"
+expect "$(post /admin/skills/drafts '{"id":"no-desc","label":"x"}')" 400 "a draft without a description"
+expect "$(post /admin/skills/drafts '{"fromBuiltin":"no-such-builtin"}')" 400 "a draft from an unknown built-in"
+expect "$(post /admin/skills/drafts '{"id":"x","label":"x","description":"y","whenToUse":"not a list"}')" 400 "a draft with a malformed list"
+expect "$(post /admin/skills/drafts '{"id":"weekly-report","label":"Weekly report","description":"Summarize the week","goal":"GOAL-SENTINEL-104","whenToUse":["on Fridays"],"instructions":"# Weekly report\nSKILL-SENTINEL-104"}')" 200 "drafting a skill from scratch"
+[[ -f "${SKILLS}/drafts/weekly-report/SKILL.md" && ! -e "${SKILLS}/weekly-report" ]] || { echo "the draft should be under drafts/ only" >&2; exit 1; }
+grep -q 'GOAL-SENTINEL-104' "${SKILLS}/drafts/weekly-report/skill.json" || { echo "the draft should keep its goal" >&2; exit 1; }
+expect "$(post /admin/skills/drafts '{"id":"weekly-report","label":"Weekly report","description":"Summarize the week"}')" 409 "drafting over an existing draft"
+no_host_path "a refused draft"
+expect "$(post /admin/skills/drafts '{"fromBuiltin":"integration-builder","id":"my-integrations","goal":"connect the CRM"}')" 200 "drafting from a built-in"
+expect "$(get '/admin/skills/weekly-report?source=draft')" 200 "reviewing a draft"
+grep -q 'SKILL-SENTINEL-104' "${BODY}" || { echo "the draft review should carry its SKILL.md" >&2; exit 1; }
+# Install needs the advanced-settings permission.
+expect "$(post /admin/skills/weekly-report/install '{}')" 403 "installing a skill without the advanced permission"
+[[ ! -e "${SKILLS}/weekly-report" ]] || { echo "a refused install installed the skill" >&2; exit 1; }
+expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings for skills"
+expect "$(post /admin/skills/weekly-report/install '{"force":"yes"}')" 400 "a non-boolean force on install"
+expect "$(post /admin/skills/weekly-report/install '{}')" 200 "installing a skill"
+[[ -f "${SKILLS}/weekly-report/SKILL.md" && ! -e "${SKILLS}/drafts/weekly-report" ]] || { echo "the install should move the draft" >&2; exit 1; }
+grep -q '"userId":"smoke-admin","action":"skill_installed","skill":"weekly-report"' "${DATA}/admin/audit.jsonl" || { echo "the install was not audited" >&2; exit 1; }
+expect "$(get /admin/skills)" 200 "listing skills after the install"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(b.skills.some(x=>x.id==="weekly-report"&&x.source==="installed")?0:1)' "${BODY}" || { echo "the installed skill should be listed as installed" >&2; exit 1; }
+expect "$(post /admin/skills/no-such-draft/install '{}')" 404 "installing a draft that isn't there"
+no_host_path "a missing draft"
+# Replacing an installed skill takes force, at the draft and at the install.
+expect "$(post /admin/skills/drafts '{"id":"weekly-report","label":"Weekly report v2","description":"Summarize the week"}')" 409 "drafting over an installed skill"
+expect "$(post /admin/skills/drafts '{"id":"weekly-report","label":"Weekly report v2","description":"Summarize the week","force":true}')" 200 "drafting over an installed skill with force"
+expect "$(post /admin/skills/weekly-report/install '{}')" 409 "installing over an installed skill"
+grep -Eq '"code": ?"skill_exists"' "${BODY}" || { echo "the refusal should say skill_exists: $(cat "${BODY}")" >&2; exit 1; }
+expect "$(post /admin/skills/weekly-report/install '{"force":true}')" 200 "replacing an installed skill with force"
+grep -q 'Weekly report v2' "${SKILLS}/weekly-report/skill.json" || { echo "force should replace the installed skill" >&2; exit 1; }
+# Discard a draft.
+expect "$(del /admin/skills/drafts/my-integrations)" 200 "discarding a draft"
+[[ ! -e "${SKILLS}/drafts/my-integrations" ]] || { echo "the draft is still there" >&2; exit 1; }
+expect "$(del /admin/skills/drafts/my-integrations)" 404 "discarding a draft twice"
+expect "$(del /admin/skills/drafts/weekly-report)" 404 "discarding an installed skill as a draft"
+[[ -f "${SKILLS}/weekly-report/SKILL.md" ]] || { echo "discarding a draft removed an installed skill" >&2; exit 1; }
+# The owner's prompt carries installed skills and how to propose one.
+PROJECT_ROOT="${PROJECT_ROOT}" node --input-type=module -e '
+const m = await import(process.env.PROJECT_ROOT + "/packages/mindstone-pi-adapter/dist/index.js");
+const c = m.buildPiAdapterSkillsContext();
+const fail = (x) => { console.error(x + ": " + c.text.slice(0, 400)); process.exit(1); };
+if (!c.text.includes("<skill id=\"weekly-report\">")) fail("the installed skill should be in the prompt");
+if (!c.text.includes("mindstone-skill-proposal")) fail("the prompt should say how to propose a skill");
+if (c.text.includes("my-integrations")) fail("a discarded draft is in the prompt");' || exit 1
+# A skill proposed in a reply becomes a skill_install approval; nothing is written first.
+CHAT_ID="$(PROJECT_ROOT="${PROJECT_ROOT}" node --input-type=module -e '
+const core = await import(process.env.PROJECT_ROOT + "/packages/mindstone-core/dist/index.js");
+const block = (o) => "```mindstone-skill-proposal\n" + JSON.stringify(o) + "\n```";
+const ok = { id: "chat-skill", label: "Chat skill", description: "From chat", goal: "Show it works", whenToUse: ["when asked"], instructions: "CHAT-SKILL-SENTINEL" };
+const r = core.applyActionProposalDiscipline({ replyText: "Here you go.\n" + block(ok), origin: "chat" });
+if (r.proposals.length !== 1 || r.proposals[0].kind !== "skill_install" || r.text !== "Here you go.") { console.error("a skill block should become one proposal: " + JSON.stringify(r)); process.exit(1); }
+for (const bad of [{ ...ok, id: "Bad Id" }, { ...ok, instructions: "x".repeat(16001) }, { ...ok, whenToUse: "x" }, { ...ok, label: "" }]) {
+  const b = core.applyActionProposalDiscipline({ replyText: block(bad), origin: "chat" });
+  if (b.proposals.length !== 0 || b.text !== "") { console.error("a malformed skill block should be dropped: " + JSON.stringify(bad).slice(0, 80)); process.exit(1); }
+}
+console.log(r.proposals[0].id);')" || exit 1
+[[ ! -e "${SKILLS}/chat-skill" && ! -e "${SKILLS}/drafts/chat-skill" ]] || { echo "a proposed skill was written before approval" >&2; exit 1; }
+expect "$(get "/admin/approvals/${CHAT_ID}")" 200 "showing a skill proposal"
+grep -q 'CHAT-SKILL-SENTINEL' "${BODY}" || { echo "the approval detail should carry the proposed skill" >&2; exit 1; }
+printf '{"advancedSettings":false}\n' > "${PERMS}"
+expect "$(post "/admin/approvals/${CHAT_ID}/approve" '{}')" 403 "approving a skill without the advanced permission"
+[[ "$(action_field "${CHAT_ID}" status)" == "pending" ]] || { echo "a refused skill approval changed the action" >&2; exit 1; }
+expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings for the approval"
+expect "$(post "/admin/approvals/${CHAT_ID}/approve" '{}')" 200 "approving a proposed skill"
+grep -Eq '"kind": ?"skill_install"' "${BODY}" || { echo "approve result: $(cat "${BODY}")" >&2; exit 1; }
+[[ -f "${SKILLS}/chat-skill/SKILL.md" ]] && grep -q 'CHAT-SKILL-SENTINEL' "${SKILLS}/chat-skill/SKILL.md" || { echo "the approved skill should be installed" >&2; exit 1; }
+[[ "$(action_field "${CHAT_ID}" decidedBy)" == "console:smoke-admin" ]] || { echo "decidedBy should name the Console user" >&2; exit 1; }
+# A second proposal for the same id: refused without force; a rejected one writes nothing.
+TWO_IDS="$(PROJECT_ROOT="${PROJECT_ROOT}" node --input-type=module -e '
+const core = await import(process.env.PROJECT_ROOT + "/packages/mindstone-core/dist/index.js");
+const block = (o) => "```mindstone-skill-proposal\n" + JSON.stringify(o) + "\n```";
+const again = core.applyActionProposalDiscipline({ replyText: block({ id: "chat-skill", label: "Again", description: "Again" }), origin: "chat" });
+const other = core.applyActionProposalDiscipline({ replyText: block({ id: "rejected-skill", label: "No", description: "No" }), origin: "chat" });
+console.log(again.proposals[0].id + " " + other.proposals[0].id);')" || exit 1
+AGAIN_ID="${TWO_IDS% *}"; REJECT_ID="${TWO_IDS#* }"
+expect "$(post "/admin/approvals/${AGAIN_ID}/approve" '{}')" 409 "approving a skill that is already installed"
+grep -Eq '"code": ?"skill_exists"' "${BODY}" || { echo "the refusal should say skill_exists" >&2; exit 1; }
+no_host_path "a skill_exists refusal"
+expect "$(post "/admin/approvals/${REJECT_ID}/reject" '{"note":"not now"}')" 200 "rejecting a proposed skill"
+[[ ! -e "${SKILLS}/rejected-skill" && ! -e "${SKILLS}/drafts/rejected-skill" ]] || { echo "a rejected skill was written" >&2; exit 1; }
+printf '{"advancedSettings":false}\n' > "${PERMS}"
+echo "skill builder assertions passed"
+
 # 8. Doctor and logs (#86): `mindstone doctor` and `mindstone gateway logs`
 #    for the Console, masked, with doctor's probes capped.
 get() { curl -s -o "${BODY}" -w '%{http_code}' "${ADMIN[@]}" "${BASE}$1"; }
