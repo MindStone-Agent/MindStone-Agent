@@ -254,6 +254,18 @@ if (!texts.includes("purple-otter-canyon")) { console.error("control: the rest o
 # --- 5b. Asking the same question again and again doesn't crowd the answer out.
 for i in 1 2 3 4 5 6 7 8 9; do chat admin smoke-admin "conv-repeat-${i}" "What is the admin phrase?"; done
 prompt_has conv-repeat-9 'purple-otter-canyon' || { echo "repeats of the question crowded the answer out of recall" >&2; exit 1; }
+# The question itself (asked in the earlier chats) is not one of the recall hits.
+DIR="${DATA}/transcripts" node -e '
+const fs = require("fs"), path = require("path"), crypto = require("crypto");
+const entries = fs.readdirSync(process.env.DIR).filter((f) => f.endsWith(".jsonl"))
+  .flatMap((f) => fs.readFileSync(path.join(process.env.DIR, f), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)))
+  .filter((e) => String(e.sessionKey).endsWith(":conv-repeat-9"));
+const recall = entries.find((e) => e.metadata?.event === "memory_recall_injected");
+if (!recall) { console.error("no recall event for the repeated question"); process.exit(1); }
+const asked = crypto.createHash("sha256").update("What is the admin phrase?").digest("hex");
+if ((recall.metadata?.hits ?? []).some((hit) => hit.sha256 === asked)) { console.error("the question itself came back as a recall hit"); process.exit(1); }
+'
+
 
 # --- 6. A knowledge base is still searched once the recall index exists.
 chat admin smoke-admin conv-kb "Which keycard opens the north loading gate?"
