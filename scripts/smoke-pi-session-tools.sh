@@ -130,6 +130,16 @@ expectThrow("new built-in with a relabelled source", () => assertNoUnexpectedPiB
 expectPass("read offered and enabled", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [builtin("read"), { name: "mindstone_memory_read", sourceInfo: { source: "extension" } }] }, ["read"]));
 NODE
 
+# Pi 0.87's powershell built-in can never be enabled (sessions only turn on
+# Pi's default tools, so the turns above can't see this; check the allowlist).
+node --input-type=module <<'NODE'
+import { piSessionEnabledBuiltinTools, piSessionExcludedBuiltinTools } from "./packages/mindstone-gateway/dist/index.js";
+const enabled = piSessionEnabledBuiltinTools(["powershell", "read"]);
+if (enabled.includes("powershell")) { console.error("powershell should never be enableable: " + JSON.stringify(enabled)); process.exit(1); }
+if (!piSessionExcludedBuiltinTools(["powershell"]).includes("powershell")) { console.error("powershell should always be excluded"); process.exit(1); }
+console.log("ok: powershell never enableable");
+NODE
+
 # Pi 0.87's paid cache warming (#128 review): off in MindStone's agent dir unless its settings.json names a mode.
 AGENT_DIR="${TEMP_RUNTIME}/pi-agent" node --input-type=module <<'NODE'
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
