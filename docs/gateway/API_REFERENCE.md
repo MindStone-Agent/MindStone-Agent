@@ -329,7 +329,7 @@ Optional fields:
 
 | Field | Notes |
 | --- | --- |
-| `model` | Used for metadata and routed model selection. Defaults to `mindstone/default`. |
+| `model` | Defaults to `mindstone/default`. `mindstone/<agentId>` names an agent and means that agent's model: its own `defaultModel`, else `routing.defaultModel`. Any other id is the model itself, but only for the owner; a non-owner (a Console user, a tenant) always gets the agent's model (#134). |
 | `user` | Used as source sender ID when present. |
 | `metadata.agentId` | Optional MindStone agent ID. Defaults to `default`. |
 | `metadata.sessionKey` | Optional explicit MindStone session key. |
@@ -392,7 +392,7 @@ Optional fields:
 
 | Field | Notes |
 | --- | --- |
-| `model` | Used for metadata and routed model selection. Defaults to `mindstone/default`. |
+| `model` | Defaults to `mindstone/default`. `mindstone/<agentId>` names an agent and means that agent's model: its own `defaultModel`, else `routing.defaultModel`. Any other id is the model itself, but only for the owner; a non-owner (a Console user, a tenant) always gets the agent's model (#134). |
 | `user` | Used as source sender ID when present. |
 | `metadata.agentId` | Optional MindStone agent ID. Defaults to `default`. |
 | `metadata.sessionKey` | Optional explicit MindStone session key. |

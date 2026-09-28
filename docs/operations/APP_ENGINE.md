@@ -118,6 +118,11 @@ by deployment choice and are **never required** by the runtime:
   scope, as is per-dimension storage partitioning.
 - Core stays provider-agnostic: callers of `runMindStone` supply
   provider/model (the Gateway route resolves them from config, as always).
+- The Gateway picks a run's model from config: the agent's own
+  `defaultModel`, then `routing.defaultModel`. A tenant-scoped run (with an
+  `appId`, `tenantId` or `userId`) can't choose the model; a `metadata.model`
+  it sends is ignored. An unscoped run with the service token is the owner's
+  and may name one (#134).
 - `memoryScope` governs recall only; transcripts always record at the run's
   full scope.
 

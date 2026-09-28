@@ -46,17 +46,19 @@ for (const [id, url] of [["alpha", process.env.ALPHA_URL!], ["beta", process.env
 }
 TS
 
-# config <routing.defaultModel> [agents.default.defaultModel]
+# config <routing.defaultModel|none> [agents.default.defaultModel] [routing mode]
 config() {
-  DEFAULT_MODEL="$1" AGENT_MODEL="${2:-}" node -e '
+  DEFAULT_MODEL="$1" AGENT_MODEL="${2:-}" ROUTING_MODE="${3:-pi-session}" node -e '
 const fs = require("fs"); const p = process.env.MINDSTONE_AGENT_RUNTIME_DIR + "/mindstone/config.json";
 const c = JSON.parse(fs.readFileSync(p, "utf8"));
 c.gateway = { ...(c.gateway ?? {}), auth: { mode: "token", tokenEnv: "MS_SMOKE_TOKEN" }, http: { chatCompletions: { enabled: true } } };
-c.routing = { mode: "pi-session", defaultAgentId: "default", defaultModel: process.env.DEFAULT_MODEL, pi: { agentDir: process.env.MINDSTONE_AGENT_RUNTIME_DIR + "/pi-agent" } };
+c.routing = { mode: process.env.ROUTING_MODE, defaultAgentId: "default", pi: { agentDir: process.env.MINDSTONE_AGENT_RUNTIME_DIR + "/pi-agent" } };
+if (process.env.DEFAULT_MODEL !== "none") c.routing.defaultModel = process.env.DEFAULT_MODEL;
 c.memory = { ...(c.memory ?? {}), autoRecall: false };
 // Without an agent model, the agent keeps the init-runtime alias
 // "mindstone/default", as on a fresh install.
-c.agents = { ...(c.agents ?? {}), default: { ...(c.agents?.default ?? { id: "default" }), defaultModel: process.env.AGENT_MODEL || "mindstone/default" } };
+c.agents = { ...(c.agents ?? {}), default: { ...(c.agents?.default ?? { id: "default" }), defaultModel: process.env.AGENT_MODEL || "mindstone/default" },
+  research: { id: "research", defaultModel: "alpha/stub-model" } };
 fs.writeFileSync(p, JSON.stringify(c, null, 2));
 '
 }
@@ -93,4 +95,21 @@ expect "$(chat admin beta/stub-model c4)" BETA-ANSWERED "the owner's requested m
 config "beta/stub-model"
 expect "$(chat admin nope/no-such-model c5)" BETA-ANSWERED "an unknown model should fall back to the configured default"
 grep -q 'Pi has no model "nope/no-such-model"' "${TEMP_RUNTIME}/gateway.log" || { echo "the fallback to the default model should be logged" >&2; exit 1; }
+# 5. The CLI picks the same model as the Console for the same agent (#134 review).
+cli() { env -i HOME="${HOME}" PATH="${PATH}" MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}" ./scripts/mindstone chat --once "which model answers?" "$@" 2>&1; }
+config "beta/stub-model"
+expect "$(cli)" BETA-ANSWERED "the CLI should use the model chosen in setup for the default agent"
+expect "$(cli --agent research)" ALPHA-ANSWERED "the CLI should use the research agent's own model"
+expect "$(chat admin mindstone/research c6)" ALPHA-ANSWERED "the Console should use the research agent's own model"
+# 6. Routing mode "pi" (the Pi provider) follows the same rules.
+config "beta/stub-model" "" pi
+expect "$(chat admin mindstone/default c7)" BETA-ANSWERED "pi mode: a Console chat should use the model chosen in setup"
+before="$(wc -l < "${TEMP_RUNTIME}/gateway.log")"
+expect "$(chat admin nope/other-model c8)" BETA-ANSWERED "pi mode: an unknown model should fall back to the configured default"
+tail -n +"$((before + 1))" "${TEMP_RUNTIME}/gateway.log" | grep -q 'Pi has no model "nope/other-model"' || { echo "pi mode: the fallback should be logged" >&2; exit 1; }
+# 7. With no configured default, an unknown model goes to the first available one, and that is logged.
+config none
+before="$(wc -l < "${TEMP_RUNTIME}/gateway.log")"
+expect "$(chat admin nope/third-model c9)" ALPHA-ANSWERED "with no default, the first available model answers"
+tail -n +"$((before + 1))" "${TEMP_RUNTIME}/gateway.log" | grep -q 'using the first available one' || { echo "the first-available fallback should be logged" >&2; exit 1; }
 echo "Model selection smoke test passed."

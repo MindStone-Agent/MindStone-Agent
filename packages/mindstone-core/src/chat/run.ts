@@ -111,16 +111,38 @@ function numberFromMetadata(metadata: Record<string, unknown> | undefined, key: 
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+/** "mindstone/<agentId>" names an agent (the Console sends "mindstone/default"), not a model. */
+export function isAgentModelAlias(id: string): boolean {
+  return /^mindstone\/[A-Za-z0-9_.-]+$/.test(id);
+}
+
+/**
+ * The model id an agent's turn runs on, the same everywhere (gateway, CLI,
+ * TUI) (#126 J11, #118):
+ * - a model the caller names, unless it is an agent alias, which means "this
+ *   agent's model" (the Console's "mindstone/default" once reached Pi as an
+ *   unknown model and fell through to the first available one);
+ * - then the agent's own defaultModel, then the install's routing.defaultModel.
+ *   An alias as the agent's model is a placeholder (init-runtime writes
+ *   "mindstone/default" there), not a choice.
+ * Callers pass `requested` only for the owner: a non-owner can't choose.
+ */
+export function resolveAgentModelId(input: { config?: MindStoneConfig; agentId: string; requested?: string }): string {
+  const requested = input.requested && !isAgentModelAlias(input.requested) ? input.requested : undefined;
+  const agent = input.config?.agents?.[input.agentId];
+  const agentModel = agent?.defaultModel && !isAgentModelAlias(agent.defaultModel) ? agent.defaultModel : undefined;
+  return requested ?? agentModel ?? input.config?.routing?.defaultModel ?? agent?.defaultModel ?? `mindstone/${input.agentId}`;
+}
+
 export function resolveMindStoneChatModel(input: {
   config?: MindStoneConfig;
   agentId: string;
   routingMode: "placeholder" | "mock" | "pi" | "pi-session";
   metadata?: Record<string, unknown>;
 }): MindStoneModelInfo {
-  const metadataModel = typeof input.metadata?.model === "string" ? input.metadata.model : undefined;
   const agent = input.config?.agents?.[input.agentId];
   return {
-    id: metadataModel ?? input.config?.routing?.defaultModel ?? agent?.defaultModel ?? `mindstone/${input.agentId}`,
+    id: resolveAgentModelId({ config: input.config, agentId: input.agentId, requested: typeof input.metadata?.model === "string" ? input.metadata.model : undefined }),
     provider: input.routingMode,
     contextWindowTokens: numberFromMetadata(input.metadata, "contextWindowTokens") ?? agent?.contextWindowTokens ?? 128_000,
   };
