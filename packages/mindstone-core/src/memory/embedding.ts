@@ -1,10 +1,18 @@
 import type { MindStoneConfig } from "../config/index.js";
+import { runtimePathsFromEnv } from "../paths/runtime.js";
+import { enterpriseEmbeddingEndpoint, isEnterpriseEmbeddingProvider } from "../provider/enterprise.js";
 
 export type MemoryEmbeddingProviderConfig = {
   id: string;
   model: string;
   baseUrl: string;
   apiKey?: string;
+  /** Request headers instead of a Bearer apiKey (an enterprise endpoint's: Azure's api-key, a gateway's own). */
+  headers?: Record<string, string>;
+  /** false: a redirect is an error, so the key and headers only reach baseUrl. */
+  followRedirects?: boolean;
+  /** Why this provider can't embed (an enterprise provider that isn't registered): every request fails with it. */
+  unavailable?: string;
   timeoutMs?: number;
 };
 
@@ -65,6 +73,20 @@ export function resolveMemoryEmbeddingProviderConfig(
     };
   }
 
+  if (isEnterpriseEmbeddingProvider(provider)) {
+    // A registered enterprise endpoint (#126): its own address and key, never the environment's.
+    const agentDir = config?.routing?.pi?.agentDir ?? runtimePathsFromEnv(env).piAgentDir;
+    const endpoint = enterpriseEmbeddingEndpoint(agentDir, provider);
+    return {
+      id: provider,
+      model,
+      baseUrl: "error" in endpoint ? "" : endpoint.baseUrl,
+      ...("error" in endpoint ? { unavailable: endpoint.error } : { headers: endpoint.headers }),
+      followRedirects: false,
+      timeoutMs: Number(envValue(env, "EMBEDDER_TIMEOUT_MS") ?? 10_000),
+    };
+  }
+
   if (provider === "openai-compatible" || provider === "http") {
     return {
       id: provider,
@@ -105,6 +127,9 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
   readonly model: string;
   readonly #baseUrl: string;
   readonly #apiKey?: string;
+  readonly #headers?: Record<string, string>;
+  readonly #followRedirects: boolean;
+  readonly #unavailable?: string;
   readonly #timeoutMs: number;
 
   constructor(config: MemoryEmbeddingProviderConfig) {
@@ -112,12 +137,16 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
     this.model = config.model;
     this.#baseUrl = trimTrailingSlash(config.baseUrl);
     this.#apiKey = config.apiKey;
+    this.#headers = config.headers;
+    this.#followRedirects = config.followRedirects !== false;
+    this.#unavailable = config.unavailable;
     this.#timeoutMs = config.timeoutMs ?? 10_000;
   }
 
   async embedTexts(texts: string[]): Promise<number[][]> {
     const normalized = texts.map((text) => text.trim()).filter((text) => text.length > 0);
     if (normalized.length === 0) return [];
+    if (this.#unavailable) throw new Error(this.#unavailable);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
@@ -125,10 +154,12 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
       const response = await fetch(`${this.#baseUrl}/embeddings`, {
         method: "POST",
         headers: {
+          ...this.#headers,
           "content-type": "application/json",
           ...(this.#apiKey ? { authorization: `Bearer ${this.#apiKey}` } : {}),
         },
         body: JSON.stringify({ model: this.model, input: normalized }),
+        redirect: this.#followRedirects ? "follow" : "error",
         signal: controller.signal,
       });
       const body = await response.json() as OpenAiEmbeddingResponse;
@@ -172,11 +203,17 @@ export async function probeMemoryEmbeddingProvider(
       dimensions: embedding?.length,
     };
   } catch (error) {
+    // A provider's error can quote the request: its key and header values are never shown.
+    const known = [resolved.apiKey, ...Object.values(resolved.headers ?? {})]
+      .map((value) => value?.replace(/^Bearer /i, ""))
+      .filter((value): value is string => typeof value === "string" && value.length >= 8)
+      .sort((a, b) => b.length - a.length);
+    const message = error instanceof Error ? error.message : String(error);
     return {
       providerId: resolved.id,
       model: resolved.model,
       baseUrl: resolved.baseUrl,
-      error: error instanceof Error ? error.message : String(error),
+      error: known.reduce((text, value) => text.split(value).join("[redacted]"), message),
     };
   }
 }

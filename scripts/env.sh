@@ -62,6 +62,7 @@ if [[ "${MSA_ALLOW_HOST_PROVIDER_ENV:-0}" != "1" ]]; then
   unset AWS_ACCESS_KEY_ID || true
   unset AWS_SECRET_ACCESS_KEY || true
   unset AWS_BEARER_TOKEN_BEDROCK || true
+  unset AWS_SESSION_TOKEN || true
 fi
 
 if [[ -f "${MINDSTONE_AGENT_RUNTIME_DIR}/env.local" ]]; then

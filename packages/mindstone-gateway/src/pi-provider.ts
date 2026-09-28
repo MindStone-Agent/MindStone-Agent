@@ -1,6 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { guardEnterpriseEndpoints } from "./enterprise-redirect-guard.js";
 import type { MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo } from "@mindstone-agent/core";
 
 type PiModel = {
@@ -31,9 +32,16 @@ type PiModelRuntime = {
   completeSimple(model: PiModel, context: unknown, options?: Record<string, unknown>): Promise<unknown>;
 };
 
+/** Pi 0.87's credential store: locked, 0600 writes to one auth.json. */
+type PiAuthStorage = {
+  modify(provider: string, fn: (current: unknown) => Promise<unknown>): Promise<unknown>;
+  delete(provider: string): Promise<void>;
+};
+
 type PiProviderModules = {
   ModelRuntime: { create(options: { authPath: string; modelsPath: string | null; allowModelNetwork?: boolean }): Promise<PiModelRuntime> };
   ModelRegistry: new (runtime: PiModelRuntime) => PiRegistry;
+  AuthStorage: { create(path: string): PiAuthStorage };
 };
 
 export type PiMindStoneProviderOptions = {
@@ -52,11 +60,12 @@ async function importFromProject<T>(projectRoot: string, path: string): Promise<
 }
 
 async function loadPiProviderModules(projectRoot: string): Promise<PiProviderModules> {
-  const [{ ModelRuntime }, { ModelRegistry }] = await Promise.all([
+  const [{ ModelRuntime }, { ModelRegistry }, { AuthStorage }] = await Promise.all([
     importFromProject<{ ModelRuntime: PiProviderModules["ModelRuntime"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/model-runtime.js"),
     importFromProject<{ ModelRegistry: PiProviderModules["ModelRegistry"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/model-registry.js"),
+    importFromProject<{ AuthStorage: PiProviderModules["AuthStorage"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/auth-storage.js"),
   ]);
-  return { ModelRuntime, ModelRegistry };
+  return { ModelRuntime, ModelRegistry, AuthStorage };
 }
 
 function toModelInfo(model: PiModel): MindStoneModelInfo {
@@ -118,6 +127,46 @@ function readPiSettings(agentDir: string): { defaultProvider?: string; defaultMo
   }
 }
 
+export type PiProviderCredential = { type: "api_key"; key: string; env?: Record<string, string> };
+
+/**
+ * Writes (or, with undefined, removes) a provider's entry in the isolated
+ * Pi auth.json through Pi's own AuthStorage, which locks the file and keeps
+ * it 0600. Throws when Pi could not persist the change.
+ */
+export async function setPiProviderCredential(agentDir: string, provider: string, credential: PiProviderCredential | undefined, projectRoot?: string): Promise<void> {
+  const modules = await loadPiProviderModules(resolve(projectRoot ?? projectRootFromEnv()));
+  const path = join(resolve(agentDir), "auth.json");
+  // Pi 0.87 applies 0600 only when it creates the file (auth-storage.ts), so an
+  // existing one is narrowed first: a key never goes into a looser file.
+  if (existsSync(path)) chmodSync(path, 0o600);
+  const storage = modules.AuthStorage.create(path);
+  if (credential) await storage.modify(provider, async () => credential);
+  else await storage.delete(provider);
+}
+
+/**
+ * A provider's auth.json entry exactly as stored (its key never resolved as
+ * a template), or undefined when it has none. Throws when auth.json can't be read.
+ */
+export async function piProviderCredential(agentDir: string, provider: string): Promise<{ type: string; key?: string; env?: Record<string, string> } | undefined> {
+  const path = join(resolve(agentDir), "auth.json");
+  if (!existsSync(path)) return undefined;
+  const data = JSON.parse(readFileSync(path, "utf-8").replace(/^\uFEFF/, "")) as unknown;
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("the isolated auth.json can't be read");
+  const credential = Object.hasOwn(data, provider) ? (data as Record<string, unknown>)[provider] : undefined;
+  return credential && typeof credential === "object" ? { ...(credential as { type: string; key?: string; env?: Record<string, string> }) } : undefined;
+}
+
+/** The type of a provider's auth.json entry ("api_key", "oauth"), or undefined when it has none. */
+export async function piProviderCredentialType(agentDir: string, provider: string): Promise<string | undefined> {
+  return (await piProviderCredential(agentDir, provider))?.type;
+}
+
+export type PiModelTestResult =
+  | { ok: true; model: string; reply: string; latencyMs: number }
+  | { ok: false; model?: string; error: string; latencyMs?: number };
+
 export class PiMindStoneProvider implements MindStoneModelProvider {
   readonly id = "pi";
   readonly #projectRoot: string;
@@ -130,6 +179,7 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
   constructor(options: PiMindStoneProviderOptions = {}) {
     this.#projectRoot = resolve(options.projectRoot ?? projectRootFromEnv());
     this.#agentDir = resolve(options.agentDir ?? process.env.PI_CODING_AGENT_DIR ?? join(this.#projectRoot, ".runtime", "pi-agent"));
+    guardEnterpriseEndpoints(this.#agentDir);
     this.#defaultProvider = options.defaultProvider;
     this.#defaultModel = options.defaultModel;
   }
@@ -196,6 +246,50 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
       return available[0];
     }
     throw new Error("No isolated Pi model is available/configured for MindStone-Agent routing");
+  }
+
+  /**
+   * One short completion against exactly this provider and model (never a
+   * fallback model), for the Console's live Test.
+   */
+  async testModel(provider: string, modelId: string, timeoutMs: number): Promise<PiModelTestResult> {
+    const { runtime, registry } = await this.#load();
+    const piModel = registry.find(provider, modelId);
+    if (!piModel) return { ok: false, error: `${provider}/${modelId} isn't a registered model` };
+    const id = `${provider}/${modelId}`;
+    const auth = await registry.getApiKeyAndHeaders(piModel);
+    if (!auth.ok) return { ok: false, model: id, error: auth.error };
+    // A provider's error can quote the request; its own key, header values
+    // and secret settings (keys, tokens, the key file's path) are never shown.
+    const secretEnv = Object.entries(auth.env ?? {}).filter(([name]) => /KEY|SECRET|TOKEN|CREDENTIALS|PASSWORD/i.test(name)).map(([, value]) => value);
+    const known = [auth.apiKey, ...Object.values(auth.headers ?? {}), ...secretEnv]
+      .filter((value): value is string => typeof value === "string" && value.length >= 8)
+      .sort((a, b) => b.length - a.length);
+    const redact = (text: string) => known.reduce((out, value) => out.split(value).join("[redacted]"), text);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const started = Date.now();
+    try {
+      // The runtime resolves the provider's key, headers and settings itself, as a chat does.
+      const assistant = await runtime.completeSimple(piModel, {
+        messages: [{ role: "user", content: "Reply with the single word: ready", timestamp: Date.now() }],
+        tools: [],
+      }, {
+        signal: controller.signal,
+        maxTokens: 64,
+      });
+      const latencyMs = Date.now() - started;
+      const record = (assistant ?? {}) as { stopReason?: unknown; errorMessage?: unknown };
+      if (record.stopReason === "error" || record.stopReason === "aborted") {
+        const error = controller.signal.aborted ? `no answer within ${Math.round(timeoutMs / 1000)} s` : typeof record.errorMessage === "string" && record.errorMessage ? record.errorMessage : "the model returned an error";
+        return { ok: false, model: id, error: redact(error), latencyMs };
+      }
+      return { ok: true, model: id, reply: redact(textFromAssistantMessage(assistant).trim()).slice(0, 200), latencyMs };
+    } catch (error) {
+      return { ok: false, model: id, error: controller.signal.aborted ? `no answer within ${Math.round(timeoutMs / 1000)} s` : redact(error instanceof Error ? error.message : String(error)), latencyMs: Date.now() - started };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async completeChat(request: MindStoneChatRequest): Promise<MindStoneChatResult> {
