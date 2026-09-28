@@ -7,6 +7,14 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ## [Unreleased]
 
 ### Fixed
+- **Console setup reaches a working agent, and only admins are the owner in Console chats** (#102, #103).
+  - **Identity formation now runs in Console chats.** `/v1/chat/completions` never called the first-activation identity-formation prompt, so a Console-only install never started it, even after `mindstone onboard`. The owner's first Console conversation after setup now starts it, once per agent rather than once per conversation. It waits until setup has finished.
+  - **`POST /admin/onboarding/complete`** finishes the Console's setup as `mindstone onboard` does: the onboarding record and the IDENTITY.md/USER.md scaffold, from the same core code. A placeholder is replaced with a backup; a real file is kept.
+  - **The memory step:** `POST /admin/memory/check` runs a live embed with the provider about to be saved, and `POST /admin/memory/pull` downloads a missing Ollama embedding model.
+  - **The checklist:** `/admin/status` now says `onboarded` only with a provider, a persona, memory (a vector store and an embedding provider) and the identity scaffold. Memory is required, and says what's missing; a new `identity` step; connectors stay optional.
+  - **Owner audience (#103):** a Console `user`, or a blank role header, now gets the non-owner context: no USER.md, memory index, autoRecall, owner-only invariants or handoff. Before, every Console user got the owner's. A Console admin, and a direct caller with the service token and no role header, are still the owner.
+  - `onboarding.identity.mode` is validated (`defer`, `seed` or `custom`).
+  - New smoke: `scripts/smoke-console-onboarding.sh`.
 - **The advanced-settings confirmation no longer has to be typed exactly** (console #18). `POST /admin/permissions/advanced` refused `Enable advanced settings` (a phone capitalizing the first letter) and a trailing space from autocomplete. It now ignores case, surrounding whitespace and repeated spaces, but the words must still be `enable advanced settings`; anything else is still a `400`. The admin smoke covers both.
 - **The installer failed on a fresh machine.** Building Pi regenerated its model lists from the providers' live APIs on every install. When a provider added a field Pi doesn't know, the generated file stopped compiling and the install died in `npm run install:native` (it did on 2026-09-27). The build now uses the committed model lists; `npm run build:regen-models` in `vendor/pi/packages/ai` regenerates them on purpose. Re-running the installer restores the committed model lists and npm lockfiles before pulling, so an earlier install can't block the update or break the build.
 - **`install.sh --no-link` left the CLI unbuilt**, so `./node_modules/.bin/mindstone` said "not built yet" and the installer stopped at its own status check. It now builds the CLI in place.

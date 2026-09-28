@@ -220,6 +220,11 @@ export function validateMindStoneConfig(config: MindStoneConfig): string[] {
     issues.push("gateway.auth password mode should use passwordEnv");
   }
 
+  const identityMode = config.onboarding?.identity?.mode;
+  if (identityMode !== undefined && !["defer", "seed", "custom"].includes(identityMode)) {
+    issues.push("onboarding.identity.mode must be defer, seed, or custom");
+  }
+
   const routingMode = config.routing?.mode;
   if (routingMode && !["placeholder", "mock", "pi", "pi-session"].includes(routingMode)) {
     issues.push("routing.mode must be placeholder, mock, pi, or pi-session");
@@ -1965,6 +1970,106 @@ function writeScaffoldIfMissingOrPlaceholder(path: string, body: string, replace
   return true;
 }
 
+/**
+ * Write the first-activation IDENTITY.md and USER.md scaffold for the default
+ * agent from the onboarding record: what `mindstone onboard` writes, shared
+ * with the Console's setup (#102). An initializer placeholder is replaced
+ * (with a .pre-onboarding-placeholder.bak backup); a real file is never
+ * overwritten. `purpose` and `userContext` are the user's own words and are
+ * escaped as Markdown here.
+ */
+export function writeOnboardingIdentityScaffold(params: {
+  config: MindStoneConfig;
+  configPath: string;
+  purpose?: string;
+  userContext?: string;
+  /** Who wrote it, for the scaffold's first line. */
+  createdBy?: string;
+}): { identityPath: string; userPath: string; identityCreated: boolean; userCreated: boolean } {
+  const paths = resolveOnboardingAgentPaths(params.config, params.configPath);
+  const identityText = readFileIfExists(paths.identityPath);
+  const userText = readFileIfExists(paths.userPath);
+  const identityIsPlaceholder = identityText ? isInitializerPlaceholderIdentity(identityText) : false;
+  const userIsPlaceholder = userText ? isInitializerPlaceholderUserContext(userText) : false;
+  const profile = params.config.onboarding?.profile;
+  const profileDefinition = getBuiltInMindStoneProfile(profile?.id);
+  const profileLines = selectedProfileToLines(profile);
+  const preferenceLines = selectedPreferencesToLines(params.config.onboarding?.preferences);
+  const identityLines = selectedIdentityToLines(params.config.onboarding?.identity);
+  const purpose = markdownEscape(params.purpose ?? "");
+  const userContext = markdownEscape(params.userContext ?? "");
+  const createdBy = params.createdBy ?? "`mindstone onboard`";
+  const now = new Date().toISOString();
+  const identityBody = `# MindStone Agent Identity Pending
+
+This identity scaffold was created by ${createdBy} on ${now}.
+
+The agent has not yet established a durable name, voice, or self-description. On first activation, it should read the user context, understand the requested purpose, and collaboratively form its own identity rather than pretending a complete identity already exists.
+
+## Base profile seed
+
+${profileLines.join("\n")}
+
+## Preference seed
+
+${preferenceLines.join("\n")}
+
+## Identity emergence seed
+
+${identityLines.join("\n")}
+
+## Purpose seed
+
+${purpose || profileDefinition?.purposeSeed || profile?.description || "No purpose seed provided."}
+
+## Operating notes
+
+- Be honest about uncertainty.
+- Do not overclaim unverified work.
+- Protect user files, credentials, and memory.
+- Prefer durable continuity over performative personality.
+- Treat any candidate name or direction as a seed, not a completed identity, until first activation and collaboration make it real.
+`;
+
+  const userBody = `# User Context
+
+This user/project context scaffold was created by ${createdBy} on ${now}.
+
+## Base profile
+
+${profileLines.join("\n")}
+
+## Interaction and operating preferences
+
+${preferenceLines.join("\n")}
+
+## Identity emergence
+
+${identityLines.join("\n")}
+
+## Initial purpose
+
+${purpose || profileDefinition?.purposeSeed || profile?.description || "No initial purpose provided."}
+
+## Initial context
+
+${userContext || "No initial context provided."}
+
+## Collaboration defaults
+
+- Ask before destructive filesystem, git, database, credential, or memory operations.
+- State what was verified versus inferred.
+- Preserve useful context in memory/checkpoints when appropriate.
+`;
+
+  return {
+    identityPath: paths.identityPath,
+    userPath: paths.userPath,
+    identityCreated: writeScaffoldIfMissingOrPlaceholder(paths.identityPath, identityBody, identityIsPlaceholder),
+    userCreated: writeScaffoldIfMissingOrPlaceholder(paths.userPath, userBody, userIsPlaceholder),
+  };
+}
+
 async function createOnboardingIdentityFiles(params: {
   prompter: MindStonePrompter;
   config: MindStoneConfig;
@@ -2035,71 +2140,12 @@ async function createOnboardingIdentityFiles(params: {
     }),
   );
 
-  const now = new Date().toISOString();
-  const identityBody = `# MindStone Agent Identity Pending
-
-This identity scaffold was created by \`mindstone onboard\` on ${now}.
-
-The agent has not yet established a durable name, voice, or self-description. On first activation, it should read the user context, understand the requested purpose, and collaboratively form its own identity rather than pretending a complete identity already exists.
-
-## Base profile seed
-
-${profileLines.join("\n")}
-
-## Preference seed
-
-${preferenceLines.join("\n")}
-
-## Identity emergence seed
-
-${identityLines.join("\n")}
-
-## Purpose seed
-
-${purpose || profileDefinition?.purposeSeed || profile?.description || "No purpose seed provided."}
-
-## Operating notes
-
-- Be honest about uncertainty.
-- Do not overclaim unverified work.
-- Protect user files, credentials, and memory.
-- Prefer durable continuity over performative personality.
-- Treat any candidate name or direction as a seed, not a completed identity, until first activation and collaboration make it real.
-`;
-
-  const userBody = `# User Context
-
-This user/project context scaffold was created by \`mindstone onboard\` on ${now}.
-
-## Base profile
-
-${profileLines.join("\n")}
-
-## Interaction and operating preferences
-
-${preferenceLines.join("\n")}
-
-## Identity emergence
-
-${identityLines.join("\n")}
-
-## Initial purpose
-
-${purpose || profileDefinition?.purposeSeed || profile?.description || "No initial purpose provided."}
-
-## Initial context
-
-${userContext || "No initial context provided."}
-
-## Collaboration defaults
-
-- Ask before destructive filesystem, git, database, credential, or memory operations.
-- State what was verified versus inferred.
-- Preserve useful context in memory/checkpoints when appropriate.
-`;
-
-  const identityCreated = writeScaffoldIfMissingOrPlaceholder(paths.identityPath, identityBody, identityIsPlaceholder);
-  const userCreated = writeScaffoldIfMissingOrPlaceholder(paths.userPath, userBody, userIsPlaceholder);
+  const { identityCreated, userCreated } = writeOnboardingIdentityScaffold({
+    config: params.config,
+    configPath: params.configPath,
+    purpose,
+    userContext,
+  });
   await params.prompter.note(
     [
       `${identityCreated ? "Created" : "Kept existing"}: ${paths.identityPath}`,

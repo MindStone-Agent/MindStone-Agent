@@ -15,6 +15,7 @@ import {
   configEtag,
   decideAdminAccess,
   EDITABLE_SECTIONS,
+  onboardingSteps,
   ADVANCED_GRANT_MS,
   effectivePermissions,
   ifMatchSatisfied,
@@ -136,6 +137,11 @@ import {
   ConnectorDeliveryQueue,
   getMindStoneDoctorReport,
   probeMemoryEmbeddingProvider,
+  resolveMemoryEmbeddingProviderConfig,
+  buildIdentityFormationPrompt,
+  writeOnboardingIdentityScaffold,
+  getBuiltInMindStoneProfile,
+  type MindStoneIdentityFormationPrompt,
   applyActionProposalDiscipline,
   configuredConnectorIds,
   connectorAccessPolicyFromChannelConfig,
@@ -878,6 +884,34 @@ function withoutOwnerProfile(
   return { ...context, userMarkdown: undefined, userPath: undefined };
 }
 
+/** Where the gateway records that an agent's identity formation has started (#102). */
+function identityFormationMarker(agentId: string): string {
+  return join(runtimePathsFromEnv().dataDir, "identity-formation", `${encodeURIComponent(agentId)}.json`);
+}
+
+/**
+ * The identity-formation prompt for this turn, if the agent's formation hasn't
+ * started yet and this is the session's first turn after onboarding (#102).
+ */
+function pendingIdentityFormation(config: MindStoneConfig | undefined, agentId: string, sessionKey: string): MindStoneIdentityFormationPrompt | undefined {
+  // Not before setup has finished: the persona step alone writes an
+  // onboarding record, but not the identity scaffold.
+  if (!config?.onboarding?.identity) return undefined;
+  if (existsSync(identityFormationMarker(agentId))) return undefined;
+  return buildIdentityFormationPrompt({ agentId, entries: readTranscriptEntries(sessionKey), config });
+}
+
+function markIdentityFormationPrompted(agentId: string, sessionKey: string): void {
+  const marker = identityFormationMarker(agentId);
+  try {
+    mkdirSync(dirname(marker), { recursive: true, mode: 0o700 });
+    writeFileSync(marker, `${JSON.stringify({ agentId, sessionKey, promptedAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+  } catch {
+    // Unrecorded: the next new conversation starts formation again, which is
+    // the safe side.
+  }
+}
+
 async function runConfiguredRoute(input: {
   sessionKey: string;
   agentId: string;
@@ -899,6 +933,8 @@ async function runConfiguredRoute(input: {
   recallScope?: Record<string, string>;
   /** Deterministic request-level routing: forced persona wins over workflow decisions; forced workflow bypasses selection. */
   route?: { personaId?: string; workflowId?: string };
+  /** The first-activation identity-formation prompt, for an owner's first turn (#102). */
+  identityFormation?: MindStoneIdentityFormationPrompt;
 }): Promise<{
   routed: boolean;
   status: number;
@@ -994,6 +1030,7 @@ async function runConfiguredRoute(input: {
         contextManagement: input.config?.contextManagement,
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
+        identityFormation: input.audience === "owner" ? input.identityFormation : undefined,
         memoryRecall: {
           enabled: (input.audience === "owner" || input.audience === "tenant") && input.config?.memory?.autoRecall === true,
           provider: input.config?.memory?.vectorStore === "sqlite-vec"
@@ -1034,6 +1071,17 @@ async function runConfiguredRoute(input: {
       },
     });
 
+    if (route.identityFormation?.enabled) {
+      appendTranscriptEntry({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        role: "event",
+        text: "Injected first-activation identity formation prompt into context.",
+        runId: run.id,
+        source,
+        metadata: { event: "identity_formation_prompted", mode: route.identityFormation.mode, durable: false },
+      });
+    }
     if (route.handoffReplay) {
       appendTranscriptEntry({
         sessionKey: input.sessionKey,
@@ -2030,6 +2078,150 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/admin/onboarding/complete") {
+    // The Console's setup finishes what `mindstone onboard` does (#102): the
+    // onboarding record and the IDENTITY.md/USER.md scaffold, so the owner's
+    // first chat starts identity formation. The answers are the user's own
+    // words; nothing here names a file or a command.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const limits: Record<string, number> = { purpose: 2000, userContext: 4000, projectContext: 2000 };
+    const answers: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(body)) {
+      const max = limits[key];
+      if (max === undefined || (value !== undefined && typeof value !== "string") || (typeof value === "string" && value.length > max)) {
+        refuse(400, { error: "send { purpose?, userContext?, projectContext? } as short text" }, { reason: "invalid", key });
+        return;
+      }
+      answers[key] = typeof value === "string" && value.trim() ? value.trim() : undefined;
+    }
+    await withAdminWriteLock(() => {
+      const loaded = loadMindStoneConfig(configPath);
+      if (loaded.error) {
+        sendJson(res, 503, { ok: false, error: CONFIG_UNREADABLE });
+        return;
+      }
+      if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "finishing setup needs the advanced-settings permission" }, { reason: "advanced" });
+        return;
+      }
+      const config = (loaded.config ?? {}) as MindStoneConfig;
+      const steps = onboardingSteps(config).steps;
+      if (!steps.provider.done || !steps.persona.done) {
+        refuse(409, { error: "choose a model provider and a persona first" }, { reason: "not_ready" });
+        return;
+      }
+      const now = new Date().toISOString();
+      const agentId = config.routing?.defaultAgentId ?? "default";
+      const builtIn = getBuiltInMindStoneProfile(config.agents?.[agentId]?.profileId);
+      const next: MindStoneConfig = {
+        ...config,
+        onboarding: {
+          ...config.onboarding,
+          profile: config.onboarding?.profile ?? (builtIn ? { id: builtIn.id, label: builtIn.label, description: builtIn.description, selectedAt: now } : undefined),
+          preferences: { ...config.onboarding?.preferences, ...(answers.projectContext ? { projectContext: answers.projectContext } : {}) },
+          identity: { mode: "defer", selectedAt: now, ...config.onboarding?.identity },
+        },
+      };
+      const issues = validateMindStoneConfig(next);
+      if (issues.length > 0) {
+        refuse(422, { error: "the change doesn't validate", errors: issues.map((issue) => ({ error: issue })) }, { reason: "invalid" });
+        return;
+      }
+      const configTarget = realConfigPath(configPath);
+      writeFileAtomic(configTarget, `${JSON.stringify(next, null, 2)}\n`, fileMode(configTarget, 0o600));
+      const scaffold = writeOnboardingIdentityScaffold({
+        config: next,
+        configPath,
+        purpose: answers.purpose,
+        userContext: answers.userContext,
+        createdBy: "the MindStone Console's setup",
+      });
+      appendAdminAudit(paths.dataDir, { userId, action: "onboarding_completed", identityCreated: scaffold.identityCreated, userCreated: scaffold.userCreated });
+      sendJson(res, 200, { ok: true, identity: scaffold.identityCreated ? "created" : "kept", user: scaffold.userCreated ? "created" : "kept" });
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/admin/memory/check") {
+    // A live embed with the embedding provider setup is about to save (#102):
+    // the same probe as doctor, on the candidate instead of the saved config.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const spec = body.embeddingProvider;
+    if (Object.keys(body).some((key) => key !== "embeddingProvider") || typeof spec !== "string" || !EMBEDDING_SPEC.test(spec)) {
+      refuse(400, { error: 'send { "embeddingProvider": "ollama:<model>" } (or openai: / openai-compatible:)' }, { reason: "invalid" });
+      return;
+    }
+    if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+      refuse(403, { error: "checking an embedding provider needs the advanced-settings permission" }, { reason: "advanced" });
+      return;
+    }
+    const loaded = loadMindStoneConfig(configPath);
+    if (loaded.error) {
+      sendJson(res, 503, { ok: false, error: CONFIG_UNREADABLE });
+      return;
+    }
+    const candidate: MindStoneConfig = { ...loaded.config, memory: { ...loaded.config?.memory, embeddingProvider: spec } };
+    const probe = await withTimeout(probeMemoryEmbeddingProvider(candidate), MEMORY_CHECK_MS, undefined);
+    const ok = Boolean(probe && !probe.error && probe.dimensions);
+    const error = !probe ? `no answer within ${MEMORY_CHECK_MS / 1000} s` : probe.error ?? (probe.dimensions ? undefined : "the provider returned no embedding");
+    appendAdminAudit(paths.dataDir, { userId, action: "memory_checked", embeddingProvider: spec, ok });
+    sendJson(res, 200, ok
+      ? { ok: true, providerId: probe!.providerId, model: probe!.model, dimensions: probe!.dimensions }
+      : { ok: false, error, missingModel: spec.startsWith("ollama:") && /not found|pull/i.test(error ?? "") });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/admin/memory/pull") {
+    // Download an Ollama embedding model, so a missing one doesn't need a
+    // terminal on the gateway host (#102). One download at a time.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const model = body.model;
+    if (Object.keys(body).some((key) => key !== "model") || typeof model !== "string" || !OLLAMA_MODEL_NAME.test(model)) {
+      refuse(400, { error: 'send { "model": "<ollama model name>" }' }, { reason: "invalid" });
+      return;
+    }
+    if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+      refuse(403, { error: "downloading a model needs the advanced-settings permission" }, { reason: "advanced" });
+      return;
+    }
+    if (ollamaPullRunning) {
+      refuse(409, { error: "a model download is already running; wait for it to finish" }, { reason: "busy" });
+      return;
+    }
+    const resolved = resolveMemoryEmbeddingProviderConfig({ memory: { embeddingProvider: `ollama:${model}` } });
+    const root = (resolved?.baseUrl ?? "http://127.0.0.1:11434/v1").replace(/\/v1$/, "");
+    ollamaPullRunning = true;
+    let result: { ok: true } | { ok: false; error: string };
+    try {
+      const response = await fetch(`${root}/api/pull`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, stream: false }),
+        signal: AbortSignal.timeout(OLLAMA_PULL_MS),
+      });
+      const text = await response.text();
+      let parsed: { status?: unknown; error?: unknown } = {};
+      try {
+        parsed = JSON.parse(text) as typeof parsed;
+      } catch {
+        // Not JSON: reported below.
+      }
+      result = response.ok && parsed.status === "success"
+        ? { ok: true }
+        : { ok: false, error: typeof parsed.error === "string" ? parsed.error : `Ollama answered ${response.status}` };
+    } catch (error) {
+      result = { ok: false, error: error instanceof Error && error.name === "TimeoutError" ? "the download took too long" : "Ollama can't be reached from the gateway" };
+    } finally {
+      ollamaPullRunning = false;
+    }
+    appendAdminAudit(paths.dataDir, { userId, action: "memory_model_pulled", model, ok: result.ok });
+    sendJson(res, 200, result);
+    return;
+  }
+
   const sectionMatch = /^\/admin\/config\/([A-Za-z]+)$/.exec(url.pathname);
   if (req.method === "PATCH" && sectionMatch) {
     const section = sectionMatch[1]!;
@@ -2745,6 +2937,13 @@ const DOCTOR_PROBE_MS = 8_000;
 const LOG_TAIL_BYTES = 512 * 1024;
 
 /** A promise's value, or `fallback` once `ms` have passed. */
+/** An embedding provider spec the Console may check: provider:model (#102). */
+const EMBEDDING_SPEC = /^(ollama|openai|openai-compatible):[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
+const OLLAMA_MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
+const MEMORY_CHECK_MS = 20_000;
+const OLLAMA_PULL_MS = 15 * 60_000;
+let ollamaPullRunning = false;
+
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
@@ -3458,7 +3657,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 400, openAiError("the last message must be a user message", "invalid_request_error", "invalid_messages"));
       return;
     }
-    const routed = await runConfiguredRoute({ sessionKey, agentId, audience: "owner", config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model } });
+    // Who the turn answers (#103): a Console admin is the owner; any other
+    // Console user, or a role header left blank, gets the non-owner context,
+    // as a connector's non-owner does. A direct caller with the service token
+    // and no role header is the owner, as before.
+    const audience: RouteAudience = forwarded.userRole
+      ? (forwarded.userRole.toLowerCase() === "admin" ? "owner" : "non_owner")
+      : roleHeaderSent ? "non_owner" : "owner";
+    // The owner's first Console chat after setup starts identity formation,
+    // once per agent, not once per conversation (#102).
+    const identityFormation = audience === "owner" ? pendingIdentityFormation(loadedConfig.config, agentId, sessionKey) : undefined;
+    const routed = await runConfiguredRoute({ sessionKey, agentId, audience, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model }, identityFormation });
+    if (identityFormation && routed.routed && routed.status === 200) markIdentityFormationPrompted(agentId, sessionKey);
     if (routed.routed && routed.status === 200 && input.stream === true) {
       // OpenAI-compatible server-sent events. LibreChat (and the openai/langchain clients generally)
       // send `stream: true` unconditionally and cannot parse a plain chat.completion body, so a

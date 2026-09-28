@@ -136,7 +136,12 @@ function hasReplayedHandoff(entries: TranscriptEntry[], sha256: string): boolean
   });
 }
 
-function buildIdentityFormationPrompt(input: {
+/**
+ * The first-activation identity-formation prompt for an owner's first turn,
+ * or undefined when onboarding hasn't run or this session is past its first
+ * turn. The gateway's chat-completions route uses it too (#102).
+ */
+export function buildIdentityFormationPrompt(input: {
   agentId: string;
   entries: TranscriptEntry[];
   config?: MindStoneConfig;
