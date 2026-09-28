@@ -60,7 +60,10 @@ if result["name"] != "bob-plain":
 import re
 # Also catch an echo split by escape codes or shown in part: strip ANSI codes
 # and look for any 4-character piece of the secret (#130 review).
-shown = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text.split("RESULT")[0])
+shown = text.split("RESULT")[0]
+shown = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", shown)  # OSC sequences
+shown = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", shown)  # CSI sequences
+shown = re.sub(r"[\u200b-\u200d\u2060\ufeff]", "", shown)  # zero-width characters
 secret = "SMOKE-SECRET-4471"
 pieces = [secret[i:i + 4] for i in range(len(secret) - 3)]
 if any(piece in shown for piece in pieces):

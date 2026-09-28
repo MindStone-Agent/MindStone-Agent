@@ -117,21 +117,22 @@ type PiSettingsManagerLike = {
 const CACHE_WARMING_MODES = ["off", "streaming", "idle"];
 
 export function disablePiCacheWarmingUnlessSet(input: { settingsManager: PiSettingsManagerLike; agentDir: string }): boolean {
-  let settings: Record<string, unknown> = {};
+  // Only a valid mode in a file that parses counts as the owner's choice. In
+  // every other case the session's mode is set off: a BOM is stripped and an
+  // empty file is {}, as Pi reads them, and when Pi couldn't load the file its
+  // save() leaves the file untouched, so only the session changes (#130 review).
   const path = join(input.agentDir, "settings.json");
+  let settings: unknown = {};
   if (existsSync(path)) {
-    // A BOM is stripped, as Pi does. A file that doesn't parse is left alone
-    // (Pi won't write a settings file it couldn't load either) (#130 review).
     try {
-      settings = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, "")) as Record<string, unknown>;
+      const raw = readFileSync(path, "utf8").replace(/^\uFEFF/, "");
+      settings = raw.trim() === "" ? {} : JSON.parse(raw);
     } catch {
-      return false;
+      settings = undefined;
     }
-    if (!settings || typeof settings !== "object" || Array.isArray(settings)) return false;
   }
-  // Only a mode Pi knows counts as the owner's choice: an invalid value (a
-  // typo, null) makes Pi fall back to "streaming" (#129).
-  if (settings && typeof settings === "object" && CACHE_WARMING_MODES.includes(settings.cacheWarming as string)) return false;
+  if (settings && typeof settings === "object" && !Array.isArray(settings)
+    && CACHE_WARMING_MODES.includes((settings as Record<string, unknown>).cacheWarming as string)) return false;
   input.settingsManager.setCacheWarmingMode?.("off");
   return true;
 }

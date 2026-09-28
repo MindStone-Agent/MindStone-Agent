@@ -36,7 +36,8 @@ let settings = {};
 if (fs.existsSync(path)) {
   // Like Pi: a BOM is stripped, and a file that does not parse (or is not an
   // object) is left alone rather than replaced (#130 review).
-  try { settings = JSON.parse(fs.readFileSync(path, "utf8").replace(/^\uFEFF/, "")); } catch { process.exit(0); }
+  // An empty file is {} (Pi reads it that way).
+  try { const raw = fs.readFileSync(path, "utf8").replace(/^\uFEFF/, ""); settings = raw.trim() === "" ? {} : JSON.parse(raw); } catch { process.exit(0); }
   if (!settings || typeof settings !== "object" || Array.isArray(settings)) process.exit(0);
 }
 if (!["off", "streaming", "idle"].includes(settings.cacheWarming)) {
