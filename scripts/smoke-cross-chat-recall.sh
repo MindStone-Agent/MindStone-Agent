@@ -112,6 +112,12 @@ for (const [question, facts] of cases) {
   for (const fact of facts) if (!texts.includes(fact)) fail("a non-Latin fact was dropped as a repeat: " + fact + " kept: " + JSON.stringify(texts));
   if (texts.includes(question)) fail("control: the question itself should still be dropped: " + question);
 }
+// Text with no letters or digits (emoji, punctuation) never counts as a repeat.
+{
+  const provider = { id: "unit", search: () => ["🎉 🎉", "✅"].map((text, i) => ({ id: "e" + i, chunkId: "e" + i + "#0", sourceId: "e" + i, kind: "file", text, score: 0.7 })) };
+  const result = await recallMindStoneMemory({ agentId: "default", entries: [{ id: "q", role: "user", text: "👍👍", timestamp: "t" }], provider });
+  if ((result?.hits ?? []).length !== 2) fail("emoji-only hits were dropped as repeats: " + JSON.stringify((result?.hits ?? []).map((hit) => hit.text)));
+}
 })().catch((error) => { console.error(error); process.exit(1); });
 ' || exit 1
 
