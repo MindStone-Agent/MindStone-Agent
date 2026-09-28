@@ -24,6 +24,8 @@ export type MemoryRecallInput = {
    * documents never surface.
    */
   scope?: Record<string, string>;
+  /** Not the owner's turn: the owner's chat transcripts are left out (#106 review). */
+  excludeOwnerTranscripts?: boolean;
 };
 
 const DEFAULT_MAX_RESULTS = 8;
@@ -49,6 +51,10 @@ function lexicalScore(query: string, text: string): number {
     if (textWords.has(word)) matches += 1;
   }
   return matches / queryWords.size;
+}
+
+function normalizedQuestion(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function lastUserText(entries: TranscriptEntry[]): string | undefined {
@@ -170,7 +176,13 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
   const limit = input.config?.maxResults ?? DEFAULT_MAX_RESULTS;
   const minScore = input.config?.minScore ?? DEFAULT_MIN_SCORE;
   const maxPromptTokens = input.config?.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS;
-  const rawHits = await provider.search({ text: query, limit: Math.max(limit * 3, limit), agentId: input.agentId, ...(input.scope ? { scope: input.scope } : {}) });
+  const rawHits = await provider.search({
+    text: query,
+    limit: Math.max(limit * 3, limit),
+    agentId: input.agentId,
+    ...(input.scope ? { scope: input.scope } : {}),
+    ...(input.excludeOwnerTranscripts ? { excludeOwnerTranscripts: true } : {}),
+  });
   const scopeRejected: Array<{ id: string; chunkId: string; reason: string }> = [];
   const scopedHits = rawHits.filter((hit) => {
     const documentScope = hit.metadata?.scope as Record<string, unknown> | undefined;
@@ -178,7 +190,27 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
     scopeRejected.push({ id: hit.id, chunkId: hit.chunkId, reason: "scope_mismatch" });
     return false;
   });
-  const thresholdHits = scopedHits.filter((hit) => hit.score >= minScore);
+  // An earlier chat that asked the same question carries no answer, and
+  // repeats of it could crowd out the chunk that does (#106 review).
+  const asked = normalizedQuestion(query);
+  const repeatRejected: Array<{ id: string; chunkId: string; reason: string }> = [];
+  // The same text said in several chats (a repeated reply) takes one slot:
+  // hits arrive best first, so the first copy is kept.
+  const seenTexts = new Set<string>();
+  const freshHits = scopedHits.filter((hit) => {
+    const text = normalizedQuestion(hit.text);
+    if (text === asked) {
+      repeatRejected.push({ id: hit.id, chunkId: hit.chunkId, reason: "repeats_query" });
+      return false;
+    }
+    if (seenTexts.has(text)) {
+      repeatRejected.push({ id: hit.id, chunkId: hit.chunkId, reason: "duplicate_text" });
+      return false;
+    }
+    seenTexts.add(text);
+    return true;
+  });
+  const thresholdHits = freshHits.filter((hit) => hit.score >= minScore);
   const ranked = rankMemoryHitsWithScri(thresholdHits, {
     activeEntries: input.entries,
     dedupAgainstActiveContext: input.config?.dedupAgainstActiveContext,
@@ -194,7 +226,7 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
         rawHitCount: rawHits.length,
         rankedHitCount: ranked.hits.length,
         selectedHitCount: 0,
-        rejected: [...scopeRejected, ...ranked.rejected],
+        rejected: [...scopeRejected, ...repeatRejected, ...ranked.rejected],
       },
     };
   }
@@ -213,7 +245,7 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
       rawHitCount: rawHits.length,
       rankedHitCount: ranked.hits.length,
       selectedHitCount: prompt.hits.length,
-      rejected: [...scopeRejected, ...ranked.rejected],
+      rejected: [...scopeRejected, ...repeatRejected, ...ranked.rejected],
     },
   };
 }

@@ -200,6 +200,8 @@ if (!recall) { console.error("no recall event in the new chat transcript: " + JS
 const hits = JSON.stringify(recall.metadata?.hits ?? []);
 if (!hits.includes("conv-plant")) { console.error("the recall event should point at chat 1: " + hits.slice(0, 400)); process.exit(1); }
 if (hits.includes("conv-user")) { console.error("the recall event points at a Console user chat"); process.exit(1); }
+const planted = (recall.metadata?.hits ?? []).find((hit) => JSON.stringify(hit).includes("conv-plant"));
+if (!/^[0-9a-f]{64}$/.test(String(planted?.sha256 ?? ""))) { console.error("each recall hit should carry the sha256 of its text: " + JSON.stringify(planted)); process.exit(1); }
 '
 
 # --- 3. An embedder failure doesn't fail the reply; the missed turn is indexed with the next one.
@@ -230,6 +232,14 @@ code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer
 [[ "${code}" == 200 ]] || { echo "the tenant run failed (${code}): $(cat "${BODY}")" >&2; exit 1; }
 node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").filter(Boolean); process.stdout.write(JSON.parse(l.pop()).messages.map((m)=>m.text??"").join("\n"))' "${CAPTURE}" > "${TEMP_RUNTIME}/tenant.prompt"
 grep -q 'purple-otter-canyon\|BISCUIT-9431\|FAKEPROBEKEY' "${TEMP_RUNTIME}/tenant.prompt" && { echo "a tenant run recalled the owner's chats" >&2; exit 1; }
+# The same, when the run's recall scope comes out empty (no appId for "app",
+# neither appId nor tenantId for "tenant"): it is still not the owner's run.
+for run in '{"text":"What is the admin phrase?","tenantId":"acme","userId":"cust42","memoryScope":"app"}' '{"text":"What is the admin phrase?","userId":"cust42","memoryScope":"tenant"}'; do
+  : > "${CAPTURE}"
+  code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${RECALL_TOKEN}" -H 'content-type: application/json' -d "${run}" "${BASE}/agents/default/runs")"
+  [[ "${code}" == 200 ]] || { echo "the tenant run failed (${code}): $(cat "${BODY}")" >&2; exit 1; }
+  grep -q 'purple-otter-canyon' "${CAPTURE}" && { echo "a tenant run with an empty recall scope recalled the owner's chats: ${run}" >&2; exit 1; }
+done
 # Control: the owner still recalls it, with the key masked in the index.
 chat admin smoke-admin conv-phrase "What is the admin phrase?"
 prompt_has conv-phrase 'purple-otter-canyon' || { echo "control: the owner should recall the phrase" >&2; exit 1; }
@@ -240,6 +250,10 @@ const texts = db.prepare("SELECT text FROM memory_chunks").all().map((row) => ro
 if (texts.includes("FAKEPROBEKEY")) { console.error("the key was indexed verbatim"); process.exit(1); }
 if (!texts.includes("purple-otter-canyon")) { console.error("control: the rest of the turn should be indexed"); process.exit(1); }
 '
+
+# --- 5b. Asking the same question again and again doesn't crowd the answer out.
+for i in 1 2 3 4 5 6 7 8 9; do chat admin smoke-admin "conv-repeat-${i}" "What is the admin phrase?"; done
+prompt_has conv-repeat-9 'purple-otter-canyon' || { echo "repeats of the question crowded the answer out of recall" >&2; exit 1; }
 
 # --- 6. A knowledge base is still searched once the recall index exists.
 chat admin smoke-admin conv-kb "Which keycard opens the north loading gate?"

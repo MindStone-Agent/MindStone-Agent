@@ -400,6 +400,13 @@ const isId: Check = (value) => value === undefined || (typeof value === "string"
 const oneOf = (...allowed: string[]): Check => (value) => value === undefined || (typeof value === "string" && allowed.includes(value));
 /** Only turning something off is free. */
 const onlyOff: Check = (value) => value === false;
+/**
+ * memory.autoRecall is on when absent (#106): turning it off is free, and so is
+ * a change that leaves it on (absent to true, true to absent). Turning it on
+ * from false still needs the permission.
+ */
+const autoRecallOffOrUnchanged: Check = (value, previous) =>
+  value === false || ((value === true || value === undefined) && previous !== false);
 /** Only turning something on is free (a safety switch). */
 const onlyOn: Check = (value) => value === undefined || value === true;
 const stringList = (value: unknown): string[] | undefined =>
@@ -440,9 +447,9 @@ const SAFE_SETTINGS: Array<{ pattern: string; value: Check }> = [
   // Automatic recall is on by default (#106). Turning it back on after the
   // owner turned it off still needs the permission: it indexes and recalls the
   // owner's memory files, which a tenant run can still see (#71; chat
-  // transcripts are kept from tenant runs). Turning it off stays free. Absent
-  // means on, so removing the key is not free either.
-  { pattern: "memory.autoRecall", value: onlyOff },
+  // transcripts are kept from tenant runs). Turning it off stays free, and so
+  // does a change that leaves it on, since absent means on.
+  { pattern: "memory.autoRecall", value: autoRecallOffOrUnchanged },
   { pattern: "memory.vectorStore", value: oneOf("lancedb", "sqlite-vec", "memory") },
   { pattern: "memory.recall.maxResults", value: inRange(1, 100) },
   { pattern: "memory.recall.maxPromptTokens", value: inRange(1, 1_000_000) },

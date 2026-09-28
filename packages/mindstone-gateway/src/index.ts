@@ -1214,6 +1214,8 @@ async function runConfiguredRoute(input: {
           }),
           config: input.config?.memory?.recall,
           scope: input.recallScope ?? input.scope,
+          // A tenant run never gets the owner's chats, whatever its scope holds (#106 review).
+          excludeOwnerTranscripts: input.audience !== "owner",
         },
         invariants: {
           enabled: input.config?.memory?.invariants?.enabled !== false,

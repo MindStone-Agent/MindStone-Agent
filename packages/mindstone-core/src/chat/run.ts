@@ -497,6 +497,9 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
         }),
         config: input.config?.memory?.recall,
         scope: input.recallScope ?? input.scope,
+        // An App Engine run that isn't the owner's never gets the owner's chats,
+        // even when its recall scope comes out empty (#106 review).
+        excludeOwnerTranscripts: !ownerContext,
       },
       invariants: {
         enabled: input.config?.memory?.invariants?.enabled !== false,

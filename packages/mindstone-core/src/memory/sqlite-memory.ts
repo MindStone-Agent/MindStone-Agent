@@ -894,6 +894,11 @@ function isScopedQuery(scope: Record<string, string> | undefined): boolean {
   return Boolean(scope && Object.values(scope).some((value) => typeof value === "string" && value !== ""));
 }
 
+/** The owner's unscoped chat transcripts stay out of this query: a scoped query, or one that says so. */
+function excludesOwnerTranscripts(query: MemoryQuery): boolean {
+  return query.excludeOwnerTranscripts === true || isScopedQuery(query.scope);
+}
+
 export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
   readonly id = "sqlite";
   readonly #databasePath: string;
@@ -935,7 +940,7 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
    * A scoped query (a tenant's App Engine run) never gets the owner's
    * unscoped chat transcripts (#106 review, pending #71).
    */
-  #rows(embedded: boolean | "pending", scope: Record<string, string> | undefined): StoredChunk[] {
+  #rows(embedded: boolean | "pending", scope: Record<string, string> | undefined, excludeOwnerTranscripts = false): StoredChunk[] {
     const db = openDatabase(this.#databasePath);
     initializeSchema(db);
     const scopeClauses = RECALL_SCOPE_DIMENSIONS.map(
@@ -943,7 +948,7 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     );
     // A row whose metadata isn't valid JSON is left out rather than making
     // json_extract throw and the whole recall fail.
-    const scoped = isScopedQuery(scope);
+    const scoped = excludeOwnerTranscripts || isScopedQuery(scope);
     const where = [
       ...(embedded === true ? ["embedding_json IS NOT NULL"] : embedded === "pending" ? ["embedding_json IS NULL"] : []),
       "(metadata_json IS NULL OR json_valid(metadata_json))",
@@ -968,7 +973,7 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
    * recall) means no scoped chunk is a candidate.
    */
   #inScope(row: StoredChunk, query: MemoryQuery): boolean {
-    if (!row.metadata_json || !row.metadata_json.includes('"scope"')) return !(isScopedQuery(query.scope) && row.source_id.startsWith("transcript:"));
+    if (!row.metadata_json || !row.metadata_json.includes('"scope"')) return !(excludesOwnerTranscripts(query) && row.source_id.startsWith("transcript:"));
     try {
       const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
       return scopeMatchesRecallFilter(metadata.scope as Record<string, unknown> | undefined, query.scope);
@@ -982,7 +987,7 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     const [queryEmbedding] = await this.#embeddingProvider.embedTexts([query.text]);
     if (!queryEmbedding) return [];
     const limit = query.limit ?? 8;
-    return this.#rows(true, query.scope)
+    return this.#rows(true, query.scope, excludesOwnerTranscripts(query))
       .filter((row) => this.#inScope(row, query))
       .map((row) => {
         const embedding = parseEmbedding(row.embedding_json);
@@ -996,7 +1001,7 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
 
   #lexicalSearch(query: MemoryQuery, pendingOnly = false): MemoryHit[] {
     const limit = query.limit ?? 8;
-    return this.#rows(pendingOnly ? "pending" : false, query.scope)
+    return this.#rows(pendingOnly ? "pending" : false, query.scope, excludesOwnerTranscripts(query))
       .filter((row) => this.#inScope(row, query))
       .map((row) => this.#hitFromRow(row, lexicalScore(query.text, row.text), "lexical"))
       .filter((hit) => hit.score > 0)
