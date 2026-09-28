@@ -118,15 +118,15 @@ const CACHE_WARMING_MODES = ["off", "streaming", "idle"];
 
 export function disablePiCacheWarmingUnlessSet(input: { settingsManager: PiSettingsManagerLike; agentDir: string }): boolean {
   // Only a valid mode in a file that parses counts as the owner's choice. In
-  // every other case the session's mode is set off: a BOM is stripped and an
-  // empty file is {}, as Pi reads them, and when Pi couldn't load the file its
-  // save() leaves the file untouched, so only the session changes (#130 review).
+  // every other case (an empty or unparseable file included) the session's
+  // mode is set off. A BOM is stripped, as Pi does; when Pi couldn't load the
+  // file, its save() leaves the file untouched, so only the session changes
+  // (#130 review).
   const path = join(input.agentDir, "settings.json");
   let settings: unknown = {};
   if (existsSync(path)) {
     try {
-      const raw = readFileSync(path, "utf8").replace(/^\uFEFF/, "");
-      settings = raw.trim() === "" ? {} : JSON.parse(raw);
+      settings = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
     } catch {
       settings = undefined;
     }
