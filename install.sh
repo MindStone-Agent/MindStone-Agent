@@ -167,7 +167,7 @@ MindStone-Agent installed.
 
 Finish setup in one of two ways:
   - in a terminal:        ${MINDSTONE_CMD} onboard
-  - in the web Console:   skip onboard; see "Install guide for AI agents", step 5, in README.md
+  - in the web Console:   skip onboard; see README.md, "Install guide for AI agents", step 2(b)
 
 Other commands:
   ${MINDSTONE_CMD} config
