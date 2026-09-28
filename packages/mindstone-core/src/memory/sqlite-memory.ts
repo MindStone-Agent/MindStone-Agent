@@ -10,6 +10,7 @@ import { connectorOwnerSenders, isOwnerDirectMessage } from "../channels/session
 import type { TranscriptEntry } from "../transcript/index.js";
 import { createMemoryEmbeddingProvider, type MemoryEmbeddingProvider } from "./embedding.js";
 import { discoverFileMemoryDocuments } from "./file-memory.js";
+import { redactSecrets } from "./redact.js";
 import type { MemoryDocument, MemoryHit, MemoryQuery, MemoryRecallProvider } from "./types.js";
 
 export type SqliteMemoryBackfillOptions = {
@@ -25,6 +26,8 @@ export type SqliteMemoryEmbeddingBackfillOptions = {
   provider?: MemoryEmbeddingProvider;
   batchSize?: number;
   force?: boolean;
+  /** Embed the newest chunks first (live indexing, #106), so a backlog doesn't hold up the latest turn. */
+  newestFirst?: boolean;
 };
 
 export type SqliteMemoryEmbeddingBackfillResult = {
@@ -171,6 +174,8 @@ function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
+  // Live indexing and recall share the file (#106): wait for a lock rather than fail.
+  db.exec("PRAGMA busy_timeout = 5000");
   return db;
 }
 
@@ -380,7 +385,29 @@ const BOOKKEEPING_EVENTS = new Set([
   "client_system_prompt_ignored",
   "approval_proposed",
   "approval_decided",
+  "auto_compact_required",
+  "post_compact_maintenance",
+  "persona_activated",
+  "persona_deactivated",
+  "pack_installed",
+  "runner_stream_event",
 ]);
+
+/** Workflow bookkeeping (workflow_selected, workflow_failed, …) is left out too. */
+function isBookkeepingEvent(entry: TranscriptEntry): boolean {
+  const event = String(entry.metadata?.event ?? "");
+  return BOOKKEEPING_EVENTS.has(event) || event.startsWith("workflow_");
+}
+
+/**
+ * An entry written for someone other than the owner, whatever its role (#106
+ * review): new entries record `ownerTurn`, older ones carry a non-owner
+ * session key. /v1/responses stores a caller's leading assistant and system
+ * items before its user item, so the user turn alone can't decide this.
+ */
+function entryIsNonOwner(entry: TranscriptEntry): boolean {
+  return entry.metadata?.ownerTurn === false || Boolean(entry.sessionKey?.includes(":non-owner%3A"));
+}
 
 function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNonOwner?: boolean; config?: MindStoneConfig; onlyFile?: string } = {}): MemoryDocument[] {
   if (!existsSync(paths.transcriptDir) || !statSync(paths.transcriptDir).isDirectory()) return [];
@@ -415,13 +442,16 @@ function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNon
         turnScope = recordScope(entry.metadata?.scope);
       }
       const scope = recordScope(entry.metadata?.scope) ?? (entry.runId ? runScopes.get(entry.runId) : undefined) ?? turnScope;
-      if (audience === "non_owner" && !options.includeNonOwner) continue;
+      const entryAudience = entryIsNonOwner(entry) ? "non_owner" : audience;
+      if (entryAudience === "non_owner" && !options.includeNonOwner) continue;
+      // A client's system prompt is an instruction to that chat, not something said in it.
+      if (entry.role === "system") continue;
       // The runtime's bookkeeping events ("Injected 3 recalled memory
       // chunks", "identity formation prompted") aren't the conversation:
       // recalling them would feed recall back into itself (#106). Tool
       // activity and other events stay recallable.
-      if (entry.role === "event" && BOOKKEEPING_EVENTS.has(String(entry.metadata?.event ?? ""))) continue;
-      const text = entry.text?.trim();
+      if (entry.role === "event" && isBookkeepingEvent(entry)) continue;
+      const text = entry.text?.trim() ? redactSecrets(entry.text.trim()) : undefined;
       if (!text) continue;
       const sourceParts = [entry.source?.substrate, entry.source?.channel, entry.source?.chatType].filter(Boolean).join("/");
       docs.push({
@@ -442,7 +472,7 @@ function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNon
           surface: entry.source?.substrate,
           chatType: entry.source?.chatType,
           senderId: entry.source?.senderId,
-          audience,
+          audience: entryAudience,
           ...(scope ? { scope } : {}),
           runId: entry.runId,
           event: entry.metadata?.event,
@@ -635,7 +665,7 @@ export async function indexSqliteMemoryTurn(options: {
     db.close();
   }
   const provider = options.provider ?? createMemoryEmbeddingProvider(options.config);
-  const embedded = provider ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider }) : undefined;
+  const embedded = provider ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true }) : undefined;
   return { databasePath, sourcesIndexed, chunksEmbedded: embedded?.chunksEmbedded ?? 0 };
 }
 
@@ -651,7 +681,7 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
     SELECT chunk_id, text
     FROM memory_chunks
     ${options.force ? "" : "WHERE embedding_json IS NULL"}
-    ORDER BY updated_at ASC, chunk_id ASC
+    ORDER BY updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC
   `).all() as Array<{ chunk_id: string; text: string }>;
 
   const batchSize = Math.max(1, options.batchSize ?? 16);
@@ -860,6 +890,10 @@ export function maintainSqliteMemoryIndex(options: SqliteMemoryMaintenanceOption
   }
 }
 
+function isScopedQuery(scope: Record<string, string> | undefined): boolean {
+  return Boolean(scope && Object.values(scope).some((value) => typeof value === "string" && value !== ""));
+}
+
 export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
   readonly id = "sqlite";
   readonly #databasePath: string;
@@ -875,7 +909,15 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     if (this.#embeddingProvider) {
       try {
         const embeddingHits = await this.#embeddingSearch(query);
-        if (embeddingHits.length > 0) return embeddingHits;
+        if (embeddingHits.length > 0) {
+          // Chunks not embedded yet (the latest turn while the embedder was
+          // slow or down) are still found by their words (#106 review).
+          const pending = this.#lexicalSearch(query, true);
+          const limit = query.limit ?? 8;
+          return [...embeddingHits, ...pending]
+            .sort((a, b) => b.score - a.score || a.chunkId.localeCompare(b.chunkId))
+            .slice(0, limit);
+        }
       } catch {
         // Fall through to lexical scoring. AutoRecall should degrade, not break chat routing, when an embedder is down.
       }
@@ -884,13 +926,16 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
   }
 
   /**
-   * Candidate rows, newest first, capped at 5000. The scope filter is part of
-   * the query (#62), so out-of-scope chunks never take up the cap: each scope
-   * dimension a chunk carries must equal the query's. #inScope checks the
-   * parsed rows again (it treats non-string values as absent, so the SQL is
-   * the stricter of the two).
+   * Candidate rows, capped at 5000: memory files and knowledge first, then
+   * chat transcripts newest first, so a long chat history can't push MEMORY.md
+   * out (#106 review). The scope filter is part of the query (#62), so
+   * out-of-scope chunks never take up the cap: each scope dimension a chunk
+   * carries must equal the query's. #inScope checks the parsed rows again (it
+   * treats non-string values as absent, so the SQL is the stricter of the two).
+   * A scoped query (a tenant's App Engine run) never gets the owner's
+   * unscoped chat transcripts (#106 review, pending #71).
    */
-  #rows(includeEmbeddings: boolean, scope: Record<string, string> | undefined): StoredChunk[] {
+  #rows(embedded: boolean | "pending", scope: Record<string, string> | undefined): StoredChunk[] {
     const db = openDatabase(this.#databasePath);
     initializeSchema(db);
     const scopeClauses = RECALL_SCOPE_DIMENSIONS.map(
@@ -898,12 +943,18 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     );
     // A row whose metadata isn't valid JSON is left out rather than making
     // json_extract throw and the whole recall fail.
-    const where = [...(includeEmbeddings ? ["embedding_json IS NOT NULL"] : []), "(metadata_json IS NULL OR json_valid(metadata_json))", ...scopeClauses];
+    const scoped = isScopedQuery(scope);
+    const where = [
+      ...(embedded === true ? ["embedding_json IS NOT NULL"] : embedded === "pending" ? ["embedding_json IS NULL"] : []),
+      "(metadata_json IS NULL OR json_valid(metadata_json))",
+      ...scopeClauses,
+      ...(scoped ? ["NOT (source_id LIKE 'transcript:%' AND (metadata_json IS NULL OR json_extract(metadata_json, '$.scope') IS NULL))"] : []),
+    ];
     const rows = db.prepare(`
       SELECT chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, metadata_json
       FROM memory_chunks
       WHERE ${where.join(" AND ")}
-      ORDER BY updated_at DESC
+      ORDER BY CASE WHEN source_id LIKE 'transcript:%' THEN 1 ELSE 0 END, updated_at DESC
       LIMIT 5000
     `).all(...RECALL_SCOPE_DIMENSIONS.map((dim) => scope?.[dim] ?? null)) as StoredChunk[];
     db.close();
@@ -917,7 +968,7 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
    * recall) means no scoped chunk is a candidate.
    */
   #inScope(row: StoredChunk, query: MemoryQuery): boolean {
-    if (!row.metadata_json || !row.metadata_json.includes('"scope"')) return true;
+    if (!row.metadata_json || !row.metadata_json.includes('"scope"')) return !(isScopedQuery(query.scope) && row.source_id.startsWith("transcript:"));
     try {
       const metadata = JSON.parse(row.metadata_json) as Record<string, unknown>;
       return scopeMatchesRecallFilter(metadata.scope as Record<string, unknown> | undefined, query.scope);
@@ -943,9 +994,9 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
       .slice(0, limit);
   }
 
-  #lexicalSearch(query: MemoryQuery): MemoryHit[] {
+  #lexicalSearch(query: MemoryQuery, pendingOnly = false): MemoryHit[] {
     const limit = query.limit ?? 8;
-    return this.#rows(false, query.scope)
+    return this.#rows(pendingOnly ? "pending" : false, query.scope)
       .filter((row) => this.#inScope(row, query))
       .map((row) => this.#hitFromRow(row, lexicalScore(query.text, row.text), "lexical"))
       .filter((hit) => hit.score > 0)

@@ -23,16 +23,31 @@
  * RAW-ranked — manual/CLI recall is deliberately unweighted (Clint's
  * 2026-06-10 ruling). Any future manual surface must follow the same rule.
  */
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import type { ScriRankedHit } from "./scri-ranking.js";
+import type { MindStoneConfig } from "../config/index.js";
+
+/** Automatic recall is on unless set to false (#106: on by default; absent means on). */
+export function isAutoRecallEnabled(config: MindStoneConfig | undefined): boolean {
+  return config?.memory?.autoRecall !== false;
+}
 
 const QUERY_CAP = 300;
 
 export type RecallUsagePath = "auto" | "manual";
 
+/**
+ * The log holds the owner's queries, so it lives under `<dataDir>/logs`, not
+ * in the memory folder that is indexed and recalled (#106).
+ */
 export function recallUsageLogPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(runtimePathsFromEnv(env).dataDir, "logs", "recall-usage.jsonl");
+}
+
+/** Where earlier versions wrote the log: moved out of the memory folder on first use. */
+function legacyRecallUsageLogPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(runtimePathsFromEnv(env).memoryDir, "recall-usage.jsonl");
 }
 
@@ -67,6 +82,8 @@ export function logRecallUsage(
     });
     const logPath = recallUsageLogPath();
     mkdirSync(dirname(logPath), { recursive: true });
+    const legacy = legacyRecallUsageLogPath();
+    if (existsSync(legacy) && !existsSync(logPath)) renameSync(legacy, logPath);
     appendFileSync(logPath, `${lines.join("\n")}\n`);
   } catch {
     // Fail-open: usage logging must never break recall.

@@ -188,7 +188,7 @@ export function formatConfigSummary(config: MindStoneConfig): string {
     `onboarding.preferences: ${selectedPreferencesSummary(config.onboarding?.preferences)}`,
     `onboarding.identity: ${selectedIdentitySummary(config.onboarding?.identity)}`,
     `contextManagement.mode: ${context.mode}`,
-    `memory.autoRecall: ${config.memory?.autoRecall ?? false}`,
+    `memory.autoRecall: ${config.memory?.autoRecall ?? true}`,
     `memory.vectorStore: ${config.memory?.vectorStore ?? "sqlite-vec"}`,
     `memory.embeddingProvider: ${config.memory?.embeddingProvider ?? "unset"}`,
   ].join("\n");

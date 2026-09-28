@@ -87,6 +87,45 @@ export function createLocalMemoryRecallProvider(documents: MemoryDocument[] | un
   return documents?.length ? new LocalMemoryRecallProvider(documents) : undefined;
 }
 
+/** Several providers searched as one: their hits merged by score. */
+export class CombinedMemoryRecallProvider implements MemoryRecallProvider {
+  readonly id: string;
+  readonly #providers: MemoryRecallProvider[];
+
+  constructor(providers: MemoryRecallProvider[]) {
+    this.#providers = providers;
+    this.id = providers.map((provider) => provider.id).join("+");
+  }
+
+  async search(query: MemoryQuery): Promise<MemoryHit[]> {
+    const limit = query.limit ?? DEFAULT_MAX_RESULTS;
+    const results = await Promise.all(this.#providers.map((provider) => provider.search(query)));
+    return results
+      .flat()
+      .sort((a, b) => b.score - a.score || a.chunkId.localeCompare(b.chunkId))
+      .slice(0, limit);
+  }
+}
+
+/**
+ * The recall provider for a turn. With the sqlite-vec index present, it holds
+ * memory files and transcripts; knowledge-base documents and configured local
+ * documents aren't in it, so they are searched next to it (#106: live
+ * indexing creates the index on the first turn, which had dropped them).
+ * Without the index, everything is searched locally.
+ */
+export function selectMemoryRecallProvider(options: {
+  sqlite?: MemoryRecallProvider;
+  localDocuments?: MemoryDocument[];
+  fileMemory: MemoryDocument[];
+  knowledgebases: MemoryDocument[];
+}): MemoryRecallProvider | undefined {
+  const localDocuments = options.localDocuments ?? [];
+  if (!options.sqlite) return createLocalMemoryRecallProvider([...localDocuments, ...options.fileMemory, ...options.knowledgebases]);
+  const extra = createLocalMemoryRecallProvider([...localDocuments, ...options.knowledgebases]);
+  return extra ? new CombinedMemoryRecallProvider([options.sqlite, extra]) : options.sqlite;
+}
+
 function formatHit(hit: MemoryHit, index: number): string {
   const title = hit.title ?? hit.path ?? hit.id;
   const metadata = hit.metadata ?? {};

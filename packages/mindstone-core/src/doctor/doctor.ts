@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { resolveContextManagementPolicy } from "../context/index.js";
 import { loadConfiguredIdentities } from "../identity/index.js";
 import { getCurrentHandoffStatus } from "../lifecycle/index.js";
-import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats, maintainSqliteMemoryIndex } from "../memory/index.js";
+import { discoverFileMemoryDocuments, getSqliteMemoryIndexStats, isAutoRecallEnabled, maintainSqliteMemoryIndex } from "../memory/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { resolveDefaultSessionKey } from "../routing/session.js";
 import { discoverMindStonePersonas, loadMindStonePersona, personasDirFromConfig } from "../persona/index.js";
@@ -293,8 +293,8 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
   const fileMemoryDocs = discoverFileMemoryDocuments({ config, paths });
   check(checks, fileMemoryDocs.length > 0 ? "pass" : "warn", "memory.files", "File-backed memory documents are discoverable", `${fileMemoryDocs.length} documents`);
   const deterministicMemorySources = (memory?.localDocuments?.length ?? 0) + fileMemoryDocs.length;
-  if (memory?.autoRecall && !memory.embeddingProvider && deterministicMemorySources === 0) {
-    check(checks, "warn", "memory.embedding", "Auto-recall has an embedding provider", "memory.autoRecall is true but memory.embeddingProvider is unset");
+  if (isAutoRecallEnabled(config) && !memory?.embeddingProvider && deterministicMemorySources === 0) {
+    check(checks, "warn", "memory.embedding", "Auto-recall has an embedding provider", "memory.autoRecall is on (the default) but memory.embeddingProvider is unset");
   } else if (memory?.embeddingProvider) {
     check(checks, "pass", "memory.embedding", "Embedding provider is configured", memory.embeddingProvider);
     if (options.embeddingProbe?.error) {
@@ -308,7 +308,7 @@ export function getMindStoneDoctorReport(options: MindStoneDoctorOptions = {}): 
         `${options.embeddingProbe.providerId}:${options.embeddingProbe.model} ${options.embeddingProbe.dimensions ?? 0} dimensions @ ${options.embeddingProbe.baseUrl}`,
       );
     }
-  } else if (memory?.autoRecall && deterministicMemorySources > 0) {
+  } else if (isAutoRecallEnabled(config) && deterministicMemorySources > 0) {
     check(checks, "pass", "memory.embedding", "Auto-recall has deterministic file/local memory sources", `${deterministicMemorySources} documents`);
   } else {
     check(checks, "info", "memory.embedding", "Embedding provider is unset", "fine until autoRecall is enabled");

@@ -338,7 +338,7 @@ export function onboardingSteps(config: MindStoneConfig | undefined): {
     resolveMemoryEmbeddingProviderConfig(config) ? undefined : "no embedding provider",
   ].filter((item): item is string => Boolean(item));
   const memory: OnboardingStep = missingMemory.length === 0
-    ? { done: true, detail: `vector store ${config!.memory!.vectorStore}, embeddings ${config?.memory?.embeddingProvider ?? "from the environment"}, autoRecall ${config!.memory!.autoRecall === true ? "on" : "off"}` }
+    ? { done: true, detail: `vector store ${config!.memory!.vectorStore}, embeddings ${config?.memory?.embeddingProvider ?? "from the environment"}, autoRecall ${config!.memory!.autoRecall !== false ? "on" : "off"}` }
     : { done: false, detail: `memory isn't set up: ${missingMemory.join(" and ")}` };
   // The persona step writes onboarding.profile; only finishing setup (or
   // `mindstone onboard`) writes onboarding.identity with the scaffold.
@@ -400,12 +400,6 @@ const isId: Check = (value) => value === undefined || (typeof value === "string"
 const oneOf = (...allowed: string[]): Check => (value) => value === undefined || (typeof value === "string" && allowed.includes(value));
 /** Only turning something off is free. */
 const onlyOff: Check = (value) => value === false;
-/**
- * For a setting that is off when absent (memory.autoRecall): turning it off
- * or removing it is free (#78). Not for channels.*.enabled, which is on when
- * absent.
- */
-const offOrAbsent: Check = (value) => value === false || value === undefined;
 /** Only turning something on is free (a safety switch). */
 const onlyOn: Check = (value) => value === undefined || value === true;
 const stringList = (value: unknown): string[] | undefined =>
@@ -443,10 +437,12 @@ const SAFE_SETTINGS: Array<{ pattern: string; value: Check }> = [
   { pattern: "agents.*.defaultModel", value: isShortText },
   { pattern: "agents.*.contextWindowTokens", value: inRange(1024, 10_000_000) },
   { pattern: "agents.*.profileId", value: isId },
-  // Turning memory.autoRecall ON needs the permission: it exposes the open #71
-  // (tenant recall can see the owner's unscoped memory). Turning it off is the
-  // mitigation, so it stays free.
-  { pattern: "memory.autoRecall", value: offOrAbsent },
+  // Automatic recall is on by default (#106). Turning it back on after the
+  // owner turned it off still needs the permission: it indexes and recalls the
+  // owner's memory files, which a tenant run can still see (#71; chat
+  // transcripts are kept from tenant runs). Turning it off stays free. Absent
+  // means on, so removing the key is not free either.
+  { pattern: "memory.autoRecall", value: onlyOff },
   { pattern: "memory.vectorStore", value: oneOf("lancedb", "sqlite-vec", "memory") },
   { pattern: "memory.recall.maxResults", value: inRange(1, 100) },
   { pattern: "memory.recall.maxPromptTokens", value: inRange(1, 1_000_000) },
