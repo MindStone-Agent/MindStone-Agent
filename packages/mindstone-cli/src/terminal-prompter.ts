@@ -106,6 +106,21 @@ function selectWithArrows<T extends string>(io: TerminalIo, params: {
   });
 }
 
+/** After Enter, input arriving within this quiet period is the rest of a paste, not the next answer (#133). */
+const HIDDEN_SETTLE_MS = 40;
+
+/**
+ * Reads a secret without echoing it, key by key (#131, #133):
+ * - Enter ends the prompt; Ctrl-D ends it too, or cancels it when nothing was
+ *   typed (end of input, like Ctrl-C). Backspace deletes; other control keys
+ *   are ignored.
+ * - Escape sequences (arrow keys, function keys) are skipped whole, even when
+ *   split across chunks, and bracketed-paste markers are dropped with the
+ *   pasted text kept (its line breaks removed).
+ * - After Enter, anything that arrives before a short quiet period (the rest
+ *   of a multi-line paste, the \n of a split \r\n) is discarded, so it never
+ *   reaches the next prompt.
+ */
 function inputHidden(io: TerminalIo, message: string, placeholder?: string, signal?: AbortSignal): Promise<string> {
   const { input, output } = io;
   if (signal?.aborted) return Promise.reject(new Error("Cancelled"));
@@ -114,39 +129,87 @@ function inputHidden(io: TerminalIo, message: string, placeholder?: string, sign
   return new Promise<string>((resolve, reject) => {
     const wasRaw = input.isRaw;
     let value = "";
+    // Escape-sequence state: "" none, "esc" after ESC, "csi" inside ESC [,
+    // "ss3" after ESC O. csiParams collects a CSI's parameter bytes.
+    let escape: "" | "esc" | "csi" | "ss3" = "";
+    let csiParams = "";
+    let pasting = false;
+    let settling: NodeJS.Timeout | undefined;
+    let finished = false;
     input.setRawMode(true);
     input.resume();
-    const onAbort = () => {
-      cleanup();
-      output.write("\n");
-      reject(new Error("Cancelled"));
-    };
     const cleanup = () => {
+      if (settling) clearTimeout(settling);
       input.off("data", onData);
       signal?.removeEventListener("abort", onAbort);
       input.setRawMode(wasRaw);
     };
+    const cancel = () => {
+      finished = true;
+      cleanup();
+      output.write("\n");
+      reject(new Error("Cancelled"));
+    };
+    const submit = () => {
+      finished = true;
+      output.write("\n");
+      settling = setTimeout(() => {
+        cleanup();
+        resolve(value);
+      }, HIDDEN_SETTLE_MS);
+    };
+    const onAbort = () => {
+      if (finished && settling) {
+        clearTimeout(settling);
+        settling = undefined;
+      }
+      if (!finished) output.write("\n");
+      finished = true;
+      cleanup();
+      reject(new Error("Cancelled"));
+    };
     signal?.addEventListener("abort", onAbort, { once: true });
-    // A chunk can hold several keys: a pasted key arrives with its newline in
-    // one chunk. Enter or Ctrl-D ends the prompt, Ctrl-C cancels, backspace
-    // deletes, other control keys are ignored, and a chunk that is an escape
-    // sequence (an arrow key) is dropped (#131).
     const onData = (chunk: Buffer) => {
-      const data = chunk.toString("utf8");
-      if (data.startsWith("\u001b")) return;
-      for (const ch of data) {
-        if (ch === "\u0003") {
+      if (finished) {
+        // Still settling after Enter: discard, and wait for quiet again.
+        if (settling) clearTimeout(settling);
+        settling = setTimeout(() => {
           cleanup();
-          output.write("\n");
-          reject(new Error("Cancelled"));
-          return;
-        }
-        if (ch === "\r" || ch === "\n" || ch === "\u0004") {
-          cleanup();
-          output.write("\n");
           resolve(value);
-          return;
+        }, HIDDEN_SETTLE_MS);
+        return;
+      }
+      for (const ch of chunk.toString("utf8")) {
+        if (escape === "esc") {
+          escape = ch === "[" ? "csi" : ch === "O" ? "ss3" : "";
+          csiParams = "";
+          continue;
         }
+        if (escape === "ss3") {
+          escape = "";
+          continue;
+        }
+        if (escape === "csi") {
+          if (ch >= "@" && ch <= "~") {
+            if (ch === "~" && csiParams === "200") pasting = true;
+            if (ch === "~" && csiParams === "201") pasting = false;
+            escape = "";
+          } else {
+            csiParams += ch;
+          }
+          continue;
+        }
+        if (ch === "\u001b") {
+          escape = "esc";
+          continue;
+        }
+        if (pasting) {
+          if (ch >= " " && ch !== "\u007f") value += ch;
+          continue;
+        }
+        if (ch === "\u0003") return cancel();
+        if (ch === "\u0004") return value === "" ? cancel() : submit();
+        if (ch === "\r" || ch === "\n") return submit();
         if (ch === "\u007f" || ch === "\b") {
           value = Array.from(value).slice(0, -1).join("");
           continue;

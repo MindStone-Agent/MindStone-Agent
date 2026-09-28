@@ -85,4 +85,77 @@ if "bob-plain" not in text.split("RESULT")[0]:
     sys.exit("control: a plain answer should be echoed on the terminal")
 print("secret echo assertions passed")
 PY
+# Key handling in hidden prompts (#133), each case a hidden prompt followed by a
+# plain one, so input that leaks past the hidden prompt shows up there.
+cat > "${TEMP_DIR}/cases.mts" <<'TS'
+import { makeTerminalPrompter } from "PROJECT_ROOT/packages/mindstone-cli/src/terminal-prompter.ts";
+const prompter = makeTerminalPrompter();
+const results: Array<Record<string, unknown>> = [];
+for (let i = 1; i <= Number(process.env.CASES); i++) {
+  let hidden: Record<string, unknown>;
+  try { hidden = { ok: true, value: await prompter.text({ message: `K${i}`, sensitive: true }) }; }
+  catch (error) { hidden = { ok: false, error: String(error) }; }
+  const plain = await prompter.text({ message: `N${i}` });
+  results.push({ i, hidden, plain });
+}
+prompter.close();
+process.stdout.write(`\nCASES ${JSON.stringify(results)}\n`);
+process.exit(0);
+TS
+sed -i.bak "s#PROJECT_ROOT#${PROJECT_ROOT}#" "${TEMP_DIR}/cases.mts"
+TSX="${PROJECT_ROOT}/node_modules/.bin/tsx" SCRIPT="${TEMP_DIR}/cases.mts" python3 - <<'PY'
+import os, pty, select, sys, time, json
+# (label, chunks sent with a short gap, expected hidden result: a value, or None for cancelled)
+CASES = [
+    ("backspace", [b"abX\x7fc\r"], "abc"),
+    ("arrow key inside a chunk", [b"ab\x1b[Acd\r"], "abcd"),
+    ("escape sequence split across chunks", [b"ab\x1b", b"[A", b"cd\r"], "abcd"),
+    ("multi-line paste in two chunks", [b"line1\nline2-", b"tail-of-the-paste\n"], "line1"),
+    ("CR and LF in separate chunks", [b"key5\r", b"\n"], "key5"),
+    ("bracketed paste", [b"\x1b[200~PAST\nED\x1b[201~\r"], "PASTED"),
+    ("Ctrl-C cancels", [b"ab\x03"], None),
+    ("Ctrl-D on an empty prompt cancels", [b"\x04"], None),
+    ("Ctrl-D after typing submits", [b"xy\x04"], "xy"),
+]
+os.environ["CASES"] = str(len(CASES))
+pid, fd = pty.fork()
+if pid == 0:
+    os.environ["MINDSTONE_AGENT_SCROLL_ONBOARDING"] = "1"
+    os.execv(os.environ["TSX"], [os.environ["TSX"], os.environ["SCRIPT"]])
+seen = b""
+def read_until(marker, timeout=30):
+    global seen
+    end = time.time() + timeout
+    while marker not in seen:
+        if time.time() > end:
+            sys.exit(f"timed out waiting for {marker!r}; saw {seen[-300:]!r}")
+        r, _, _ = select.select([fd], [], [], 0.1)
+        if r:
+            try:
+                seen += os.read(fd, 4096)
+            except OSError:
+                break
+for i, (label, chunks, _) in enumerate(CASES, start=1):
+    read_until(f"K{i}".encode()); time.sleep(0.2)
+    for n, chunk in enumerate(chunks):
+        if n: time.sleep(0.01)
+        os.write(fd, chunk)
+    read_until(f"N{i}".encode()); time.sleep(0.2)
+    os.write(fd, f"plain-{i}\r".encode())
+read_until(b"CASES "); read_until(b"]\r\n")
+os.waitpid(pid, 0)
+text = seen.decode("utf8", "replace")
+results = json.loads(text[text.index("CASES ") + 6:].splitlines()[0])
+failures = []
+for (label, _, expected), got in zip(CASES, results):
+    if got["plain"] != f"plain-{got['i']}":
+        failures.append(f"{label}: input leaked into the next prompt, which got {got['plain']!r}")
+    if expected is None and got["hidden"]["ok"]:
+        failures.append(f"{label}: the prompt should be cancelled, got {got['hidden']!r}")
+    if expected is not None and got["hidden"] != {"ok": True, "value": expected}:
+        failures.append(f"{label}: expected {expected!r}, got {got['hidden']!r}")
+if failures:
+    sys.exit("hidden-input cases failed:\n  " + "\n  ".join(failures))
+print(f"hidden-input key handling: {len(CASES)} cases passed")
+PY
 echo "CLI secret echo smoke test passed."
