@@ -89,6 +89,11 @@ if (!identity.includes("# MindStone Integration Builder")) throw new Error("Acti
 if (!identity.includes("Profile: Integration Builder")) throw new Error("Identity profile seed missing");
 if (!identity.includes("Interaction detail: balanced")) throw new Error("Identity preference seed missing");
 if (!identity.includes("Identity emergence mode: defer")) throw new Error("Identity emergence seed missing");
+// Non-owner turns get IDENTITY.md, so the owner's words and host paths stay in USER.md and the config.
+for (const ownerWords of ["MindStone-Agent rebuild", "help build and operate", "Clint prefers truthful"]) {
+  if (identity.includes(ownerWords)) throw new Error(`Activated identity carries the owner's words: ${ownerWords}`);
+}
+if (identity.includes(dirname(configPath))) throw new Error("Activated identity carries a host path");
 if (!user.includes("Base profile: Integration Builder")) throw new Error("User profile seed missing");
 if (!user.includes("Project/domain context: MindStone-Agent rebuild")) throw new Error("User project context missing");
 if (!user.includes("Clint prefers truthful")) throw new Error("User scaffold content missing");

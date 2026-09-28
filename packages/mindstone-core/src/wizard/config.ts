@@ -2122,7 +2122,7 @@ async function createOnboardingIdentityFiles(params: {
 
   await params.prompter.note(
     [
-      "The next two text prompts seed the first IDENTITY.md and USER.md files.",
+      "The next two text prompts go in USER.md, the agent's notes about you.",
       "Keep them short. You can edit the files later.",
       "If you are not sure, write the immediate job you want the agent to help with first.",
     ].join("\n"),
