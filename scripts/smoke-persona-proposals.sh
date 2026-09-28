@@ -207,6 +207,9 @@ c.setdefault("gateway", {})["auth"] = {"mode": "token", "tokenEnv": "PERSONA_TOK
 c["gateway"]["admin"] = {"tokenEnv": "PERSONA_ADMIN_TOKEN"}
 c["gateway"]["http"] = {"chatCompletions": {"enabled": True}}
 c["routing"] = {"mode": "mock", "defaultAgentId": "default", "defaultModel": "mindstone/mock", "mock": {"responsePrefix": "persona", "captureFile": os.environ["CAPTURE"]}}
+# Recall is on by default (#106) and would bring the owner's earlier proposal
+# text into a later chat as memory; these checks are about the persona itself.
+c.setdefault("memory", {})["autoRecall"] = False
 p.write_text(json.dumps(c, indent=2) + "\n")
 PY
 ./scripts/start-gateway.sh >"${TEMP_RUNTIME}/gateway.log" 2>&1 &

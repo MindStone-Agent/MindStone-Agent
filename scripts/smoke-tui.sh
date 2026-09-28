@@ -34,6 +34,8 @@ config.session = {
   mode: 'single',
   defaultSessionKey: 'agent:default:main',
 };
+// Recall is on by default (#106); the history counts below assume no recall events.
+config.memory = { ...(config.memory ?? {}), autoRecall: false };
 mkdirSync(`${runtime}/agents/default`, { recursive: true });
 writeFileSync(`${runtime}/agents/default/IDENTITY.md`, '# TUI Smoke Identity\n\nIdentity sentinel: TUI-SMOKE-IDENTITY.');
 writeFileSync(`${runtime}/agents/default/USER.md`, '# TUI Smoke User\n\nUser sentinel: TUI-SMOKE-USER.');
