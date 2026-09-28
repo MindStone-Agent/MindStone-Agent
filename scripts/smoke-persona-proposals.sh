@@ -39,7 +39,7 @@ BODY="${TEMP_RUNTIME}/body.json"
 # --- 1. Units: the parser's limits, the template, no overwrite.
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyActionProposalDiscipline, approveProposedAction, ApprovalStore, checkApprovable, extractActionProposals, parsePersonaProposal, renderPersonaMarkdown, runMindStoneChatTurn, writeProposedPersona, PersonaExistsError, MAX_PENDING_PERSONAS } from "./packages/mindstone-core/src/index.ts";
@@ -95,6 +95,15 @@ assert.equal(capStore.pending().filter((a) => a.kind === "persona_create").lengt
 const dropped = applyActionProposalDiscipline({ replyText: block("late"), origin: "unit", store: capStore, allowPersona: true });
 assert.ok(dropped.text.includes("wasn't saved"), `a capped proposal should be said in the reply: ${dropped.text}`);
 assert.equal(applyActionProposalDiscipline({ replyText: block("other"), origin: "unit", store: capStore, allowPersona: true, agentId: "other-agent" }).proposals.length, 1, "the cap is per agent");
+// The drop is recorded even when the reply also proposes something else.
+const withMemory = applyActionProposalDiscipline({ replyText: `${block("late2")}\n\`\`\`mindstone-memory-proposal\n{"path":"notes/x.md","content":"x"}\n\`\`\``, origin: "unit", store: capStore, allowPersona: true, sessionKey: "unit:cap" });
+assert.ok(withMemory.events.some((e) => e.metadata?.event === "persona_proposal_dropped"), "a capped drop beside another proposal should still be recorded");
+// A persona that can't be written completely leaves nothing behind (the
+// write fails after the directory exists: here, a field that throws).
+const faulty = { id: "halfway", name: "Half" } as Record<string, unknown>;
+Object.defineProperty(faulty, "voice", { enumerable: true, get() { throw new Error("disk full"); } });
+assert.throws(() => writeProposedPersona({ personasDir: dir, persona: faulty as never, approvedBy: "t", now: "n" }), /disk full/);
+assert.ok(!existsSync(join(dir, "halfway")), "a half-written persona directory was left behind");
 // Approving saves the persona and records the decision; nothing is activated.
 const saveStore = new ApprovalStore({ path: join(dir, "save.json") });
 const [proposal] = applyActionProposalDiscipline({ replyText: block("heron"), origin: "unit", store: saveStore, allowPersona: true }).proposals;
@@ -105,13 +114,23 @@ const result = approveProposedAction(saveStore, checkApprovable(saveStore, propo
 assert.deepEqual(result, { outcome: "approved", kind: "persona_create", personaId: "heron" });
 assert.equal(saveStore.get(proposal!.id)?.status, "approved");
 assert.equal(decided, 1, "the decision is recorded");
+// A decision made meanwhile (rejected between the check and the approve) removes the files just written.
+const raceStore = new ApprovalStore({ path: join(dir, "race.json") });
+const [raced] = applyActionProposalDiscipline({ replyText: block("raced"), origin: "unit", store: raceStore, allowPersona: true }).proposals;
+const racedCheck = checkApprovable(raceStore, raced!.id);
+raceStore.decide(raced!.id, { status: "rejected", decidedBy: "other", now: "n" });
+assert.throws(() => approveProposedAction(raceStore, racedCheck, { decidedBy: "unit", memoryDir: dir, personasDir: join(dir, "personas") }));
+assert.ok(!existsSync(join(dir, "personas", "raced")), "a refused decision left the persona files");
 // Core chat: a non-owner turn's persona block is dropped, an owner's is kept.
-const echo = { id: "echo", listModels: () => [], async completeChat(r: { messages: { role: string; text?: string }[]; model: unknown }) { return { role: "assistant" as const, text: [...r.messages].reverse().find((m) => m.role === "user")?.text ?? "", model: r.model as never }; } };
+let lastPrompt = "";
+const echo = { id: "echo", listModels: () => [], async completeChat(r: { messages: { role: string; text?: string }[]; model: unknown }) { lastPrompt = r.messages.map((m) => m.text ?? "").join("\n"); return { role: "assistant" as const, text: [...r.messages].reverse().find((m) => m.role === "user")?.text ?? "", model: r.model as never }; } };
 const chatBase = { agentId: "default", config: { routing: { mode: "mock" } } as never, provider: echo as never, model: { id: "m", provider: "echo", contextWindowTokens: 4096 }, source: { substrate: "unit", channel: "t", chatType: "direct" as const, senderId: "x" } };
 await runMindStoneChatTurn({ ...chatBase, sessionKey: "unit:nonowner", ownerContext: false, message: block("stranger") } as never);
 assert.ok(!new ApprovalStore().pending().some((a) => a.persona?.id === "stranger"), "a non-owner core chat turn proposed a persona");
+assert.ok(!lastPrompt.includes("Proposing a persona"), "a non-owner core chat turn got the persona instruction");
 await runMindStoneChatTurn({ ...chatBase, sessionKey: "unit:owner", message: block("friend") } as never);
 assert.ok(new ApprovalStore().pending().some((a) => a.persona?.id === "friend"), "control: an owner core chat turn proposes");
+assert.ok(lastPrompt.includes("Proposing a persona"), "control: an owner core chat turn gets the persona instruction");
 console.log("persona unit assertions passed");
 TS
 
@@ -176,7 +195,7 @@ expect "$(get "/admin/approvals/${ID}")" 200 "reading the proposal"
 node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (b.action?.persona?.id!=="wren") { console.error("the proposal should carry its persona: "+JSON.stringify(b.action)); process.exit(1) }' "${BODY}"
 [[ ! -e "${DATA}/personas/wren" ]] || { echo "a pending proposal wrote files" >&2; exit 1; }
 
-# Approve: written, active, previous recorded, listed, and the next chat carries it.
+# Approve: written and listed, not active until the switch.
 expect "$(post "/admin/approvals/${ID}/approve" '{}')" 200 "approving the persona"
 [[ -f "${DATA}/personas/wren/PERSONA.md" && -f "${DATA}/personas/wren/metadata.json" ]] || { echo "approving should write the persona files" >&2; exit 1; }
 # Saved to the list, not active: the next chat doesn't carry it yet.

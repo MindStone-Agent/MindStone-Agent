@@ -372,18 +372,18 @@ export function applyActionProposalDiscipline(params: {
   const cappedNote = capped
     ? `\n\n(The persona proposal wasn't saved: ${MAX_PENDING_PERSONAS} persona proposals are already waiting on the Approvals page. Approve or reject those first.)`
     : "";
+  const cappedEvents = capped && params.sessionKey
+    ? [appendTranscriptEntry({
+        sessionKey: params.sessionKey,
+        agentId: params.agentId ?? "default",
+        role: "event",
+        text: `persona proposal dropped: ${MAX_PENDING_PERSONAS} already pending`,
+        source: params.source,
+        runId: params.runId,
+        metadata: { event: "persona_proposal_dropped", reason: "too_many_pending", origin: params.origin },
+      })]
+    : [];
   if (!extracted.memory && !extracted.mutations.length && !persona) {
-    const cappedEvents = capped && params.sessionKey
-      ? [appendTranscriptEntry({
-          sessionKey: params.sessionKey,
-          agentId: params.agentId ?? "default",
-          role: "event",
-          text: `persona proposal dropped: ${MAX_PENDING_PERSONAS} already pending`,
-          source: params.source,
-          runId: params.runId,
-          metadata: { event: "persona_proposal_dropped", reason: "too_many_pending", origin: params.origin },
-        })]
-      : [];
     return { text: `${extracted.text}${cappedNote}`, content, events: cappedEvents, proposals: [] };
   }
   const approvals = store;
@@ -435,7 +435,7 @@ export function applyActionProposalDiscipline(params: {
         }),
       )
     : [];
-  return { text: `${extracted.text}${cappedNote}`, content, events, proposals };
+  return { text: `${extracted.text}${cappedNote}`, content, events: [...cappedEvents, ...events], proposals };
 }
 
 /**
