@@ -55,6 +55,11 @@ export function invalidateEnterpriseOrigins(): void {
 }
 
 export function guardEnterpriseEndpoints(agentDir: string): void {
+  // The AWS SDK takes AWS_ENDPOINT_URL(_BEDROCK_RUNTIME) or a shared-config
+  // endpoint_url ahead of the region, so a Bedrock API key could leave for an
+  // address nobody registered. Bedrock always goes to its regional address
+  // (#126 review); the host's AWS endpoint overrides don't apply in this process.
+  process.env.AWS_IGNORE_CONFIGURED_ENDPOINT_URLS = "true";
   const dir = resolve(agentDir);
   if (!agentDirs.has(dir)) agentDirs.set(dir, { stamp: "", origins: new Set() });
   const original = globalThis.fetch as typeof fetch & { [GUARDED]?: true };
