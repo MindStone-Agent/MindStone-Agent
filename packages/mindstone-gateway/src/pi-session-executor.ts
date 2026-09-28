@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -114,14 +114,25 @@ type PiSettingsManagerLike = {
  * off unless its settings.json names a mode, so an owner can still opt in.
  * Pi reads this from the agent dir's settings file only, so it is written there.
  */
+const CACHE_WARMING_MODES = ["off", "streaming", "idle"];
+
 export function disablePiCacheWarmingUnlessSet(input: { settingsManager: PiSettingsManagerLike; agentDir: string }): boolean {
-  let settings: Record<string, unknown> = {};
-  try {
-    settings = JSON.parse(readFileSync(join(input.agentDir, "settings.json"), "utf8")) as Record<string, unknown>;
-  } catch {
-    // No settings file yet (or unreadable): nothing was chosen.
+  // Only a valid mode in a file that parses counts as the owner's choice. In
+  // every other case (an empty or unparseable file included) the session's
+  // mode is set off. A BOM is stripped, as Pi does; when Pi couldn't load the
+  // file, its save() leaves the file untouched, so only the session changes
+  // (#130 review).
+  const path = join(input.agentDir, "settings.json");
+  let settings: unknown = {};
+  if (existsSync(path)) {
+    try {
+      settings = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
+    } catch {
+      settings = undefined;
+    }
   }
-  if (settings && typeof settings === "object" && "cacheWarming" in settings) return false;
+  if (settings && typeof settings === "object" && !Array.isArray(settings)
+    && CACHE_WARMING_MODES.includes((settings as Record<string, unknown>).cacheWarming as string)) return false;
   input.settingsManager.setCacheWarmingMode?.("off");
   return true;
 }
