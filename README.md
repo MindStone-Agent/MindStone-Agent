@@ -8,6 +8,8 @@
 > (**implemented** / **smoke-tested** / **live-validated** / **pending**) — and
 > expect rough edges. Do not depend on it for production or unattended use.
 
+> 🤖 **AI agents:** to install this, follow [Install guide for AI agents](#install-guide-for-ai-agents). It works step by step, with a check after each step.
+
 🔶 **Persistent AI agents with identity, memory, recall, and shared continuity across surfaces.**
 
 MindStone-Agent is a local-first agent harness for building AI collaborators that keep their identity, history, working context, and accumulated judgment across sessions. It combines a native CLI/TUI, a local Gateway, structured memory, append-only transcripts, Auto Recall, context management, and Pi-backed model execution inside an isolated runtime.
@@ -146,6 +148,134 @@ For an unlinked checkout, use:
 ```bash
 ./node_modules/.bin/mindstone status
 ```
+
+## Install guide for AI agents
+
+This section is written so an AI coding agent (Claude Code, Codex and similar) can install and run MindStone-Agent from start to finish; humans can follow it too. Every step ends with a check, and you shouldn't move on until the check passes. **Never print a token or credential into your output.** Write secrets straight to files, as the commands below do.
+
+### 0. Requirements
+
+- macOS or Linux (arm64 or x86_64).
+- `git`, plus **Node.js 22.19 or newer** with `npm`. Check with `node --version`.
+- A C/C++ toolchain for native modules:
+  - **macOS:** the Xcode Command Line Tools (`xcode-select --install`).
+  - **Linux:** `build-essential` and `python3`.
+- Docker, but only if you'll also run the web Console (step 5).
+
+### 1. Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install.sh | bash
+```
+
+This clones into `~/.mindstone-agent/MindStone-Agent`, installs dependencies, builds everything, and links the `mindstone` command onto `PATH`.
+
+Options go after `bash -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install.sh | \
+  bash -s -- --dir "$HOME/MindStone-Agent" --no-link
+```
+
+With `--no-link`, run the CLI as `./node_modules/.bin/mindstone` from inside the checkout.
+
+**Check:** `mindstone status` exits 0 and prints the isolated runtime paths, all under `<checkout>/.runtime/`.
+
+### 2. Onboard (needs a person at a terminal)
+
+`mindstone onboard` and `mindstone auth login <provider>` are **interactive**: they need a real terminal (TTY), and an OAuth login opens a browser.
+
+**If you are an agent without a TTY, stop here and ask the human** to run this in the checkout folder:
+
+```bash
+mindstone onboard
+```
+
+Wait until they confirm it finished. Onboarding does three things:
+- connects a model provider;
+- writes the routing (`routing.mode: pi-session`);
+- creates the identity, user and memory files.
+
+It also creates `<checkout>/.runtime/mindstone/config.json`, which step 5 edits. To change settings later, use `mindstone config --section <name>`.
+
+**Check:**
+- `mindstone doctor` reports no errors for runtime, config, identity and routing.
+- `mindstone chat --once "hello"` returns a real answer, not a setup prompt.
+
+### 3. Start the gateway
+
+Choose **one** of these. Don't run both, or two gateways will fight over the port.
+
+```bash
+mindstone gateway start      # a background process; manage it with gateway stop/restart
+mindstone gateway install    # macOS only: a launchd service that starts at login
+```
+
+**Check:** `curl -sf http://127.0.0.1:19789/health >/dev/null && echo ok` prints `ok`.
+
+### 4. Update later
+
+Re-run the install command from step 1, with the same options if you used any (`--dir`, `--no-link`). It pulls the latest `main`, rebuilds, and keeps your `.runtime/` data. Then restart the gateway (`mindstone gateway restart`, or reinstall the service).
+
+**Check:** `mindstone doctor` is clean, and `/health` answers.
+
+### 5. Optional: the web Console
+
+The MindStone Console is a web UI for chat and administration: settings, secrets, approvals, doctor and logs, and restart. It lives in [MindStone-Agent/mindstone-console](https://github.com/MindStone-Agent/mindstone-console), and its README has the install steps.
+
+The gateway side needs onboarding (step 2) to be finished first. Then run these commands, which write the secrets to files and never print them.
+
+1. **The gateway token.** Paths in the config are relative to the config file's folder:
+   ```bash
+   cd <checkout>/.runtime/mindstone
+   mkdir -p -m 700 secrets
+   (umask 077; openssl rand -hex 32 > secrets/gateway-token)
+   ```
+   Don't also set a `MINDSTONE_AGENT_GATEWAY_TOKEN` environment variable. If it's set, it wins over the file.
+2. **The admin credential.** The gateway stores only its hash, so keep the credential itself **outside** `.runtime/`. The Console needs it (Console step 2); after that, delete this copy.
+   ```bash
+   [ -e "$HOME/.mindstone-admin-credential" ] || (umask 077; openssl rand -hex 32 > "$HOME/.mindstone-admin-credential")
+   ```
+   Do this once. Replacing the credential after the Console is set up disconnects the Console until its `.env` gets the new value.
+   It must differ from the gateway token, or the admin API stays off.
+3. **Merge the settings into `config.json`.** This keeps everything else in the file:
+   ```bash
+   cd <checkout>/.runtime/mindstone
+   HASH=$(printf %s "$(cat "$HOME/.mindstone-admin-credential")" | shasum -a 256 | cut -d' ' -f1) \
+   node -e '
+     const h = process.env.HASH || "";
+     if (!/^[0-9a-f]{64}$/.test(h) || h.startsWith("e3b0c442")) throw new Error("no admin credential hash: check the credential file and shasum");
+     const fs = require("fs"), f = "config.json", c = JSON.parse(fs.readFileSync(f, "utf8"));
+     c.gateway = c.gateway || {};
+     c.gateway.auth = { mode: "token", tokenFile: "secrets/gateway-token" };
+     c.gateway.http = { ...(c.gateway.http || {}), chatCompletions: { enabled: true } };
+     c.gateway.admin = { ...(c.gateway.admin || {}), tokenSha256: h };
+     fs.writeFileSync(f, JSON.stringify(c, null, 2) + "\n");'
+   ```
+   On Linux, use `sha256sum` in place of `shasum -a 256`. Don't add a `routing` section: onboarding already set it.
+4. **Check the route.** `mindstone doctor` should show `routing.mode` as `pi-session`. If it shows `placeholder`, run `mindstone config --section routing`. Without a route, Console chat fails.
+5. **Let the Console's container reach the gateway.** The gateway listens on `127.0.0.1:19789`. The address it listens on comes from environment variables, not from config.
+   - **Docker Desktop (macOS):** it reaches the gateway as `host.docker.internal`, so nothing needs to change.
+   - **Linux:** a container can't reach the host's loopback. Start the gateway bound to the Docker bridge address, and use the same variable on every restart:
+     ```bash
+     MINDSTONE_AGENT_GATEWAY_HOST=172.17.0.1 mindstone gateway restart
+     ```
+     Also set `gateway.host` to `172.17.0.1` in `config.json`. That doesn't move the listener, but `restart` and `status` use it for their health check, which otherwise reports `false`. Use that address in place of `127.0.0.1` in the checks. The macOS `gateway install` service always uses `127.0.0.1`.
+6. **Restart the gateway** if you started it with `mindstone gateway start`: run `mindstone gateway restart`, with the variable from step 5 on Linux. If you used `gateway install`, skip this step. The gateway re-reads `config.json` on each request, and a `restart` would start a second process that can't get the port.
+
+**Check:**
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $(cat <checkout>/.runtime/mindstone/secrets/gateway-token)" http://127.0.0.1:19789/v1/models
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:19789/v1/models
+```
+
+The first prints `200` and the second prints `401`.
+
+**Don't:**
+- put tokens in the repo, in chat or in logs;
+- use the same value for the admin credential and the gateway token;
+- use the upstream LibreChat compose files at the root of the Console repo. Use only its `mindstone/` folder.
 
 ## First run
 
