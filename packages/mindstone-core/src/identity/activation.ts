@@ -41,22 +41,29 @@ function preferenceLabel(value: string | undefined): string {
   return value?.replace(/_/g, " ") ?? "unset";
 }
 
+/**
+ * Only the chosen labels go in IDENTITY.md. Non-owner turns get IDENTITY.md
+ * too, so the owner's own words (notes, project context) stay in USER.md.
+ */
 function formatPreferenceLines(preferences: MindStoneOnboardingPreferences | undefined): string[] {
   if (!preferences) return ["- Preferences: unset"];
+  const ownerWords = [
+    preferences.interactionDetailNotes,
+    preferences.recommendationStyleNotes,
+    preferences.workStyleNotes,
+    preferences.approvalNotes,
+    preferences.memoryStyleNotes,
+    preferences.setupNotes,
+    preferences.modelSetupNotes,
+    preferences.projectContext,
+  ].some((value) => Boolean(value?.trim()));
   return [
     `- Interaction detail: ${preferenceLabel(preferences.interactionDetail)}`,
-    preferences.interactionDetailNotes ? `- Interaction detail notes: ${sanitizeMarkdownLine(preferences.interactionDetailNotes)}` : undefined,
     `- Recommendation style: ${preferenceLabel(preferences.recommendationStyle)}`,
-    preferences.recommendationStyleNotes ? `- Recommendation style notes: ${sanitizeMarkdownLine(preferences.recommendationStyleNotes)}` : undefined,
     `- Work style: ${preferenceLabel(preferences.workStyle)}`,
-    preferences.workStyleNotes ? `- Work style notes: ${sanitizeMarkdownLine(preferences.workStyleNotes)}` : undefined,
     `- Approval mode: ${preferenceLabel(preferences.approvalMode)}`,
-    preferences.approvalNotes ? `- Approval notes: ${sanitizeMarkdownLine(preferences.approvalNotes)}` : undefined,
     `- Memory/checkpoint style: ${preferenceLabel(preferences.memoryStyle)}`,
-    preferences.memoryStyleNotes ? `- Memory/checkpoint notes: ${sanitizeMarkdownLine(preferences.memoryStyleNotes)}` : undefined,
-    preferences.setupNotes ? `- Setup notes: ${sanitizeMarkdownLine(preferences.setupNotes)}` : undefined,
-    preferences.modelSetupNotes ? `- Model setup notes: ${sanitizeMarkdownLine(preferences.modelSetupNotes)}` : undefined,
-    preferences.projectContext ? `- Project/domain context: ${sanitizeMarkdownLine(preferences.projectContext)}` : undefined,
+    ownerWords ? "- The user's notes and project context are in USER.md." : undefined,
     preferences.sensitiveContext ? "- Sensitive context: configured in USER.md; treat as private and do not disclose casually." : undefined,
   ].filter((line): line is string => Boolean(line));
 }
@@ -168,11 +175,7 @@ ${memoryPriorities.length ? `- Memory priorities from profile:\n${memoryPrioriti
 
 ## User context
 
-The paired user context file is:
-
-\`\`\`text
-${params.userPath ?? "unset"}
-\`\`\`
+The paired user context file is USER.md.
 
 User context file present at activation: ${params.userExists}.
 
@@ -181,8 +184,6 @@ Read USER.md as durable user/project context, not as a transcript. If USER.md co
 ## Activation provenance
 
 - Agent id: ${params.agentId}
-- Config path: ${params.configPath}
-- Identity path: ${params.identityPath ?? "unset"}
 - Prior identity state: ${params.previousIdentityPending ? "pending scaffold" : "missing or force-activated"}
 - Activation command: \`mindstone identity activate\`
 `;

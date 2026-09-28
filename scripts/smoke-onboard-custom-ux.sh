@@ -94,8 +94,14 @@ if (!prefs?.modelSetupNotes?.includes("real model later")) throw new Error("Mode
 
 const identityPath = resolve(dirname(result.path), "agents/default/IDENTITY.md");
 const identity = readFileSync(identityPath, "utf-8");
-if (!identity.includes("Interaction detail notes")) throw new Error("Activated identity omitted custom interaction notes");
-if (!identity.includes("Model setup notes")) throw new Error("Activated identity omitted custom model notes");
+// Non-owner turns get IDENTITY.md, so the write-in notes go to USER.md and IDENTITY.md points there.
+const user = readFileSync(resolve(dirname(result.path), "agents/default/USER.md"), "utf-8");
+if (!user.includes("Interaction detail notes: Be brief")) throw new Error("USER.md omitted custom interaction notes");
+if (!user.includes("Model setup notes: Use a real model later")) throw new Error("USER.md omitted custom model notes");
+for (const ownerWords of ["Be brief unless", "Never push, delete", "Use a real model later", "Custom UX validation project"]) {
+  if (identity.includes(ownerWords)) throw new Error(`Activated identity carries the owner's words: ${ownerWords}`);
+}
+if (!identity.includes("The user's notes and project context are in USER.md.")) throw new Error("Activated identity does not point at USER.md for the notes");
 
 console.log(`onboard custom UX smoke passed: ${result.path}`);
 TS

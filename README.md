@@ -182,7 +182,7 @@ With `--no-link`, run the CLI as `./node_modules/.bin/mindstone` from inside the
 On a first install, the installer also creates the runtime config, `<checkout>/.runtime/mindstone/config.json`, with safe defaults:
 - not onboarded: `routing.mode` is `placeholder`, so no model is called yet;
 - the gateway on `127.0.0.1:19789`, with auth `none` and its HTTP APIs off;
-- placeholder identity and user files. `mindstone onboard` (2(a)) replaces them. On the Console path (2(b)) they stay placeholders until identity formation runs in Console chats, which isn't built yet ([#102](https://github.com/MindStone-Agent/MindStone-Agent/issues/102)).
+- placeholder identity and user files. `mindstone onboard` (2(a)) replaces them. On the Console path (2(b)), the Console's guided setup replaces them with the first-activation scaffold (its **About you** step), keeping `.pre-onboarding-placeholder.bak` backups, and the agent then forms its identity in its first Console chat ([#102](https://github.com/MindStone-Agent/MindStone-Agent/issues/102)).
 
 Re-running the installer (step 4) never changes an existing `config.json`.
 
@@ -216,7 +216,7 @@ It updates the `config.json` the installer created. To change settings later, us
 This path needs no interactive terminal (TTY): steps 3 and 5 are still shell commands, but none of them prompts. Don't run `mindstone onboard`. Instead:
 1. start the gateway (step 3);
 2. set the gateway up for the Console (step 5);
-3. install the Console and run its guided setup, following the [Console README](https://github.com/MindStone-Agent/mindstone-console). Guided setup chooses the model provider, the model and the persona. That is enough for the gateway to report itself as onboarded, and for Console chat to work. It doesn't replace the placeholder identity and user files: they stay placeholders until identity formation runs in Console chats (#102).
+3. install the Console and run its guided setup, following the [Console README](https://github.com/MindStone-Agent/mindstone-console). Guided setup chooses the model provider, the model and the persona, then sets up memory (an embedding model with a live check; with local Ollama the Console can download it), optional chat connectors, and a short **About you** step that writes the identity scaffold. The gateway reports itself as onboarded once the provider, model, persona, memory and About you steps are done; connectors are optional (`GET /admin/status` shows each step), and the first Console chat starts identity formation.
 
 Until then the gateway reports itself as not onboarded, and the Console shows a **Set up MindStone** banner.
 

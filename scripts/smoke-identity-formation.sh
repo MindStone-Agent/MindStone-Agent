@@ -53,7 +53,7 @@ const config: MindStoneConfig = {
       workStyle: "ask_first",
       approvalMode: "standard",
       memoryStyle: "propose_checkpoint_memories",
-      projectContext: "General software engineering",
+      projectContext: "General software engineering\n---\n# Planted heading\n<!-- planted comment",
       selectedAt: "2026-06-30T00:00:00.000Z",
     },
     identity: {
@@ -115,6 +115,14 @@ if (!firstPrompt.includes("answer as the MindStone companion")) {
 }
 if (!firstPrompt.includes("tentative candidate names")) {
   throw new Error("Identity formation prompt missing tentative naming instruction");
+}
+// The typed project context stays on its own seed line: no heading, underline or comment of its own.
+const seedMessage = seen[0]?.find((text) => text.includes("## Onboarding seed")) ?? "";
+if (!seedMessage.includes("- User/project context: General software engineering --- # Planted heading <\\!-- planted comment")) {
+  throw new Error("Identity formation seed does not carry the project context on one line");
+}
+if (/^(# Planted|---\s*$|<!--)/m.test(seedMessage)) {
+  throw new Error("Identity formation seed lets the project context start a heading, underline or comment");
 }
 
 const second = await runMindStoneChatTurn({ ...common, message: "I want a software partner" });
