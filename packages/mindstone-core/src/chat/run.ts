@@ -111,9 +111,17 @@ function numberFromMetadata(metadata: Record<string, unknown> | undefined, key: 
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-/** "mindstone/<agentId>" names an agent (the Console sends "mindstone/default"), not a model. */
-export function isAgentModelAlias(id: string): boolean {
-  return /^mindstone\/[A-Za-z0-9_.-]+$/.test(id);
+/**
+ * "mindstone/<agentId>" names an agent (the Console sends "mindstone/default"),
+ * not a model, when <agentId> is a known agent: "default", the routing default
+ * agent, or a configured one. Any other "mindstone/..." id is a model id (the
+ * mock provider's ids look like that).
+ */
+export function isAgentModelAlias(id: string, config?: MindStoneConfig): boolean {
+  const match = /^mindstone\/([A-Za-z0-9_.-]+)$/.exec(id);
+  if (!match) return false;
+  const agentId = match[1];
+  return agentId === "default" || agentId === config?.routing?.defaultAgentId || Boolean(config?.agents && Object.prototype.hasOwnProperty.call(config.agents, agentId));
 }
 
 /**
@@ -128,9 +136,9 @@ export function isAgentModelAlias(id: string): boolean {
  * Callers pass `requested` only for the owner: a non-owner can't choose.
  */
 export function resolveAgentModelId(input: { config?: MindStoneConfig; agentId: string; requested?: string }): string {
-  const requested = input.requested && !isAgentModelAlias(input.requested) ? input.requested : undefined;
+  const requested = input.requested && !isAgentModelAlias(input.requested, input.config) ? input.requested : undefined;
   const agent = input.config?.agents?.[input.agentId];
-  const agentModel = agent?.defaultModel && !isAgentModelAlias(agent.defaultModel) ? agent.defaultModel : undefined;
+  const agentModel = agent?.defaultModel && !isAgentModelAlias(agent.defaultModel, input.config) ? agent.defaultModel : undefined;
   return requested ?? agentModel ?? input.config?.routing?.defaultModel ?? agent?.defaultModel ?? `mindstone/${input.agentId}`;
 }
 
