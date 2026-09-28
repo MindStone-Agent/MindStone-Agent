@@ -28,6 +28,12 @@ export type MemoryQuery = {
   filters?: Record<string, unknown>;
   /** Recall scope (App Engine / Agent Mesh). Providers that store scoped chunks apply it before ranking (#62). */
   scope?: Record<string, string>;
+  /**
+   * Leave out the owner's chat transcripts (unscoped transcript chunks): set for
+   * any turn that isn't the owner's, such as a tenant's App Engine run, whatever
+   * its scope holds (#106 review).
+   */
+  excludeOwnerTranscripts?: boolean;
 };
 
 export type MemoryRecallConfig = {

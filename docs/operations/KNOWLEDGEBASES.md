@@ -45,12 +45,11 @@ chat and Gateway routes — the document carries the per-section citations and
 points at `mindstone kb search <id>` for full content. Full section bodies are
 never injected via Auto Recall.
 
-- Requires `memory.autoRecall: true` (same switch as the rest of Auto Recall).
+- Uses the same switch as the rest of automatic recall, `memory.autoRecall`, which is on unless set to `false` (#106). With `memory.vectorStore: "sqlite-vec"`, knowledge-base documents are searched next to the recall index.
 - Opt out with `knowledgebases: { recall: { enabled: false } }`.
-- v1 boundary: KB documents ride the local/file recall provider. When
-  `memory.vectorStore` is `sqlite-vec` **and** the SQLite provider initializes,
-  recall comes from that store and KB docs do not participate; embedding KB
-  entries into the vector store is future scope.
+- KB documents are searched by words (the local provider), next to the
+  SQLite recall index when there is one; they are not embedded into the vector
+  store. Embedding them is future scope.
 
 ## External sources (#23)
 

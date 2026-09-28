@@ -336,7 +336,7 @@ function mindstoneContextMessage(): string {
     `Identity exists: ${identity?.identityExists ?? false}`,
     `User path: ${identity?.userPath ?? "not configured"}`,
     `User exists: ${identity?.userExists ?? false}`,
-    `Memory autoRecall: ${config?.memory?.autoRecall ?? false}`,
+    `Memory autoRecall: ${config?.memory?.autoRecall ?? true}`,
     `Memory vector store: ${config?.memory?.vectorStore ?? "memory"}`,
     `Context mode: ${config?.contextManagement?.mode ?? "sliding_window"}`,
     identity?.error ? `Identity error: ${identity.error}` : undefined,
@@ -377,14 +377,14 @@ function transcriptStatusMessage(sessionKeyInput?: unknown): { text: string; det
 
 async function buildPiAdapterRecallContext(event: PiBeforeAgentStartEvent): Promise<{ text?: string; details: Record<string, unknown> }> {
   const { config, agentId, sessionKey } = defaultAgentAndSession();
-  if (config?.memory?.autoRecall !== true) return { details: { injected: false, reason: "autoRecall_disabled" } };
+  if (config?.memory?.autoRecall === false) return { details: { injected: false, reason: "autoRecall_disabled" } };
   const provider = resolveMemoryRecallProvider();
   if (!provider) return { details: { injected: false, reason: "provider_unavailable" } };
   const recall = await recallMindStoneMemory({
     agentId,
     entries: [currentPromptUserEntry({ prompt: event.prompt, agentId, sessionKey })],
     provider,
-    config: config.memory?.recall,
+    config: config?.memory?.recall,
   });
   if (!recall?.promptText) {
     return {

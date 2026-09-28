@@ -71,7 +71,7 @@ const config = JSON.parse(readFileSync(result.path, "utf-8")) as any;
 if (config.routing?.mode !== "placeholder") throw new Error("QuickStart placeholder routing mode was not written");
 if (config.gateway?.auth?.mode !== "none") throw new Error("QuickStart gateway auth mode was not written");
 if (config.contextManagement?.mode !== "sliding_window") throw new Error("Context mode was not written");
-if (config.memory?.autoRecall !== false) throw new Error("QuickStart memory autoRecall default was not written");
+if (config.memory?.autoRecall !== true) throw new Error("QuickStart memory autoRecall should default to on (#106)");
 if (config.session?.mode !== "single" || config.session?.defaultSessionKey !== "agent:default:main") throw new Error("QuickStart session policy was not written");
 if (config.onboarding?.profile?.id !== "integration_builder") throw new Error("Selected onboarding profile was not written");
 if (config.onboarding?.preferences?.interactionDetail !== "balanced") throw new Error("Interaction preference was not written");

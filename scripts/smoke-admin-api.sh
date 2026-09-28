@@ -238,8 +238,10 @@ expect "$(patch memory '{"index":{"enabled":true}}')" 200 "a plain memory patch"
 grep -q '"memory.index.enabled"' "${BODY}" || { echo "changed paths missing" >&2; exit 1; }
 has memory.index.enabled true || { echo "the patch was not written" >&2; exit 1; }
 # Turning autoRecall on exposes the open #71, so it needs the permission (#75 review).
-expect "$(patch memory '{"autoRecall":true}')" 403 "turning autoRecall on without the permission"
+# A fresh runtime has it on (#106), so turn it off first (free).
+has memory.autoRecall true || { echo "a fresh runtime should have autoRecall on" >&2; exit 1; }
 expect "$(patch memory '{"autoRecall":false}')" 200 "turning autoRecall off stays free"
+expect "$(patch memory '{"autoRecall":true}')" 403 "turning autoRecall on without the permission"
 # A channel named like a prototype member is still a new channel.
 expect "$(patch channels '{"toString":{"pollMs":1000}}')" 403 "a channel named toString"
 # An audited refusal keeps at most 50 paths.
@@ -334,22 +336,30 @@ expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"  enable 
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable  advanced settings"}')" 200 "granting advanced settings with a double space"
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings"
 expect "$(patch routing '{"pi":{"builtinTools":["read"]}}')" 200 "an advanced patch with the permission"
-# autoRecall on needs the permission; off, or removing the key, is free (#78:
-# the earlier check patched false onto false, which changed nothing).
+# autoRecall: off is free (#78: the earlier check patched false onto false,
+# which changed nothing). Absent means on (#106): turning it on from false
+# needs the permission, whether by true or by removing the key; a change that
+# leaves it on (true to absent, absent to true) is free.
 revoke() { expect "$(post /admin/permissions/advanced '{"enabled":false}')" 200 "revoking advanced settings"; }
 regrant() { expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings again"; }
 expect "$(patch memory '{"autoRecall":true}')" 200 "turning autoRecall on with the permission"
 revoke
 expect "$(patch memory '{"autoRecall":"true"}')" 403 "a string \"true\" for autoRecall without the permission"
-regrant
-revoke
+# true to absent and back leave recall on: free.
+expect "$(patch memory '{"autoRecall":null}')" 200 "removing autoRecall while it is on, without the permission"
+node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(c.memory && "autoRecall" in c.memory ? 1 : 0)' "${CONFIG}" || { echo "removing autoRecall was not written" >&2; exit 1; }
+expect "$(patch memory '{"autoRecall":true}')" 200 "saving autoRecall true while it is absent, without the permission"
+has memory.autoRecall true || { echo "saving autoRecall true was not written" >&2; exit 1; }
 expect "$(patch memory '{"autoRecall":false}')" 200 "turning autoRecall off without the permission"
 has memory.autoRecall false || { echo "turning autoRecall off was not written" >&2; exit 1; }
+# From off, both ways of turning it back on need the permission.
+expect "$(patch memory '{"autoRecall":null}')" 403 "removing autoRecall while it is off, without the permission"
+has memory.autoRecall false || { echo "a refused removal still changed autoRecall" >&2; exit 1; }
+expect "$(patch memory '{"autoRecall":true}')" 403 "turning autoRecall back on without the permission"
 regrant
-expect "$(patch memory '{"autoRecall":true}')" 200 "turning autoRecall on again"
-revoke
-expect "$(patch memory '{"autoRecall":null}')" 200 "removing autoRecall (off) without the permission"
+expect "$(patch memory '{"autoRecall":null}')" 200 "removing autoRecall while it is off, with the permission"
 node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(c.memory && "autoRecall" in c.memory ? 1 : 0)' "${CONFIG}" || { echo "removing autoRecall was not written" >&2; exit 1; }
+revoke
 # channels.*.enabled is on when absent, so removing it is not free.
 expect "$(patch channels '{"telegram":{"enabled":null}}')" 403 "removing a channel's enabled flag without the permission"
 regrant

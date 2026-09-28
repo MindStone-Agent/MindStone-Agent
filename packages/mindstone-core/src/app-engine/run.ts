@@ -3,6 +3,7 @@ import type { MindStoneModelInfo, MindStoneModelProvider } from "../provider/ind
 import type { AgentRunner } from "../runner/index.js";
 import type { TranscriptSource } from "../transcript/index.js";
 import { runMindStoneChatTurn } from "../chat/run.js";
+import { isAutoRecallEnabled } from "../memory/index.js";
 import {
   recallScopeForMemoryScope,
   scopeFromRequest,
@@ -50,8 +51,8 @@ export async function runMindStone(request: MindStoneRunRequest, options: MindSt
   const memoryScope: MindStoneMemoryScope = request.memoryScope ?? "agent";
   const recallScope = recallScopeForMemoryScope(scope, memoryScope);
 
-  const config = memoryScope === "none" && options.config?.memory?.autoRecall
-    ? { ...options.config, memory: { ...options.config.memory, autoRecall: false } }
+  const config = memoryScope === "none" && isAutoRecallEnabled(options.config)
+    ? { ...options.config, memory: { ...options.config?.memory, autoRecall: false } }
     : options.config;
 
   const turn = await runMindStoneChatTurn({

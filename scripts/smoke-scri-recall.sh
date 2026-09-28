@@ -83,9 +83,9 @@ console.log("parity battery 2 ok: authority anchors hold");
 const os = await import("node:os");
 const nodefs = await import("node:fs");
 const tmpMem = nodefs.mkdtempSync(`${os.tmpdir()}/scri-manual-`);
-process.env.MINDSTONE_AGENT_MEMORY_DIR = tmpMem;
+process.env.MINDSTONE_AGENT_DATA_DIR = tmpMem;
 logRecallUsage("manual", "manual battery query", swamp.hits, new Set());
-const manualLog = `${tmpMem}/recall-usage.jsonl`;
+const manualLog = `${tmpMem}/logs/recall-usage.jsonl`;
 if (!nodefs.existsSync(manualLog)) { console.error("manual path wrote no usage log"); process.exit(1); }
 const manualLines = nodefs.readFileSync(manualLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
 if (!manualLines.every((l) => l.path === "manual" && l.authority_factor === null)) { console.error("manual log must be path:manual, authority_factor:null (raw)", manualLines); process.exit(1); }
@@ -93,7 +93,7 @@ nodefs.rmSync(tmpMem, { recursive: true, force: true });
 console.log("parity battery 3 ok: manual path logs shared schema, authority_factor null (raw)");
 
 // 4. Usage logger is fail-open: unwritable path must not throw (auto OR manual).
-process.env.MINDSTONE_AGENT_MEMORY_DIR = "/dev/null/nope";
+process.env.MINDSTONE_AGENT_DATA_DIR = "/dev/null/nope";
 logRecallUsage("auto", "battery query", swamp.hits, new Set());
 logRecallUsage("manual", "battery query", swamp.hits, new Set());
 console.log("parity battery 4 ok: usage logger fail-open on unwritable path (auto + manual)");
@@ -194,8 +194,10 @@ if (!Array.isArray(alpha.scri.reasons) || !alpha.scri.reasons.includes("critical
 NODE
 
 # Usage instrumentation (#36): the auto path must write the shared-schema JSONL.
-USAGE_LOG="${TEMP_RUNTIME}/mindstone/memory/recall-usage.jsonl"
+USAGE_LOG="${TEMP_RUNTIME}/mindstone/logs/recall-usage.jsonl"
 test -f "${USAGE_LOG}" || { echo "recall-usage.jsonl missing at ${USAGE_LOG}" >&2; exit 1; }
+# It holds the owner's queries, so it never sits in the memory folder (#106).
+test ! -e "${TEMP_RUNTIME}/mindstone/memory/recall-usage.jsonl" || { echo "recall-usage.jsonl was written to the memory folder" >&2; exit 1; }
 USAGE_LOG_PATH="${USAGE_LOG}" node <<'NODE'
 const { readFileSync } = require("node:fs");
 const lines = readFileSync(process.env.USAGE_LOG_PATH, "utf8").trim().split("\n").map((l) => JSON.parse(l));
