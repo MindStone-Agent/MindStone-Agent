@@ -326,6 +326,7 @@ expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable ad
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":""}')" 400 "granting advanced settings with an empty phrase"
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"   "}')" 400 "granting advanced settings with a blank phrase"
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":["enable advanced settings"]}')" 400 "granting advanced settings with a non-string phrase"
+expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"please enable advanced settings now"}')" 400 "granting advanced settings with the phrase inside other text"
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"Enable Advanced Settings"}')" 200 "granting advanced settings with a capitalized phrase"
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"  enable advanced settings  "}')" 200 "granting advanced settings with surrounding spaces"
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable  advanced settings"}')" 200 "granting advanced settings with a double space"
