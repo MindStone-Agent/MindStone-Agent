@@ -87,7 +87,7 @@ check() {
   node -e '
     const offered = new Set(JSON.parse(process.argv[1]));
     const expected = new Set(process.argv[2].split(" ").filter(Boolean));
-    const builtins = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+    const builtins = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
     const got = builtins.filter((n) => offered.has(n));
     const want = builtins.filter((n) => expected.has(n));
     if (got.join() !== want.join()) {
@@ -100,7 +100,9 @@ check() {
 
 check "$(run_turn none)" "" "default config"
 check "$(run_turn '["read"]')" "read" "builtinTools [read]"
-check "$(run_turn '["read","bash","edit","write","grep","find","ls"]')" "read bash edit write" "builtinTools all seven"
+check "$(run_turn '["read","bash","powershell","edit","write","grep","find","ls"]')" "read bash edit write" "builtinTools all eight"
+# Pi 0.87's powershell built-in (#127) can't be enabled.
+check "$(run_turn '["powershell"]')" "" "builtinTools [powershell]"
 
 check "$(run_turn '"bash"')" "" "builtinTools as a string"
 check "$(run_turn '["BASH","bash "]')" "" "builtinTools with near-miss names"
@@ -126,6 +128,32 @@ expectThrow("bash by name only, labelled extension", () => assertNoUnexpectedPiB
 expectThrow("read offered, config is a string", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [builtin("read")] }, "read"));
 expectThrow("new built-in with a relabelled source", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [{ name: "newtool", sourceInfo: { source: "core", path: "<builtin:newtool>" } }] }, undefined));
 expectPass("read offered and enabled", () => assertNoUnexpectedPiBuiltinTools({ getAllTools: () => [builtin("read"), { name: "mindstone_memory_read", sourceInfo: { source: "extension" } }] }, ["read"]));
+NODE
+
+# Pi 0.87's paid cache warming (#128 review): off in MindStone's agent dir unless its settings.json names a mode.
+AGENT_DIR="${TEMP_RUNTIME}/pi-agent" node --input-type=module <<'NODE'
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { disablePiCacheWarmingUnlessSet } from "./packages/mindstone-gateway/dist/index.js";
+import { SettingsManager } from "./vendor/pi/packages/coding-agent/dist/core/settings-manager.js";
+const fail = (m) => { console.error(m); process.exit(1); };
+// The session turns above ran in this agent dir: warming was turned off there.
+const written = JSON.parse(readFileSync(join(process.env.AGENT_DIR, "settings.json"), "utf8"));
+if (written.cacheWarming !== "off") fail("a session turn should have turned cache warming off in the agent dir: " + JSON.stringify(written));
+// Unset: turned off, and Pi reads it back.
+const fresh = mkdtempSync(join(tmpdir(), "pi-warm-"));
+const manager = SettingsManager.create(fresh, fresh);
+if (!disablePiCacheWarmingUnlessSet({ settingsManager: manager, agentDir: fresh })) fail("unset cache warming should be turned off");
+if (manager.getCacheWarmingMode() !== "off") fail("the session's own settings should read cache warming as off");
+await manager.flush();
+if (SettingsManager.create(fresh, fresh).getCacheWarmingMode() !== "off") fail("Pi should read cache warming as off from the file");
+// Chosen by the owner: left alone.
+const chosen = mkdtempSync(join(tmpdir(), "pi-warm-"));
+writeFileSync(join(chosen, "settings.json"), JSON.stringify({ cacheWarming: "streaming" }));
+if (disablePiCacheWarmingUnlessSet({ settingsManager: SettingsManager.create(chosen, chosen), agentDir: chosen })) fail("an owner's cache warming choice should be kept");
+if (SettingsManager.create(chosen, chosen).getCacheWarmingMode() !== "streaming") fail("the owner's streaming choice was changed");
+console.log("ok: cache warming off unless chosen");
 NODE
 
 echo "Pi session built-in tool allowlist smoke test passed."

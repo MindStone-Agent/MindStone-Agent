@@ -3,8 +3,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { makeTerminalPrompter } from "./terminal-prompter.js";
+import { piLoginInteraction, type PiLoginInteraction } from "./pi-login.js";
+import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import {
   ApprovalStore,
@@ -134,215 +136,6 @@ function parseCommand(argv: string[]): Command {
   throw new Error(`Unknown command: ${raw}\n\n${usage()}`);
 }
 
-function arrowOptionLines<T extends string>(
-  options: Array<MindStoneSelectOption<T>>,
-  selectedIndex: number,
-): string[] {
-  return options.map((option, index) => {
-    const selected = index === selectedIndex;
-    const pointer = selected ? gold("◆") : " ";
-    const label = selected ? bold(gold(option.label)) : option.label;
-    const hint = option.hint ? dim(` — ${option.hint}`) : "";
-    return ` ${pointer} ${label}${hint}`;
-  });
-}
-
-function selectWithArrows<T extends string>(params: {
-  message: string;
-  options: Array<MindStoneSelectOption<T>>;
-  initialValue?: T;
-  prefixLines?: string[];
-}): Promise<T> {
-  if (!input.isTTY || !output.isTTY) {
-    return Promise.resolve(
-      params.options.find((option) => option.value === params.initialValue)?.value ?? params.options[0].value,
-    );
-  }
-
-  let selectedIndex = Math.max(
-    0,
-    params.initialValue ? params.options.findIndex((option) => option.value === params.initialValue) : 0,
-  );
-  if (selectedIndex < 0) selectedIndex = 0;
-  let renderedLines = 0;
-
-  const render = () => {
-    if (renderedLines > 0) output.write(`\x1b[${renderedLines}A\x1b[0J`);
-    const lines = [
-      ...(params.prefixLines?.length ? [...params.prefixLines, ""] : []),
-      bold(params.message),
-      dim("Use ↑/↓ arrows, Enter to select, Ctrl+C to cancel."),
-      ...arrowOptionLines(params.options, selectedIndex),
-    ];
-    renderedLines = lines.length;
-    output.write(`${lines.join("\n")}\n`);
-  };
-
-  return new Promise<T>((resolve, reject) => {
-    const wasRaw = input.isRaw;
-    input.setRawMode(true);
-    input.resume();
-    output.write("\x1b[?25l");
-
-    const cleanup = () => {
-      input.off("data", onData);
-      input.setRawMode(wasRaw);
-      output.write("\x1b[?25h");
-    };
-
-    const finish = (value: T) => {
-      cleanup();
-      output.write("\n");
-      resolve(value);
-    };
-
-    const onData = (chunk: Buffer) => {
-      const data = chunk.toString("utf8");
-      if (data === "\u0003") {
-        cleanup();
-        output.write("\n");
-        reject(new Error("Cancelled"));
-        return;
-      }
-      if (data === "\r" || data === "\n") {
-        finish(params.options[selectedIndex].value);
-        return;
-      }
-      if (data === "\u001b[A" || data === "k" || data === "\u0010") {
-        selectedIndex = (selectedIndex - 1 + params.options.length) % params.options.length;
-        render();
-        return;
-      }
-      if (data === "\u001b[B" || data === "j" || data === "\u000e") {
-        selectedIndex = (selectedIndex + 1) % params.options.length;
-        render();
-      }
-    };
-
-    input.on("data", onData);
-    render();
-  });
-}
-
-function inputHidden(message: string, placeholder?: string): Promise<string> {
-  if (!input.isTTY || !output.isTTY) return Promise.resolve("");
-  output.write(`${message}${placeholder ? ` [${placeholder}]` : ""}: `);
-  return new Promise<string>((resolve, reject) => {
-    const wasRaw = input.isRaw;
-    let value = "";
-    input.setRawMode(true);
-    input.resume();
-    const cleanup = () => {
-      input.off("data", onData);
-      input.setRawMode(wasRaw);
-    };
-    const onData = (chunk: Buffer) => {
-      const data = chunk.toString("utf8");
-      if (data === "\u0003") {
-        cleanup();
-        output.write("\n");
-        reject(new Error("Cancelled"));
-        return;
-      }
-      if (data === "\r" || data === "\n") {
-        cleanup();
-        output.write("\n");
-        resolve(value);
-        return;
-      }
-      if (data === "\u007f") {
-        value = value.slice(0, -1);
-        return;
-      }
-      value += data;
-    };
-    input.on("data", onData);
-  });
-}
-
-function makeTerminalPrompter(): MindStonePrompter & { close(): void } {
-  const rl = createInterface({ input, output });
-  const pageMode = input.isTTY && output.isTTY && process.env.MINDSTONE_AGENT_SCROLL_ONBOARDING !== "1";
-  let pendingPageLines: string[] = [];
-
-  const clearPage = () => {
-    if (pageMode) output.write("\x1b[2J\x1b[H");
-  };
-  const consumePagePrefix = (): string[] => {
-    const lines = pendingPageLines;
-    pendingPageLines = [];
-    if (pageMode) clearPage();
-    return lines;
-  };
-  const pushPageNote = (message: string, title?: string) => {
-    if (title) pendingPageLines.push(bold(title));
-    pendingPageLines.push(message);
-  };
-  const ask = async (question: string): Promise<string> => (await rl.question(question)).trim();
-
-  return {
-    close: () => rl.close(),
-    intro: async (title) => {
-      if (pageMode) clearPage();
-      output.write(`${gold(formatMindStoneConfigHeader())}\n`);
-      output.write(`${bold(title)}\n\n`);
-    },
-    outro: async (message) => {
-      const prefix = consumePagePrefix();
-      if (prefix.length) output.write(`${prefix.join("\n")}\n\n`);
-      output.write(`${gold("🔶")} ${message}\n`);
-    },
-    note: async (message, title) => {
-      if (pageMode) {
-        pushPageNote(message, title);
-        return;
-      }
-      if (title) output.write(`${bold(title)}\n`);
-      output.write(`${message}\n\n`);
-    },
-    confirm: async ({ message, initialValue }) => {
-      rl.pause();
-      try {
-        return (
-          (await selectWithArrows({
-            message,
-            options: [
-              { value: "yes", label: "Yes" },
-              { value: "no", label: "No" },
-            ],
-            initialValue: initialValue ? "yes" : "no",
-            prefixLines: consumePagePrefix(),
-          })) === "yes"
-        );
-      } finally {
-        rl.resume();
-      }
-    },
-    select: async <T extends string>({ message, options, initialValue }: {
-      message: string;
-      options: Array<MindStoneSelectOption<T>>;
-      initialValue?: T;
-    }): Promise<T> => {
-      rl.pause();
-      try {
-        return await selectWithArrows({ message, options, initialValue, prefixLines: consumePagePrefix() });
-      } finally {
-        rl.resume();
-      }
-    },
-    text: async ({ message, placeholder, initialValue, sensitive, validate }) => {
-      const fallback = initialValue ?? "";
-      const prefix = consumePagePrefix();
-      if (prefix.length) output.write(`${prefix.join("\n")}\n\n`);
-      const value = sensitive ? await inputHidden(message, placeholder) : await ask(`${message}${fallback || placeholder ? ` [${fallback || placeholder}]` : ""}: `);
-      const resolved = value || fallback;
-      const issue = validate?.(resolved);
-      if (issue) throw new Error(issue);
-      return resolved;
-    },
-  };
-}
-
 async function discoverPiModels(): Promise<{ models: MindStoneModelInfo[]; providers: MindStoneProviderInfo[]; error?: string }> {
   try {
     const paths = runtimePathsFromEnv();
@@ -355,21 +148,10 @@ async function discoverPiModels(): Promise<{ models: MindStoneModelInfo[]; provi
 }
 
 
-/** Pi 0.87 login (#127): one prompt/notify interaction for api-key and OAuth flows. */
-type PiAuthPrompt =
-  | { type: "text" | "secret" | "manual_code"; message: string; placeholder?: string }
-  | { type: "select"; message: string; options: readonly { id: string; label: string; description?: string }[] };
-
-type PiAuthEvent =
-  | { type: "info"; message: string; links?: readonly { url: string; label?: string }[] }
-  | { type: "auth_url"; url: string; instructions?: string }
-  | { type: "device_code"; userCode: string; verificationUri: string; intervalSeconds?: number; expiresInSeconds?: number }
-  | { type: "progress"; message: string };
-
 type PiModelRuntimeModule = {
   ModelRuntime: {
     create(options: { authPath: string; modelsPath: string | null; allowModelNetwork?: boolean }): Promise<{
-      login(providerId: string, type: "oauth" | "api_key", interaction: { prompt(prompt: PiAuthPrompt): Promise<string>; notify(event: PiAuthEvent): void }): Promise<unknown>;
+      login(providerId: string, type: "oauth" | "api_key", interaction: PiLoginInteraction): Promise<unknown>;
     }>;
   };
 };
@@ -416,43 +198,7 @@ async function runProviderOAuthLogin(prompter: MindStonePrompter, providerId: st
     "Connect account",
   );
 
-  await runtime.login(providerId, "oauth", {
-    notify: (event) => {
-      if (event.type === "auth_url") {
-        const opened = openAuthUrl(event.url);
-        output.write(`${bold("OAuth browser login")}\n`);
-        if (opened) output.write("Opened the login URL in your browser.\n");
-        output.write(`${event.instructions ? `${event.instructions}\n` : ""}`);
-        output.write(`${event.url}\n\n`);
-      } else if (event.type === "device_code") {
-        const opened = openAuthUrl(event.verificationUri);
-        output.write(`${bold("OAuth device login")}\n`);
-        if (opened) output.write("Opened the verification URL in your browser.\n");
-        output.write(`Verification URL: ${event.verificationUri}\n`);
-        output.write(`Code: ${bold(event.userCode)}\n`);
-        if (event.expiresInSeconds) output.write(`Expires in: ${event.expiresInSeconds}s\n`);
-        output.write("\n");
-      } else {
-        output.write(`${dim(event.message)}\n`);
-        for (const link of event.type === "info" ? event.links ?? [] : []) output.write(`${link.label ? `${link.label}: ` : ""}${link.url}\n`);
-      }
-    },
-    prompt: async (prompt) => {
-      if (prompt.type === "select") {
-        if (prompt.options.length === 0) throw new Error("Login offered no options to choose from.");
-        return prompter.select({
-          message: prompt.message,
-          options: prompt.options.map((option) => ({ value: option.id, label: option.label })),
-          initialValue: prompt.options[0]?.id,
-        });
-      }
-      return prompter.text({
-        message: prompt.message,
-        placeholder: prompt.placeholder,
-        validate: (value) => value.trim() ? undefined : "Required",
-      });
-    },
-  });
+  await runtime.login(providerId, "oauth", piLoginInteraction(prompter, { write: (text) => output.write(text), openUrl: openAuthUrl }));
 
   return `Connected ${providerId}. Credentials saved in isolated auth file: ${authPath}`;
 }

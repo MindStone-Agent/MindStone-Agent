@@ -41,7 +41,7 @@ c = json.loads(p.read_text())
 mode = os.environ["AUTH_MODE"]
 gw = c.setdefault("gateway", {})
 # tokenEnv wins; tokenFile is listed so the secrets endpoint must treat it as a host credential.
-gw["auth"] = {"mode": "none"} if mode == "none" else {"mode": "token", "tokenEnv": "ADMIN_SMOKE_TOKEN", "tokenFile": "secrets/gateway-token"}
+gw["auth"] = {"mode": "none"} if mode == "none" else {"mode": "token", "tokenEnv": "ADMIN_SMOKE_TOKEN", "tokenFile": "secrets/gateway-token", "passwordEnv": "SMOKE_UNSET_PASSWORD_API_KEY"}
 if os.environ["ADMIN_TOKEN_MODE"] == "env":
     gw["admin"] = {"tokenEnv": "ADMIN_SMOKE_ADMIN_TOKEN"}
 elif os.environ["ADMIN_TOKEN_MODE"] == "same":
@@ -549,6 +549,8 @@ expect "$(post /admin/providers/openai-compatible '{"env":"SOME_PROVIDER_API_KEY
 expect "$(post /admin/providers/openai-compatible '{"env":"HOME","models":["m0"]}')" 400 "an arbitrary variable as a provider key"
 expect "$(post /admin/providers/openai-compatible '{"env":"MINDSTONE_AGENT_GATEWAY_TOKEN","baseUrl":"'"${LOCAL}"'"}')" 400 "the default gateway token variable as a provider key"
 expect "$(post /admin/providers/openai-compatible '{"env":"COPIED_ADMIN_API_KEY","baseUrl":"'"${LOCAL}"'"}')" 422 "a variable holding the admin credential"
+# A gateway credential variable named like an API key, and unset (so only the name can catch it).
+expect "$(post /admin/providers/openai-compatible '{"env":"SMOKE_UNSET_PASSWORD_API_KEY","baseUrl":"'"${LOCAL}"'"}')" 422 "a gateway credential variable named like an API key"
 expect "$(post /admin/secrets/copied.key '{"value":"'"${ADMIN_SMOKE_TOKEN}"'"}')" 200 "storing a copy of the service token"
 expect "$(post /admin/providers/openai-compatible '{"secret":"copied.key","baseUrl":"'"${LOCAL}"'"}')" 422 "a secret holding the service token"
 expect "$(post /admin/providers/openai-compatible '{"secret":"gateway-token","baseUrl":"'"${LOCAL}"'"}')" 422 "the gateway token file as a provider key"

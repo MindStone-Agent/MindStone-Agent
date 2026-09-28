@@ -105,7 +105,26 @@ type PiSettingsManagerLike = {
   getCompactionReserveTokens?(): number;
   getCompactionKeepRecentTokens?(): number;
   applyOverrides?(overrides: { compaction: { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number } }): void;
+  setCacheWarmingMode?(mode: string): void;
 };
+
+/**
+ * Pi 0.87 warms the provider's prompt cache during long runs by default, with
+ * extra paid requests (#128 review). MindStone's isolated agent dir turns it
+ * off unless its settings.json names a mode, so an owner can still opt in.
+ * Pi reads this from the agent dir's settings file only, so it is written there.
+ */
+export function disablePiCacheWarmingUnlessSet(input: { settingsManager: PiSettingsManagerLike; agentDir: string }): boolean {
+  let settings: Record<string, unknown> = {};
+  try {
+    settings = JSON.parse(readFileSync(join(input.agentDir, "settings.json"), "utf8")) as Record<string, unknown>;
+  } catch {
+    // No settings file yet (or unreadable): nothing was chosen.
+  }
+  if (settings && typeof settings === "object" && "cacheWarming" in settings) return false;
+  input.settingsManager.setCacheWarmingMode?.("off");
+  return true;
+}
 
 export const DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR = 20_000;
 
@@ -887,6 +906,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       const resumeCap = capPiSessionManagerOnLoad(sessionManager, resolvePiSessionResumeCapOptions(this.#resumeCapOptions));
       const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
       applyPiSessionCompactionSettings({ settingsManager: settingsManager as PiSettingsManagerLike, compaction: this.#compactionOptions });
+      disablePiCacheWarmingUnlessSet({ settingsManager: settingsManager as PiSettingsManagerLike, agentDir: this.#agentDir });
       const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
         cwd: this.#cwd,
         agentDir: this.#agentDir,
@@ -967,6 +987,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
       const resumeCap = capPiSessionManagerOnLoad(sessionManager, resolvePiSessionResumeCapOptions(this.#resumeCapOptions));
       const settingsManager = modules.SettingsManager.create(this.#cwd, this.#agentDir);
       applyPiSessionCompactionSettings({ settingsManager: settingsManager as PiSettingsManagerLike, compaction: this.#compactionOptions });
+      disablePiCacheWarmingUnlessSet({ settingsManager: settingsManager as PiSettingsManagerLike, agentDir: this.#agentDir });
       const promptParts = buildPiSessionPromptParts(request.messages);
       const resourceLoader = new modules.DefaultResourceLoader(buildPiSessionResourceLoaderOptions({
         cwd: this.#cwd,

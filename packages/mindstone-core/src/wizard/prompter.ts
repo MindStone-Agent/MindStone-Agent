@@ -25,6 +25,8 @@ export type MindStonePrompter = {
     initialValue?: string;
     sensitive?: boolean;
     validate?: (value: string) => string | undefined;
+    /** Ends the question early (rejecting), e.g. when a login finishes in the browser first. */
+    signal?: AbortSignal;
   }): Promise<string>;
   progress?(label: string): MindStoneProgress;
 };
