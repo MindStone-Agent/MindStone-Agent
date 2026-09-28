@@ -1,15 +1,11 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { getPublicWorkspacePackages } from "./release-packages.mjs";
 
-const packages = [
-	{ directory: "packages/ai", name: "@earendil-works/pi-ai" },
-	{ directory: "packages/agent", name: "@earendil-works/pi-agent-core" },
-	{ directory: "packages/tui", name: "@earendil-works/pi-tui" },
-	{ directory: "packages/coding-agent", name: "@earendil-works/pi-coding-agent" },
-];
+const packages = getPublicWorkspacePackages();
 
 const dryRun = process.argv.includes("--dry-run");
 const unknownArgs = process.argv.slice(2).filter((arg) => arg !== "--dry-run");
@@ -37,10 +33,6 @@ function run(command, args, options = {}) {
 	}
 
 	return result;
-}
-
-function readPackageJson(directory) {
-	return JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
 }
 
 function assertBuildOutputExists(directory) {
@@ -73,14 +65,7 @@ function isPublished(name, version) {
 	throw new Error(output ? `Failed to query ${name}@${version}\n${output}` : `Failed to query ${name}@${version}`);
 }
 
-const packageVersions = new Map();
-for (const pkg of packages) {
-	const packageJson = readPackageJson(pkg.directory);
-	if (packageJson.name !== pkg.name) {
-		throw new Error(`${pkg.directory}/package.json has name ${packageJson.name}, expected ${pkg.name}`);
-	}
-	packageVersions.set(pkg.name, packageJson.version);
-}
+const packageVersions = new Map(packages.map((pkg) => [pkg.name, pkg.version]));
 
 const versions = [...new Set(packageVersions.values())];
 if (versions.length !== 1) {
@@ -89,24 +74,34 @@ if (versions.length !== 1) {
 
 console.log(`Publishing pi packages at ${versions[0]}${dryRun ? " (dry run)" : ""}\n`);
 
-for (const pkg of packages) {
-	const version = packageVersions.get(pkg.name);
+const packageStates = packages.map((pkg) => ({
+	...pkg,
+	published: false,
+	version: packageVersions.get(pkg.name),
+}));
+
+for (const pkg of packageStates) {
 	assertBuildOutputExists(pkg.directory);
-	const published = isPublished(pkg.name, version);
+	pkg.published = isPublished(pkg.name, pkg.version);
 
-	if (dryRun) {
-		if (published) {
-			console.log(`${pkg.name}@${version} is already published; validating package contents only.`);
-		} else {
-			console.log(`${pkg.name}@${version} is not published; validating package contents before publish.`);
-		}
-		validatePack(pkg.directory);
-		console.log();
-		continue;
+	if (pkg.published) {
+		console.log(`${pkg.name}@${pkg.version} is already published; validating package contents only.`);
+	} else {
+		console.log(`${pkg.name}@${pkg.version} is not published; validating package contents before publish.`);
 	}
+	validatePack(pkg.directory);
+	console.log();
+}
 
-	if (published) {
-		console.log(`Skipping ${pkg.name}@${version}: already published\n`);
+if (dryRun) {
+	process.exit(0);
+}
+
+console.log("All packages validated; starting publication.\n");
+
+for (const pkg of packageStates) {
+	if (pkg.published) {
+		console.log(`Skipping ${pkg.name}@${pkg.version}: already published\n`);
 		continue;
 	}
 
