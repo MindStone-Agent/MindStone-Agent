@@ -218,13 +218,15 @@ describe("session selector path/delete interactions", () => {
 
 	it("does not start redundant All loads when toggling scopes while All is already loading", async () => {
 		const currentSessions = [makeSession({ id: "current" })];
+		const allSessions = [makeSession({ id: "all" })];
 		const allDeferred = createDeferred<SessionInfo[]>();
 		let allLoadCalls = 0;
 
 		const selector = new SessionSelectorComponent(
 			async () => currentSessions,
-			async () => {
+			async (onProgress) => {
 				allLoadCalls++;
+				onProgress?.(1, 2, allSessions);
 				return allDeferred.promise;
 			},
 			() => {},
@@ -241,8 +243,10 @@ describe("session selector path/delete interactions", () => {
 		list.handleInput("\t"); // current -> all again while load pending
 
 		expect(allLoadCalls).toBe(1);
+		expect(selector.getSessionList().getSelectedSessionPath()).toBe(allSessions[0]!.path);
+		expect(selector.render(120).join("\n")).toContain("Loading");
 
-		allDeferred.resolve([makeSession({ id: "all" })]);
+		allDeferred.resolve(allSessions);
 		await flushPromises();
 	});
 
@@ -280,6 +284,45 @@ describe("session selector path/delete interactions", () => {
 		const output = stripAnsi(selector.render(120).join("\n"));
 		expect(output).toContain("Parent");
 		expect(output).toContain("└─ Child");
+	});
+
+	it("sorts threaded sessions by latest activity in their subtree", async () => {
+		const parentOne = makeSession({
+			id: "parent-one",
+			name: "Parent one",
+			modified: new Date("2026-01-02T00:00:00.000Z"),
+		});
+		const parentTwo = makeSession({
+			id: "parent-two",
+			name: "Parent two",
+			modified: new Date("2026-01-01T00:00:00.000Z"),
+		});
+		const childTwo = makeSession({
+			id: "child-two",
+			name: "Child two",
+			parentSessionPath: parentTwo.path,
+			modified: new Date("2026-01-03T00:00:00.000Z"),
+		});
+
+		const selector = new SessionSelectorComponent(
+			async () => [parentOne, parentTwo, childTwo],
+			async () => [],
+			() => {},
+			() => {},
+			() => {},
+			() => {},
+			{ keybindings },
+		);
+		await flushPromises();
+
+		const output = stripAnsi(selector.render(120).join("\n"));
+		const parentTwoIndex = output.indexOf("Parent two");
+		const childTwoIndex = output.indexOf("└─ Child two");
+		const parentOneIndex = output.indexOf("Parent one");
+
+		expect(parentTwoIndex).toBeGreaterThanOrEqual(0);
+		expect(childTwoIndex).toBeGreaterThan(parentTwoIndex);
+		expect(parentOneIndex).toBeGreaterThan(childTwoIndex);
 	});
 
 	it("treats the current session as active across symlink aliases", async () => {

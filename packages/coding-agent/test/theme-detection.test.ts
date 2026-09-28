@@ -3,8 +3,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	detectTerminalBackgroundFromEnv,
 	detectTerminalBackgroundTheme,
+	detectTerminalThemeForAuto,
 	getThemeByName,
 	getThemeForRgbColor,
+	parseAutoThemeSetting,
+	resolveThemeSetting,
 } from "../src/modes/interactive/theme/theme.ts";
 
 afterEach(() => {
@@ -97,6 +100,46 @@ describe("detectTerminalBackgroundTheme", () => {
 	});
 });
 
+describe("detectTerminalThemeForAuto", () => {
+	it("starts both queries and returns the preferred color-scheme result without waiting", async () => {
+		let resolveColorScheme!: (theme: "dark" | "light" | undefined) => void;
+		let backgroundQueryStarted = false;
+		const detection = detectTerminalThemeForAuto({
+			timeoutMs: 100,
+			ui: {
+				queryTerminalColorScheme: () =>
+					new Promise((resolve) => {
+						resolveColorScheme = resolve;
+					}),
+				queryTerminalBackgroundColor: () => {
+					backgroundQueryStarted = true;
+					return new Promise<RgbColor | undefined>(() => {});
+				},
+			},
+		});
+
+		expect(backgroundQueryStarted).toBe(true);
+		resolveColorScheme("dark");
+		await expect(detection).resolves.toBe("dark");
+	});
+
+	it("uses the background result when the color-scheme query fails", async () => {
+		await expect(
+			detectTerminalThemeForAuto({
+				timeoutMs: 100,
+				ui: {
+					async queryTerminalColorScheme(): Promise<undefined> {
+						throw new Error("color-scheme query failed");
+					},
+					async queryTerminalBackgroundColor(): Promise<RgbColor> {
+						return { r: 250, g: 250, b: 250 };
+					},
+				},
+			}),
+		).resolves.toBe("light");
+	});
+});
+
 describe("theme color mode", () => {
 	it("uses terminal capabilities", () => {
 		setCapabilities({ images: null, trueColor: false, hyperlinks: false });
@@ -117,5 +160,15 @@ describe("theme detection from RGB", () => {
 	it("classifies RGB colors by luminance", () => {
 		expect(getThemeForRgbColor({ r: 8, g: 8, b: 8 })).toBe("dark");
 		expect(getThemeForRgbColor({ r: 250, g: 250, b: 250 })).toBe("light");
+	});
+});
+
+describe("theme setting helpers", () => {
+	it("parses and resolves automatic theme settings", () => {
+		expect(parseAutoThemeSetting("light/dark")).toEqual({ lightTheme: "light", darkTheme: "dark" });
+		expect(resolveThemeSetting("dark", "light")).toBe("dark");
+		expect(resolveThemeSetting("light/dark", "light")).toBe("light");
+		expect(resolveThemeSetting("light/dark", "dark")).toBe("dark");
+		expect(resolveThemeSetting("light/dark/extra", "dark")).toBeUndefined();
 	});
 });

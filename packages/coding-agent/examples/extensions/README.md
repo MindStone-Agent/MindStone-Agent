@@ -112,6 +112,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | Extension | Description |
 |-----------|-------------|
 | `message-renderer.ts` | Custom message rendering with colors and expandable details via `registerMessageRenderer` |
+| `entry-renderer.ts` | TUI-only session entry rendering via `appendEntry` and `registerEntryRenderer` |
 | `event-bus.ts` | Inter-extension communication via `pi.events` |
 
 ### Session Metadata
@@ -160,7 +161,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       name: Type.String({ description: "Name to greet" }),
     }),
-    async execute(toolCallId, params, onUpdate, ctx, signal) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       return {
         content: [{ type: "text", text: `Hello, ${params.name}!` }],
         details: {},

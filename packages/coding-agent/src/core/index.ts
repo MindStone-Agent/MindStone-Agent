@@ -26,19 +26,34 @@ export {
 	createAgentSessionServices,
 } from "./agent-session-services.ts";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+export type { CacheWarmingDecision, CacheWarmingStatus } from "./cache-warmer.ts";
 export type { CompactionResult } from "./compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
 export { areExperimentalFeaturesEnabled } from "./experimental.ts";
 // Extensions system
 export {
+	type AgentActivityOutcome,
+	type AgentBeforeSettleEvent,
+	type AgentBeforeSettleEventResult,
 	type AgentEndEvent,
+	type AgentSettledEvent,
 	type AgentStartEvent,
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
 	type BeforeAgentStartEvent,
 	type BeforeAgentStartEventResult,
+	type BoundaryContextPreview,
+	type BoundaryResult,
+	type BoundaryState,
 	type BuildSystemPromptOptions,
+	type CacheWarmingDecisionEvent,
+	type CacheWarmingDecisionEventResult,
+	type CompactionEntryDraft,
+	type ContextEditEntryDraft,
 	type ContextEvent,
+	type ContextWithSystemEvent,
+	type CustomEntryDraft,
+	type CustomMessageEntryDraft,
 	defineTool,
 	discoverAndLoadExtensions,
 	type ExecOptions,
@@ -55,13 +70,16 @@ export {
 	ExtensionRunner,
 	type ExtensionShortcut,
 	type ExtensionUIContext,
+	type InlineExtension,
 	type LoadExtensionsResult,
 	type MessageRenderer,
+	type NormalizedBuildSystemPromptOptions,
 	type RegisteredCommand,
 	type SessionBeforeCompactEvent,
 	type SessionBeforeForkEvent,
 	type SessionBeforeSwitchEvent,
 	type SessionBeforeTreeEvent,
+	type SessionBoundaryDraft,
 	type SessionCompactEvent,
 	type SessionShutdownEvent,
 	type SessionStartEvent,
@@ -72,6 +90,7 @@ export {
 	type ToolRenderResultOptions,
 	type ToolResultEvent,
 	type TurnEndEvent,
+	type TurnEndEventResult,
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";

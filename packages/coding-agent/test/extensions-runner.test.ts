@@ -1,3 +1,4 @@
+import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
 /**
  * Tests for ExtensionRunner - conflict detection, error handling, tool wrapping.
  */
@@ -7,17 +8,26 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
+import { createEventBus } from "../src/core/event-bus.ts";
+import {
+	createExtensionRuntime,
+	discoverAndLoadExtensions,
+	loadExtensionFromFactory,
+	loadExtensions,
+} from "../src/core/extensions/loader.ts";
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
 	ExtensionActions,
 	ExtensionContextActions,
+	ExtensionFactory,
 	ExtensionUIContext,
 	ProviderConfig,
 } from "../src/core/extensions/types.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
-import { ModelRegistry } from "../src/core/model-registry.ts";
+import type { ModelRegistry } from "../src/core/model-registry.ts";
+import type { ScopedModel } from "../src/core/model-resolver.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 
 describe("ExtensionRunner", () => {
 	let tempDir: string;
@@ -26,13 +36,12 @@ describe("ExtensionRunner", () => {
 	let modelRegistry: ModelRegistry;
 	const defaultKeybindings = new KeybindingsManager().getEffectiveConfig();
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-runner-test-"));
 		extensionsDir = path.join(tempDir, "extensions");
 		fs.mkdirSync(extensionsDir);
 		sessionManager = SessionManager.inMemory();
-		const authStorage = AuthStorage.create(path.join(tempDir, "auth.json"));
-		modelRegistry = ModelRegistry.create(authStorage);
+		modelRegistry = await createInMemoryModelRegistry(AuthStorage.inMemory());
 	});
 
 	afterEach(() => {
@@ -49,7 +58,21 @@ describe("ExtensionRunner", () => {
 				name: "Instant Model",
 				reasoning: false,
 				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				cost: {
+					input: 1,
+					output: 2,
+					cacheRead: 0.1,
+					cacheWrite: 1.25,
+					tiers: [
+						{
+							inputTokensAbove: 272000,
+							input: 2,
+							output: 3,
+							cacheRead: 0.2,
+							cacheWrite: 2.5,
+						},
+					],
+				},
 				contextWindow: 128000,
 				maxTokens: 4096,
 			},
@@ -84,7 +107,24 @@ describe("ExtensionRunner", () => {
 		getContextUsage: () => undefined,
 		compact: () => {},
 		getSystemPrompt: () => "",
+		getScopedModels: () => [],
 	};
+
+	describe("scopedModels", () => {
+		it("reflects the getScopedModels context action on ctx.scopedModels", async () => {
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			// Before bindCore the default is an empty list (never undefined).
+			expect(runner.createContext().scopedModels).toEqual([]);
+
+			// After bindCore wires a getScopedModels action, ctx.scopedModels
+			// returns it live (same reference, lazy getter).
+			const scoped = [{ model: { id: "scoped-test" }, thinkingLevel: "high" }] as unknown as ScopedModel[];
+			runner.bindCore(extensionActions, { ...extensionContextActions, getScopedModels: () => scoped });
+			expect(runner.createContext().scopedModels).toBe(scoped);
+		});
+	});
 
 	describe("project_trust", () => {
 		it("continues past undecided handlers and returns the first yes/no decision", async () => {
@@ -358,6 +398,32 @@ describe("ExtensionRunner", () => {
 			expect(tools.map((t) => t.definition.name).sort()).toEqual(["tool_a", "tool_b"]);
 		});
 
+		// Regression test for #9300.
+		it("rejects extension tools without a parameter schema", async () => {
+			const extensionPath = path.join(extensionsDir, "missing-parameters.js");
+			fs.writeFileSync(
+				extensionPath,
+				`export default function(pi) {
+	pi.registerTool({
+		name: "noop",
+		label: "No-op",
+		description: "Do nothing",
+		execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+	});
+}`,
+			);
+
+			const result = await loadExtensions([extensionPath], tempDir);
+
+			expect(result.extensions).toHaveLength(0);
+			expect(result.errors).toEqual([
+				{
+					path: extensionPath,
+					error: `Failed to load extension: Tool "noop" registered by extension "${extensionPath}" must define an object parameter schema.`,
+				},
+			]);
+		});
+
 		it("keeps first tool when two extensions register the same name", async () => {
 			const first = `
 				import { Type } from "typebox";
@@ -558,9 +624,102 @@ describe("ExtensionRunner", () => {
 			expect(errors[0].error).toContain("Handler error!");
 			expect(errors[0].event).toBe("context");
 		});
+
+		// Regression test for #9068.
+		it("fails closed when a user_bash handler throws", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("user_bash", async () => {
+						throw new Error("Routing failed");
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "throws.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+
+			await expect(
+				runner.emitUserBash({ type: "user_bash", command: "pwd", excludeFromContext: false, cwd: tempDir }),
+			).rejects.toThrow("Routing failed");
+			expect(errors).toMatchObject([{ event: "user_bash", error: "Routing failed" }]);
+		});
+
+		// Regression test for #9068.
+		it.each([
+			["an empty object", "{}"],
+			["null operations", "{ operations: null }"],
+			["operations without exec", "{ operations: {} }"],
+			["a null result", "{ result: null }"],
+			["an incomplete result", '{ result: { output: "handled" } }'],
+			[
+				"operations and a result",
+				'{ operations: { exec: async () => ({ exitCode: 0 }) }, result: { output: "handled", exitCode: 0, cancelled: false, truncated: false } }',
+			],
+		])("fails closed when a user_bash handler returns %s", async (_description, handlerResult) => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("user_bash", async () => (${handlerResult}));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "invalid-result.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+
+			await expect(
+				runner.emitUserBash({ type: "user_bash", command: "pwd", excludeFromContext: false, cwd: tempDir }),
+			).rejects.toThrow("Invalid user_bash handler result");
+			expect(errors).toMatchObject([
+				{ event: "user_bash", error: expect.stringContaining("Invalid user_bash handler result") },
+			]);
+		});
+
+		it("accepts valid user_bash operations and result overrides", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("user_bash", async (event) => {
+						if (event.command === "operations") {
+							return { operations: { exec: async () => ({ exitCode: 0 }) } };
+						}
+						return { result: { output: "handled", exitCode: 0, cancelled: false, truncated: false } };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "valid-results.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const event = { type: "user_bash" as const, excludeFromContext: false, cwd: tempDir };
+
+			const operations = await runner.emitUserBash({ ...event, command: "operations" });
+			expect(operations).toEqual({ operations: { exec: expect.any(Function) } });
+			await expect(runner.emitUserBash({ ...event, command: "result" })).resolves.toEqual({
+				result: { output: "handled", exitCode: 0, cancelled: false, truncated: false },
+			});
+		});
 	});
 
-	describe("message renderers", () => {
+	describe("message and entry renderers", () => {
+		it("gets Markdown transformers in extension load order", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.registerMarkdownTransformer((markdown) => markdown);
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "markdown-renderer-a.ts"), extCode);
+			fs.writeFileSync(path.join(extensionsDir, "markdown-renderer-b.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(runner.getMarkdownTransformers()).toHaveLength(2);
+		});
+
 		it("gets message renderer by type", async () => {
 			const extCode = `
 				export default function(pi) {
@@ -577,6 +736,21 @@ describe("ExtensionRunner", () => {
 
 			const missing = runner.getMessageRenderer("not-exists");
 			expect(missing).toBeUndefined();
+		});
+
+		it("gets entry renderer by type", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.registerEntryRenderer("my-entry", (entry, options, theme) => null);
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "entry-renderer.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(runner.getEntryRenderer("my-entry")).toBeDefined();
+			expect(runner.getEntryRenderer("not-exists")).toBeUndefined();
 		});
 	});
 
@@ -627,6 +801,26 @@ describe("ExtensionRunner", () => {
 
 			expect(flags.get("shared-flag")?.description).toBe("first");
 			expect(result.runtime.flagValues.get("shared-flag")).toBe(true);
+		});
+
+		it("rejects default values that do not match the flag type", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.registerFlag("safe-mode", {
+						type: "boolean",
+						default: "false",
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "bad-flag-default.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+			expect(result.extensions).toHaveLength(0);
+			expect(result.errors[0]?.error).toContain(
+				'Invalid default for flag "safe-mode": expected boolean, got string',
+			);
+			expect(result.runtime.flagValues.has("safe-mode")).toBe(false);
 		});
 
 		it("can set flag values", async () => {
@@ -682,16 +876,157 @@ describe("ExtensionRunner", () => {
 			runner.onError((error) => errors.push(error.error));
 			runner.bindCore(extensionActions, extensionContextActions);
 
-			const chained = await runner.emitBeforeAgentStart("hello", undefined, "base", {
+			const chained = await runner.emitBeforeAgentStart("hello", undefined, {
 				cwd: tempDir,
+				customPrompt: "base",
 			});
 
 			expect(errors).toEqual([]);
+			expect(chained.messages).toEqual([]);
+			expect(buildSystemPrompt(chained.systemPromptOptions)).toMatch(/base[\s\S]*\nfirst\nsecond$/);
+		});
+	});
 
-			expect(chained).toEqual({
-				messages: undefined,
-				systemPrompt: "base\nfirst\nsecond",
+	describe("boundary chaining", () => {
+		it("chains shared draft proposals and preserves omitted result fields", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const observations: Array<{ entries: number; continuation: boolean; preview: number }> = [];
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("agent_before_settle", (event) => {
+						observations.push({
+							entries: event.entries.length,
+							continuation: event.continue,
+							preview: event.context.contextEntries.length,
+						});
+						event.entries.push({ type: "custom", customType: "first", data: 1 });
+						return { continue: true };
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:first>",
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("agent_before_settle", (event) => {
+						observations.push({
+							entries: event.entries.length,
+							continuation: event.continue,
+							preview: event.context.contextEntries.length,
+						});
+						return { entries: [] };
+					});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+				"<inline:second>",
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+
+			const result = await runner.emitBoundary({ type: "agent_before_settle", outcome: "completed" }, (entries) => ({
+				contextEntries: entries.map((entry, index) => ({
+					sourceEntry: {
+						type: "custom",
+						id: `draft-${index}`,
+						parentId: null,
+						timestamp: "",
+						customType: entry.type,
+					},
+					messages: [],
+				})),
+				contextMessages: [],
+				llmMessages: [],
+				pendingMessages: [],
+				canContinue: false,
+			}));
+
+			expect(observations).toEqual([
+				{ entries: 0, continuation: false, preview: 0 },
+				{ entries: 1, continuation: true, preview: 1 },
+			]);
+			expect(result.entries).toEqual([]);
+			expect(result.continue).toBe(true);
+		});
+
+		it("reports invalid boundary previews and lets later handlers repair the proposal", async () => {
+			const runtime = createExtensionRuntime();
+			let secondRan = false;
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("agent_before_settle", () => ({
+						entries: [{ type: "context_edit", targetId: "missing", replacement: null }],
+					}));
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"<inline:invalid>",
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("agent_before_settle", (event) => {
+						secondRan = true;
+						expect(event.entries).toHaveLength(1);
+						return { entries: [] };
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"<inline:repair>",
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(error.error));
+
+			const result = await runner.emitBoundary({ type: "agent_before_settle", outcome: "completed" }, (entries) => {
+				if (entries.some((entry) => entry.type === "context_edit")) throw new Error("Entry missing not found");
+				return {
+					contextEntries: [],
+					contextMessages: [],
+					llmMessages: [],
+					pendingMessages: [],
+					canContinue: false,
+				};
 			});
+
+			expect(secondRan).toBe(true);
+			expect(errors).toContain("Invalid boundary entries: Entry missing not found");
+			expect(result.entries).toEqual([]);
+			expect(result.valid).toBe(true);
+		});
+
+		it("keeps shared mutations made before a handler throws", async () => {
+			const runtime = createExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("agent_before_settle", (event) => {
+						event.entries.push({ type: "custom", customType: "kept" });
+						throw new Error("boundary failed");
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(error.error));
+
+			const result = await runner.emitBoundary({ type: "agent_before_settle", outcome: "completed" }, () => ({
+				contextEntries: [],
+				contextMessages: [],
+				llmMessages: [],
+				pendingMessages: [],
+				canContinue: false,
+			}));
+
+			expect(result.entries).toMatchObject([{ type: "custom", customType: "kept" }]);
+			expect(errors).toEqual(["boundary failed"]);
 		});
 	});
 
@@ -788,7 +1123,7 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("provider registration", () => {
-		it("bindCore ignores invalid queued registrations and reports extension error", () => {
+		it("bindCore ignores invalid queued registrations and reports extension error", async () => {
 			const runtime = createExtensionRuntime();
 			runtime.registerProvider(
 				"broken-provider",
@@ -808,7 +1143,7 @@ describe("ExtensionRunner", () => {
 			expect(errors).toEqual([
 				'/tmp/broken-extension.ts: Provider broken-provider: "api" is required when registering streamSimple.',
 			]);
-			expect(() => modelRegistry.refresh()).not.toThrow();
+			await expect(modelRegistry.refresh()).resolves.toMatchObject({ aborted: false });
 		});
 
 		it("pre-bind unregister removes all queued registrations for a provider", () => {
@@ -844,7 +1179,15 @@ describe("ExtensionRunner", () => {
 
 			runtime.registerProvider("instant-provider", providerModelConfig);
 			expect(runtime.pendingProviderRegistrations).toHaveLength(0);
-			expect(modelRegistry.find("instant-provider", "instant-model")).toBeDefined();
+			expect(modelRegistry.find("instant-provider", "instant-model")?.cost.tiers).toEqual([
+				{
+					inputTokensAbove: 272000,
+					input: 2,
+					output: 3,
+					cacheRead: 0.2,
+					cacheWrite: 2.5,
+				},
+			]);
 
 			runtime.unregisterProvider("instant-provider");
 			expect(modelRegistry.find("instant-provider", "instant-model")).toBeUndefined();
@@ -875,6 +1218,127 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	// #8967: event handler unsubscription must not disturb other registrations.
+	describe("event subscriptions", () => {
+		async function loadSubscriptionExtension(factory: ExtensionFactory) {
+			const runtime = createExtensionRuntime();
+			const extension = await loadExtensionFromFactory(factory, tempDir, createEventBus(), runtime);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			return { extension, runner };
+		}
+
+		it("allows self-removal without skipping neighboring handlers", async () => {
+			const calls: string[] = [];
+			const { runner } = await loadSubscriptionExtension((pi) => {
+				const unsubscribe = pi.on("agent_end", () => {
+					calls.push("A");
+					unsubscribe();
+				});
+				pi.on("agent_end", () => {
+					calls.push("B");
+				});
+			});
+
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B"]);
+
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B", "B"]);
+		});
+
+		it("removes duplicate registrations independently and cleans up the last handler", async () => {
+			const calls: string[] = [];
+			const unsubscribers: Array<() => void> = [];
+			const { extension, runner } = await loadSubscriptionExtension((pi) => {
+				const shared = () => {
+					calls.push("shared");
+				};
+				unsubscribers.push(pi.on("agent_end", shared));
+				unsubscribers.push(
+					pi.on("agent_end", () => {
+						calls.push("B");
+					}),
+				);
+				unsubscribers.push(pi.on("agent_end", shared));
+			});
+			const [stopFirst, stopB, stopSecond] = unsubscribers;
+
+			stopSecond();
+			stopSecond();
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["shared", "B"]);
+
+			stopFirst();
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["shared", "B", "B"]);
+
+			stopB();
+			expect(extension.handlers.has("agent_end")).toBe(false);
+		});
+
+		it("keeps removed pending handlers in the current dispatch", async () => {
+			const calls: string[] = [];
+			const { runner } = await loadSubscriptionExtension((pi) => {
+				pi.on("agent_end", () => {
+					calls.push("A");
+					stopB();
+				});
+				const stopB = pi.on("agent_end", () => {
+					calls.push("B");
+				});
+				pi.on("agent_end", () => {
+					calls.push("C");
+				});
+			});
+
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B", "C"]);
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B", "C", "A", "C"]);
+		});
+
+		it("defers registrations made during dispatch until the next dispatch", async () => {
+			const calls: string[] = [];
+			const { runner } = await loadSubscriptionExtension((pi) => {
+				pi.on("agent_end", () => {
+					calls.push("A");
+					pi.on("agent_end", () => {
+						calls.push("C");
+					});
+				});
+				pi.on("agent_end", () => {
+					calls.push("B");
+				});
+			});
+
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B"]);
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "B", "A", "B", "C"]);
+		});
+
+		it("uses a fresh handler list for nested dispatches", async () => {
+			const calls: string[] = [];
+			const { runner } = await loadSubscriptionExtension((pi) => {
+				const stopA = pi.on("agent_end", async () => {
+					calls.push("A");
+					stopA();
+					stopB();
+					pi.on("agent_end", () => {
+						calls.push("C");
+					});
+					await runner.emit({ type: "agent_end", messages: [] });
+				});
+				const stopB = pi.on("agent_end", () => {
+					calls.push("B");
+				});
+			});
+
+			await runner.emit({ type: "agent_end", messages: [] });
+			expect(calls).toEqual(["A", "C", "B"]);
+		});
+	});
+
 	describe("hasHandlers", () => {
 		it("returns true when handlers exist for event type", async () => {
 			const extCode = `
@@ -889,6 +1353,60 @@ describe("ExtensionRunner", () => {
 
 			expect(runner.hasHandlers("tool_call")).toBe(true);
 			expect(runner.hasHandlers("agent_end")).toBe(false);
+		});
+	});
+
+	describe("before_provider_headers", () => {
+		it("lets a handler mutate headers in place and preserves existing headers", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_provider_headers", (event) => {
+						event.headers["X-Turn-Index"] = "3";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "headers.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(runner.hasHandlers("before_provider_headers")).toBe(true);
+
+			const headers = await runner.emitBeforeProviderHeaders({ "User-Agent": "kimchi/1.0" });
+			expect(headers["X-Turn-Index"]).toBe("3");
+			expect(headers["User-Agent"]).toBe("kimchi/1.0");
+		});
+
+		it("isolates a throwing handler and still applies the others", async () => {
+			const throwing = `
+				export default function(pi) {
+					pi.on("before_provider_headers", () => {
+						throw new Error("header handler boom");
+					});
+				}
+			`;
+			const good = `
+				export default function(pi) {
+					pi.on("before_provider_headers", (event) => {
+						event.headers["X-Good"] = "yes";
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "a-throwing.ts"), throwing);
+			fs.writeFileSync(path.join(extensionsDir, "b-good.ts"), good);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ event: string; error: string }> = [];
+			runner.onError((err) => errors.push(err));
+
+			const headers = await runner.emitBeforeProviderHeaders({ "User-Agent": "x" });
+
+			expect(headers["X-Good"]).toBe("yes");
+			expect(headers["User-Agent"]).toBe("x");
+			expect(errors).toHaveLength(1);
+			expect(errors[0].event).toBe("before_provider_headers");
+			expect(errors[0].error).toContain("header handler boom");
 		});
 	});
 });
