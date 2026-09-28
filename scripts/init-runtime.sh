@@ -25,6 +25,22 @@ fi
 
 mkdir -p "${AGENT_DIR}" "$(dirname "${CONFIG_PATH}")" "${MINDSTONE_AGENT_MEMORY_DIR}" "${MINDSTONE_AGENT_JOURNAL_DIR}" "$(dirname "${MINDSTONE_AGENT_LOG_PATH}")" "$(dirname "${MINDSTONE_AGENT_MEMORY_INDEX_PATH}")"
 
+# Pi 0.87 warms the provider cache with extra paid requests unless told not
+# to (#129). Seed MindStone's isolated Pi agent dir with it off, only when the
+# owner hasn't chosen: a settings.json that already names a mode is left alone.
+mkdir -p "${PI_CODING_AGENT_DIR}"
+PI_SETTINGS="${PI_CODING_AGENT_DIR}/settings.json" node -e '
+const fs = require("fs");
+const path = process.env.PI_SETTINGS;
+let settings = {};
+try { settings = JSON.parse(fs.readFileSync(path, "utf8")); } catch {}
+if (!settings || typeof settings !== "object" || Array.isArray(settings)) settings = {};
+if (!["off", "streaming", "idle"].includes(settings.cacheWarming)) {
+  settings.cacheWarming = "off";
+  fs.writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
+}
+'
+
 if [[ ! -f "${AGENT_DIR}/IDENTITY.md" ]]; then
   cat >"${AGENT_DIR}/IDENTITY.md" <<'EOF'
 # Default MindStone Agent

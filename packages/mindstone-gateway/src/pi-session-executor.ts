@@ -114,6 +114,8 @@ type PiSettingsManagerLike = {
  * off unless its settings.json names a mode, so an owner can still opt in.
  * Pi reads this from the agent dir's settings file only, so it is written there.
  */
+const CACHE_WARMING_MODES = ["off", "streaming", "idle"];
+
 export function disablePiCacheWarmingUnlessSet(input: { settingsManager: PiSettingsManagerLike; agentDir: string }): boolean {
   let settings: Record<string, unknown> = {};
   try {
@@ -121,7 +123,9 @@ export function disablePiCacheWarmingUnlessSet(input: { settingsManager: PiSetti
   } catch {
     // No settings file yet (or unreadable): nothing was chosen.
   }
-  if (settings && typeof settings === "object" && "cacheWarming" in settings) return false;
+  // Only a mode Pi knows counts as the owner's choice: an invalid value (a
+  // typo, null) makes Pi fall back to "streaming" (#129).
+  if (settings && typeof settings === "object" && CACHE_WARMING_MODES.includes(settings.cacheWarming as string)) return false;
   input.settingsManager.setCacheWarmingMode?.("off");
   return true;
 }

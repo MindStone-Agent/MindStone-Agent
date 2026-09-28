@@ -32,6 +32,14 @@ echo "== Pi session built-in tool allowlist smoke test =="
 
 npm run build:mindstone >/dev/null
 ./scripts/init-runtime.sh >/tmp/mindstone-agent-pi-tools-init.log
+# init-runtime seeds Pi's cache warming off (#129). Remove it again so the
+# session turns below show the gateway turns it off by itself too.
+PI_SETTINGS="${TEMP_RUNTIME}/pi-agent/settings.json" node -e '
+const fs = require("fs"); const p = process.env.PI_SETTINGS;
+const s = JSON.parse(fs.readFileSync(p, "utf8"));
+if (s.cacheWarming !== "off") { console.error("init-runtime should seed cacheWarming off: " + JSON.stringify(s)); process.exit(1); }
+delete s.cacheWarming; fs.writeFileSync(p, JSON.stringify(s));
+'
 
 node "${PROJECT_ROOT}/scripts/stub-openai-server.mjs" >"${TEMP_RUNTIME}/stub.json" &
 STUB_PID=$!
@@ -158,6 +166,14 @@ if (!disablePiCacheWarmingUnlessSet({ settingsManager: manager, agentDir: fresh 
 if (manager.getCacheWarmingMode() !== "off") fail("the session's own settings should read cache warming as off");
 await manager.flush();
 if (SettingsManager.create(fresh, fresh).getCacheWarmingMode() !== "off") fail("Pi should read cache warming as off from the file");
+// An invalid value (a typo, null) is not a choice: Pi would fall back to streaming.
+for (const bad of [null, "Off", "warm"]) {
+  const dir = mkdtempSync(join(tmpdir(), "pi-warm-"));
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ cacheWarming: bad }));
+  const m = SettingsManager.create(dir, dir);
+  if (!disablePiCacheWarmingUnlessSet({ settingsManager: m, agentDir: dir })) fail("an invalid cacheWarming value should be replaced: " + JSON.stringify(bad));
+  if (m.getCacheWarmingMode() !== "off") fail("an invalid cacheWarming value left warming on: " + JSON.stringify(bad));
+}
 // Chosen by the owner: left alone.
 const chosen = mkdtempSync(join(tmpdir(), "pi-warm-"));
 writeFileSync(join(chosen, "settings.json"), JSON.stringify({ cacheWarming: "streaming" }));
@@ -165,5 +181,17 @@ if (disablePiCacheWarmingUnlessSet({ settingsManager: SettingsManager.create(cho
 if (SettingsManager.create(chosen, chosen).getCacheWarmingMode() !== "streaming") fail("the owner's streaming choice was changed");
 console.log("ok: cache warming off unless chosen");
 NODE
+# init-runtime keeps an owner's choice, and replaces an invalid value.
+for pair in 'streaming:streaming' 'null:off'; do
+  given="${pair%%:*}" want="${pair##*:}"
+  RT="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-seed.XXXXXX")"
+  mkdir -p "${RT}/pi-agent"
+  if [[ "${given}" == null ]]; then printf '{"cacheWarming":null}' > "${RT}/pi-agent/settings.json"; else printf '{"cacheWarming":"%s"}' "${given}" > "${RT}/pi-agent/settings.json"; fi
+  MINDSTONE_AGENT_RUNTIME_DIR="${RT}" PI_CODING_AGENT_DIR="${RT}/pi-agent" ./scripts/init-runtime.sh >/dev/null
+  got="$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).cacheWarming))' "${RT}/pi-agent/settings.json")"
+  rm -rf "${RT}"
+  [[ "${got}" == "${want}" ]] || { echo "init-runtime with cacheWarming ${given} should leave ${want}, got ${got}" >&2; exit 1; }
+done
+echo "ok: init-runtime seeds cache warming"
 
 echo "Pi session built-in tool allowlist smoke test passed."

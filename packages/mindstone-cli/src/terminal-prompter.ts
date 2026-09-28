@@ -153,7 +153,7 @@ function inputHidden(io: TerminalIo, message: string, placeholder?: string, sign
 
 export function makeTerminalPrompter(io: TerminalIo = { input: stdin, output: stdout }): MindStonePrompter & { close(): void } {
   const { input, output } = io;
-  const rl = createInterface({ input, output });
+  let rl = createInterface({ input, output });
   const pageMode = input.isTTY && output.isTTY && process.env.MINDSTONE_AGENT_SCROLL_ONBOARDING !== "1";
   let pendingPageLines: string[] = [];
 
@@ -174,6 +174,16 @@ export function makeTerminalPrompter(io: TerminalIo = { input: stdin, output: st
   // wins) must end its pending question, or it takes the next answer (#127).
   const ask = async (question: string, signal?: AbortSignal): Promise<string> =>
     (await (signal ? rl.question(question, { signal }) : rl.question(question))).trim();
+  // On a real terminal the readline echoes whatever is typed, even paused, so
+  // it is closed while a secret is read and a fresh one is made after (#129).
+  const hidden = async (message: string, placeholder?: string, signal?: AbortSignal): Promise<string> => {
+    rl.close();
+    try {
+      return await inputHidden(io, message, placeholder, signal);
+    } finally {
+      rl = createInterface({ input, output });
+    }
+  };
 
   return {
     close: () => rl.close(),
@@ -229,7 +239,7 @@ export function makeTerminalPrompter(io: TerminalIo = { input: stdin, output: st
       const fallback = initialValue ?? "";
       const prefix = consumePagePrefix();
       if (prefix.length) output.write(`${prefix.join("\n")}\n\n`);
-      const value = sensitive ? await inputHidden(io, message, placeholder, signal) : await ask(`${message}${fallback || placeholder ? ` [${fallback || placeholder}]` : ""}: `, signal);
+      const value = sensitive ? await hidden(message, placeholder, signal) : await ask(`${message}${fallback || placeholder ? ` [${fallback || placeholder}]` : ""}: `, signal);
       const resolved = value || fallback;
       const issue = validate?.(resolved);
       if (issue) throw new Error(issue);
