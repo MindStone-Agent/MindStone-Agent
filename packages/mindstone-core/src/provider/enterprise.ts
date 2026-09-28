@@ -198,9 +198,10 @@ export type EnterpriseHostPolicy = {
   allowPrivateHosts?: boolean;
 };
 
+/** Exactly this machine: localhost, [::1] or a full 127.x.x.x address (never a name that merely starts with 127. or ends in .localhost). */
 function isLoopbackHost(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  return host === "localhost" || host.endsWith(".localhost") || host === "::1" || /^127\./.test(host);
+  return host === "localhost" || host === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
 
 /** An https URL to a public host, with no credentials, query or fragment. */

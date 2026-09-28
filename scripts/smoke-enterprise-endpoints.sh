@@ -8,7 +8,7 @@
 #     sets MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1
 #   - what lands in Pi's models.json and auth.json (0600, literal keys)
 #   - the live Test: one completion through Pi, the provider's values redacted
-# Binds gateway port base+31 and stubs on base+32 and base+33. Synthetic secrets only.
+# Binds gateway port base+31 and stubs on base+32 to base+34. Synthetic secrets only.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -17,8 +17,9 @@ SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
 GATEWAY_PORT="$((SMOKE_PORT_BASE + 31))"
 STUB_PORT="$((SMOKE_PORT_BASE + 32))"
 OTHER_PORT="$((SMOKE_PORT_BASE + 33))"
+REDIR_PORT="$((SMOKE_PORT_BASE + 34))"
 stop_gateway() { if [[ -n "${gateway_pid:-}" ]]; then kill "${gateway_pid}" >/dev/null 2>&1 || true; wait "${gateway_pid}" >/dev/null 2>&1 || true; unset gateway_pid; fi; }
-cleanup() { stop_gateway; for pid in "${stub_pid:-}" "${other_pid:-}"; do [[ -n "${pid}" ]] && kill "${pid}" >/dev/null 2>&1 || true; done; [[ -n "${ENT_SMOKE_KEEP:-}" ]] || rm -rf "${TEMP_RUNTIME}"; }
+cleanup() { stop_gateway; for pid in "${stub_pid:-}" "${other_pid:-}" "${redir_pid:-}"; do [[ -n "${pid}" ]] && kill "${pid}" >/dev/null 2>&1 || true; done; [[ -n "${ENT_SMOKE_KEEP:-}" ]] || rm -rf "${TEMP_RUNTIME}"; }
 trap cleanup EXIT
 export MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}"
 export MINDSTONE_AGENT_GATEWAY_PORT="${GATEWAY_PORT}"
@@ -341,6 +342,27 @@ lines="$(wc -l < "${STUB_LOG}")"
 expect "$(post /admin/memory/check '{"embeddingProvider":"enterprise-azure:text-embedding-3-small"}')" 200 "checking embeddings through a removed provider"
 grep -q "isn't registered" "${BODY}" || { echo "a removed provider should say it isn't registered: $(cat "${BODY}")" >&2; exit 1; }
 [[ "$(wc -l < "${STUB_LOG}")" == "${lines}" ]] || { echo "a removed provider still sent a request" >&2; exit 1; }
+# With the switch, plain http is allowed only to this machine itself, never to a name that looks like it.
+for bad in "http://127.attacker.example/v1" "http://evil.localhost/v1" "http://localhost.attacker.example/v1"; do
+  expect "$(post /admin/providers/enterprise/enterprise-openai '{"baseUrl":"'"${bad}"'","secret":"az.key","models":["m"]}')" 400 "plain http to ${bad}"
+done
+# Redirects from an origin no provider is registered at (the gateway's guard doesn't know it): the model
+# listing and memory's embeddings refuse them on their own. The redirector sends everything to the other origin.
+REDIR_PORT="${REDIR_PORT}" OTHER_PORT="${OTHER_PORT}" node -e '
+require("http").createServer((req, res) => { res.writeHead(307, { location: `http://127.0.0.1:${process.env.OTHER_PORT}${req.url}` }); res.end(); })
+  .listen(Number(process.env.REDIR_PORT), "127.0.0.1");' &
+redir_pid=$!
+sleep 0.5
+REDIR="http://127.0.0.1:${REDIR_PORT}"
+expect "$(post /admin/providers/enterprise/enterprise-openai '{"baseUrl":"'"${REDIR}"'/v1","secret":"az.key","headers":{"Ocp-Apim-Subscription-Key":{"secret":"sub.key"}}}')" 422 "a first registration whose listing redirects"
+[[ ! -s "${OTHER_LOG}" ]] || { echo "a model listing followed a redirect with the key: $(cat "${OTHER_LOG}")" >&2; exit 1; }
+expect "$(post /admin/providers/enterprise/enterprise-openai '{"baseUrl":"'"${REDIR}"'/v1","secret":"az.key","models":["corp-large"],"headers":{"Ocp-Apim-Subscription-Key":{"secret":"sub.key"}}}')" 200 "registering a gateway that redirects, with its models"
+# Outside the gateway (the CLI's memory path): core's embedding provider, in a process with no guard.
+PI_AGENT_DIR="${PI_CODING_AGENT_DIR}" node --input-type=module -e '
+const core = await import(process.argv[1]);
+const provider = core.createMemoryEmbeddingProvider({ memory: { embeddingProvider: "enterprise-openai:corp-embed" }, routing: { pi: { agentDir: process.env.PI_AGENT_DIR } } });
+try { await provider.embedTexts(["hello"]); console.error("embedding through a redirect succeeded"); process.exit(1); } catch { process.exit(0); }' "${PROJECT_ROOT}/packages/mindstone-core/dist/index.js" || { echo "memory's embedding call should fail on a redirect" >&2; exit 1; }
+[[ ! -s "${OTHER_LOG}" ]] || { echo "an embedding request followed a redirect with the key: $(cat "${OTHER_LOG}")" >&2; exit 1; }
 grep -q '6610' "${AUDIT}" && { echo "key material reached the audit log" >&2; exit 1; }
 stop_gateway
 echo "enterprise endpoint assertions passed"
