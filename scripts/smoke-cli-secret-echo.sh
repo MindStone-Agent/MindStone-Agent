@@ -57,8 +57,14 @@ if not result["secretOk"]:
     sys.exit(f"the secret was not read correctly: {result}")
 if result["name"] != "bob-plain":
     sys.exit(f"the plain answer after the secret was wrong: {result}")
-if "SMOKE-SECRET-4471" in text:
-    sys.exit("the secret was shown on the terminal")
+import re
+# Also catch an echo split by escape codes or shown in part: strip ANSI codes
+# and look for any 4-character piece of the secret (#130 review).
+shown = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text.split("RESULT")[0])
+secret = "SMOKE-SECRET-4471"
+pieces = [secret[i:i + 4] for i in range(len(secret) - 3)]
+if any(piece in shown for piece in pieces):
+    sys.exit("the secret, or part of it, was shown on the terminal")
 if "bob-plain" not in text.split("RESULT")[0]:
     sys.exit("control: a plain answer should be echoed on the terminal")
 print("secret echo assertions passed")

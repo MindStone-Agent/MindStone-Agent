@@ -33,8 +33,12 @@ PI_SETTINGS="${PI_CODING_AGENT_DIR}/settings.json" node -e '
 const fs = require("fs");
 const path = process.env.PI_SETTINGS;
 let settings = {};
-try { settings = JSON.parse(fs.readFileSync(path, "utf8")); } catch {}
-if (!settings || typeof settings !== "object" || Array.isArray(settings)) settings = {};
+if (fs.existsSync(path)) {
+  // Like Pi: a BOM is stripped, and a file that does not parse (or is not an
+  // object) is left alone rather than replaced (#130 review).
+  try { settings = JSON.parse(fs.readFileSync(path, "utf8").replace(/^\uFEFF/, "")); } catch { process.exit(0); }
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) process.exit(0);
+}
 if (!["off", "streaming", "idle"].includes(settings.cacheWarming)) {
   settings.cacheWarming = "off";
   fs.writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");

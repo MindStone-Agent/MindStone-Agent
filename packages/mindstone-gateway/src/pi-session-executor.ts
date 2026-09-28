@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -118,10 +118,16 @@ const CACHE_WARMING_MODES = ["off", "streaming", "idle"];
 
 export function disablePiCacheWarmingUnlessSet(input: { settingsManager: PiSettingsManagerLike; agentDir: string }): boolean {
   let settings: Record<string, unknown> = {};
-  try {
-    settings = JSON.parse(readFileSync(join(input.agentDir, "settings.json"), "utf8")) as Record<string, unknown>;
-  } catch {
-    // No settings file yet (or unreadable): nothing was chosen.
+  const path = join(input.agentDir, "settings.json");
+  if (existsSync(path)) {
+    // A BOM is stripped, as Pi does. A file that doesn't parse is left alone
+    // (Pi won't write a settings file it couldn't load either) (#130 review).
+    try {
+      settings = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, "")) as Record<string, unknown>;
+    } catch {
+      return false;
+    }
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) return false;
   }
   // Only a mode Pi knows counts as the owner's choice: an invalid value (a
   // typo, null) makes Pi fall back to "streaming" (#129).
