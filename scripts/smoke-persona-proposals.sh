@@ -251,6 +251,18 @@ patch_personas() { curl -s -o "${BODY}" -w '%{http_code}' -X PATCH "${ADMIN[@]}"
 expect "$(patch_personas '{"active":"wren"}')" 200 "switching to the persona"
 chat admin conv-next "Hi again"
 grep -q 'VOICE-SENTINEL-105' "${CAPTURE}" || { echo "the next chat after the switch should carry the persona" >&2; exit 1; }
+# The transcript records which persona answered each turn (the Console's J8 reads it).
+persona_answered() { DIR="${DATA}/transcripts" CONV="$1" node -e '
+const fs = require("fs"), path = require("path");
+const files = []; const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); e.isDirectory() ? walk(f) : f.endsWith(".jsonl") && files.push(f); } };
+walk(process.env.DIR);
+const entries = files.flatMap((f) => fs.readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)))
+  .filter((e) => e.role === "assistant" && String(e.sessionKey).endsWith(":" + process.env.CONV));
+if (entries.length === 0) { console.error("no assistant entry for " + process.env.CONV); process.exit(2); }
+const c = entries[entries.length - 1].metadata?.personaContext;
+process.stdout.write(c?.injected ? c.personaId : "none");'; }
+[[ "$(persona_answered conv-next)" == wren ]] || { echo "the transcript should record that wren answered after the switch" >&2; exit 1; }
+[[ "$(persona_answered conv-before)" == none ]] || { echo "the transcript recorded a persona before the switch" >&2; exit 1; }
 
 # The same id again: refused, left pending, nothing overwritten.
 chat admin conv-dup "$(block '{"id":"wren","name":"Other Wren","voice":"Different. DUP-SENTINEL-105."}')"

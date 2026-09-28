@@ -1348,6 +1348,8 @@ async function runConfiguredRoute(input: {
         model: model.id,
         usage: route.result.usage,
         runner: route.runner,
+        // Which persona answered (#105): the Console's transcripts say so per turn.
+        ...(route.personaContext ? { personaContext: route.personaContext } : {}),
         ...(input.scope ? { scope: input.scope } : {}),
         providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
       },
