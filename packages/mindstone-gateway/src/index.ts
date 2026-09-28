@@ -139,6 +139,7 @@ import {
   probeMemoryEmbeddingProvider,
   resolveMemoryEmbeddingProviderConfig,
   buildIdentityFormationPrompt,
+  isPendingMindStoneIdentity,
   writeOnboardingIdentityScaffold,
   getBuiltInMindStoneProfile,
   type MindStoneIdentityFormationPrompt,
@@ -890,25 +891,44 @@ function identityFormationMarker(agentId: string): string {
 }
 
 /**
- * The identity-formation prompt for this turn, if the agent's formation hasn't
- * started yet and this is the session's first turn after onboarding (#102).
+ * The identity-formation prompt for this turn (#102), when: setup has
+ * finished (onboarding.identity is set), the agent is a configured one, its
+ * IDENTITY.md is still the pending scaffold (or the initializer placeholder,
+ * or missing), this is the session's first turn, and the agent's formation
+ * hasn't started. The caller claims the marker before the turn runs.
  */
-function pendingIdentityFormation(config: MindStoneConfig | undefined, agentId: string, sessionKey: string): MindStoneIdentityFormationPrompt | undefined {
-  // Not before setup has finished: the persona step alone writes an
-  // onboarding record, but not the identity scaffold.
+function pendingIdentityFormation(config: MindStoneConfig | undefined, configPath: string | undefined, agentId: string, sessionKey: string): MindStoneIdentityFormationPrompt | undefined {
   if (!config?.onboarding?.identity) return undefined;
+  if (!config.agents || !Object.hasOwn(config.agents, agentId)) return undefined;
   if (existsSync(identityFormationMarker(agentId))) return undefined;
+  // An agent that already has a real identity isn't sent back to formation
+  // (an install onboarded before this gateway recorded the marker).
+  const identity = loadRouteIdentityContext({ agentId, config, configPath })?.identityMarkdown;
+  if (identity && !isPendingMindStoneIdentity(identity)) return undefined;
   return buildIdentityFormationPrompt({ agentId, entries: readTranscriptEntries(sessionKey), config });
 }
 
-function markIdentityFormationPrompted(agentId: string, sessionKey: string): void {
+/**
+ * Claim the agent's formation turn before it runs, exclusively, so two first
+ * conversations at once don't both start it. False when already claimed.
+ */
+function claimIdentityFormation(agentId: string, sessionKey: string): boolean {
   const marker = identityFormationMarker(agentId);
   try {
     mkdirSync(dirname(marker), { recursive: true, mode: 0o700 });
-    writeFileSync(marker, `${JSON.stringify({ agentId, sessionKey, promptedAt: new Date().toISOString() })}\n`, { mode: 0o600 });
+    writeFileSync(marker, `${JSON.stringify({ agentId, sessionKey, promptedAt: new Date().toISOString() })}\n`, { mode: 0o600, flag: "wx" });
+    return true;
   } catch {
-    // Unrecorded: the next new conversation starts formation again, which is
-    // the safe side.
+    return false;
+  }
+}
+
+/** A formation turn that didn't complete gives the claim back, so the next conversation starts it. */
+function releaseIdentityFormation(agentId: string): void {
+  try {
+    unlinkSync(identityFormationMarker(agentId));
+  } catch {
+    // Already gone.
   }
 }
 
@@ -2088,7 +2108,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const limits: Record<string, number> = { purpose: 2000, userContext: 4000, projectContext: 2000 };
     const answers: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(body)) {
-      const max = limits[key];
+      const max = Object.hasOwn(limits, key) ? limits[key] : undefined;
       if (max === undefined || (value !== undefined && typeof value !== "string") || (typeof value === "string" && value.length > max)) {
         refuse(400, { error: "send { purpose?, userContext?, projectContext? } as short text" }, { reason: "invalid", key });
         return;
@@ -2128,15 +2148,22 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         refuse(422, { error: "the change doesn't validate", errors: issues.map((issue) => ({ error: issue })) }, { reason: "invalid" });
         return;
       }
+      // The scaffold first: setup counts as finished only once its files exist.
+      let scaffold: ReturnType<typeof writeOnboardingIdentityScaffold>;
+      try {
+        scaffold = writeOnboardingIdentityScaffold({
+          config: next,
+          configPath,
+          purpose: answers.purpose,
+          userContext: answers.userContext,
+          createdBy: "the MindStone Console's setup",
+        });
+      } catch {
+        refuse(409, { error: "the identity files couldn't be written; check the agent's identityPath and userPath on the gateway host" }, { reason: "scaffold_failed" });
+        return;
+      }
       const configTarget = realConfigPath(configPath);
       writeFileAtomic(configTarget, `${JSON.stringify(next, null, 2)}\n`, fileMode(configTarget, 0o600));
-      const scaffold = writeOnboardingIdentityScaffold({
-        config: next,
-        configPath,
-        purpose: answers.purpose,
-        userContext: answers.userContext,
-        createdBy: "the MindStone Console's setup",
-      });
       appendAdminAudit(paths.dataDir, { userId, action: "onboarding_completed", identityCreated: scaffold.identityCreated, userCreated: scaffold.userCreated });
       sendJson(res, 200, { ok: true, identity: scaffold.identityCreated ? "created" : "kept", user: scaffold.userCreated ? "created" : "kept" });
     });
@@ -2194,13 +2221,16 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const resolved = resolveMemoryEmbeddingProviderConfig({ memory: { embeddingProvider: `ollama:${model}` } });
     const root = (resolved?.baseUrl ?? "http://127.0.0.1:11434/v1").replace(/\/v1$/, "");
     ollamaPullRunning = true;
+    // A client that gives up frees the slot: the download is stopped.
+    const clientGone = new AbortController();
+    res.on("close", () => clientGone.abort());
     let result: { ok: true } | { ok: false; error: string };
     try {
       const response = await fetch(`${root}/api/pull`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ model, stream: false }),
-        signal: AbortSignal.timeout(OLLAMA_PULL_MS),
+        signal: AbortSignal.any([AbortSignal.timeout(OLLAMA_PULL_MS), clientGone.signal]),
       });
       const text = await response.text();
       let parsed: { status?: unknown; error?: unknown } = {};
@@ -2939,7 +2969,12 @@ const LOG_TAIL_BYTES = 512 * 1024;
 /** A promise's value, or `fallback` once `ms` have passed. */
 /** An embedding provider spec the Console may check: provider:model (#102). */
 const EMBEDDING_SPEC = /^(ollama|openai|openai-compatible):[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
-const OLLAMA_MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
+/**
+ * An Ollama model from the default registry: `name[:tag]`, or a
+ * `namespace/name[:tag]` there. No host (a dot in the first segment), no
+ * `..`, so nothing is pulled from another registry.
+ */
+const OLLAMA_MODEL_NAME = /^(?:[a-z0-9][a-z0-9_-]{0,63}\/)?[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9_-]+)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,63})?$/;
 const MEMORY_CHECK_MS = 20_000;
 const OLLAMA_PULL_MS = 15 * 60_000;
 let ollamaPullRunning = false;
@@ -3564,7 +3599,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     }
 
     const forwarded = forwardedUser(req);
-    const metadata0 = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
+    // Who the turn answers (#103): a Console admin is the owner; any other
+    // Console user, or a role header left blank, gets the non-owner context,
+    // as a connector's non-owner does. A direct caller with the service token
+    // and no role header is the owner, as before.
+    const roleHeaderSent = req.headers["x-mindstone-user-role"] !== undefined;
+    const audience: RouteAudience = forwarded.userRole
+      ? (forwarded.userRole.toLowerCase() === "admin" ? "owner" : "non_owner")
+      : roleHeaderSent ? "non_owner" : "owner";
+    const requestMetadata = typeof input.metadata === "object" && input.metadata !== null ? input.metadata as Record<string, unknown> : {};
+    // A non-owner can't choose its session or agent: it would reach the
+    // owner's history that way (#103 review).
+    const metadata0 = audience === "owner"
+      ? requestMetadata
+      : Object.fromEntries(Object.entries(requestMetadata).filter(([key]) => key !== "sessionKey" && key !== "agentId"));
     const metadata: Record<string, unknown> = { ...metadata0, ...(forwarded.userRole ? { userRole: forwarded.userRole } : {}), ...(forwarded.conversationId ? { conversationId: forwarded.conversationId } : {}) };
     const model = typeof input.model === "string" ? input.model : "mindstone/default";
     const agentId = agentIdFromModel(loadedConfig.config, model, metadata.agentId);
@@ -3598,7 +3646,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       .filter((text): text is string => Boolean(text));
     // A role header that is present but blank (LibreChat blanks a placeholder it
     // can't fill) is an unknown user, not a trusted caller.
-    const roleHeaderSent = req.headers["x-mindstone-user-role"] !== undefined;
     const keepClientSystem = forwarded.userRole ? forwarded.userRole.toLowerCase() === "admin" : !roleHeaderSent;
     const keptSystemEntries: TranscriptEntry[] = [];
     const commonMetadata = {
@@ -3657,18 +3704,22 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       sendJson(res, 400, openAiError("the last message must be a user message", "invalid_request_error", "invalid_messages"));
       return;
     }
-    // Who the turn answers (#103): a Console admin is the owner; any other
-    // Console user, or a role header left blank, gets the non-owner context,
-    // as a connector's non-owner does. A direct caller with the service token
-    // and no role header is the owner, as before.
-    const audience: RouteAudience = forwarded.userRole
-      ? (forwarded.userRole.toLowerCase() === "admin" ? "owner" : "non_owner")
-      : roleHeaderSent ? "non_owner" : "owner";
-    // The owner's first Console chat after setup starts identity formation,
-    // once per agent, not once per conversation (#102).
-    const identityFormation = audience === "owner" ? pendingIdentityFormation(loadedConfig.config, agentId, sessionKey) : undefined;
-    const routed = await runConfiguredRoute({ sessionKey, agentId, audience, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model }, identityFormation });
-    if (identityFormation && routed.routed && routed.status === 200) markIdentityFormationPrompted(agentId, sessionKey);
+    // The owner's first Console conversation after setup starts identity
+    // formation, once per agent, not once per conversation (#102). Only a
+    // Console conversation: a script calling with the service token doesn't
+    // use it up.
+    const pending = audience === "owner" && forwarded.conversationId
+      ? pendingIdentityFormation(loadedConfig.config, loadedConfig.path, agentId, sessionKey)
+      : undefined;
+    const identityFormation = pending && claimIdentityFormation(agentId, sessionKey) ? pending : undefined;
+    let routed: Awaited<ReturnType<typeof runConfiguredRoute>>;
+    try {
+      routed = await runConfiguredRoute({ sessionKey, agentId, audience, config: loadedConfig.config, configPath: loadedConfig.path, metadata: { ...metadata, model }, identityFormation });
+    } catch (error) {
+      if (identityFormation) releaseIdentityFormation(agentId);
+      throw error;
+    }
+    if (identityFormation && !(routed.routed && routed.status === 200)) releaseIdentityFormation(agentId);
     if (routed.routed && routed.status === 200 && input.stream === true) {
       // OpenAI-compatible server-sent events. LibreChat (and the openai/langchain clients generally)
       // send `stream: true` unconditionally and cannot parse a plain chat.completion body, so a

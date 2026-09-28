@@ -1975,8 +1975,8 @@ function writeScaffoldIfMissingOrPlaceholder(path: string, body: string, replace
  * agent from the onboarding record: what `mindstone onboard` writes, shared
  * with the Console's setup (#102). An initializer placeholder is replaced
  * (with a .pre-onboarding-placeholder.bak backup); a real file is never
- * overwritten. `purpose` and `userContext` are the user's own words and are
- * escaped as Markdown here.
+ * overwritten. `purpose` and `userContext` are the user's own words: a
+ * heading in them is quoted, so it stays text.
  */
 export function writeOnboardingIdentityScaffold(params: {
   config: MindStoneConfig;
@@ -1996,8 +1996,11 @@ export function writeOnboardingIdentityScaffold(params: {
   const profileLines = selectedProfileToLines(profile);
   const preferenceLines = selectedPreferencesToLines(params.config.onboarding?.preferences);
   const identityLines = selectedIdentityToLines(params.config.onboarding?.identity);
-  const purpose = markdownEscape(params.purpose ?? "");
-  const userContext = markdownEscape(params.userContext ?? "");
+  // The user's own words: a heading in them is shown as text, so it can't
+  // pose as one of the scaffold's sections.
+  const quoteHeadings = (value: string) => value.replace(/^(\s*)#/gm, "$1\\#");
+  const purpose = quoteHeadings(markdownEscape(params.purpose ?? ""));
+  const userContext = quoteHeadings(markdownEscape(params.userContext ?? ""));
   const createdBy = params.createdBy ?? "`mindstone onboard`";
   const now = new Date().toISOString();
   const identityBody = `# MindStone Agent Identity Pending

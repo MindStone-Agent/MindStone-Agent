@@ -13,6 +13,7 @@ import { existsSync, readFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
+  resolveMemoryEmbeddingProviderConfig,
   getMindStoneSystemStatus,
   resolveGatewayAuthRequirement,
   type MindStoneConfig,
@@ -333,10 +334,11 @@ export function onboardingSteps(config: MindStoneConfig | undefined): {
     : { done: false, detail: "no persona configured (agents is empty)" };
   const missingMemory = [
     config?.memory?.vectorStore ? undefined : "no vector store",
-    config?.memory?.embeddingProvider ? undefined : "no embedding provider",
+    // The environment's MINDSTONE_EMBEDDING_PROVIDER counts, as the embedder reads it.
+    resolveMemoryEmbeddingProviderConfig(config) ? undefined : "no embedding provider",
   ].filter((item): item is string => Boolean(item));
   const memory: OnboardingStep = missingMemory.length === 0
-    ? { done: true, detail: `vector store ${config!.memory!.vectorStore}, embeddings ${config!.memory!.embeddingProvider}, autoRecall ${config!.memory!.autoRecall === true ? "on" : "off"}` }
+    ? { done: true, detail: `vector store ${config!.memory!.vectorStore}, embeddings ${config?.memory?.embeddingProvider ?? "from the environment"}, autoRecall ${config!.memory!.autoRecall === true ? "on" : "off"}` }
     : { done: false, detail: `memory isn't set up: ${missingMemory.join(" and ")}` };
   // The persona step writes onboarding.profile; only finishing setup (or
   // `mindstone onboard`) writes onboarding.identity with the scaffold.
