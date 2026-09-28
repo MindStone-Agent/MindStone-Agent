@@ -130,7 +130,7 @@ curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/mai
   bash -s -- --dir "$HOME/Projects/MindStone-Agent"
 ```
 
-The installer clones or updates the repository, installs dependencies, builds the vendored Pi base, initializes isolated runtime directories, and links the `mindstone` CLI onto your PATH unless `--no-link` is used.
+The installer clones or updates the repository, installs dependencies, builds the vendored Pi base, initializes isolated runtime directories and, on a first install, the runtime config (not onboarded yet), and links the `mindstone` CLI onto your PATH unless `--no-link` is used. `mindstone onboard` finishes setup in a terminal; to set up in the web Console instead, see the [install guide for AI agents](#install-guide-for-ai-agents), step 2(b).
 
 ### Install from source
 
@@ -179,13 +179,22 @@ curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/mai
 
 With `--no-link`, run the CLI as `./node_modules/.bin/mindstone` from inside the checkout.
 
-**Check:** `mindstone status` exits 0 and prints the isolated runtime paths, all under `<checkout>/.runtime/`.
+On a first install, the installer also creates the runtime config, `<checkout>/.runtime/mindstone/config.json`, with safe defaults:
+- not onboarded: `routing.mode` is `placeholder`, so no model is called yet;
+- the gateway on `127.0.0.1:19789`, with auth `none` and its HTTP APIs off;
+- placeholder identity and user files. `mindstone onboard` (2(a)) replaces them. On the Console path (2(b)), the Console's guided setup replaces them with the first-activation scaffold (its **About you** step), keeping `.pre-onboarding-placeholder.bak` backups, and the agent then forms its identity in its first Console chat ([#102](https://github.com/MindStone-Agent/MindStone-Agent/issues/102)).
 
-### 2. Onboard (needs a person at a terminal)
+Re-running the installer (step 4) never changes an existing `config.json`.
 
-`mindstone onboard` and `mindstone auth login <provider>` are **interactive**: they need a real terminal (TTY), and an OAuth login opens a browser.
+**Check:** `mindstone status` exits 0, prints the isolated runtime paths, all under `<checkout>/.runtime/`, and shows `Config exists: true`.
 
-**If you are an agent without a TTY, stop here and ask the human** to run this in the checkout folder:
+### 2. Onboard: in a terminal, or in the web Console
+
+Choose **one** path.
+
+#### 2(a). In a terminal: `mindstone onboard`
+
+`mindstone onboard` and `mindstone auth login <provider>` are **interactive**: they need a real terminal (TTY), and an OAuth login opens a browser. If you are an agent without a TTY, either ask the human to run this in the checkout folder, or use path (b):
 
 ```bash
 mindstone onboard
@@ -196,11 +205,22 @@ Wait until they confirm it finished. Onboarding does three things:
 - writes the routing (`routing.mode: pi-session`);
 - creates the identity, user and memory files.
 
-It also creates `<checkout>/.runtime/mindstone/config.json`, which step 5 edits. To change settings later, use `mindstone config --section <name>`.
+It updates the `config.json` the installer created. To change settings later, use `mindstone config --section <name>`.
 
 **Check:**
 - `mindstone doctor` reports no errors for runtime, config, identity and routing.
 - `mindstone chat --once "hello"` returns a real answer, not a setup prompt.
+
+#### 2(b). In the web Console: skip `mindstone onboard`
+
+This path needs no interactive terminal (TTY): steps 3 and 5 are still shell commands, but none of them prompts. Don't run `mindstone onboard`. Instead:
+1. start the gateway (step 3);
+2. set the gateway up for the Console (step 5);
+3. install the Console and run its guided setup, following the [Console README](https://github.com/MindStone-Agent/mindstone-console). Guided setup chooses the model provider, the model and the persona, then sets up memory (an embedding model with a live check; with local Ollama the Console can download it), optional chat connectors, and a short **About you** step that writes the identity scaffold. The gateway reports itself as onboarded once all of these are done (`GET /admin/status` shows each step), and the first Console chat starts identity formation.
+
+Until then the gateway reports itself as not onboarded, and the Console shows a **Set up MindStone** banner.
+
+**Check:** `mindstone doctor` ends with `Result: ok`. Its `routing.mode` line is a warning showing `placeholder`, which is expected until the Console's guided setup finishes.
 
 ### 3. Start the gateway
 
@@ -213,17 +233,23 @@ mindstone gateway install    # macOS only: a launchd service that starts at logi
 
 **Check:** `curl -sf http://127.0.0.1:19789/health >/dev/null && echo ok` prints `ok`.
 
+**Using another port.** The gateway listens on port 19789 by default. Two settings choose the port, and **they must agree**:
+- **`MINDSTONE_AGENT_GATEWAY_PORT`**, an environment variable, moves the listener. Set it on every `mindstone gateway start` and `restart` (for example `MINDSTONE_AGENT_GATEWAY_PORT=19790 mindstone gateway start`). It isn't read from `config.json`.
+- **`gateway.port`** in `<checkout>/.runtime/mindstone/config.json` is the port the CLI uses: `gateway start`, `restart` and `status` check health there, and `mindstone status` and `doctor` report it.
+
+If they differ, the gateway runs, but the CLI's health checks report it as down. The macOS `gateway install` service always listens on 19789. Use the new port in place of 19789 in the checks here and in step 5, and in the Console's gateway URL.
+
 ### 4. Update later
 
-Re-run the install command from step 1, with the same options if you used any (`--dir`, `--no-link`). It pulls the latest `main`, rebuilds, and keeps your `.runtime/` data. Then restart the gateway (`mindstone gateway restart`, or reinstall the service).
+Re-run the install command from step 1, with the same options if you used any (`--dir`, `--no-link`). It pulls the latest `main`, rebuilds, and keeps your `.runtime/` data; an existing `config.json` is left exactly as it is. Then restart the gateway (`mindstone gateway restart`, or reinstall the service).
 
 **Check:** `mindstone doctor` is clean, and `/health` answers.
 
-### 5. Optional: the web Console
+### 5. The web Console (optional after 2(a), required for 2(b))
 
 The MindStone Console is a web UI for chat and administration: settings, secrets, approvals, doctor and logs, and restart. It lives in [MindStone-Agent/mindstone-console](https://github.com/MindStone-Agent/mindstone-console), and its README has the install steps.
 
-The gateway side needs onboarding (step 2) to be finished first. Then run these commands, which write the secrets to files and never print them.
+The gateway side works on either path from step 2: after `mindstone onboard` (2(a)), or with no onboarding yet (2(b)), using the `config.json` the installer created. Start the gateway first (step 3). Then run these commands, which write the secrets to files and never print them.
 
 1. **The gateway token.** Paths in the config are relative to the config file's folder:
    ```bash
@@ -252,9 +278,11 @@ The gateway side needs onboarding (step 2) to be finished first. Then run these 
      c.gateway.admin = { ...(c.gateway.admin || {}), tokenSha256: h };
      fs.writeFileSync(f, JSON.stringify(c, null, 2) + "\n");'
    ```
-   On Linux, use `sha256sum` in place of `shasum -a 256`. Don't add a `routing` section: onboarding already set it.
-4. **Check the route.** `mindstone doctor` should show `routing.mode` as `pi-session`. If it shows `placeholder`, run `mindstone config --section routing`. Without a route, Console chat fails.
-5. **Let the Console's container reach the gateway.** The gateway listens on `127.0.0.1:19789`. The address it listens on comes from environment variables, not from config.
+   On Linux, use `sha256sum` in place of `shasum -a 256`. Don't add a `routing` section: onboarding (2(a)) or the Console's guided setup (2(b)) sets it.
+4. **Check the route.** Run `mindstone doctor` and find the `routing.mode` line.
+   - **Console-first install (2(b)):** `placeholder` is expected. The Console's guided setup sets the route, so go on to 5.5. Console chat works once guided setup finishes.
+   - **After `mindstone onboard` (2(a)):** it should be `pi-session`. If it shows `placeholder`, onboarding didn't set a route: run `mindstone config --section routing` in a terminal, or finish setup in the Console instead. Without a route, Console chat fails.
+5. **Let the Console's container reach the gateway.** The gateway listens on `127.0.0.1:19789`. The address and port it listens on come from environment variables, not from config (see "Using another port" in step 3).
    - **Docker Desktop (macOS):** it reaches the gateway as `host.docker.internal`, so nothing needs to change.
    - **Linux:** a container can't reach the host's loopback. Start the gateway bound to the Docker bridge address, and use the same variable on every restart:
      ```bash
