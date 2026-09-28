@@ -63,14 +63,16 @@ const entry = (id, sessionKey, text, role = "user", metadata = undefined) => JSO
 const longKey = consoleConversationSessionKey("non-owner:" + "x".repeat(80), "c5");
 if (!longKey.includes(":non-owner%3A")) fail("a long non-owner id lost its prefix: " + longKey);
 if (consoleConversationSessionKey("non-owner:jo", "c1") !== "agent:console:console:non-owner%3Ajo:c1") fail("a short non-owner key changed");
+// Owner entries first: each entry after a non-owner user turn counts as
+// the reply to that turn and is left out, which would hide the later checks.
 writeFileSync(file, [
-  entry("a", "agent:console:console:non-owner%3Ajo:c1", "LEGACY-USER-7123"),
   entry("b", "agent:console:console:admin:c2", "LEGACY-OWNER-7124"),
-  entry("c", "agent:console:console:admin:c3", "INJECTED-ASSIST-7125", "assistant", { ownerTurn: false }),
-  entry("d", longKey, "LONG-ID-USER-7126"),
   entry("e", "agent:console:console:admin:c2", "SYSTEM-PROMPT-7127", "system"),
   entry("f", "agent:console:console:admin:c2", "WORKFLOW-EVENT-7128", "event", { event: "workflow_selected" }),
   entry("g", "agent:console:console:admin:c2", "my key is sk-proj-FAKEUNITKEY00001111 and ghp_FAKEUNITTOKEN000011112222", "user"),
+  entry("c", "agent:console:console:admin:c3", "INJECTED-ASSIST-7125", "assistant", { ownerTurn: false }),
+  entry("a", "agent:console:console:non-owner%3Ajo:c1", "LEGACY-USER-7123"),
+  entry("d", longKey, "LONG-ID-USER-7126"),
 ].join("\n") + "\n");
 await indexSqliteMemoryTurn({ transcriptFile: file, config: { memory: { vectorStore: "sqlite-vec" } } });
 let db = new DatabaseSync(sqliteMemoryDatabasePath(paths));
