@@ -94,7 +94,7 @@ function usage(): string {
     "  mindstone identity activate [--agent ID] [--dry-run] [--force] [--yes] [--json]",
     "                         Synthesize first-activation identity from onboarding seed",
     "  mindstone skill list   Show built-in, installed, and draft skill surfaces",
-    "  mindstone skill build [--from-builtin ID | --id ID --label TEXT --description TEXT] [--force] [--json]",
+    "  mindstone skill build [--from-builtin ID | --id ID --label TEXT --description TEXT] [--goal TEXT] [--force] [--json]",
     "                         Generate a skill DRAFT artifact (not usable until installed)",
     "  mindstone skill install <id> [--force] [--json]",
     "                         Approve a draft skill: promote it to installed",
@@ -1429,6 +1429,7 @@ async function runSkillCommand(argv: string[]): Promise<void> {
       id: optionValue(argv, "--id"),
       label: optionValue(argv, "--label"),
       description: optionValue(argv, "--description"),
+      goal: optionValue(argv, "--goal"),
       whenToUse: optionValues(argv, "--when"),
       outputs: optionValues(argv, "--output"),
       safetyNotes: optionValues(argv, "--safety"),
@@ -1983,6 +1984,12 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`Memory path: ${action.memory.path}\n`);
       output.write(`--- content ---\n${action.memory.content}\n--- end content ---\n`);
     }
+    if (action.skill) {
+      output.write(`Skill: ${action.skill.id} (${action.skill.label})\n`);
+      output.write(`Description: ${action.skill.description}\n`);
+      if (action.skill.goal) output.write(`Goal: ${action.skill.goal}\n`);
+      if (action.skill.instructions) output.write(`--- instructions ---\n${action.skill.instructions}\n--- end instructions ---\n`);
+    }
     if (action.mutation) {
       output.write(`Mutation: ${action.mutation.operation} ${action.mutation.resource} via ${action.mutation.connectorId}\n`);
       output.write(`--- data ---\n${JSON.stringify(action.mutation.data, null, 2)}\n--- end data ---\n`);
@@ -2015,6 +2022,10 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
     const result = approveProposedAction(store, check, {
       decidedBy: process.env.USER ?? "cli",
       memoryDir: runtimePathsFromEnv().memoryDir,
+      skillsDir: (() => {
+        const approvalPaths = runtimePathsFromEnv();
+        return skillsDirFromConfig(loadMindStoneConfig(resolveConfigPath(process.env, approvalPaths)).config, approvalPaths);
+      })(),
       force: hasOption(argv, "--force"),
       onDecision: appendApprovalAuditEvent,
     });
@@ -2028,6 +2039,8 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
     } else if (result.kind === "connector_mutation") {
       output.write(`${gold("Approved")} — ${action.mutation?.operation} ${action.mutation?.resource} enqueued for apply via ${result.connectorId}.\n`);
       output.write("A running Gateway applies it within seconds; a stopped one on next start.\n");
+    } else if (result.kind === "skill_install") {
+      output.write(`${gold("Approved")} — skill installed: ${result.skillId}. The agent sees it from its next turn.\n`);
     } else {
       output.write(`${gold("Approved")} — memory file written: ${result.memoryFile}\n`);
     }

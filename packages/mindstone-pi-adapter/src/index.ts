@@ -3,16 +3,19 @@ import {
   createLocalMemoryRecallProvider,
   createMemoryEmbeddingProvider,
   discoverFileMemoryDocuments,
+  discoverMindStoneSkills,
   formatMindStoneChannelCatalog,
   getSqliteMemoryIndexStats,
   listTranscriptSessions,
   loadMindStoneConfig,
   logRecallUsage,
   loadMindStoneIdentity,
+  loadMindStoneSkillArtifact,
   recallMindStoneMemory,
   resolveConfigPath,
   runMindStoneConfigWizard,
   runtimePathsFromEnv,
+  skillsDirFromConfig,
   sqliteMemoryDatabasePath,
   SqliteMemoryRecallProvider,
   transcriptPathForSession,
@@ -409,10 +412,56 @@ async function buildPiAdapterRecallContext(event: PiBeforeAgentStartEvent): Prom
   };
 }
 
+/** The most of installed skills' SKILL.md put in the prompt; past it, a skill is listed by label and description only (#104). */
+const SKILLS_PROMPT_BUDGET = 12_000;
+
+/**
+ * Installed skills and how to propose a new one (#104). The adapter only runs
+ * on owner turns, so a non-owner never gets the owner's skills. A skill the
+ * agent proposes is held for the owner's approval; nothing installs itself.
+ */
+export function buildPiAdapterSkillsContext(): { text: string; details: Record<string, unknown> } {
+  const { config } = defaultAgentAndSession();
+  const skillsDir = skillsDirFromConfig(config, runtimePathsFromEnv());
+  const installed = discoverMindStoneSkills(skillsDir).filter((skill) => skill.source === "installed" && !skill.error);
+  const full: string[] = [];
+  const listed: string[] = [];
+  let used = 0;
+  for (const summary of installed) {
+    const loaded = loadMindStoneSkillArtifact(skillsDir, summary.id, "installed");
+    if (!loaded.ok) continue;
+    const body = (loaded.skill.skillMarkdown ?? "").trim();
+    const block = [`<skill id="${summary.id}">`, body, "</skill>"].join("\n");
+    if (used + block.length <= SKILLS_PROMPT_BUDGET) {
+      full.push(block);
+      used += block.length;
+    } else {
+      listed.push(`- ${summary.id}: ${summary.label}. ${summary.description ?? ""}`.trim());
+    }
+  }
+  const lines = ["<mindstone-skills>"];
+  if (full.length || listed.length) {
+    lines.push("Installed skills. Follow a skill's instructions when the owner's request matches it.", ...full);
+    if (listed.length) lines.push("More installed skills (over the prompt budget; ask the owner if you need one's details):", ...listed);
+  } else {
+    lines.push("No skills are installed yet.");
+  }
+  lines.push(
+    "When the owner asks you to create a skill, draft it and propose it for install by ending your reply with one fenced block:",
+    "```mindstone-skill-proposal",
+    '{"id":"lowercase-with-hyphens","label":"Short name","description":"What it does","goal":"What it is for","whenToUse":["..."],"outputs":["..."],"safetyNotes":["..."],"instructions":"The skill\'s instructions, in markdown"}',
+    "```",
+    "Only propose a skill when the owner asks for one. It is held for the owner's approval in the Console and does nothing until then.",
+    "</mindstone-skills>",
+  );
+  return { text: lines.join("\n"), details: { installed: installed.length, inPrompt: full.length, listedOnly: listed.length } };
+}
+
 async function injectPiAdapterPromptContext(event: PiBeforeAgentStartEvent): Promise<PiBeforeAgentStartResult | undefined> {
   const identityContext = buildPiAdapterPromptContext();
   const recallContext = await buildPiAdapterRecallContext(event);
-  const sections = [identityContext.text, recallContext.text].filter((section): section is string => Boolean(section));
+  const skillsContext = buildPiAdapterSkillsContext();
+  const sections = [identityContext.text, recallContext.text, skillsContext.text].filter((section): section is string => Boolean(section));
   if (sections.length === 0) return undefined;
   return {
     systemPrompt: [event.systemPrompt, "", ...sections].filter(Boolean).join("\n"),
