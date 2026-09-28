@@ -869,12 +869,15 @@ CHAT_ID="$(PROJECT_ROOT="${PROJECT_ROOT}" node --input-type=module -e '
 const core = await import(process.env.PROJECT_ROOT + "/packages/mindstone-core/dist/index.js");
 const block = (o) => "```mindstone-skill-proposal\n" + JSON.stringify(o) + "\n```";
 const ok = { id: "chat-skill", label: "Chat skill", description: "From chat", goal: "Show it works", whenToUse: ["when asked"], instructions: "CHAT-SKILL-SENTINEL" };
-const r = core.applyActionProposalDiscipline({ replyText: "Here you go.\n" + block(ok), origin: "chat" });
+const r = core.applyActionProposalDiscipline({ replyText: "Here you go.\n" + block(ok), origin: "chat", allowSkill: true });
 if (r.proposals.length !== 1 || r.proposals[0].kind !== "skill_install" || r.text !== "Here you go.") { console.error("a skill block should become one proposal: " + JSON.stringify(r)); process.exit(1); }
 for (const bad of [{ ...ok, id: "Bad Id" }, { ...ok, instructions: "x".repeat(16001) }, { ...ok, whenToUse: "x" }, { ...ok, label: "" }]) {
-  const b = core.applyActionProposalDiscipline({ replyText: block(bad), origin: "chat" });
+  const b = core.applyActionProposalDiscipline({ replyText: block(bad), origin: "chat", allowSkill: true });
   if (b.proposals.length !== 0 || b.text !== "") { console.error("a malformed skill block should be dropped: " + JSON.stringify(bad).slice(0, 80)); process.exit(1); }
 }
+// A reply to anyone but the owner never proposes a skill; the block is still stripped.
+const n = core.applyActionProposalDiscipline({ replyText: "Hi.\n" + block({ ...ok, id: "non-owner-skill" }), origin: "telegram" });
+if (n.proposals.length !== 0 || n.text !== "Hi.") { console.error("a non-owner reply should not propose a skill: " + JSON.stringify(n)); process.exit(1); }
 console.log(r.proposals[0].id);')" || exit 1
 [[ ! -e "${SKILLS}/chat-skill" && ! -e "${SKILLS}/drafts/chat-skill" ]] || { echo "a proposed skill was written before approval" >&2; exit 1; }
 expect "$(get "/admin/approvals/${CHAT_ID}")" 200 "showing a skill proposal"
@@ -891,8 +894,8 @@ grep -Eq '"kind": ?"skill_install"' "${BODY}" || { echo "approve result: $(cat "
 TWO_IDS="$(PROJECT_ROOT="${PROJECT_ROOT}" node --input-type=module -e '
 const core = await import(process.env.PROJECT_ROOT + "/packages/mindstone-core/dist/index.js");
 const block = (o) => "```mindstone-skill-proposal\n" + JSON.stringify(o) + "\n```";
-const again = core.applyActionProposalDiscipline({ replyText: block({ id: "chat-skill", label: "Again", description: "Again" }), origin: "chat" });
-const other = core.applyActionProposalDiscipline({ replyText: block({ id: "rejected-skill", label: "No", description: "No" }), origin: "chat" });
+const again = core.applyActionProposalDiscipline({ replyText: block({ id: "chat-skill", label: "Again", description: "Again" }), origin: "chat", allowSkill: true });
+const other = core.applyActionProposalDiscipline({ replyText: block({ id: "rejected-skill", label: "No", description: "No" }), origin: "chat", allowSkill: true });
 console.log(again.proposals[0].id + " " + other.proposals[0].id);')" || exit 1
 AGAIN_ID="${TWO_IDS% *}"; REJECT_ID="${TWO_IDS#* }"
 expect "$(post "/admin/approvals/${AGAIN_ID}/approve" '{}')" 409 "approving a skill that is already installed"

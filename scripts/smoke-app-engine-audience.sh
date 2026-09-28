@@ -80,6 +80,22 @@ code() { curl -s -o "${TEMP_RUNTIME}/code.json" -w '%{http_code}' -X POST -H "Au
 [[ "$(code '{"text":"hi","tenantId":"t1:user:u1"}')" == "400" ]] || { echo "a tenantId containing a colon must be refused" >&2; exit 1; }
 [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${AE_TOKEN}" -H 'content-type: application/json' -d '{"text":"hi","tenantId":"t1"}' "http://127.0.0.1:${GATEWAY_PORT}/agents/a%3Ab/runs")" == "400" ]] || { echo "a scoped run on an agent id containing a colon must be refused" >&2; exit 1; }
 
+# A skill proposal in a reply to anyone but the owner is stripped, never proposed
+# (#104). The mock model echoes the prompt, so the block comes back in the reply.
+SKILL_BLOCK='```mindstone-skill-proposal\n{\"id\":\"ID\",\"label\":\"L\",\"description\":\"D\"}\n```'
+skill_run() { run "{\"text\":\"${SKILL_BLOCK//ID/$1}\"$2}" "${TEMP_RUNTIME}/skill.jsonl"; }
+skill_run tenant-skill ',"tenantId":"t1"'
+skill_run app-skill ',"appId":"app-9","userId":"u2"'
+skill_run owner-skill ''
+DATA="${DATA}" node <<'NODE'
+const { readFileSync } = require("node:fs");
+const fail = (m) => { console.error(m); process.exit(1); };
+const skills = JSON.parse(readFileSync(`${process.env.DATA}/approvals/actions.json`, "utf8")).actions.filter((a) => a.kind === "skill_install").map((a) => a.skill.id);
+if (!skills.includes("owner-skill")) fail("control: the owner's reply should propose its skill: " + JSON.stringify(skills));
+for (const id of ["tenant-skill", "app-skill"]) if (skills.includes(id)) fail(`a scoped run proposed a skill (${id})`);
+console.log("gateway skill-proposal audience assertions passed");
+NODE
+
 # The in-process API (runMindStone) applies the same audience.
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
 import assert from "node:assert/strict";
@@ -119,6 +135,14 @@ await assert.rejects(run({ tenantId: "t1", agentId: "a:b" }), /agentId must be n
 {
   const padded = await run({ tenantId: " t1 " });
   assert.equal(padded.sessionKey, "tenant:t1:agent:default:main", "core trims scope ids the way the gateway does");
+}
+{
+  const block = (id: string) => "```mindstone-skill-proposal\n" + JSON.stringify({ id, label: "L", description: "D" }) + "\n```";
+  const store = () => JSON.parse(readFileSync(`${paths.dataDir}/approvals/actions.json`, "utf8")).actions.filter((a: { kind: string }) => a.kind === "skill_install").map((a: { skill: { id: string } }) => a.skill.id);
+  await runMindStone({ agentId: "default", input: block("core-tenant-skill"), tenantId: "t1" } as never, { config, configPath, provider, model } as never);
+  await runMindStone({ agentId: "default", input: block("core-owner-skill") } as never, { config, configPath, provider, model } as never);
+  assert.ok(store().includes("core-owner-skill"), "control: an in-process owner reply proposes its skill");
+  assert.ok(!store().includes("core-tenant-skill"), "an in-process tenant reply proposed a skill");
 }
 const tenantPi = piSessionRunnerOptions({ routing: { mode: "pi-session", pi: { builtinTools: ["bash"] } } } as never, "tenant");
 assert.deepEqual(tenantPi.builtinTools, [], "tenant Pi turns get no built-in tools");

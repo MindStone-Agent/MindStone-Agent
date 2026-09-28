@@ -1199,6 +1199,7 @@ async function runConfiguredRoute(input: {
       origin: source?.substrate ?? "gateway",
       source,
       runId: run.id,
+      allowSkill: input.audience === "owner",
     });
 
     const assistantEntry = appendTranscriptEntry({

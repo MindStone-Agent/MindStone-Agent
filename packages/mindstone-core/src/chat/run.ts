@@ -665,6 +665,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     origin: input.source?.substrate ?? "chat",
     source: input.source,
     runId,
+    allowSkill: ownerContext,
   });
   events.push(...extracted.events);
 

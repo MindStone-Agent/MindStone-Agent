@@ -399,8 +399,15 @@ export function applyActionProposalDiscipline(params: {
   source?: TranscriptSource;
   runId?: string;
   store?: ApprovalStore;
+  /**
+   * Skill proposals are the owner's (#104): an installed skill joins the
+   * owner's prompt, so a reply to anyone else never proposes one. The block is
+   * still stripped from the reply.
+   */
+  allowSkill?: boolean;
 }): { text: string; content: unknown; events: TranscriptEntry[]; proposals: ProposedAction[] } {
-  const extracted = extractActionProposals(params.replyText);
+  const found = extractActionProposals(params.replyText);
+  const extracted = params.allowSkill ? found : { ...found, skill: undefined };
   // Sanitize content whenever it plausibly carries a fence — proposals may
   // exist in content even when text is already clean (diverging shapes).
   const contentProbe = params.content !== undefined ? JSON.stringify(params.content) : undefined;

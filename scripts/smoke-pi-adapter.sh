@@ -54,6 +54,16 @@ config.memory = { ...(config.memory ?? {}), autoRecall: true };
 writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
 NODE
 
+# An installed skill reaches the owner's prompt through the same hook (#104).
+node --input-type=module <<'NODE'
+const core = await import('./packages/mindstone-core/dist/index.js');
+const skillsDir = `${process.env.MINDSTONE_AGENT_RUNTIME_DIR}/mindstone/skills`;
+const drafted = core.buildMindStoneSkillDraft({ skillsDir, id: 'adapter-smoke-skill', label: 'Adapter smoke skill', description: 'Adapter smoke', goal: 'PI-ADAPTER-SMOKE-SKILL' });
+if (!drafted.ok) throw new Error(drafted.error);
+const installed = core.installMindStoneSkill(skillsDir, 'adapter-smoke-skill');
+if (!installed.ok) throw new Error(installed.error);
+NODE
+
 OUTPUT="$(node <<'NODE'
 const { readFileSync, existsSync } = await import('node:fs');
 const mod = await import('./packages/mindstone-pi-adapter/dist/index.js');
@@ -173,6 +183,10 @@ if ! grep -q 'before_agent_start' <<<"${OUTPUT}"; then
 fi
 if ! grep -q 'PI-ADAPTER-SMOKE-IDENTITY' <<<"${OUTPUT}" || ! grep -q 'PI-ADAPTER-SMOKE-USER' <<<"${OUTPUT}" || ! grep -q 'mindstone-identity' <<<"${OUTPUT}"; then
   echo "Pi adapter before_agent_start hook did not inject identity/user prompt context" >&2
+  exit 1
+fi
+if ! grep -q 'mindstone-skills' <<<"${OUTPUT}" || ! grep -q 'PI-ADAPTER-SMOKE-SKILL' <<<"${OUTPUT}"; then
+  echo "Pi adapter before_agent_start hook did not inject the installed skill" >&2
   exit 1
 fi
 if ! grep -q 'mindstone-ephemeral-recall' <<<"${OUTPUT}" || ! grep -q 'Relevant MindStone memory follows' <<<"${OUTPUT}" || ! grep -q 'inject ephemeral recall' <<<"${OUTPUT}"; then
