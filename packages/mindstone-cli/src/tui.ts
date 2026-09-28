@@ -51,7 +51,7 @@ import {
   ProcessTerminal,
   Spacer,
   Text,
-  TUI,
+  TuiMainScreen,
   truncateToWidth,
   type Component,
   type EditorTheme,
@@ -886,7 +886,7 @@ export async function runTuiCommand(argv: string[]): Promise<void> {
   const ctx = resolveTuiContext(argv, loaded);
 
   const terminal = new ProcessTerminal();
-  const tui = new TUI(terminal);
+  const tui = new TuiMainScreen(terminal);
   const header = new MindStoneHeader(ctx);
   const chat = new MindStoneChatLog();
   const footer = new MindStoneFooter();

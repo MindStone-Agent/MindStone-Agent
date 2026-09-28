@@ -58,6 +58,7 @@ export {
   DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR,
   PI_SESSION_EVENT_CALLBACK_METADATA_KEY,
   applyPiSessionCompactionSettings,
+  disablePiCacheWarmingUnlessSet,
   buildPiSessionResourceLoaderOptions,
   PiSessionExecutor,
   repairPiSessionFileTailIfNeeded,

@@ -23,13 +23,17 @@ type PiRegistry = {
   find(provider: string, modelId: string): PiModel | undefined;
   getProviderDisplayName(provider: string): string;
   getProviderAuthStatus(provider: string): PiAuthStatus;
-  getApiKeyAndHeaders(model: PiModel): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> } | { ok: false; error: string }>;
+  getApiKeyAndHeaders(model: PiModel): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string | null>; baseUrl?: string; env?: Record<string, string> } | { ok: false; error: string }>;
+};
+
+/** Pi's model and auth runtime (Pi 0.87, #127): it resolves each provider's auth, base URL included. */
+type PiModelRuntime = {
+  completeSimple(model: PiModel, context: unknown, options?: Record<string, unknown>): Promise<unknown>;
 };
 
 type PiProviderModules = {
-  AuthStorage: { create(path?: string): unknown };
-  ModelRegistry: { create(authStorage: unknown, modelsPath?: string): PiRegistry };
-  completeSimple: (model: PiModel, context: unknown, options?: Record<string, unknown>) => Promise<unknown>;
+  ModelRuntime: { create(options: { authPath: string; modelsPath: string | null; allowModelNetwork?: boolean }): Promise<PiModelRuntime> };
+  ModelRegistry: new (runtime: PiModelRuntime) => PiRegistry;
 };
 
 export type PiMindStoneProviderOptions = {
@@ -48,12 +52,11 @@ async function importFromProject<T>(projectRoot: string, path: string): Promise<
 }
 
 async function loadPiProviderModules(projectRoot: string): Promise<PiProviderModules> {
-  const [{ AuthStorage }, { ModelRegistry }, ai] = await Promise.all([
-    importFromProject<{ AuthStorage: PiProviderModules["AuthStorage"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/auth-storage.js"),
+  const [{ ModelRuntime }, { ModelRegistry }] = await Promise.all([
+    importFromProject<{ ModelRuntime: PiProviderModules["ModelRuntime"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/model-runtime.js"),
     importFromProject<{ ModelRegistry: PiProviderModules["ModelRegistry"] }>(projectRoot, "vendor/pi/packages/coding-agent/dist/core/model-registry.js"),
-    importFromProject<{ completeSimple: PiProviderModules["completeSimple"] }>(projectRoot, "vendor/pi/packages/ai/dist/index.js"),
   ]);
-  return { AuthStorage, ModelRegistry, completeSimple: ai.completeSimple };
+  return { ModelRuntime, ModelRegistry };
 }
 
 function toModelInfo(model: PiModel): MindStoneModelInfo {
@@ -121,8 +124,8 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
   readonly #agentDir: string;
   readonly #defaultProvider?: string;
   readonly #defaultModel?: string;
-  #modules?: PiProviderModules;
   #registry?: PiRegistry;
+  #runtime?: PiModelRuntime;
 
   constructor(options: PiMindStoneProviderOptions = {}) {
     this.#projectRoot = resolve(options.projectRoot ?? projectRootFromEnv());
@@ -131,16 +134,18 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
     this.#defaultModel = options.defaultModel;
   }
 
-  async #load(): Promise<{ modules: PiProviderModules; registry: PiRegistry }> {
-    if (this.#modules && this.#registry) return { modules: this.#modules, registry: this.#registry };
+  async #load(): Promise<{ runtime: PiModelRuntime; registry: PiRegistry }> {
+    if (this.#runtime && this.#registry) return { runtime: this.#runtime, registry: this.#registry };
     const modules = await loadPiProviderModules(this.#projectRoot);
     const authPath = join(this.#agentDir, "auth.json");
     const modelsPath = join(this.#agentDir, "models.json");
-    const authStorage = modules.AuthStorage.create(authPath);
-    const registry = modules.ModelRegistry.create(authStorage, existsSync(modelsPath) ? modelsPath : undefined);
-    this.#modules = modules;
+    // Only this install's agent dir: a missing models.json means none (null),
+    // never Pi's global default. No catalog fetches at run time.
+    const runtime = await modules.ModelRuntime.create({ authPath, modelsPath: existsSync(modelsPath) ? modelsPath : null, allowModelNetwork: false });
+    const registry = new modules.ModelRegistry(runtime);
+    this.#runtime = runtime;
     this.#registry = registry;
-    return { modules, registry };
+    return { runtime, registry };
   }
 
   async listModels(): Promise<MindStoneModelInfo[]> {
@@ -186,8 +191,9 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
   }
 
   async completeChat(request: MindStoneChatRequest): Promise<MindStoneChatResult> {
-    const { modules, registry } = await this.#load();
+    const { runtime, registry } = await this.#load();
     const piModel = await this.#resolvePiModel(request.model.id);
+    // Checked first for a clear error; the runtime resolves the same auth for the call.
     const auth = await registry.getApiKeyAndHeaders(piModel);
     if (!auth.ok) throw new Error(auth.error);
 
@@ -197,11 +203,8 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
       timestamp: Date.now(),
     }));
     const context = { messages, tools: [] };
-    const assistant = await modules.completeSimple(piModel, context, {
+    const assistant = await runtime.completeSimple(piModel, context, {
       signal: request.signal,
-      apiKey: auth.apiKey,
-      headers: auth.headers,
-      env: auth.env,
       sessionId: request.sessionKey,
     });
 
