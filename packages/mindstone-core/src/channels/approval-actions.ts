@@ -23,7 +23,7 @@ import { PersonaExistsError, writeProposedPersona } from "../persona/create.js";
 export class ApprovalActionError extends Error {
   constructor(
     message: string,
-    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload" | "no_personas_dir" | "persona_exists" | "persona_referenced",
+    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload" | "no_personas_dir" | "persona_exists" | "persona_referenced" | "no_persona_references",
     readonly status: number,
     /** For callers outside this host (the Console): the same refusal without host paths or CLI hints. */
     readonly publicMessage: string = message,
@@ -230,8 +230,8 @@ export function approveProposedAction(
     const personaId = action.persona.id;
     // An id the config already uses (active, a route rule, a workflow step)
     // would answer as soon as it's saved, with no switch (#105 review).
-    if (!options.referencedPersonaIds) throw new ApprovalActionError("approving a persona needs the persona ids the config uses", "no_personas_dir", 422);
-    if (options.referencedPersonaIds.has(personaId)) {
+    if (!options.referencedPersonaIds) throw new ApprovalActionError("approving a persona needs the persona ids the config uses", "no_persona_references", 422);
+    if (options.referencedPersonaIds.has(personaId.toLowerCase())) {
       throw new ApprovalActionError(
         `the config already uses the persona id "${personaId}", so approving it would make it active without a switch; ask the agent for a new name, or reject this proposal`,
         "persona_referenced",

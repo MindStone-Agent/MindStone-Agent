@@ -107,7 +107,7 @@ export function loadMindStoneWorkflow(workflowsDir: string, workflowId: string):
 }
 
 /**
- * Persona ids the config already puts to use: `personas.active`, a persona
+ * Persona ids (lowercased) the config already puts to use: `personas.active`, a persona
  * route rule, or a workflow step (its persona, or a gate on one being
  * loadable). Approving a persona the agent proposed under one of these ids
  * would make it answer with no switch, so the approval is refused (#105
@@ -116,7 +116,8 @@ export function loadMindStoneWorkflow(workflowsDir: string, workflowId: string):
 export function referencedPersonaIds(config: MindStoneConfig | undefined, paths?: MindStoneRuntimePaths): Set<string> {
   const ids = new Set<string>();
   const add = (value: unknown) => {
-    if (typeof value === "string" && value.trim()) ids.add(value.trim());
+    // Lowercased: persona directories match regardless of case on macOS and Windows (#105 review).
+    if (typeof value === "string" && value.trim()) ids.add(value.trim().toLowerCase());
   };
   add(config?.personas?.active);
   for (const rule of Array.isArray(config?.personas?.routes) ? config.personas.routes : []) add(rule?.personaId);

@@ -42,7 +42,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyActionProposalDiscipline, approveProposedAction, ApprovalActionError, ApprovalStore, checkApprovable, extractActionProposals, parsePersonaProposal, PERSONA_PROPOSAL_INSTRUCTIONS, referencedPersonaIds, renderPersonaMarkdown, runMindStoneChatTurn, writeProposedPersona, PersonaExistsError, MAX_PENDING_PERSONAS } from "./packages/mindstone-core/src/index.ts";
+import { stripProposalFences, applyActionProposalDiscipline, approveProposedAction, ApprovalActionError, ApprovalStore, checkApprovable, extractActionProposals, parsePersonaProposal, PERSONA_PROPOSAL_INSTRUCTIONS, referencedPersonaIds, renderPersonaMarkdown, runMindStoneChatTurn, writeProposedPersona, PersonaExistsError, MAX_PENDING_PERSONAS } from "./packages/mindstone-core/src/index.ts";
 
 const ok = { id: "wren", name: "Wren", voice: "Warm and direct." };
 assert.deepEqual(parsePersonaProposal(ok), ok);
@@ -68,6 +68,12 @@ assert.equal(extractActionProposals('Here.\r\n```mindstone-persona-proposal\r\n{
 assert.equal(extractActionProposals('Sure. ```mindstone-persona-proposal\n{"id":"wren","name":"Wren","voice":"Warm."}\n```').persona?.id, "wren", "an opener after text on its line");
 assert.equal(extractActionProposals('Sure.\n```mindstone-persona-proposal\n{"id":"wren","name":"Wren","voice":"Warm."}```').persona?.id, "wren", "a closer at the end of the last line");
 assert.equal(extractActionProposals('Sure. ```mindstone-persona-proposal\n{"id":"wren","name":"Wren","voice":"Warm."}\n```').text, "Sure.");
+// An empty line where the block was, so the text around it stays apart.
+assert.equal(extractActionProposals('A.\n```mindstone-persona-proposal\n{"id":"wren","name":"Wren","voice":"Warm."}\n```\nB.').text, "A.\n\nB.");
+// Structured content is stripped of exactly the blocks the text path finds.
+assert.equal(stripProposalFences('A.\n~~~mindstone-persona-proposal\n{"id":"wren"}\n~~~\nB.'), "A.\n\nB.", "a ~~~ proposal is stripped from content too");
+const nestedExample = 'Ex:\n````\n```mindstone-persona-proposal\n{"id":"shown"}\n```\n````';
+assert.equal(stripProposalFences(nestedExample), nestedExample, "an example inside another fence stays in content, as in text");
 // A block shown inside another fence (an example, or the instructions echoed back) is text, not a proposal.
 for (const example of [
   'For example:\n````text\n```mindstone-persona-proposal\n{"id":"shown","name":"Shown","voice":"x"}\n```\n````\nThat is the format.',
@@ -143,16 +149,17 @@ assert.ok(!existsSync(join(dir, "personas", "raced")), "a refused decision left 
 // An id the config already uses would answer with no switch: refused, nothing written, still pending.
 const refStore = new ApprovalStore({ path: join(dir, "ref.json") });
 const [refd] = applyActionProposalDiscipline({ replyText: block("inuse"), origin: "unit", store: refStore, allowPersona: true }).proposals;
-assert.throws(() => approveProposedAction(refStore, checkApprovable(refStore, refd!.id), { decidedBy: "unit", memoryDir: dir, personasDir: join(dir, "personas"), referencedPersonaIds: new Set(["inuse"]) }),
+assert.throws(() => approveProposedAction(refStore, checkApprovable(refStore, refd!.id), { decidedBy: "unit", memoryDir: dir, personasDir: join(dir, "personas"), referencedPersonaIds: referencedPersonaIds({ personas: { active: "InUse" } } as never) }),
   (error) => error instanceof ApprovalActionError && error.code === "persona_referenced" && error.status === 409);
 assert.throws(() => approveProposedAction(refStore, checkApprovable(refStore, refd!.id), { decidedBy: "unit", memoryDir: dir, personasDir: join(dir, "personas") }),
-  (error) => error instanceof ApprovalActionError && error.status === 422, "without the config's persona ids, approving is refused");
+  (error) => error instanceof ApprovalActionError && error.status === 422 && error.code === "no_persona_references", "without the config's persona ids, approving is refused");
 assert.ok(!existsSync(join(dir, "personas", "inuse")) && refStore.get(refd!.id)?.status === "pending");
 // Every place the config names a persona counts.
 const wfDir = join(dir, "wf");
 mkdirSync(join(wfDir, "flow"), { recursive: true });
 writeFileSync(join(wfDir, "flow", "workflow.json"), JSON.stringify({ steps: [{ kind: "route", personaId: "by-step" }, { kind: "gate", gate: { personaLoadable: "by-gate" } }] }));
-const refs = referencedPersonaIds({ personas: { active: "by-active", routes: [{ personaId: "by-route" }] }, workflows: { dir: wfDir } } as never);
+// Lowercased, since persona directories match regardless of case on macOS and Windows.
+const refs = referencedPersonaIds({ personas: { active: "By-Active", routes: [{ personaId: "BY-ROUTE" }] }, workflows: { dir: wfDir } } as never);
 assert.deepEqual([...refs].sort(), ["by-active", "by-gate", "by-route", "by-step"]);
 // Core chat: a non-owner turn's persona block is dropped, an owner's is kept.
 let lastPrompt = "";
@@ -259,8 +266,9 @@ expect "$(post "/admin/approvals/${REJ}/reject" '{"note":"not now"}')" 200 "reje
 [[ ! -e "${DATA}/personas/finch" ]] || { echo "a rejected persona was written" >&2; exit 1; }
 
 # An id the config already uses is refused: approving it would make it answer
-# with no switch (#105 review). Here it is set active before it exists.
-expect "$(patch_personas '{"active":"ghost"}')" 200 "setting active a persona not saved yet"
+# with no switch (#105 review). Here it is set active before it exists, in
+# other case: persona directories match regardless of case on macOS and Windows.
+expect "$(patch_personas '{"active":"Ghost"}')" 200 "setting active a persona not saved yet"
 chat admin conv-ghost "$(block '{"id":"ghost","name":"Ghost","voice":"x"}')"
 GHOST="$(pending_personas)"
 expect "$(post "/admin/approvals/${GHOST}/approve" '{}')" 409 "approving a persona id the config already uses"

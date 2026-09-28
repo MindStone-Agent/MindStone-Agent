@@ -258,7 +258,10 @@ export function resolveConnectorSendPolicy(params: {
 /** Pending persona proposals kept at once (#105 review). */
 export const MAX_PENDING_PERSONAS = 3;
 
-const PROPOSAL_INFO = /^mindstone-(memory|calendar|persona)-proposal$/;
+/** The proposal kinds, in one place: every fence pattern below is built from it. */
+const PROPOSAL_KINDS = "memory|calendar|persona";
+const PROPOSAL_INFO = new RegExp(`^mindstone-(${PROPOSAL_KINDS})-proposal$`);
+const PROPOSAL_INLINE_OPENER = new RegExp(`^(.*?\\S)[ \\t]*(\`\`\`mindstone-(?:${PROPOSAL_KINDS})-proposal[ \\t]*\\r?)$`);
 
 /**
  * The reply split into its text and its proposal blocks. A block counts only
@@ -276,7 +279,7 @@ function splitProposalBlocks(replyText: string): { text: string; blocks: Array<{
   while (i < lines.length) {
     const line = lines[i]!;
     // A proposal fence opened after some text: the text stays, the fence starts its own line.
-    const inline = /^(.*?\S)[ \t]*(```mindstone-(?:memory|calendar|persona)-proposal[ \t]*\r?)$/.exec(line);
+    const inline = PROPOSAL_INLINE_OPENER.exec(line);
     if (inline) {
       lines.splice(i, 1, inline[1]!, inline[2]!);
       continue;
@@ -351,12 +354,14 @@ export function extractMemoryProposal(replyText: string): { text: string; propos
   return { text: extracted.text, proposal: extracted.memory };
 }
 
-/** Strip proposal fences from a string WITHOUT proposing; no-op (identity) when none present. */
+/**
+ * Strip proposal blocks from a string WITHOUT proposing; no-op (identity)
+ * when none present. The same blocks the text path finds (#105 review), so
+ * structured content and text never disagree.
+ */
 export function stripProposalFences(text: string): string {
-  const fence = /```mindstone-(?:memory|calendar|persona)-proposal\s*\n[\s\S]*?```/g;
-  if (!fence.test(text)) return text;
-  fence.lastIndex = 0;
-  return text.replace(fence, "").trim();
+  const split = splitProposalBlocks(text);
+  return split.blocks.length === 0 ? text : split.text.trim();
 }
 
 /**

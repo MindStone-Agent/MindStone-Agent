@@ -25,12 +25,8 @@ export const PERSONA_PROPOSAL_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 export const PERSONA_PROPOSAL_INSTRUCTIONS = [
   "# Proposing a persona",
   "When the user asks you to, or once identity formation has given you enough to go on, you can propose a working persona for yourself: your name, voice, working style and boundaries. It is saved only if the owner approves it in the MindStone Console, and it takes effect only when they switch to it there.",
-  "Propose it by ending your reply with exactly one block like the one in this example, written as its own fenced block with three backticks, not inside another fence (JSON; `id` is lowercase letters, digits and hyphens):",
-  "````text",
-  "```mindstone-persona-proposal",
+  "Propose it by ending your reply with exactly one fenced code block, not inside any other block: a line of three backticks followed directly by mindstone-persona-proposal, then one line of JSON, then a line of three backticks. `id` is lowercase letters, digits and hyphens. The JSON looks like this:",
   '{"id":"wren","name":"Wren","description":"One line on who this persona is.","voice":"How you speak.","workingStyle":"How you work with the user.","boundaries":["Something you will not do."]}',
-  "```",
-  "````",
   "The block is removed from what the user sees, so also say in your reply that you've put a persona up for approval. A persona adjusts voice and working style only: it never overrides your core identity, the user's boundaries or safety rules. Don't claim it is active until the user says they switched to it.",
   "Once switched to, a persona is used in every chat, including other people's chats and connectors, so keep private details about the user out of it: those belong in USER.md.",
 ].join("\n");
