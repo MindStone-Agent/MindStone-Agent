@@ -878,6 +878,25 @@ c = core.buildMindStoneSkillsPrompt(process.env.SKILLS);
 const tail = c.promptText.slice(c.promptText.indexOf("ESCAPED-LINE"));
 if ((c.promptText.match(/<\/mindstone-skills>/g) ?? []).length !== 1 || (c.promptText.match(/<\/skill>/g) ?? []).length !== c.inPrompt.length || !tail.includes("</skill>")) fail("a skill closed its own wrapper", c.promptText);' || exit 1
 rm -rf "${SKILLS}/escape-skill"
+# An unreadable skill is that skill's error, never a failed turn or a failed list;
+# a SKILL.md that is only the generated outline appears once.
+SKILLS="${SKILLS}" PROJECT_ROOT="${PROJECT_ROOT}" node --input-type=module -e '
+const core = await import(process.env.PROJECT_ROOT + "/packages/mindstone-core/dist/index.js");
+for (const [id, extra] of [["locked-skill", { skillMarkdown: "LOCKED-BODY" }], ["outline-skill", { safetyNotes: ["OUTLINE-ONCE"] }]]) {
+  const d = core.composeMindStoneSkillDraft({ id, label: id, description: id, ...extra });
+  core.writeInstalledMindStoneSkill(process.env.SKILLS, d.artifact, d.skillMarkdown);
+}'
+chmod 000 "${SKILLS}/locked-skill/SKILL.md"
+SKILLS="${SKILLS}" PROJECT_ROOT="${PROJECT_ROOT}" node --input-type=module -e '
+const core = await import(process.env.PROJECT_ROOT + "/packages/mindstone-core/dist/index.js");
+const c = core.buildMindStoneSkillsPrompt(process.env.SKILLS);
+if (c.promptText.includes("locked-skill") || !c.promptText.includes("<skill id=\"weekly-report\">")) { console.error("an unreadable skill should be left out, the rest kept"); process.exit(1); }
+if ((c.promptText.match(/OUTLINE-ONCE/g) ?? []).length !== 1) { console.error("a generated outline should appear once"); process.exit(1); }' || { chmod 600 "${SKILLS}/locked-skill/SKILL.md"; exit 1; }
+expect "$(get /admin/skills)" 200 "listing skills with one unreadable"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const s=b.skills.find(x=>x.id==="locked-skill"); process.exit(s&&s.error&&!("inPrompt" in s)?0:1)' "${BODY}" || { chmod 600 "${SKILLS}/locked-skill/SKILL.md"; echo "the unreadable skill should be listed with its error: $(cat "${BODY}")" >&2; exit 1; }
+no_host_path "an unreadable skill"
+chmod 600 "${SKILLS}/locked-skill/SKILL.md"
+rm -rf "${SKILLS}/locked-skill" "${SKILLS}/outline-skill"
 # A skill over the prompt budget is listed by name only, and the list says which.
 PROJECT_ROOT="${PROJECT_ROOT}" SKILLS="${SKILLS}" node --input-type=module -e '
 const core = await import(process.env.PROJECT_ROOT + "/packages/mindstone-core/dist/index.js");

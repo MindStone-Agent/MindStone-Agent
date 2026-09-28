@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { MindStoneConfig } from "../config/types.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
@@ -108,7 +108,14 @@ export function loadMindStoneSkillArtifact(dir: string, skillId: string, source:
   if (!description) return { ok: false, skillId, error: "skill.json is missing required string field: description" };
 
   const skillMdPath = join(skillDir, "SKILL.md");
-  const skillMarkdown = existsSync(skillMdPath) ? readFileSync(skillMdPath, "utf-8") : undefined;
+  // An unreadable SKILL.md (permissions, a directory in its place) is this
+  // skill's error, never a throw: skills are loaded on every owner turn (#104).
+  let skillMarkdown: string | undefined;
+  try {
+    skillMarkdown = existsSync(skillMdPath) ? readFileSync(skillMdPath, "utf-8") : undefined;
+  } catch (error) {
+    return { ok: false, skillId, error: `SKILL.md can't be read at ${skillMdPath}: ${error instanceof Error ? error.message : String(error)}` };
+  }
   if (!skillMarkdown?.trim()) {
     return { ok: false, skillId, error: `SKILL.md missing or empty at ${skillMdPath}` };
   }
@@ -252,20 +259,24 @@ export function composeMindStoneSkillDraft(input: Omit<BuildSkillDraftInput, "sk
       origin: "custom",
       createdAt: input.now,
     };
-    skillMarkdown =
-      input.skillMarkdown ??
-      [
-        `# ${artifact.label}`,
-        "",
-        artifact.description,
-        "",
-        ...(artifact.goal ? ["## Goal", "", artifact.goal, ""] : []),
-        ...(artifact.whenToUse.length ? ["## When to use", "", ...artifact.whenToUse.map((item) => `- ${item}`), ""] : []),
-        ...(artifact.outputs.length ? ["## Outputs", "", ...artifact.outputs.map((item) => `- ${item}`), ""] : []),
-        ...(artifact.safetyNotes.length ? ["## Safety notes", "", ...artifact.safetyNotes.map((item) => `- ${item}`), ""] : []),
-      ].join("\n");
+    skillMarkdown = input.skillMarkdown ?? skillOutlineMarkdown(artifact);
   }
   return { ok: true, artifact, skillMarkdown };
+}
+
+/** The SKILL.md a draft gets when no instructions are given: an outline of its fields. */
+export function skillOutlineMarkdown(artifact: MindStoneSkillArtifact): string {
+  const list = (items?: string[]) => (items ?? []).map((item) => `- ${item}`);
+  return [
+    `# ${artifact.label}`,
+    "",
+    artifact.description,
+    "",
+    ...(artifact.goal ? ["## Goal", "", artifact.goal, ""] : []),
+    ...(artifact.whenToUse?.length ? ["## When to use", "", ...list(artifact.whenToUse), ""] : []),
+    ...(artifact.outputs?.length ? ["## Outputs", "", ...list(artifact.outputs), ""] : []),
+    ...(artifact.safetyNotes?.length ? ["## Safety notes", "", ...list(artifact.safetyNotes), ""] : []),
+  ].join("\n");
 }
 
 export function buildMindStoneSkillDraft(input: BuildSkillDraftInput): BuildSkillDraftResult {
@@ -313,8 +324,20 @@ export function writeInstalledMindStoneSkill(skillsDir: string, artifact: MindSt
   if (idError) throw new Error(idError);
   const installedDir = join(skillsDir, artifact.id);
   mkdirSync(installedDir, { recursive: true });
-  writeFileSync(join(installedDir, "skill.json"), `${JSON.stringify(artifact, null, 2)}\n`);
-  writeFileSync(join(installedDir, "SKILL.md"), skillMarkdown.endsWith("\n") ? skillMarkdown : `${skillMarkdown}\n`);
+  // Both files are written in full first, then renamed into place, SKILL.md
+  // before skill.json: a failure part-way never pairs a new skill.json with
+  // an old or missing SKILL.md.
+  const md = join(installedDir, ".SKILL.md.tmp");
+  const json = join(installedDir, ".skill.json.tmp");
+  try {
+    writeFileSync(md, skillMarkdown.endsWith("\n") ? skillMarkdown : `${skillMarkdown}\n`);
+    writeFileSync(json, `${JSON.stringify(artifact, null, 2)}\n`);
+    renameSync(md, join(installedDir, "SKILL.md"));
+    renameSync(json, join(installedDir, "skill.json"));
+  } finally {
+    rmSync(md, { force: true });
+    rmSync(json, { force: true });
+  }
   return installedDir;
 }
 

@@ -1,5 +1,5 @@
 import { estimatePromptTokens } from "../context/index.js";
-import { discoverMindStoneSkills, loadMindStoneSkillArtifact, type MindStoneSkillArtifact } from "./artifacts.js";
+import { discoverMindStoneSkills, loadMindStoneSkillArtifact, skillOutlineMarkdown, type MindStoneSkillArtifact } from "./artifacts.js";
 
 /**
  * Installed skills in the owner's prompt (#104). Every field an admin reviews
@@ -24,13 +24,17 @@ function contained(text: string): string {
   return text.replace(/<\/(skill|mindstone-skills)\b/gi, "</ $1");
 }
 
-/** One installed skill as the agent reads it: every reviewed field, then SKILL.md. */
+/**
+ * One installed skill as the agent reads it: every reviewed field, then
+ * SKILL.md. A SKILL.md that is only the outline generated from those fields
+ * is shown once, not twice.
+ */
 export function renderMindStoneSkillForPrompt(artifact: MindStoneSkillArtifact, skillMarkdown: string): string {
   const list = (title: string, items?: string[]) => (items && items.length ? [`${title}:`, ...items.map((item) => `- ${item}`)] : []);
-  return [
-    `<skill id="${artifact.id}">`,
-    contained(
-      [
+  const body = skillMarkdown.trim();
+  const fields = body === skillOutlineMarkdown(artifact).trim()
+    ? [body]
+    : [
         `Label: ${artifact.label}`,
         `Description: ${artifact.description}`,
         ...(artifact.goal ? [`Goal: ${artifact.goal}`] : []),
@@ -38,16 +42,21 @@ export function renderMindStoneSkillForPrompt(artifact: MindStoneSkillArtifact, 
         ...list("Outputs", artifact.outputs),
         ...list("Safety notes", artifact.safetyNotes),
         "Instructions (SKILL.md):",
-        skillMarkdown.trim(),
-      ].join("\n"),
-    ),
-    "</skill>",
-  ].join("\n");
+        body,
+      ];
+  return [`<skill id="${artifact.id}">`, contained(fields.join("\n")), "</skill>"].join("\n");
 }
 
 export function buildMindStoneSkillsPrompt(skillsDir: string, options: { budget?: number } = {}): MindStoneSkillsPromptResult {
   const budget = options.budget ?? SKILLS_PROMPT_BUDGET;
-  const installed = discoverMindStoneSkills(skillsDir).filter((skill) => skill.source === "installed" && !skill.error);
+  // Nothing here may fail an owner's turn: an unreadable skills directory
+  // means no skills this turn, and a skill that doesn't load is left out.
+  let installed: ReturnType<typeof discoverMindStoneSkills> = [];
+  try {
+    installed = discoverMindStoneSkills(skillsDir).filter((skill) => skill.source === "installed" && !skill.error);
+  } catch {
+    installed = [];
+  }
   const full: string[] = [];
   const listed: string[] = [];
   const inPrompt: string[] = [];
