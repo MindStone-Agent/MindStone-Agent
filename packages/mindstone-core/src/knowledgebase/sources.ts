@@ -82,7 +82,16 @@ export function publicAddress(url: string): string {
       .split("/")
       .map((segment) => {
         const plain = segment.split(";")[0] ?? "";
-        return plain && isSecretPathSegment(decodeURIComponent(plain)) ? "***" : plain;
+        if (!plain) return plain;
+        let decoded: string;
+        try {
+          decoded = decodeURIComponent(plain);
+        } catch {
+          // A stray "%" can't be read, so the segment isn't shown.
+          return "***";
+        }
+        // Either form may look like a credential (the gateway checks the raw one).
+        return isSecretPathSegment(decoded) || isSecretPathSegment(plain) ? "***" : plain;
       })
       .join("/");
     return `${parsed.protocol}//${parsed.host}${path}${parsed.search || parsed.hash ? "?…" : ""}`;

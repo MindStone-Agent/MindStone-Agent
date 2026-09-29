@@ -42,11 +42,11 @@ BASE="http://127.0.0.1:${GATEWAY_PORT}"
 BODY="${TEMP_RUNTIME}/body.json"
 
 # A source server: one small markdown page, one page over the 5 MB cap, and
-# one that answers after 3 s (to overlap two ingests).
+# one that answers after 6 s (to overlap ingests, with room on a busy host).
 node - <<'NODE' &
 require("http").createServer((req, res) => {
   const path = new URL(req.url, "http://x").pathname;
-  if (path === "/slow.md") { setTimeout(() => { res.writeHead(200, { "content-type": "text/markdown" }); res.end("# Slow\n\nSlow page.\n"); }, 3000); return; }
+  if (path === "/slow.md") { setTimeout(() => { res.writeHead(200, { "content-type": "text/markdown" }); res.end("# Slow\n\nSlow page.\n"); }, 6000); return; }
   if (path === "/doc.md") { res.writeHead(200, { "content-type": "text/markdown" }); res.end("# URL facts\n\nThe fetched reference code is URLFACT-8802 for this collection.\n"); return; }
   if (path === "/huge.md") { res.writeHead(200, { "content-type": "text/markdown" }); const chunk = "x".repeat(1024 * 1024); for (let i = 0; i < 6; i += 1) res.write(chunk); res.end(); return; }
   res.writeHead(404); res.end();
