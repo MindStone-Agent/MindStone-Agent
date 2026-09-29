@@ -8,6 +8,8 @@
 > (**implemented** / **smoke-tested** / **live-validated** / **pending**) — and
 > expect rough edges. Do not depend on it for production or unattended use.
 
+> 🚀 **Quick start:** one command installs everything (the gateway, the web Console and its database) in Docker. See [Quick start](#quick-start).
+
 > 🤖 **AI agents:** to install this, follow [Install guide for AI agents](#install-guide-for-ai-agents). It works step by step, with a check after each step.
 
 🔶 **Persistent AI agents with identity, memory, recall, and shared continuity across surfaces.**
