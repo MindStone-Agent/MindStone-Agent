@@ -115,20 +115,29 @@ alike.
   request at a time. On a gateway that is always answering, the re-embed waits
   for a gap; `kb ingest` works meanwhile. A failed attempt keeps the old
   vectors (word match meanwhile) and is tried again later (#158):
-  - A failure that cost something counts: the embedder refused the text (a
-    400, a zero or wrong-size vector), or it stopped after embedding some of
-    it. The wait after each is 30 minutes, then 60, 120 and 240; after the
-    fifth, that KB isn't tried again for that model (use `kb ingest`).
-  - An embedder that can't be reached, is down (a 5xx), has no key or model
-    (401, 403, 404), times out before embedding anything, or limits requests
-    (a 429) costs nothing: the KB is tried again after 30 minutes, however
-    often, and it never counts toward giving up.
+  - A 429 is a pause: the job waits (the embedder's Retry-After, between 30
+    seconds and 5 minutes, not counted against its budget) and sends the same
+    entry again, up to 5 times in a row.
+  - Only a failure that cost nothing is free: nothing was embedded, and the
+    embedder couldn't be reached, was down (a 5xx), had no key or model (401,
+    403, 404), timed out (408, or no answer in time), or kept answering 429.
+    The KB is tried again after 30 minutes (longer once earlier failures
+    have counted), however often, and it never counts toward giving up.
+  - Any other failure counts: the embedder refused the text (a 400, or a
+    reply that isn't usable vectors), it stopped after embedding some of it
+    (for any reason, a 429 included), or the vectors couldn't be written. The
+    wait after each is 30 minutes, then 60, 120 and 240; after the fifth, that
+    KB isn't tried again for that model (use `kb ingest`).
   - The state is kept in the KB's `reembed.json`, so a restart doesn't give it
-    more tries. A state for another model doesn't apply (a switch back to a
-    model starts afresh), and embedding the KB, by the gateway or `kb ingest`,
-    removes it. `kb status` (and the admin API's KB status) shows it as
-    `vectors.reembed` (`failures`, and `nextAttemptAt` or `gaveUp`, and the
-    last `reason`), and a KB given up on says so in its reason.
+    more tries (a KB folder that can't be written keeps it in the gateway's
+    memory instead). A state for another model doesn't apply, and it is
+    removed when the KB is embedded for the install's model, by the gateway
+    or `kb ingest`, or when the gateway finds it already embedded that way.
+    `kb status` shows it (when the gateway tries next, the counted failures
+    and the last reason; a KB given up on says so in its reason), `--json` as
+    `vectors.reembed`, and the gateway's KB lists (`GET /admin/knowledgebases`
+    and a persona's) carry it as `reembed` (`failures`, `nextAttemptAt` or
+    `gaveUp`, `reason`).
   An ingest that finishes while a re-embed runs keeps its own vectors, and
   that doesn't count as a failure. Each attempt is recorded in the admin audit
   log as `kb_reembedded` (with `reason` and `cause`, `unavailable`,

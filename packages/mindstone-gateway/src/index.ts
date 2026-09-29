@@ -120,6 +120,7 @@ import {
   knowledgebasesDirFromConfig,
   personaKnowledgebasesDir,
   reembedStaleKnowledgebase,
+  reembedState,
   turnsHoldReembed,
   decisionForAnsweringPersona,
   personaComponentsSummary,
@@ -2294,7 +2295,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         skills: persona.skills,
         workflows: persona.workflows,
         knowledgebases: persona.knowledgebases,
-        privateKnowledgebases: privateDir ? adminKnowledgebaseList(privateDir) : [],
+        privateKnowledgebases: privateDir ? adminKnowledgebaseList(privateDir, kbEmbeddingSpec(gateConfig.config), true) : [],
         active: gateConfig.config?.personas?.active === persona.id,
       },
     });
@@ -2321,7 +2322,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
   }
   if (req.method === "GET" && url.pathname === "/admin/knowledgebases") {
     // The global collections, for the persona editor's picker (#125). Creating one is the CLI's job.
-    sendJson(res, 200, { ok: true, knowledgebases: adminKnowledgebaseList(knowledgebasesDirFromConfig(gateConfig.config, paths)) });
+    sendJson(res, 200, { ok: true, knowledgebases: adminKnowledgebaseList(knowledgebasesDirFromConfig(gateConfig.config, paths), kbEmbeddingSpec(gateConfig.config)) });
     return;
   }
   const privateKbListMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases$/.exec(url.pathname);
@@ -2333,7 +2334,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       return;
     }
     const privateDir = readablePersonaKnowledgebasesDir(join(personasDir, id));
-    sendJson(res, 200, { ok: true, knowledgebases: privateDir ? adminKnowledgebaseList(privateDir) : [] });
+    sendJson(res, 200, { ok: true, knowledgebases: privateDir ? adminKnowledgebaseList(privateDir, kbEmbeddingSpec(gateConfig.config), true) : [] });
     return;
   }
   const privateKbSourcesMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases\/([a-z0-9][a-z0-9-]{0,39})\/sources$/.exec(url.pathname);
@@ -4406,17 +4407,34 @@ function adminPersonaLoads(personasDir: string, id: string): boolean {
 }
 
 /** Knowledge bases for the Console, without host paths. */
-function adminKnowledgebaseList(kbDir: string): Array<Record<string, unknown>> {
-  return discoverMindStoneKnowledgebases(kbDir).map(({ id, name, description, version, indexed, entryCount, sourceCount, error }) => ({
-    id,
-    name,
-    description,
-    version,
-    indexed,
-    entryCount,
-    sourceCount,
-    ...(error ? { error: "this knowledge base can't be loaded" } : {}),
-  }));
+/** The install's embedding model spec, when one is configured. */
+function kbEmbeddingSpec(config: MindStoneConfig | undefined): string | undefined {
+  const embedder = createMemoryEmbeddingProvider(config, process.env);
+  return embedder ? memoryEmbeddingSpec(embedder) : undefined;
+}
+
+/**
+ * The KBs in a folder for the Console. A KB the gateway is embedding again
+ * after a model switch carries `reembed` (#158): failures that counted, when
+ * it tries next or that it gave up, and the last fixed reason.
+ */
+function adminKnowledgebaseList(kbDir: string, spec?: string, noLinks = false): Array<Record<string, unknown>> {
+  return discoverMindStoneKnowledgebases(kbDir).map(({ id, name, description, version, indexed, entryCount, sourceCount, error }) => {
+    const state = spec && !error ? reembedState(join(kbDir, id), spec, noLinks) : undefined;
+    return {
+      id,
+      name,
+      description,
+      version,
+      indexed,
+      entryCount,
+      sourceCount,
+      ...(error ? { error: "this knowledge base can't be loaded" } : {}),
+      ...(state
+        ? { reembed: { failures: state.failures, ...(state.gaveUp ? { gaveUp: true } : { nextAttemptAt: state.nextAttemptAt }), ...(state.reason ? { reason: state.reason } : {}) } }
+        : {}),
+    };
+  });
 }
 
 /** An ingest error with the host's KB path replaced by the KB's own name. */

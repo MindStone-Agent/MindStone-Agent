@@ -23,8 +23,10 @@ import {
 } from "./sources.js";
 import {
   KB_REEMBED_NOTE,
+  KB_REEMBED_STATE_FALLBACK,
   KB_REEMBED_STATE_FILE,
   KB_VECTORS_FILE,
+  clearKbReembedState,
   kbVectorsStatus,
   readKbReembedState,
   readKbVectors,
@@ -403,6 +405,8 @@ export async function reembedStaleKnowledgebase(options: {
   claim?: (target: { personaId?: string; kbId: string }) => (() => void) | undefined;
   /** Awaited before each entry is sent (#156 review): the caller holds the job while turns run. */
   beforeBatch?: () => Promise<void>;
+  /** How a 429 pauses the job (#158); KB_REEMBED_LIMITS.rateLimit by default. */
+  rateLimit?: { minMs: number; maxMs: number; maxWaits: number };
 }): Promise<{ reembedded?: { kbId: string; personaId?: string; vectors: KbVectorsWriteResult; gaveUp?: true }; deferred: number }> {
   const maxEntries = options.maxEntries ?? KB_REEMBED_LIMITS.maxEntries;
   const spec = memoryEmbeddingSpec(options.embedder);
@@ -420,7 +424,11 @@ export async function reembedStaleKnowledgebase(options: {
       const read = readKbIndexWithText(loaded.kb);
       if (!read) continue;
       const current = readKbVectors(loaded.kb.dir, read.text, options.embedder, { noLinks, decode: false });
-      if (current.state !== "stale" || current.cause !== "model") continue;
+      if (current.state !== "stale" || current.cause !== "model") {
+        // Embedded for this model by some other way: an earlier give-up no longer applies (#158 review).
+        if (current.state === "ready") clearKbReembedState(loaded.kb.dir);
+        continue;
+      }
       const state = reembedState(loaded.kb.dir, spec, noLinks);
       // Given up on for this model: not waiting, so not deferred (#156 review).
       if (state?.gaveUp) continue;
@@ -448,15 +456,24 @@ export async function reembedStaleKnowledgebase(options: {
           // request after at most one entry (#156 review).
           batchSize: 1,
           beforeBatch: options.beforeBatch,
+          rateLimit: options.rateLimit ?? KB_REEMBED_LIMITS.rateLimit,
         });
-        if (vectors.state === "ready") {
-          REEMBED_STATE_FALLBACK.delete(loaded.kb.dir);
+        // An ingest that finished meanwhile left nothing to retry (#158 review).
+        const reread = readKbIndexWithText(loaded.kb);
+        const stillStale = ((now) => now.state === "stale" && now.cause === "model")(
+          reread ? readKbVectors(loaded.kb.dir, reread.text, options.embedder, { noLinks, decode: false }) : { state: "missing" as const },
+        );
+        if (vectors.state === "ready" || !stillStale) {
+          // Nothing to record.
         } else if (vectors.superseded) {
           // A newer ingest won: not a failure of the embedder (#156 review).
         } else {
           // A failure that cost something counts, and the wait doubles; an
           // outage or a 429 costs nothing and only waits (#158).
-          const counts = vectors.cause === "rejected" || (vectors.cause === "unavailable" && (vectors.embedded ?? 0) > 0);
+          // Free only when nothing was embedded and the embedder was out of reach or
+          // limiting requests; anything else, or no cause at all, counts (#158 review).
+          const free = (vectors.cause === "unavailable" || vectors.cause === "rate-limited") && !((vectors.embedded ?? 0) > 0);
+          const counts = !free;
           const failures = (state?.failures ?? 0) + (counts ? 1 : 0);
           const gaveUp = counts && failures >= KB_REEMBED_LIMITS.maxFailures;
           const next: KbReembedState = {
@@ -465,12 +482,12 @@ export async function reembedStaleKnowledgebase(options: {
             failures,
             ...(gaveUp
               ? { gaveUp: true as const }
-              : { nextAttemptAt: new Date(Date.now() + KB_REEMBED_LIMITS.retryAfterMs * (counts ? 2 ** (failures - 1) : 1)).toISOString() }),
+              : { nextAttemptAt: new Date(Date.now() + KB_REEMBED_LIMITS.retryAfterMs * 2 ** Math.max(0, failures - 1)).toISOString() }),
             reason: vectors.reason,
             updatedAt: new Date(Date.now()).toISOString(),
           };
-          if (writeKbReembedState(loaded.kb.dir, next)) REEMBED_STATE_FALLBACK.delete(loaded.kb.dir);
-          else REEMBED_STATE_FALLBACK.set(loaded.kb.dir, next);
+          if (writeKbReembedState(loaded.kb.dir, next)) KB_REEMBED_STATE_FALLBACK.delete(loaded.kb.dir);
+          else KB_REEMBED_STATE_FALLBACK.set(loaded.kb.dir, next);
           if (gaveUp) return { reembedded: { kbId: summary.id, personaId, vectors, gaveUp: true }, deferred };
         }
         return { reembedded: { kbId: summary.id, personaId, vectors }, deferred };
@@ -490,6 +507,8 @@ export const KB_REEMBED_LIMITS = {
   maxFailures: 5,
   /** A turn running longer than this no longer holds the re-embed back: it may never end (#158). */
   turnWaitMs: 10 * 60_000,
+  /** A 429 pauses the job: Retry-After within 30 s to 5 minutes, up to 5 times in a row (#158). */
+  rateLimit: { minMs: 30_000, maxMs: 5 * 60_000, maxWaits: 5 },
 };
 
 /** Whether turns in flight (their start times) hold a background re-embed back (#156 review, #158). */
@@ -498,12 +517,10 @@ export function turnsHoldReembed(starts: Iterable<number>, now = Date.now(), wai
   return false;
 }
 
-/** A KB's re-embed state that couldn't be written to its folder (a read-only folder): kept here meanwhile. */
-const REEMBED_STATE_FALLBACK = new Map<string, KbReembedState>();
-
 /** The re-embed state that applies to a KB for `spec`, if any (#158). */
 export function reembedState(kbDir: string, spec: string, noLinks = false): KbReembedState | undefined {
-  const state = REEMBED_STATE_FALLBACK.get(kbDir) ?? readKbReembedState(kbDir, { noLinks });
+  const kept = KB_REEMBED_STATE_FALLBACK.get(kbDir);
+  const state = kept?.spec === spec ? kept : readKbReembedState(kbDir, { noLinks });
   return state?.spec === spec ? state : undefined;
 }
 

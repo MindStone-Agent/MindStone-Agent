@@ -132,10 +132,11 @@ class KbZeroVector extends Error {}
 function embedFailureCause(error: unknown): KbEmbedFailureCause {
   const { status, unavailable } = (error ?? {}) as { status?: unknown; unavailable?: unknown };
   if (status === 429) return "rate-limited";
-  // A 5xx, or a key, permission or model the embedder doesn't have: nothing about the text.
-  if (typeof status === "number") return status >= 500 || status === 401 || status === 403 || status === 404 ? "unavailable" : "rejected";
-  // Not reached (fetch's TypeError), not answered in time, or not usable as configured.
-  if (unavailable === true || error instanceof KbEmbedTimeout || isAbort(error) || error instanceof TypeError) return "unavailable";
+  // A 5xx, a request timeout, or a key, permission or model the embedder doesn't have: nothing about the text.
+  if (typeof status === "number") return status >= 500 || [401, 403, 404, 408].includes(status) ? "unavailable" : "rejected";
+  // Not reached (the provider marks it), not answered in time, or not usable as configured. Anything
+  // else, a reply it couldn't use included, is the embedder's work done, so it counts (#158 review).
+  if (unavailable === true || error instanceof KbEmbedTimeout || isAbort(error)) return "unavailable";
   return "rejected";
 }
 
@@ -152,7 +153,7 @@ export function readKbReembedState(kbDir: string, options: { noLinks?: boolean }
       || typeof state.failures !== "number" || !Number.isInteger(state.failures) || state.failures < 0
       || (state.nextAttemptAt !== undefined && (typeof state.nextAttemptAt !== "string" || Number.isNaN(Date.parse(state.nextAttemptAt))))
       || (state.gaveUp !== undefined && state.gaveUp !== true)
-      || (state.reason !== undefined && typeof state.reason !== "string")
+      || (state.reason !== undefined && (typeof state.reason !== "string" || state.reason.length > 300 || /[\u0000-\u001f\u007f-\u009f]/.test(state.reason)))
     ) {
       return undefined;
     }
@@ -178,8 +179,17 @@ export function writeKbReembedState(kbDir: string, state: KbReembedState): boole
   }
 }
 
+/** A state that couldn't be written to its KB folder (a read-only folder): kept here meanwhile. */
+export const KB_REEMBED_STATE_FALLBACK = new Map<string, KbReembedState>();
+
+/** Removes the re-embed state, best effort: it never fails what called it (#158 review). */
 export function clearKbReembedState(kbDir: string): void {
-  rmSync(join(kbDir, KB_REEMBED_STATE_FILE), { force: true });
+  KB_REEMBED_STATE_FALLBACK.delete(kbDir);
+  try {
+    rmSync(join(kbDir, KB_REEMBED_STATE_FILE), { force: true });
+  } catch {
+    // A folder in its place: left, and ignored when read.
+  }
 }
 
 /** A request the embedder didn't answer in time (fetch's abort), not an error the embedder sent back. */
@@ -216,6 +226,12 @@ export async function writeKbVectors(params: {
    * the budget.
    */
   beforeBatch?: () => Promise<void>;
+  /**
+   * A 429 is a pause, not a failure (#158): wait (Retry-After, within
+   * minMs..maxMs) and send the same entry again, up to maxWaits times in a
+   * row. Waiting doesn't count against the budget.
+   */
+  rateLimit?: { minMs: number; maxMs: number; maxWaits: number };
 }): Promise<KbVectorsWriteResult> {
   const { embedder } = params;
   const indexStillCurrent = () => {
@@ -265,12 +281,25 @@ export async function writeKbVectors(params: {
         paused += Date.now() - waitStarted;
       }
       const batch = params.entries.slice(offset, offset + batchSize);
-      try {
-        await embedBatch(batch);
-      } catch (error) {
-        // A request the embedder couldn't finish in time: its entries once more, one a request.
-        if (error instanceof KbEmbedTimeout || !isAbort(error) || batch.length === 1) throw error;
-        for (const entry of batch) await embedBatch([entry]);
+      for (let waits = 0; ; waits += 1) {
+        try {
+          try {
+            await embedBatch(batch);
+          } catch (error) {
+            // A request the embedder couldn't finish in time: its entries once more, one a request.
+            if (error instanceof KbEmbedTimeout || !isAbort(error) || batch.length === 1) throw error;
+            for (const entry of batch) await embedBatch([entry]);
+          }
+          break;
+        } catch (error) {
+          const limit = params.rateLimit;
+          if (!limit || embedFailureCause(error) !== "rate-limited" || waits >= limit.maxWaits) throw error;
+          const asked = (error as { retryAfterMs?: unknown }).retryAfterMs;
+          const wait = Math.min(limit.maxMs, Math.max(limit.minMs, typeof asked === "number" ? asked : 0));
+          const waitStarted = Date.now();
+          await new Promise((resolve) => setTimeout(resolve, wait));
+          paused += Date.now() - waitStarted;
+        }
       }
     }
   } catch (error) {
@@ -311,14 +340,15 @@ export async function writeKbVectors(params: {
   try {
     writeFileSync(temp, `${JSON.stringify(file)}\n`, { flag: "wx" });
     renameSync(temp, path);
-    // Embedded for this model: nothing is left to retry or give up on (#158).
-    clearKbReembedState(params.kbDir);
   } catch {
     dropOld();
-    return { state: "missing", reason: "the vectors file could not be written" };
+    // The embedding was done: a failure that cost something (#158 review).
+    return { state: "missing", reason: "the vectors file could not be written", embedded: Object.keys(encoded).length };
   } finally {
     rmSync(temp, { force: true });
   }
+  // Embedded for this model: nothing is left to retry or give up on (#158).
+  clearKbReembedState(params.kbDir);
   return { state: "ready", provider: file.provider, model: file.model, dimension, count: Object.keys(encoded).length };
 }
 

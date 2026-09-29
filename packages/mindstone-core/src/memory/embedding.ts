@@ -163,17 +163,24 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
-      const response = await fetch(`${this.#baseUrl}/embeddings`, {
-        method: "POST",
-        headers: {
-          ...this.#headers,
-          "content-type": "application/json",
-          ...(this.#apiKey ? { authorization: `Bearer ${this.#apiKey}` } : {}),
-        },
-        body: JSON.stringify({ model: this.model, input: normalized }),
-        redirect: this.#followRedirects ? "follow" : "error",
-        signal: controller.signal,
-      });
+      let response: Response;
+      try {
+        response = await fetch(`${this.#baseUrl}/embeddings`, {
+          method: "POST",
+          headers: {
+            ...this.#headers,
+            "content-type": "application/json",
+            ...(this.#apiKey ? { authorization: `Bearer ${this.#apiKey}` } : {}),
+          },
+          body: JSON.stringify({ model: this.model, input: normalized }),
+          redirect: this.#followRedirects ? "follow" : "error",
+          signal: controller.signal,
+        });
+      } catch (error) {
+        // Not reached: marked, so the re-embed tells it from a reply it can't use (#158 review).
+        if (error instanceof Error && error.name !== "AbortError") Object.assign(error, { unavailable: true });
+        throw error;
+      }
       if (!response.ok) {
         // The status goes with the error (#158): a 429 or a 5xx is the embedder's state, a 400 the text's.
         let message: string | undefined;
@@ -182,7 +189,13 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
         } catch {
           // Not JSON (a proxy's error page): the status says enough.
         }
-        throw Object.assign(new Error(message || `embedding request failed with HTTP ${response.status}`), { status: response.status });
+        // A 429's Retry-After, in ms, so a re-embed can wait that long (#158 review).
+        const retryAfter = response.headers.get("retry-after");
+        const seconds = retryAfter === null ? NaN : /^\d+$/.test(retryAfter.trim()) ? Number(retryAfter) : (Date.parse(retryAfter) - Date.now()) / 1000;
+        throw Object.assign(new Error(message || `embedding request failed with HTTP ${response.status}`), {
+          status: response.status,
+          ...(Number.isFinite(seconds) && seconds >= 0 ? { retryAfterMs: Math.round(seconds * 1000) } : {}),
+        });
       }
       const body = await response.json() as OpenAiEmbeddingResponse;
       const data = body.data;

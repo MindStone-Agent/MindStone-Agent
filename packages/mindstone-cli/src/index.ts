@@ -1344,10 +1344,22 @@ function personaKbDir(argv: string[], config: MindStoneConfig, paths: MindStoneR
 }
 
 /** A KB's vectors in one line (#125 §5): used for recall by meaning, or why not. */
-function kbVectorsLine(vectors: { state: string; reason?: string; provider?: string; model?: string; dimension?: number; count?: number }): string {
+function kbVectorsLine(vectors: {
+  state: string;
+  reason?: string;
+  provider?: string;
+  model?: string;
+  dimension?: number;
+  count?: number;
+  reembed?: { failures: number; nextAttemptAt?: string; gaveUp?: true; reason?: string };
+}): string {
   const made = vectors.provider ? ` (${vectors.provider}:${vectors.model}, ${vectors.dimension} dimensions${vectors.count !== undefined ? `, ${vectors.count} entries` : ""})` : "";
   if (vectors.state === "ready") return `vectors: ready${made}; recall ranks this KB by meaning`;
-  return `vectors: ${vectors.state}${made}: ${vectors.reason ?? "unknown"}; recall uses word match`;
+  // A KB the gateway is still trying to embed again says when, and why the last try failed (#158 review).
+  const retry = vectors.reembed && !vectors.reembed.gaveUp && vectors.reembed.nextAttemptAt
+    ? `; the gateway tries again after ${vectors.reembed.nextAttemptAt} (${vectors.reembed.failures} counted failure(s)${vectors.reembed.reason ? `; last: ${vectors.reembed.reason}` : ""})`
+    : "";
+  return `vectors: ${vectors.state}${made}: ${vectors.reason ?? "unknown"}${retry}; recall uses word match`;
 }
 
 async function runKbCommand(rawArgv: string[]): Promise<void> {
