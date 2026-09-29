@@ -57,8 +57,20 @@ createServer((req, res) => {
       return send(200, { data: (body.input ?? []).map((_, index) => ({ index, embedding: [0.1, 0.2, 0.3] })) });
     }
     if (req.url === "/api/pull") {
-      // Slow enough that a second download overlaps it.
-      return setTimeout(() => { pulled.add(body.model); send(200, { status: "success" }); }, 1500);
+      // Streamed, as Ollama does when asked (#145); a pull that isn't streamed
+      // is refused, so a gateway that waits for one answer fails here.
+      if (body.stream !== true) return send(400, { error: "the smoke's stub only answers a streamed pull" });
+      res.writeHead(200, { "content-type": "application/x-ndjson" });
+      const line = (value) => res.write(JSON.stringify(value) + "\n");
+      line({ status: "pulling manifest" });
+      const ticks = setInterval(() => line({ status: "pulling 0123abcd", digest: "sha256:0123abcd", total: 100, completed: 50 }), 300);
+      // 1.5 s: slow enough that a second download overlaps it; slow-embed takes 11 s.
+      return setTimeout(() => {
+        clearInterval(ticks);
+        if (body.model === "broken-embed") line({ error: "synthetic pull failure" });
+        else if (body.model !== "cut-embed") { pulled.add(body.model); line({ status: "success" }); }
+        res.end();
+      }, body.model === "slow-embed" ? 11_000 : 1500);
     }
     send(404, { error: "not found" });
   });
@@ -146,11 +158,32 @@ sleep 0.4
 second="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${ADMIN[@]}" -d '{"model":"mxbai-embed-large"}' "${BASE}/admin/memory/pull")"
 wait "${pull1}"
 [[ "${second}" == 409 ]] || { echo "a second concurrent download should be refused as busy, got ${second}" >&2; exit 1; }
-[[ "$(cat "${TEMP_RUNTIME}/pull1.code")" == 200 ]] || { echo "the first download should succeed" >&2; exit 1; }
+[[ "$(cat "${TEMP_RUNTIME}/pull1.code")" == 200 && "$(field ok)" == true ]] || { echo "the first download should succeed: $(cat "${BODY}")" >&2; exit 1; }
 # Downloaded; checking again finds it, so the download slot is cleared.
 : "downloading the model"
 expect "$(post /admin/memory/check '{"embeddingProvider":"ollama:mxbai-embed-large"}')" 200 "checking the downloaded model"
 [[ "$(field ok)" == true ]] || { echo "the downloaded model should now embed: $(cat "${BODY}")" >&2; exit 1; }
+# A long download (#145): the headers come at once, and a newline every 10 s
+# keeps a client's fetch waiting (undici gives up after 300 s without a
+# byte). The answer is the same JSON, after the whitespace.
+expect "$(post /admin/memory/check '{"embeddingProvider":"ollama:slow-embed"}')" 200 "checking a slow model"
+read -r first total code <<<"$(curl -s -o "${BODY}" -w '%{time_starttransfer} %{time_total} %{http_code}' -X POST "${ADMIN[@]}" -d '{"model":"slow-embed"}' "${BASE}/admin/memory/pull")"
+[[ "${code}" == 200 ]] || { echo "the slow download answered ${code}: $(cat "${BODY}")" >&2; exit 1; }
+node -e '
+const [first, total] = process.argv.slice(1, 3).map(Number);
+const text = require("fs").readFileSync(process.argv[3], "utf8");
+if (!(total >= 10)) { console.error(`the slow download took ${total} s: nothing was measured`); process.exit(1); }
+if (!(first < 2)) { console.error(`the headers came after ${first} s of a ${total} s download`); process.exit(1); }
+if (!text.startsWith("\n")) { console.error("no newline was sent while the download ran"); process.exit(1); }
+if (JSON.parse(text).ok !== true) { console.error(`the slow download failed: ${text.trim()}`); process.exit(1); }
+' "${first}" "${total}" "${BODY}" || exit 1
+# Ollama reports a failure, or the stream stops before it says success.
+for pair in "broken-embed|synthetic pull failure" "cut-embed|the download ended before it finished"; do
+  model="${pair%%|*}" want="${pair#*|}"
+  expect "$(post /admin/memory/check "{\"embeddingProvider\":\"ollama:${model}\"}")" 200 "checking ${model}"
+  expect "$(post /admin/memory/pull "{\"model\":\"${model}\"}")" 200 "downloading ${model}"
+  [[ "$(field ok)" == false && "$(field error)" == "${want}" ]] || { echo "${model} should fail with \"${want}\": $(cat "${BODY}")" >&2; exit 1; }
+done
 expect "$(patch memory '{"vectorStore":"sqlite-vec","embeddingProvider":"ollama:nomic-embed-text","autoRecall":true}')" 200 "saving memory"
 expect "$(get /admin/status)" 200 "status after memory"
 [[ "$(field steps.memory.done)" == true && "$(field onboarded)" == false ]] || { echo "memory is set but identity isn't: $(cat "${BODY}")" >&2; exit 1; }
