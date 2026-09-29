@@ -746,41 +746,55 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
 /**
  * After an owner's turn, a KB whose vectors another embedding model made is
  * embedded again in the background from its index (#151), as memory's chunks
- * are by the backfill (#140). One KB at a time; a private KB being ingested
- * is left for later. A KB over KB_REEMBED_MAX_ENTRIES keeps word match until
- * `kb ingest`.
+ * are by the backfill (#140). One KB at a time, off the turn (nothing here can
+ * fail or slow the reply); a private KB being ingested is left for later. A KB
+ * over KB_REEMBED_LIMITS.maxEntries keeps word match until `kb ingest`. Once a
+ * scan finds nothing stale or waiting for this model, scans stop until the
+ * model changes.
  */
 let kbReembedRunning = false;
+let kbReembedCleanSpec: string | undefined;
 
 function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
-  if (kbReembedRunning || config?.knowledgebases?.recall?.enabled === false || !isAutoRecallEnabled(config)) return;
-  const embedder = createMemoryEmbeddingProvider(config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs });
-  if (!embedder) return;
-  const paths = runtimePathsFromEnv();
-  const personasDir = personasDirFromConfig(config, paths);
-  const kbDirs = [
-    { dir: knowledgebasesDirFromConfig(config, paths) },
-    ...discoverMindStonePersonas(personasDir).flatMap((persona) => {
-      const dir = readablePersonaKnowledgebasesDir(persona.dir);
-      return dir ? [{ dir, personaId: persona.id }] : [];
-    }),
-  ];
+  if (kbReembedRunning) return;
   kbReembedRunning = true;
-  void reembedStaleKnowledgebase({
-    kbDirs,
-    embedder,
-    now: new Date().toISOString(),
-    claim: ({ personaId, kbId }) => {
-      if (!personaId) return () => undefined;
-      const key = `${personaId}/${kbId}`;
-      if (PRIVATE_KB_INGESTS.has(key) || PRIVATE_KB_INGESTS.size >= MAX_PRIVATE_KB_INGESTS) return undefined;
-      PRIVATE_KB_INGESTS.add(key);
-      return () => PRIVATE_KB_INGESTS.delete(key);
-    },
-  })
-    .then((result) => {
-      if (result) console.info(`[mindstone] knowledge base ${result.personaId ? `${result.personaId}/` : ""}${result.kbId} embedded again for the new model: ${result.vectors.state}`);
-    })
+  void (async () => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (config?.knowledgebases?.recall?.enabled === false || !isAutoRecallEnabled(config)) return;
+    const embedder = createMemoryEmbeddingProvider(config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs });
+    if (!embedder) return;
+    const spec = memoryEmbeddingSpec(embedder);
+    if (kbReembedCleanSpec === spec) return;
+    const paths = runtimePathsFromEnv();
+    const personasDir = personasDirFromConfig(config, paths);
+    const kbDirs = [
+      { dir: knowledgebasesDirFromConfig(config, paths) },
+      ...discoverMindStonePersonas(personasDir).flatMap((persona) => {
+        const dir = readablePersonaKnowledgebasesDir(persona.dir);
+        return dir ? [{ dir, personaId: persona.id }] : [];
+      }),
+    ];
+    const result = await reembedStaleKnowledgebase({
+      kbDirs,
+      embedder,
+      now: new Date().toISOString(),
+      claim: ({ personaId, kbId }) => {
+        if (!personaId) return () => undefined;
+        const key = `${personaId}/${kbId}`;
+        if (PRIVATE_KB_INGESTS.has(key) || PRIVATE_KB_INGESTS.size >= MAX_PRIVATE_KB_INGESTS) return undefined;
+        PRIVATE_KB_INGESTS.add(key);
+        return () => PRIVATE_KB_INGESTS.delete(key);
+      },
+    });
+    const done = result.reembedded;
+    if (done) {
+      const where = `${done.personaId ? `${done.personaId}/` : ""}${done.kbId}`;
+      if (done.vectors.state === "ready") console.info(`[mindstone] knowledge base ${where} embedded again for ${spec}`);
+      else console.warn(`[mindstone] knowledge base ${where} not embedded again for ${spec} (word match meanwhile; retried later): ${done.vectors.reason}`);
+    } else if (result.deferred === 0) {
+      kbReembedCleanSpec = spec;
+    }
+  })()
     .catch((error: unknown) => {
       console.warn(`[mindstone] knowledge base re-embed failed: ${error instanceof Error ? error.message : String(error)}`);
     })

@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { MindStoneConfig } from "../config/types.js";
-import type { MemoryEmbeddingProvider } from "../memory/embedding.js";
+import { memoryEmbeddingSpec, type MemoryEmbeddingProvider } from "../memory/embedding.js";
 import type { MemoryDocument } from "../memory/types.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import type {
@@ -347,7 +347,7 @@ export async function ingestMindStoneKnowledgebase(
   } else {
     writeFileSync(kb.indexPath, text);
   }
-  const vectors = await writeKbVectors({ kbDir: kb.dir, kbId, entries, indexText: text, embedder: options.embedder, now: options.now, timeoutMs: options.embedTimeoutMs });
+  const vectors = await writeKbVectors({ kbDir: kb.dir, kbId, entries, indexText: text, indexPath: kb.indexPath, embedder: options.embedder, now: options.now, timeoutMs: options.embedTimeoutMs });
   return { ok: true, kbId, indexPath: kb.indexPath, entryCount: entries.length, sourceCount: sourcePaths.length + externalDocuments.length, vectors };
 }
 
@@ -370,44 +370,79 @@ export function ingestApprovedPrivateKnowledgebase(
  * source is read or fetched), the first KB whose vectors another model made,
  * among the global collections and every persona's private KBs. One KB a
  * call, at most `maxEntries` entries; a larger one keeps word match until
- * `kb ingest`. `claim` lets the caller skip a KB being ingested meanwhile.
- * A failed embed removes the old vectors, so the KB isn't tried again every
- * turn.
+ * `kb ingest`. `claim` lets the caller skip a KB being ingested meanwhile. A
+ * failed attempt keeps the old vectors (recall uses word match) and isn't
+ * tried again for that model for KB_REEMBED_LIMITS.retryAfterMs.
+ * `deferred` counts the stale KBs left for later (claimed, or waiting to be
+ * retried): with none and nothing done, nothing is stale for this model.
  */
 export async function reembedStaleKnowledgebase(options: {
   kbDirs: Array<{ dir: string; personaId?: string }>;
   embedder: MemoryEmbeddingProvider;
   now?: string;
   maxEntries?: number;
+  timeoutMs?: number;
   claim?: (target: { personaId?: string; kbId: string }) => (() => void) | undefined;
-}): Promise<{ kbId: string; personaId?: string; vectors: KbVectorsWriteResult } | undefined> {
-  const maxEntries = options.maxEntries ?? KB_REEMBED_MAX_ENTRIES;
+}): Promise<{ reembedded?: { kbId: string; personaId?: string; vectors: KbVectorsWriteResult }; deferred: number }> {
+  const maxEntries = options.maxEntries ?? KB_REEMBED_LIMITS.maxEntries;
+  const spec = memoryEmbeddingSpec(options.embedder);
+  const yieldTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+  let deferred = 0;
   for (const { dir, personaId } of options.kbDirs) {
     const noLinks = personaId !== undefined;
+    await yieldTurn();
     for (const summary of discoverMindStoneKnowledgebases(dir)) {
+      await yieldTurn();
       if (summary.error || !summary.indexed || summary.entryCount > maxEntries) continue;
       if (noLinks && privateKnowledgebaseLinkError(dir, summary.id)) continue;
       const loaded = loadMindStoneKnowledgebase(dir, summary.id);
       if (!loaded.ok) continue;
       const read = readKbIndexWithText(loaded.kb);
       if (!read) continue;
-      const current = readKbVectors(loaded.kb.dir, read.text, options.embedder, { noLinks });
+      const current = readKbVectors(loaded.kb.dir, read.text, options.embedder, { noLinks, decode: false });
       if (current.state !== "stale" || current.cause !== "model") continue;
+      const retryKey = `${loaded.kb.dir}\0${spec}`;
+      if ((REEMBED_RETRY_AT.get(retryKey) ?? 0) > Date.now()) {
+        deferred += 1;
+        continue;
+      }
       const release = options.claim ? options.claim({ personaId, kbId: summary.id }) : () => undefined;
-      if (!release) continue;
+      if (!release) {
+        deferred += 1;
+        continue;
+      }
       try {
-        const vectors = await writeKbVectors({ kbDir: loaded.kb.dir, kbId: summary.id, entries: read.index.entries, indexText: read.text, embedder: options.embedder, now: options.now });
-        return { kbId: summary.id, personaId, vectors };
+        const vectors = await writeKbVectors({
+          kbDir: loaded.kb.dir,
+          kbId: summary.id,
+          entries: read.index.entries,
+          indexText: read.text,
+          indexPath: loaded.kb.indexPath,
+          embedder: options.embedder,
+          now: options.now,
+          timeoutMs: options.timeoutMs ?? KB_REEMBED_LIMITS.timeoutMs,
+          keepOnFailure: true,
+        });
+        if (vectors.state === "ready") REEMBED_RETRY_AT.delete(retryKey);
+        else REEMBED_RETRY_AT.set(retryKey, Date.now() + KB_REEMBED_LIMITS.retryAfterMs);
+        return { reembedded: { kbId: summary.id, personaId, vectors }, deferred };
       } finally {
         release();
       }
     }
   }
-  return undefined;
+  return { deferred };
 }
 
-/** The largest KB embedded again after a model switch without an explicit ingest (#151). */
-export const KB_REEMBED_MAX_ENTRIES = 512;
+/** A background re-embed after a model switch (#151): nobody waits on it, so it gets a longer budget. */
+export const KB_REEMBED_LIMITS = {
+  maxEntries: 512,
+  timeoutMs: 600_000,
+  retryAfterMs: 30 * 60_000,
+};
+
+/** When a KB (its folder, for a model spec) may be tried again after a failed re-embed. */
+const REEMBED_RETRY_AT = new Map<string, number>();
 
 export function readMindStoneKbIndex(kb: MindStoneKnowledgebase): MindStoneKbIndex | undefined {
   return readKbIndexWithText(kb)?.index;

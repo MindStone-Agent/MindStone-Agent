@@ -68,7 +68,10 @@ alike.
   embedding runs whenever one of those is set, **even with no `sqlite-vec`
   index**, which memory recall needs. Every ingest does it: `kb ingest`, the
   admin API's ingest, and approving an agent-proposed private KB (the card
-  shows its text in full). Ingest then sends each entry's text,
+  shows its text in full). So does the re-embed after a switch of model
+  (below): after each owner chat through the gateway, one KB's entries (at
+  most 512, global or any persona's) go to the new embedder, with no ingest
+  by anyone. Ingest then sends each entry's text,
   and every turn that ranks by meaning sends the question, to that embedder.
   With a hosted embedder (`openai:`, an enterprise endpoint), KB text leaves
   this machine; check that an `EMBEDDING_PROVIDER` set for another tool isn't
@@ -101,11 +104,15 @@ alike.
   **After a switch of embedding model** (#151), a KB whose vectors the old
   model made is embedded again on its own, as memory's chunks are (#140):
   after each owner chat through the gateway (automatic recall on), one such
-  KB, global or private, is embedded from its `index.json`, in the
+  KB, global or private, is embedded from its current `index.json`, in the
   background; its sources aren't read or fetched again. A KB of more than 512
-  entries, one whose index changed after its vectors, and a private KB being
-  ingested at that moment are left for `kb ingest` (or the next chat). Until
-  then recall finds the KB by its words. KB word-match hits are marked
+  entries needs `kb ingest`; so does one whose index changed after its
+  vectors while the model stayed the same. A private KB being ingested at
+  that moment waits for the next chat. A failed attempt keeps the old vectors
+  (word match meanwhile) and is tried again after 30 minutes; an ingest that
+  finishes while a re-embed runs keeps its own vectors. Once nothing is left
+  to embed again for the model, the gateway stops looking until the model
+  changes. Until a KB is embedded again, recall finds it by its words. KB word-match hits are marked
   `recallMode: "lexical"` in the recall event, as memory's are, and KB
   vectors are matched to the install's model by the same `<provider>:<model>`
   spec memory records.

@@ -429,28 +429,50 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
 // After a model switch, a KB is embedded again from its index, one a call (#151): only one another
 // model made, not one whose index changed or that is too large; a claimed-out KB is left for later.
 {
-  const root = mkdtempSync(join(tmpdir(), "kbvec-reembed-"));
-  const kb = async (id: string, text: string, model: string) => {
+  const kb = async (root: string, id: string, text: string, model: string) => {
     mkdirSync(join(root, id, "sources"), { recursive: true });
     writeFileSync(join(root, id, "kb.json"), JSON.stringify({ name: id }));
     writeFileSync(join(root, id, "sources", "a.md"), text);
     await ingestMindStoneKnowledgebase(root, id, { embedder: { ...fixed({ alpha: [1, 0, 0] }), model } as any });
   };
-  await kb("a-big", "# A\n\n## One\n\nalpha one\n\n## Two\n\nalpha two\n", "old");
-  await kb("b-index", "# B\n\nalpha b\n", "m1");
-  writeFileSync(join(root, "b-index", "index.json"), readFileSync(join(root, "b-index", "index.json"), "utf8") + " ");
-  await kb("c-old", "# C\n\nalpha c\n", "old");
-  await kb("d-new", "# D\n\nalpha d\n", "m1");
+  const modelOf = (root: string, id: string) => JSON.parse(readFileSync(join(root, id, KB_VECTORS_FILE), "utf8")).model;
   const now = { ...fixed({ alpha: [1, 0, 0] }), model: "m1" } as any;
-  // a-big has 2 entries: over a limit of 1. b-index (this model) changed after its vectors. c-old: another model.
-  let result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: now, maxEntries: 1, claim: ({ kbId }) => (kbId === "c-old" ? undefined : () => undefined) });
-  assert.equal(result, undefined, "a claimed-out KB is left for later, and nothing else qualifies");
-  result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: now, maxEntries: 1 });
-  assert.equal(result?.kbId, "c-old");
-  assert.equal(JSON.parse(readFileSync(join(root, "c-old", KB_VECTORS_FILE), "utf8")).model, "m1");
-  assert.equal(await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: now, maxEntries: 1 }), undefined, "nothing left under the limit");
-  assert.equal((await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: now }))?.kbId, "a-big", "a-big within the default limit");
-  assert.equal(await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: now }), undefined, "a KB whose index changed under this model is left for kb ingest");
+  // The rules: a-big (2 entries) over a limit of 1; b-index (this model) changed after its vectors; c-old another model.
+  const rules = mkdtempSync(join(tmpdir(), "kbvec-reembed-"));
+  await kb(rules, "a-big", "# A\n\n## One\n\nalpha one\n\n## Two\n\nalpha two\n", "old");
+  await kb(rules, "b-index", "# B\n\nalpha b\n", "m1");
+  writeFileSync(join(rules, "b-index", "index.json"), readFileSync(join(rules, "b-index", "index.json"), "utf8") + " ");
+  await kb(rules, "c-old", "# C\n\nalpha c\n", "old");
+  let result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: rules }], embedder: now, maxEntries: 1, claim: ({ kbId }) => (kbId === "c-old" ? undefined : () => undefined) });
+  assert.deepEqual(result, { deferred: 1 }, "a claimed-out KB is left for later, and nothing else qualifies");
+  result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: rules }], embedder: now, maxEntries: 1 });
+  assert.equal(result.reembedded?.kbId, "c-old");
+  assert.equal(modelOf(rules, "c-old"), "m1");
+  assert.deepEqual(await reembedStaleKnowledgebase({ kbDirs: [{ dir: rules }], embedder: now, maxEntries: 1 }), { deferred: 0 }, "nothing left under the limit");
+  assert.equal((await reembedStaleKnowledgebase({ kbDirs: [{ dir: rules }], embedder: now })).reembedded?.kbId, "a-big", "a-big within the default limit");
+  assert.deepEqual(await reembedStaleKnowledgebase({ kbDirs: [{ dir: rules }], embedder: now }), { deferred: 0 }, "a KB whose index changed under this model is left for kb ingest");
+  // A failed attempt keeps the stale vectors and waits before trying again (#151 review).
+  const failing2 = mkdtempSync(join(tmpdir(), "kbvec-reembed-fail-"));
+  await kb(failing2, "f-kb", "# F\n\nalpha f\n", "old");
+  const down = { id: "stub", model: "m1", async embedTexts() { throw new Error("down"); } } as any;
+  result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: failing2 }], embedder: down });
+  assert.equal(result.reembedded?.vectors.state, "missing");
+  assert.equal(modelOf(failing2, "f-kb"), "old", "a failed re-embed keeps the old vectors");
+  assert.deepEqual(await reembedStaleKnowledgebase({ kbDirs: [{ dir: failing2 }], embedder: now }), { deferred: 1 }, "not tried again at once");
+  // An ingest that finishes while a re-embed runs keeps its own vectors.
+  const race = mkdtempSync(join(tmpdir(), "kbvec-reembed-race-"));
+  await kb(race, "e-race", "# E\n\nalpha e\n", "old");
+  const racing = {
+    ...fixed({ alpha: [1, 0, 0] }), model: "m1",
+    async embedTexts(texts: string[]) {
+      writeFileSync(join(race, "e-race", "index.json"), readFileSync(join(race, "e-race", "index.json"), "utf8") + "\n");
+      return texts.map(() => [1, 0, 0]);
+    },
+  } as any;
+  const beforeRace = readFileSync(join(race, "e-race", KB_VECTORS_FILE), "utf8");
+  result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: race }], embedder: racing });
+  assert.match((result.reembedded?.vectors as any).reason ?? "", /index changed while/);
+  assert.equal(readFileSync(join(race, "e-race", KB_VECTORS_FILE), "utf8"), beforeRace, "vectors made from an index replaced meanwhile are not written");
 }
 // Sections whose headings slug alike get their own ids, and so their own vectors.
 {
