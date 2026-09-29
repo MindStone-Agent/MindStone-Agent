@@ -316,7 +316,7 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   assert.deepEqual(selectRecallHits(three, 3).map((h) => h.id), ["k1", "k2", "k3"], "with no memory hit, KB sources take every slot");
   assert.deepEqual(selectRecallHits([...three, hit("m1", 0.9)], 1).map((h) => h.id), ["m1"], "one slot: memory's");
   // A KB source's word copy isn't memory: it doesn't take a slot from the quota.
-  assert.deepEqual(selectRecallHits([...three, hit("k3", 0.95)], 3).map((h) => h.id), ["k1", "k2", "k3"]);
+  assert.deepEqual(selectRecallHits([...three, hit("k3", 0.95)], 3).map((h) => `${h.id}:${isQuotaHit(h) ? "meaning" : "words"}`), ["k1:meaning", "k2:meaning", "k3:meaning"]);
 }
 
 // A request the embedder can't finish in time: the batch once more, an entry a request; one that
