@@ -111,6 +111,12 @@ expect "$(post /admin/providers/enterprise/vertex '{"models":["gemini-2.5-flash"
 expect "$(post /admin/providers/enterprise/vertex '{"models":["gemini-2.5-flash"],"secret":"vertex.named"}')" 400 "Pi's own Vertex placeholder as a key"
 expect "$(post /admin/providers/enterprise/enterprise-openai '{"baseUrl":"https://llm.example.com/v1","secret":"az.key","models":["m"],"headers":{"Authorization":"x"}}')" 400 "overriding the Authorization header"
 expect "$(post /admin/providers/enterprise/enterprise-openai '{"baseUrl":"https://llm.example.com/v1","secret":"az.key","models":["m"],"headers":{"X-A":"a\r\nX-B: b"}}')" 400 "a header value with a line break"
+# Auth options that aren't available yet are listed, marked planned, and refused (#140).
+expect "$(get /admin/models)" 200 "listing the enterprise kinds"
+[[ "$(jsonv "${BODY}" 'j.enterprise.flatMap(k=>k.fields.filter(f=>f.planned).map(f=>k.kind+":"+f.name)).join(",")')" == "azure-openai:entraIdentity,bedrock:roleArn,bedrock:accessKeys,vertex:workloadIdentity" ]] || { echo "the planned auth options should be listed: $(cat "${BODY}")" >&2; exit 1; }
+expect "$(post /admin/providers/enterprise/azure-openai '{"endpoint":"https://smoke-res.openai.azure.com","models":["gpt-4o"],"secret":"az.key","entraIdentity":"x"}')" 400 "a planned auth option"
+grep -q "isn't available yet" "${BODY}" || { echo "a planned option should say it isn't available yet: $(cat "${BODY}")" >&2; exit 1; }
+expect "$(post /admin/providers/enterprise/vertex '{"models":["m"],"workloadIdentity":"x"}')" 400 "Vertex workload identity (planned)"
 [[ ! -e "${MODELS_JSON}" || "$(jsonv "${MODELS_JSON}" 'Object.keys(j.providers).filter(k=>k.startsWith("enterprise-")).length')" == "0" ]] || { echo "a refused registration wrote to models.json" >&2; exit 1; }
 echo "refusal assertions passed"
 

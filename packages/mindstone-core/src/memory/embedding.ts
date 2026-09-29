@@ -217,14 +217,24 @@ export function sharedQueryEmbedder(provider: MemoryEmbeddingProvider | undefine
   };
 }
 
+/**
+ * One live embed with the configured provider. `timeoutMs` raises the embed
+ * timeout for this probe only (never lowers it): the first embed after a
+ * model loads can take longer than a chat's (#140: mxbai-embed-large took
+ * about 13 s to load, past the 10 s default).
+ */
 export async function probeMemoryEmbeddingProvider(
   config?: MindStoneConfig,
   env: NodeJS.ProcessEnv = process.env,
+  options: { timeoutMs?: number } = {},
 ): Promise<MemoryEmbeddingProbeResult | undefined> {
   const resolved = resolveMemoryEmbeddingProviderConfig(config, env);
   if (!resolved) return undefined;
+  // A configured timeout that isn't a positive number counts as the default, so the raise still applies.
+  const configured = typeof resolved.timeoutMs === "number" && Number.isFinite(resolved.timeoutMs) && resolved.timeoutMs > 0 ? resolved.timeoutMs : 10_000;
+  const timeoutMs = Math.max(configured, options.timeoutMs ?? 0);
   try {
-    const provider = new OpenAiCompatibleEmbeddingProvider(resolved);
+    const provider = new OpenAiCompatibleEmbeddingProvider({ ...resolved, timeoutMs });
     const [embedding] = await provider.embedTexts(["MindStone embedding health check"]);
     return {
       providerId: resolved.id,
@@ -238,12 +248,17 @@ export async function probeMemoryEmbeddingProvider(
       .map((value) => value?.replace(/^Bearer /i, ""))
       .filter((value): value is string => typeof value === "string" && value.length >= 8)
       .sort((a, b) => b.length - a.length);
-    const message = error instanceof Error ? error.message : String(error);
+    // The request's own timeout names its limit; an upstream error is cut short (#140 review).
+    const aborted = error instanceof Error && error.name === "AbortError";
+    const message = aborted
+      ? `no answer within ${Math.round(timeoutMs / 1000)} s`
+      : error instanceof Error ? error.message : String(error);
+    const redacted = known.reduce((text, value) => text.split(value).join("[redacted]"), message);
     return {
       providerId: resolved.id,
       model: resolved.model,
       baseUrl: resolved.baseUrl,
-      error: known.reduce((text, value) => text.split(value).join("[redacted]"), message),
+      error: redacted.length > 300 ? `${redacted.slice(0, 300)}…` : redacted,
     };
   }
 }

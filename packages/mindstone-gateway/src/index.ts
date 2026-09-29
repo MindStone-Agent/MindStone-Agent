@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync, readSync, fstatSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { appendFileSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync, readSync, fstatSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative as relativePath, resolve as resolvePath, sep } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
@@ -138,6 +138,8 @@ import {
   createMemoryEmbeddingProvider,
   KB_EMBED_LIMITS,
   indexSqliteMemoryTurn,
+  memoryEmbeddingSpec,
+  sqliteMemoryEmbeddingMix,
   isAutoRecallEnabled,
   transcriptPathForSession,
   decideGatewayAuth,
@@ -201,6 +203,7 @@ import {
   sanitizeRunnerStreamSubstrateEventPayload,
   writeAutoCompactHandoff,
   type MindStoneConfig,
+  resolvePathRelativeToConfig,
   type AgentRunResult,
   type AgentRunStreamEvent,
   type AgentRunner,
@@ -2294,6 +2297,31 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     sendJson(res, 200, { ok: true, secrets });
     return;
   }
+  if (req.method === "GET" && url.pathname === "/admin/user") {
+    // What the agent knows about the owner (#140): the default agent's USER.md,
+    // for the Console's Settings. Never a host path.
+    const file = adminUserFile(gateConfig.config, configPath);
+    if (!file.ok) {
+      sendJson(res, file.status, { ok: false, error: file.error });
+      return;
+    }
+    const read = file.exists ? readAdminUserFile(file.path) : undefined;
+    if (read && !read.ok) {
+      sendJson(res, 409, { ok: false, error: read.error });
+      return;
+    }
+    const bytes = read?.content.length ?? 0;
+    const tooLarge = bytes > USER_MD_MAX_BYTES;
+    sendJson(res, 200, {
+      ok: true,
+      exists: file.exists,
+      bytes,
+      etag: userMarkdownEtag(read?.content),
+      ...(read && !tooLarge ? { markdown: read.content.toString("utf-8") } : {}),
+      ...(tooLarge ? { tooLarge: true, maxBytes: USER_MD_MAX_BYTES } : {}),
+    });
+    return;
+  }
   if (req.method !== "POST" && req.method !== "PATCH" && req.method !== "DELETE") {
     sendJson(res, 404, { ok: false, error: "unknown admin endpoint" });
     return;
@@ -2308,6 +2336,64 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     sendJson(res, status, { ok: false, ...body });
   };
 
+  if (req.method === "PATCH" && url.pathname === "/admin/user") {
+    // Replace the default agent's USER.md with the Console's text (#140). The
+    // agent updates this file too, so the etag read with it is required: a
+    // file changed meanwhile is never overwritten.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const ifMatch = typeof req.headers["if-match"] === "string" ? req.headers["if-match"].trim() : "";
+    // The one etag read with it: no "*", and no weak etag (If-Match compares strongly).
+    if (!ifMatch || ifMatch === "*" || /(^|,)\s*W\//i.test(ifMatch)) {
+      refuse(428, { error: "send the etag read with USER.md (If-Match)" }, { reason: "etag_required", target: "user_md" });
+      return;
+    }
+    const unknown = Object.keys(body).find((key) => key !== "markdown");
+    const markdown = body.markdown;
+    if (unknown || typeof markdown !== "string") {
+      refuse(400, { error: "send { markdown } as text" }, { reason: "invalid", target: "user_md" });
+      return;
+    }
+    if (Buffer.byteLength(markdown, "utf-8") > USER_MD_MAX_BYTES) {
+      refuse(413, { error: `USER.md can be at most ${USER_MD_MAX_BYTES / 1024} KiB` }, { reason: "too_large", target: "user_md" });
+      return;
+    }
+    if (USER_MD_CONTROL.test(markdown)) {
+      refuse(400, { error: "USER.md can't hold control characters other than newline, carriage return and tab" }, { reason: "control_characters", target: "user_md" });
+      return;
+    }
+    await withAdminWriteLock(() => {
+      if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "changing USER.md needs the advanced-settings permission" }, { reason: "advanced", target: "user_md" });
+        return;
+      }
+      const loaded = loadMindStoneConfig(configPath);
+      if (loaded.error) {
+        sendJson(res, 503, { ok: false, error: CONFIG_UNREADABLE });
+        return;
+      }
+      // Found again under the lock, from the config as it is now.
+      const file = adminUserFile(loaded.config, configPath);
+      if (!file.ok) {
+        refuse(file.status, { error: file.error }, { reason: "user_md_unavailable", target: "user_md" });
+        return;
+      }
+      const current = file.exists ? readAdminUserFile(file.path) : undefined;
+      if (current && !current.ok) {
+        refuse(409, { error: current.error }, { reason: "user_md_unavailable", target: "user_md" });
+        return;
+      }
+      if (!ifMatchSatisfied(ifMatch, userMarkdownEtag(current?.content))) {
+        refuse(412, { error: "USER.md changed since you read it (the agent may have updated it); reload and try again" }, { reason: "etag", target: "user_md" });
+        return;
+      }
+      const mode = file.exists ? statSync(file.path).mode & 0o777 : 0o600;
+      writeFileAtomic(file.path, markdown, mode);
+      appendAdminAudit(paths.dataDir, { userId, action: "user_md_replaced", bytes: Buffer.byteLength(markdown, "utf-8") });
+      sendJson(res, 200, { ok: true, bytes: Buffer.byteLength(markdown, "utf-8"), etag: userMarkdownEtag(Buffer.from(markdown, "utf-8")) });
+    });
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/admin/permissions/advanced") {
     const body = await readAdminBody(req, res);
     if (!body) return;
@@ -3266,14 +3352,19 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       return;
     }
     const candidate: MindStoneConfig = { ...loaded.config, memory: { ...loaded.config?.memory, embeddingProvider: spec } };
-    const probe = await withTimeout(probeMemoryEmbeddingProvider(candidate), MEMORY_CHECK_MS, undefined);
+    const probe = await withTimeout(probeMemoryEmbeddingProvider(candidate, process.env, { timeoutMs: MEMORY_CHECK_EMBED_MS }), MEMORY_CHECK_MS, undefined);
     const ok = Boolean(probe && !probe.error && probe.dimensions);
     const error = !probe ? `no answer within ${MEMORY_CHECK_MS / 1000} s` : probe.error ?? (probe.dimensions ? undefined : "the provider returned no embedding");
     const missingModel = !ok && spec.startsWith("ollama:") && /not found|pull/i.test(error ?? "");
     lastMissingOllamaModel = missingModel ? spec.slice("ollama:".length) : undefined;
     appendAdminAudit(paths.dataDir, { userId, action: "memory_checked", embeddingProvider: spec, ok });
+    // Memories another model embedded are embedded again after a switch, and
+    // until then found only by their words (#140): the check says how many.
+    const index = ok && probe!.providerId && probe!.model
+      ? sqliteMemoryEmbeddingMix(memoryEmbeddingSpec({ id: probe!.providerId, model: probe!.model }), paths)
+      : undefined;
     sendJson(res, 200, ok
-      ? { ok: true, providerId: probe!.providerId, model: probe!.model, dimensions: probe!.dimensions }
+      ? { ok: true, providerId: probe!.providerId, model: probe!.model, dimensions: probe!.dimensions, ...(index ? { index } : {}) }
       : { ok: false, error, missingModel });
     return;
   }
@@ -4114,7 +4205,13 @@ const EMBEDDING_SPEC = /^(ollama|openai|openai-compatible|enterprise-azure|enter
  * `..`, so nothing is pulled from another registry.
  */
 const OLLAMA_MODEL_NAME = /^(?:[a-z0-9][a-z0-9_-]{0,63}\/)?[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9_-]+)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,63})?$/;
-const MEMORY_CHECK_MS = 20_000;
+/**
+ * The memory check's own embed may load the model first (#140: 13 s for
+ * mxbai-embed-large), so it gets 45 s, and the check 50 s; the Console's
+ * proxy waits 55 s, under a front proxy's usual 60 s.
+ */
+const MEMORY_CHECK_EMBED_MS = 45_000;
+const MEMORY_CHECK_MS = 50_000;
 const OLLAMA_PULL_MS = 15 * 60_000;
 let ollamaPullRunning = false;
 /** The Ollama model the last memory check reported missing: the only one a pull may fetch (#111 review). */
@@ -4289,6 +4386,86 @@ function removeOrEmpty(path: string): boolean {
     } catch {
       return false;
     }
+  }
+}
+
+/** USER.md through the admin API (#140): at most this many bytes, and no control characters but newline, CR and tab. */
+const USER_MD_MAX_BYTES = 64 * 1024;
+const USER_MD_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/;
+/** Larger than this, USER.md isn't read at all (#140 review): not shown, and not replaced here. */
+const USER_MD_READ_LIMIT = 8 * 1024 * 1024;
+
+/** The etag of USER.md as read (a missing file has its own), keyed per gateway process like the config's. */
+function userMarkdownEtag(content: Buffer | undefined): string {
+  return configEtag(content === undefined ? "\u0000USER.md missing" : `\u0000USER.md\n${content.toString("base64")}`);
+}
+
+/**
+ * USER.md's bytes, read without following a link and only from a regular
+ * file with one name (#140 review: a hard link to a stored secret passed an
+ * lstat check). The size is checked on the open file before reading.
+ */
+function readAdminUserFile(path: string): { ok: true; content: Buffer } | { ok: false; error: string } {
+  const refused = { ok: false as const, error: "USER.md isn't a plain file with one name, so it can't be read or changed here" };
+  let fd: number | undefined;
+  try {
+    // O_NONBLOCK: a FIFO put there meanwhile can't hold the event loop (#140 review).
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) return refused;
+    if (stat.size > USER_MD_READ_LIMIT) return { ok: false, error: `USER.md is larger than ${USER_MD_READ_LIMIT / 1024 / 1024} MiB, so it can't be read or changed here` };
+    const content = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < stat.size) {
+      const read = readSync(fd, content, offset, stat.size - offset, offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    return { ok: true, content: content.subarray(0, offset) };
+  } catch {
+    return refused;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * The default agent's USER.md, as the agent reads it (its configured
+ * userPath, relative to the config), for GET/PATCH /admin/user (#140). Only a
+ * file named USER.md under the config folder's agents/ folder, reached
+ * without a link at any step, and a regular file when it exists: a config
+ * pointing userPath at a stored secret, the admin state or anywhere else on
+ * the host doesn't make the admin API read or write it.
+ */
+function adminUserFile(
+  config: MindStoneConfig | undefined,
+  configPath: string,
+): { ok: true; path: string; exists: boolean } | { ok: false; status: number; error: string } {
+  const agentId = config?.routing?.defaultAgentId ?? "default";
+  const userPath = config?.agents?.[agentId]?.userPath;
+  if (!userPath) return { ok: false, status: 409, error: "the default agent has no USER.md set up yet; finish guided setup first" };
+  const outside = { ok: false as const, status: 409, error: "USER.md isn't a plain USER.md file in the agents folder next to the gateway's config, so it can't be read or changed here" };
+  const target = resolvePathRelativeToConfig(userPath, configPath);
+  if (basename(target) !== "USER.md") return outside;
+  let root: string;
+  let parent: string;
+  try {
+    root = realpathSync(join(dirname(configPath), "agents"));
+    parent = realpathSync(dirname(target));
+    // The agents folder itself is a real folder next to the config, not a link to one elsewhere.
+    if (root !== join(realpathSync(dirname(configPath)), "agents")) return outside;
+  } catch {
+    return { ok: false, status: 409, error: "USER.md's folder doesn't exist yet; finish guided setup first" };
+  }
+  // Inside the agents folder once every link is followed.
+  if (parent !== root && !parent.startsWith(`${root}${sep}`)) return outside;
+  // The same folders by name as on disk: a link from one agent's folder to another is refused as well.
+  if (relativePath(resolvePath(dirname(configPath), "agents"), resolvePath(dirname(target))) !== relativePath(root, parent)) return outside;
+  const path = join(parent, basename(target));
+  try {
+    return lstatSync(path).isFile() ? { ok: true, path, exists: true } : outside;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? { ok: true, path, exists: false } : outside;
   }
 }
 
