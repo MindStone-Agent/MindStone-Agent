@@ -387,12 +387,13 @@ const SKILL_PROPOSAL_UNSAFE = /(?![\u200c\u200d\u180e\ufe00-\ufe0f\u{E0100}-\u{E
  *   start of a keycap;
  * - FE00 after Han, Myanmar or a non-ASCII math symbol; FE01-FE0D and the
  *   ideographic selectors not at all;
- * - U+180E between two Mongolian letters;
+ * - U+180E between two Mongolian characters (letters or their marks);
  * - a joiner only between two non-ASCII characters, never two in a row.
  * Eight or more combining marks in a row, counted through joiners and U+180E,
- * is refused too (Myanmar and Tibetan stack up to five or six). A joiner
- * between non-ASCII characters can still stand or not: under two bits a gap,
- * and the CLI shows it as \u{200d}.
+ * is refused too (Myanmar and Tibetan stack up to five or six). What stays
+ * possible is a joiner (or FE00, FE0E/FE0F, U+180E where allowed) standing or
+ * not between non-ASCII characters: up to about 3 bits a character, never
+ * next to ASCII, and the CLI shows each as \u{..}.
  */
 const SKILL_PROPOSAL_HIDDEN = new RegExp([
   String.raw`(?<!\p{Emoji})[\uFE0E\uFE0F]`,
