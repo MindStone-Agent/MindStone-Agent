@@ -46,6 +46,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  MEMORY_EMBED_PROBE_TEXT,
   MEMORY_EMBED_REFUSAL_SPACING_MS,
   MEMORY_EMBED_SKIP_AFTER,
   MEMORY_REEMBED_BATCH,
@@ -306,7 +307,7 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   const refusedSends = () => sent.filter((texts) => texts.some((text) => text.includes("REFUSEDTEXT"))).length;
   const rejection = () => {
     const db = new DatabaseSync(dbPath);
-    const row = db.prepare("SELECT failures, reason FROM memory_embed_rejections WHERE chunk_id = 'refused#0' AND spec = 'stub:p'").get() as { failures: number; reason: string } | undefined;
+    const row = db.prepare("SELECT failures, reason, updated_at FROM memory_embed_rejections WHERE chunk_id = 'refused#0' AND spec = 'stub:p'").get() as { failures: number; reason: string; updated_at: string } | undefined;
     db.close();
     return row;
   };
@@ -325,8 +326,11 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   const next = await reembedSqliteMemoryOtherModel({ paths, provider: P, limit: 8 });
   if (next.chunksEmbedded !== 8 || refusedSends() !== 0) fail(`a chunk refused before should go last: ${JSON.stringify(next)}, ${refusedSends()} sends`);
   // A refusal counts at most once per MEMORY_EMBED_REFUSAL_SPACING_MS (#170 review): refused again at once, it isn't counted again.
+  const firstAt = rejection()?.updated_at;
   const soon = await backfillSqliteMemoryEmbeddings({ paths, provider: P });
   if (soon.chunksRejected !== 1 || rejection()?.failures !== 1) fail(`a refusal again within the spacing shouldn't count again: ${JSON.stringify(soon)}, ${JSON.stringify(rejection())}`);
+  // Nor does it move the spacing on: refused every few minutes, a chunk still gets counted.
+  if (!firstAt || rejection()?.updated_at !== firstAt) fail(`an uncounted refusal shouldn't restart the spacing: ${firstAt} -> ${rejection()?.updated_at}`);
   const age = (ms: number) => {
     const db = new DatabaseSync(dbPath);
     db.prepare("UPDATE memory_embed_rejections SET updated_at = ? WHERE chunk_id = 'refused#0' AND spec = 'stub:p'").run(new Date(Date.now() - ms).toISOString());
@@ -438,6 +442,13 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   if (calls !== 1 + MEMORY_REEMBED_BATCH + 1) fail(`the request, its chunks alone and the test text, then stop: ${calls} requests`);
   if (gates !== calls) fail(`beforeBatch should run before every request, the test text included: ${gates} for ${calls}`);
   if (rejections("stub:q") !== 0) fail(`an embedder refusing everything marked ${rejections("stub:q")} chunks`);
+  // An outage on the test text stops the run as an outage, counting nothing.
+  const probeDown = { id: "stub", model: "q", async embedTexts(texts: string[]) {
+    if (texts.length === 1 && texts[0] === MEMORY_EMBED_PROBE_TEXT) throw Object.assign(new Error("service unavailable"), { status: 503 });
+    throw Object.assign(new Error("model does not support embeddings"), { status: 400 });
+  } };
+  const probeOutage = await reembedSqliteMemoryOtherModel({ paths, provider: probeDown, limit: 16 }).then(() => undefined, (error: unknown) => error);
+  if (!(probeOutage instanceof Error) || (probeOutage as { refusedEverything?: boolean }).refusedEverything || rejections("stub:q") !== 0) fail(`an outage on the test text should stop the run as an outage: ${String(probeOutage)}, ${rejections("stub:q")}`);
   const wholeBackfill = await backfillSqliteMemoryEmbeddings({ paths, provider: everything }).then(() => undefined, (error: unknown) => error);
   if (!(wholeBackfill instanceof Error) || rejections("stub:q") !== 0) fail(`a whole backfill against it should stop and count nothing: ${String(wholeBackfill)}, ${rejections("stub:q")}`);
   // One that worked before, and in this run, then refuses everything (a proxy's 400 while its upstream
