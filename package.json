@@ -62,6 +62,7 @@
     "smoke:persona-admin": "./scripts/smoke-persona-admin.sh",
     "smoke:user-md": "./scripts/smoke-user-md.sh",
     "smoke:memory-model-switch": "./scripts/smoke-memory-model-switch.sh",
+    "smoke:persona-proposal-components": "./scripts/smoke-persona-proposal-components.sh",
     "smoke:app-engine": "./scripts/smoke-app-engine.sh",
     "smoke:app-engine-audience": "./scripts/smoke-app-engine-audience.sh",
     "smoke:connector": "./scripts/smoke-connector.sh",

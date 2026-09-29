@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { appendTranscriptEntry, type TranscriptEntry, type TranscriptSource } from "../transcript/index.js";
 import type { ConnectorOutboundMessage } from "./connector.js";
-import { parsePersonaProposal, type PersonaProposalPayload } from "../persona/create.js";
+import { parsePersonaProposal, PERSONA_TEXT_INVISIBLE, STACKED_MARKS, type PersonaProposalPayload } from "../persona/create.js";
+import { validateWorkflowDefinition, WORKFLOW_ID, type WorkflowDefinitionInput } from "../workflow/validate.js";
+import { builtinMindStoneSkills } from "../skills/artifacts.js";
 
 /**
  * Durable proposed-action store (issue #21, designed to be absorbed by the
@@ -19,7 +21,14 @@ import { parsePersonaProposal, type PersonaProposalPayload } from "../persona/cr
  * skills, personas, workflows, config) and adds a UI + defer on top of this
  * same store.
  */
-export type ProposedActionKind = "connector_send" | "memory_write" | "connector_mutation" | "persona_create" | "skill_install";
+export type ProposedActionKind =
+  | "connector_send"
+  | "memory_write"
+  | "connector_mutation"
+  | "persona_create"
+  | "skill_install"
+  | "workflow_create"
+  | "persona_kb_create";
 
 export type ProposedActionStatus = "pending" | "approved" | "rejected";
 
@@ -63,6 +72,45 @@ export type SkillInstallPayload = {
   instructions?: string;
 };
 
+/**
+ * A persona's components as the agent proposes them (#125). Existing ones are
+ * listed by id and checked when the persona is approved; new ones each become
+ * their own approval card, linked to the persona's.
+ */
+export type PersonaProposalComponents = {
+  skills: string[];
+  workflows: string[];
+  knowledgebases: string[];
+};
+
+/** A workflow the agent proposes with a persona (#125). It can't route to, or gate on, a persona. */
+export type WorkflowCreatePayload = {
+  id: string;
+  personaId: string;
+  definition: WorkflowDefinitionInput;
+};
+
+/** A private knowledge base the agent proposes for its persona (#125): markdown text sources only. */
+export type PersonaKnowledgebasePayload = {
+  personaId: string;
+  id: string;
+  name?: string;
+  sources: Array<{ name: string; text: string }>;
+};
+
+/** How much one persona proposal may bring (#125). */
+export const PERSONA_COMPONENT_LIMITS = {
+  listed: 12,
+  newSkills: 3,
+  newWorkflows: 3,
+  newKnowledgebases: 2,
+  sourcesPerKnowledgebase: 5,
+  sourceText: 20_000,
+} as const;
+
+/** Pending component cards kept at once, per kind (#125). */
+export const MAX_PENDING_COMPONENTS = 6;
+
 /** Size limits for a proposed skill, so a reply can't park megabytes in the approvals store. */
 export const SKILL_PROPOSAL_LIMITS = { text: 2_000, list: 12, instructions: 16_000 } as const;
 
@@ -86,6 +134,17 @@ export type ProposedAction = {
   persona?: PersonaProposalPayload;
   /** skill_install: the skill to draft and install on approval (#104). */
   skill?: SkillInstallPayload;
+  /** persona_create: the existing components the persona lists (#125). */
+  components?: PersonaProposalComponents;
+  /** workflow_create: the workflow to write on approval (#125). */
+  workflow?: WorkflowCreatePayload;
+  /** persona_kb_create: the private knowledge base to write and ingest on approval (#125). */
+  knowledgebase?: PersonaKnowledgebasePayload;
+  /**
+   * A component card's persona card (#125): it can be approved only after
+   * that one is, and is rejected with it.
+   */
+  parentApprovalId?: string;
   status: ProposedActionStatus;
   decidedAt?: string;
   decidedBy?: string;
@@ -290,13 +349,90 @@ function boundedList(value: unknown): string[] | undefined {
   return items.every((item): item is string => item !== undefined) ? items : undefined;
 }
 
+/**
+ * Characters no proposal text needs and a terminal or reader could be fooled
+ * by: C0 controls but line breaks and tabs, DEL and C1 (escape sequences),
+ * bidi embeddings, overrides and isolates, line and paragraph separators,
+ * and tag characters (#125 review).
+ */
+const PROPOSAL_UNSAFE_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u2028\u2029\u{E0000}-\u{E007F}]/u;
+/** A name (a memory path, a mutation resource) is one line too: a line break would draw a line of its own (#125 review). */
+// The characters that act on a terminal or reorder or hide text. Zero-width
+// joiners (U+200C, U+200D) and the Mongolian vowel separator stay allowed:
+// Persian, Indic, Mongolian and emoji spell with them. Other invisible
+// characters (variation selectors, fillers) are allowed too and shown as
+// \u{..} by the CLI; a lookalike of an existing name is a new file, never a
+// replacement.
+const PROPOSAL_UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\u2800\ufeff\u{E0000}-\u{E007F}]/u;
+
+/** Text for a summary line, with anything unsafe shown as \u{..}: summaries reach logs and the TUI as they are. */
+export function summaryText(text: string): string {
+  return text.replace(new RegExp(PROPOSAL_UNSAFE_NAME.source, "gu"), (char) => `\\u{${char.codePointAt(0)!.toString(16)}}`);
+}
+
+/**
+ * What a proposed skill's fields refuse (#146 review): the component
+ * proposals' set (any control, format, private-use or unassigned character
+ * but line breaks and tabs, every default-ignorable, the separators, the
+ * braille blank and the Hangul fillers), less the four characters real
+ * writing needs, which component ids never do: the zero-width non-joiner and
+ * joiner (Persian, Indic, emoji sequences), variation selectors (emoji
+ * presentation) and the Mongolian vowel separator.
+ */
+const SKILL_PROPOSAL_UNSAFE = /(?![\u200c\u200d\u180e\ufe00-\ufe0f\u{E0100}-\u{E01EF}])(?:[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u2800\u3164\uFFA0\u115F\u1160])/u;
+/**
+ * Those four, only where real writing puts them (#146 delta review), since
+ * each draws nothing and could carry hidden text:
+ * - FE0E/FE0F right after an emoji; after a digit, # or *, only FE0F as the
+ *   start of a keycap;
+ * - FE00 after Han, Myanmar or a non-ASCII math symbol; FE01-FE0D and the
+ *   ideographic selectors not at all;
+ * - U+180E between two Mongolian characters (letters or their marks);
+ * - a joiner only between two non-ASCII characters, never two in a row.
+ * Eight or more combining marks in a row, counted through joiners and U+180E,
+ * is refused too (Myanmar and Tibetan stack up to five or six). What stays
+ * possible is a joiner (or FE00, FE0E/FE0F, U+180E where allowed) standing or
+ * not between non-ASCII characters: up to about 3 bits a character, never
+ * next to ASCII, and the CLI shows each as \u{..}.
+ */
+const SKILL_PROPOSAL_HIDDEN = new RegExp([
+  String.raw`(?<!\p{Emoji})[\uFE0E\uFE0F]`,
+  String.raw`(?<=[0-9#*])\uFE0E`,
+  String.raw`(?<=[0-9#*])\uFE0F(?!\u20E3)`,
+  String.raw`[\uFE01-\uFE0D\u{E0100}-\u{E01EF}]`,
+  String.raw`(?<!\p{Script=Han}|\p{Script=Myanmar}|(?![\x00-\x7F])\p{Sm})\uFE00`,
+  String.raw`(?<![\u1820-\u1878\u1880-\u18AA])\u180E|\u180E(?![\u1820-\u1878\u1880-\u18AA])`,
+  String.raw`(?<![^\x00-\x7F])[\u200C\u200D]`,
+  String.raw`[\u200C\u200D](?![^\x00-\x7F])`,
+  String.raw`[\u200C\u200D]{2,}`,
+  String.raw`(?:\p{M}[\u200C\u200D\u180E]?){8,}`,
+].join("|"), "u");
+
+function hasUnsafeText(value: unknown): boolean {
+  if (typeof value === "string") {
+    const text = value.replace(/\r\n/g, "\n");
+    return PROPOSAL_UNSAFE_TEXT.test(text) || SKILL_PROPOSAL_UNSAFE.test(text) || SKILL_PROPOSAL_HIDDEN.test(text);
+  }
+  if (Array.isArray(value)) return value.some(hasUnsafeText);
+  return false;
+}
+
 /** A proposed skill (#104), or undefined when any field is missing, malformed or too large. */
 export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undefined {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
+  // Nothing that acts on a terminal, reorders or hides text in any field
+  // (SKILL_PROPOSAL_UNSAFE): the text is printed in `skill list`, the TUI and
+  // logs long after it is approved. Zero-width joiners and variation
+  // selectors stay: real writing needs them (#125, #146 review).
+  const fields = ["id", "label", "description", "goal", "whenToUse", "outputs", "safetyNotes", "instructions"].map((key) => record[key]);
+  if (fields.some((field) => hasUnsafeText(field))) return undefined;
   const id = typeof record.id === "string" && SKILL_PROPOSAL_ID.test(record.id) && record.id !== "drafts" ? record.id : undefined;
-  const label = boundedText(record.label, SKILL_PROPOSAL_LIMITS.text);
-  const description = boundedText(record.description, SKILL_PROPOSAL_LIMITS.text);
+  // One line: the label goes into the card's summary, which list views print
+  // as it is, so a line break could draw rows of its own (#125 review).
+  const label = typeof record.label === "string" && /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(record.label) ? undefined : boundedText(record.label, SKILL_PROPOSAL_LIMITS.text);
+  // One line, like the label: `skill list` prints it as a row (#125 review).
+  const description = typeof record.description === "string" && /[\n\t]/.test(record.description.trim()) ? undefined : boundedText(record.description, SKILL_PROPOSAL_LIMITS.text);
   const goal = record.goal === undefined ? undefined : boundedText(record.goal, SKILL_PROPOSAL_LIMITS.text);
   const whenToUse = boundedList(record.whenToUse);
   const outputs = boundedList(record.outputs);
@@ -306,6 +442,143 @@ export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undef
   if (record.goal !== undefined && goal === undefined) return undefined;
   if (record.instructions !== undefined && instructions === undefined) return undefined;
   return { id, label, description, goal, whenToUse, outputs, safetyNotes, instructions };
+}
+
+const COMPONENT_ID = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
+const PRIVATE_KB_PROPOSAL_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+export type ParsedPersonaComponents = {
+  listed: PersonaProposalComponents;
+  skills: SkillInstallPayload[];
+  workflows: Array<{ id: string; definition: WorkflowDefinitionInput }>;
+  knowledgebases: Array<{ id: string; name?: string; sources: Array<{ name: string; text: string }> }>;
+};
+
+/**
+ * Every string in a proposed component, keys included, CRLF read as LF: the
+ * same refusals as a persona's own fields (#105), invisible characters and
+ * stacked combining marks (#125 review).
+ */
+function hasInvisibleText(value: unknown): boolean {
+  if (typeof value === "string") {
+    const text = value.replace(/\r\n/g, "\n");
+    return PERSONA_TEXT_INVISIBLE.test(text) || STACKED_MARKS.test(text);
+  }
+  if (Array.isArray(value)) return value.some(hasInvisibleText);
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).some(([key, item]) => hasInvisibleText(key) || hasInvisibleText(item));
+  }
+  return false;
+}
+
+/**
+ * A persona proposal's `components` (#125), or why they don't hold up; then
+ * the whole proposal is dropped, so no persona arrives half-built, and the
+ * reply says why. The reasons are fixed text: nothing from the proposal is
+ * echoed.
+ * - `skills`, `workflows`, `knowledgebases`: existing ids, checked on approval.
+ * - `new.skills`: skill proposals, with exactly the fields and limits of a
+ *   `mindstone-skill-proposal`; not a built-in skill's id.
+ * - `new.workflows`: `{ id, name?, description?, steps }`, checked strictly;
+ *   a step can't name a persona (`personaId`, `personaLoadable`).
+ * - `new.privateKnowledgebases`: `{ id, name?, sources: [{ text }] }`.
+ * - No id both listed and new, and no invisible characters in any text.
+ */
+export function checkPersonaComponentsProposal(value: unknown): { ok: true; components: ParsedPersonaComponents } | { ok: false; error: string } {
+  const empty: ParsedPersonaComponents = { listed: { skills: [], workflows: [], knowledgebases: [] }, skills: [], workflows: [], knowledgebases: [] };
+  const fail = (error: string) => ({ ok: false as const, error });
+  if (value === undefined) return { ok: true, components: empty };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fail("its components aren't an object");
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => !["skills", "workflows", "knowledgebases", "new"].includes(key))) {
+    return fail("its components have a key other than skills, workflows, knowledgebases and new");
+  }
+  const ids = (list: unknown): string[] | undefined => {
+    if (list === undefined) return [];
+    if (!Array.isArray(list) || list.length > PERSONA_COMPONENT_LIMITS.listed) return undefined;
+    if (list.some((id) => typeof id !== "string" || !COMPONENT_ID.test(id))) return undefined;
+    return [...new Set(list as string[])];
+  };
+  const skills = ids(record.skills);
+  const workflows = ids(record.workflows);
+  const knowledgebases = ids(record.knowledgebases);
+  if (!skills || !workflows || !knowledgebases) {
+    return fail(`a list of existing skills, workflows or knowledge bases isn't a list of up to ${PERSONA_COMPONENT_LIMITS.listed} ids`);
+  }
+  const parsed: ParsedPersonaComponents = { ...empty, listed: { skills, workflows, knowledgebases } };
+  if (record.new === undefined) return { ok: true, components: parsed };
+  if (!record.new || typeof record.new !== "object" || Array.isArray(record.new)) return fail("its new components aren't an object");
+  const next = record.new as Record<string, unknown>;
+  if (Object.keys(next).some((key) => !["skills", "workflows", "privateKnowledgebases"].includes(key))) {
+    return fail("its new components have a key other than skills, workflows and privateKnowledgebases");
+  }
+  if (hasInvisibleText(next)) return fail("a new component has characters that can't be seen on the approval card");
+  const list = (entry: unknown, max: number): unknown[] | undefined =>
+    entry === undefined ? [] : Array.isArray(entry) && entry.length <= max ? entry : undefined;
+  const newSkills = list(next.skills, PERSONA_COMPONENT_LIMITS.newSkills);
+  const newWorkflows = list(next.workflows, PERSONA_COMPONENT_LIMITS.newWorkflows);
+  const newKbs = list(next.privateKnowledgebases, PERSONA_COMPONENT_LIMITS.newKnowledgebases);
+  if (!newSkills || !newWorkflows || !newKbs) {
+    return fail(`it brings more than ${PERSONA_COMPONENT_LIMITS.newSkills} new skills, ${PERSONA_COMPONENT_LIMITS.newWorkflows} new workflows or ${PERSONA_COMPONENT_LIMITS.newKnowledgebases} private knowledge bases`);
+  }
+  const builtins = new Set(builtinMindStoneSkills().map((skill) => skill.artifact.id));
+  for (const raw of newSkills) {
+    const skill = parseSkillProposal(raw);
+    if (!skill) return fail("a new skill isn't a valid skill proposal");
+    if (parsed.skills.some((other) => other.id === skill.id)) return fail("two new skills have the same id");
+    if (builtins.has(skill.id)) return fail("a new skill has the id of a built-in skill");
+    parsed.skills.push(skill);
+  }
+  for (const raw of newWorkflows) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail("a new workflow isn't an object");
+    const { id, ...definition } = raw as Record<string, unknown>;
+    if (typeof id !== "string" || !WORKFLOW_ID.test(id)) return fail("a new workflow's id isn't lowercase letters, digits and hyphens");
+    if (parsed.workflows.some((other) => other.id === id)) return fail("two new workflows have the same id");
+    // No step of an agent-proposed workflow may name a persona: such a
+    // workflow could make one answer turns on the owner's behalf (#125).
+    // The checker is told no persona exists, so a step that names one fails.
+    const checked = validateWorkflowDefinition(definition, { personaExists: () => false });
+    if (!checked.ok) return fail("a new workflow isn't valid (its steps route or gate, and none can name a persona)");
+    parsed.workflows.push({ id, definition: checked.workflow });
+  }
+  for (const raw of newKbs) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail("a new private knowledge base isn't an object");
+    const kb = raw as Record<string, unknown>;
+    if (Object.keys(kb).some((key) => !["id", "name", "sources"].includes(key))) return fail("a new private knowledge base has a key other than id, name and sources");
+    if (typeof kb.id !== "string" || !PRIVATE_KB_PROPOSAL_ID.test(kb.id)) return fail("a new private knowledge base's id isn't lowercase letters, digits and hyphens");
+    if (parsed.knowledgebases.some((other) => other.id === kb.id)) return fail("two new private knowledge bases have the same id");
+    const name = kb.name === undefined ? undefined : boundedText(kb.name, 80);
+    // The same rule as a KB created on the admin API, so the card can be approved.
+    if (kb.name !== undefined && (!name || /[\u0000-\u001f\u007f]/.test(name))) return fail("a new private knowledge base's name isn't one line of up to 80 characters");
+    if (!Array.isArray(kb.sources) || kb.sources.length === 0 || kb.sources.length > PERSONA_COMPONENT_LIMITS.sourcesPerKnowledgebase) {
+      return fail(`a new private knowledge base doesn't have 1 to ${PERSONA_COMPONENT_LIMITS.sourcesPerKnowledgebase} sources`);
+    }
+    const sources: Array<{ name: string; text: string }> = [];
+    for (const [index, source] of kb.sources.entries()) {
+      if (!source || typeof source !== "object" || Array.isArray(source) || Object.keys(source as Record<string, unknown>).some((key) => key !== "text")) {
+        return fail("a knowledge base source isn't an object with only `text`");
+      }
+      const text = (source as Record<string, unknown>).text;
+      if (typeof text !== "string" || !text.trim() || text.length > PERSONA_COMPONENT_LIMITS.sourceText) {
+        return fail(`a knowledge base source's text is empty or longer than ${PERSONA_COMPONENT_LIMITS.sourceText} characters`);
+      }
+      sources.push({ name: `source-${index + 1}`, text: text.replace(/\r\n/g, "\n") });
+    }
+    parsed.knowledgebases.push({ id: kb.id, ...(name ? { name } : {}), sources });
+  }
+  // Listed and new at once: the persona can't be approved (the listed one
+  // doesn't exist yet) and the new card waits for the persona (#125 review).
+  const clash = (listed: string[], added: Array<{ id: string }>) => added.some((item) => listed.some((id) => id.toLowerCase() === item.id.toLowerCase()));
+  if (clash(parsed.listed.skills, parsed.skills) || clash(parsed.listed.workflows, parsed.workflows)) {
+    return fail("a skill or workflow is both listed as existing and brought as new; list only existing ones");
+  }
+  return { ok: true, components: parsed };
+}
+
+/** `checkPersonaComponentsProposal` without the reason. */
+export function parsePersonaComponents(value: unknown): ParsedPersonaComponents | undefined {
+  const checked = checkPersonaComponentsProposal(value);
+  return checked.ok ? checked.components : undefined;
 }
 
 /** Pending persona proposals kept at once (#105 review). */
@@ -376,6 +649,15 @@ export type ExtractedActionProposals = {
   mutations: ConnectorMutationPayload[];
   /** The first well-formed persona proposal (#105). */
   persona?: PersonaProposalPayload;
+  /** Its components (#125); a proposal whose components don't hold up is dropped whole. */
+  personaComponents?: ParsedPersonaComponents;
+  /** Skill blocks dropped although another was used, or why the only one was (#125 review). */
+  skillBlocksDropped?: number;
+  skillProposalError?: string;
+  /** Persona blocks dropped although another was used: only one per reply is (#125 review). */
+  personaBlocksDropped?: number;
+  /** Why a persona proposal was dropped (#125 review), so the reply can say so. */
+  personaProposalError?: string;
   /** At most one proposed skill per reply (#104). */
   skill?: SkillInstallPayload;
 };
@@ -384,32 +666,77 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
   const mutations: ConnectorMutationPayload[] = [];
   let memory: MemoryWritePayload | undefined;
   let persona: PersonaProposalPayload | undefined;
+  let personaComponents: ParsedPersonaComponents | undefined;
+  let personaProposalError: string | undefined;
+  let personaBlocks = 0;
+  let skillBlocks = 0;
+  let skillProposalError: string | undefined;
   let skill: SkillInstallPayload | undefined;
   const split = splitProposalBlocks(replyText);
   for (const { kind: fenceKind, body } of split.blocks) {
+    // An empty block is noise, not a proposal: dropped without a word, as before.
+    if (!body.trim()) continue;
+    // Counted once each, whatever happens while reading it (#125 review).
+    if (fenceKind === "persona") personaBlocks += 1;
+    if (fenceKind === "skill") skillBlocks += 1;
     try {
       const parsed = JSON.parse(body);
       if (fenceKind === "memory") {
         const path = typeof parsed?.path === "string" ? parsed.path.trim() : "";
         const content = typeof parsed?.content === "string" ? parsed.content : "";
-        if (path && content && !memory) memory = { path, content };
+        // A path is a file name: no control, bidi or tag characters, which
+        // would reach terminals and file names as they are (#125 review).
+        if (path && content && !memory && !PROPOSAL_UNSAFE_NAME.test(path)) memory = { path, content };
       } else if (fenceKind === "persona") {
-        persona ??= parsePersonaProposal(parsed);
+        if (!persona) {
+          const base = parsePersonaProposal(parsed);
+          const components = base ? checkPersonaComponentsProposal((parsed as Record<string, unknown>).components) : undefined;
+          if (base && components?.ok) {
+            persona = base;
+            personaComponents = components.components;
+          } else if (components && !components.ok) {
+            personaProposalError ??= components.error;
+          } else {
+            personaProposalError ??= "its id, name, voice, working style or boundaries don't hold up (see their limits)";
+          }
+        }
       } else if (fenceKind === "skill") {
-        skill ??= parseSkillProposal(parsed);
+        if (!skill) {
+          skill = parseSkillProposal(parsed);
+          if (!skill) skillProposalError ??= "its fields don't hold up (an id, a one-line label and a one-line description are needed, within their limits, with no hidden or direction characters)";
+        }
       } else {
         const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
         const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
         const data = parsed?.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? (parsed.data as Record<string, unknown>) : undefined;
-        if (operation && data) {
+        // A resource that isn't a plain name drops the proposal: the card
+        // never shows a different resource than the agent proposed (#125 review).
+        if (operation && data && !PROPOSAL_UNSAFE_NAME.test(resource)) {
           mutations.push({ connectorId: "calendar", operation, resource, data });
         }
       }
     } catch {
-      // malformed proposal blocks are dropped from the reply, never applied
+      // malformed proposal blocks are dropped from the reply, never applied;
+      // a persona's is said in the reply (#125 review)
+      if (fenceKind === "persona" && !persona) personaProposalError ??= "its block isn't valid JSON, or couldn't be read";
+      if (fenceKind === "skill" && !skill) skillProposalError ??= "its block isn't valid JSON, or couldn't be read";
     }
   }
-  return { text: split.text.trim(), memory, mutations, persona, skill };
+  return {
+    text: split.text.trim(),
+    memory,
+    mutations,
+    persona,
+    personaComponents,
+    ...(persona ? { personaBlocksDropped: personaBlocks - 1 } : { personaProposalError }),
+    skill,
+    ...(skill ? { skillBlocksDropped: skillBlocks - 1 } : skillBlocks ? { skillProposalError } : {}),
+  };
+}
+
+/** The reply, then any notes about dropped proposals, apart from it by a blank line. */
+function withNotes(text: string, notes: string): string {
+  return notes ? (text ? `${text}\n\n${notes}` : notes) : text;
 }
 
 /** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
@@ -485,29 +812,122 @@ export function applyActionProposalDiscipline(params: {
   // At most a few persona proposals wait at once: the instruction is on every
   // owner turn, so an agent that keeps proposing can't flood Approvals.
   const store = params.store ?? new ApprovalStore();
-  const capped = Boolean(params.allowPersona && extracted.persona)
-    && store.pending().filter((action) => action.kind === "persona_create" && (action.agentId ?? "default") === (params.agentId ?? "default")).length >= MAX_PENDING_PERSONAS;
+  const pending = store.pending();
+  const mine = (action: ProposedAction) => (action.agentId ?? "default") === (params.agentId ?? "default");
+  // A component card counts only while its persona card is still live: one
+  // left under a rejected persona can't be approved and is rejected when
+  // tried, so it doesn't hold a place (#125 review).
+  const liveComponent = (action: ProposedAction) => {
+    if (!action.parentApprovalId) return false;
+    const parent = store.get(action.parentApprovalId);
+    return parent !== undefined && parent.status !== "rejected";
+  };
+  const pendingPersonas = pending.filter((action) => action.kind === "persona_create" && mine(action)).length;
+  // Only component cards count toward the component caps: a plain skill
+  // proposal (#104) never does (#125 review).
+  const pendingComponents = (kind: ProposedActionKind) => pending.filter((action) => action.kind === kind && mine(action) && liveComponent(action)).length;
+  const components = extracted.personaComponents;
+  const overCap = (count: number, kind: ProposedActionKind) => count > 0 && count + pendingComponents(kind) > MAX_PENDING_COMPONENTS;
+  // A persona proposal and each of its new components wait on their own
+  // cards; if any kind it brings is at its cap, the whole proposal is dropped (#125).
+  const capped = Boolean(params.allowPersona && extracted.persona) && (
+    pendingPersonas >= MAX_PENDING_PERSONAS
+    || overCap(components?.skills.length ?? 0, "skill_install")
+    || overCap(components?.workflows.length ?? 0, "workflow_create")
+    || overCap(components?.knowledgebases.length ?? 0, "persona_kb_create")
+  );
   const persona = params.allowPersona && !capped ? extracted.persona : undefined;
-  const skill = params.allowSkill ? extracted.skill : undefined;
+  // A separate skill proposal with the id of a skill the persona brings is
+  // dropped: approving one would replace what was reviewed on the other (#125 review).
+  const skillClash = Boolean(persona && extracted.skill && components?.skills.some((item) => item.id === extracted.skill!.id));
+  const skill = params.allowSkill && !skillClash ? extracted.skill : undefined;
   // A dropped proposal is said, not swallowed: the owner reads why in the reply.
-  const cappedNote = capped
-    ? `\n\n(The persona proposal wasn't saved: ${MAX_PENDING_PERSONAS} persona proposals are already waiting on the Approvals page. Approve or reject those first.)`
-    : "";
-  const cappedEvents = capped && params.sessionKey
-    ? [appendTranscriptEntry({
-        sessionKey: params.sessionKey,
+  const refused = params.allowPersona ? extracted.personaProposalError : undefined;
+  const extraBlocks = persona ? extracted.personaBlocksDropped ?? 0 : 0;
+  const cappedNote = [
+    capped
+      ? `(The persona proposal wasn't saved: too many persona proposals, or proposed skills, workflows or knowledge bases, are already waiting on the Approvals page. Approve or reject those first.)`
+      : refused
+        ? `(The persona proposal wasn't saved, and nothing was put up for approval: ${refused}.)`
+        : "",
+    extraBlocks > 0 ? `(Only one persona proposal per reply is put up for approval; ${extraBlocks} other persona block(s) in this reply were dropped.)` : "",
+    skillClash && params.allowSkill
+      ? `(The separate skill proposal wasn't saved: the persona brings a skill with the same id, on its own card.${(extracted.skillBlocksDropped ?? 0) > 0 ? ` The other skill block(s) in this reply weren't saved either: one skill proposal per reply is read.` : ""})`
+      : "",
+    params.allowSkill && extracted.skillProposalError ? `(The skill proposal wasn't saved, and nothing was put up for approval: ${extracted.skillProposalError}.)` : "",
+    params.allowSkill && !skillClash && (extracted.skillBlocksDropped ?? 0) > 0 ? `(Only one skill proposal per reply is put up for approval; ${extracted.skillBlocksDropped} other skill block(s) were dropped.)` : "",
+  ].filter(Boolean).join("\n\n");
+  // Every drop is in the transcript too, not only in the reply (#125 review).
+  const drops: Array<{ reason: string; text: string }> = [
+    ...(capped ? [{ reason: "too_many_pending", text: "persona proposal dropped: too many proposals already pending" }] : []),
+    ...(!capped && refused ? [{ reason: "invalid_proposal", text: `persona proposal dropped: ${refused}` }] : []),
+    ...(extraBlocks > 0 ? [{ reason: "extra_persona_blocks", text: `${extraBlocks} other persona block(s) dropped: one per reply` }] : []),
+    ...(skillClash && params.allowSkill ? [{ reason: "skill_id_clash", text: "skill proposal dropped: the persona brings a skill with the same id" }] : []),
+    ...(params.allowSkill && extracted.skillProposalError ? [{ reason: "invalid_skill_proposal", text: `skill proposal dropped: ${extracted.skillProposalError}` }] : []),
+    ...(params.allowSkill && (extracted.skillBlocksDropped ?? 0) > 0 ? [{ reason: "extra_skill_blocks", text: `${extracted.skillBlocksDropped} other skill block(s) dropped: one per reply` }] : []),
+  ];
+  const cappedEvents = params.sessionKey
+    ? drops.map((drop) => appendTranscriptEntry({
+        sessionKey: params.sessionKey!,
         agentId: params.agentId ?? "default",
         role: "event",
-        text: `persona proposal dropped: ${MAX_PENDING_PERSONAS} already pending`,
+        text: drop.text,
         source: params.source,
         runId: params.runId,
-        metadata: { event: "persona_proposal_dropped", reason: "too_many_pending", origin: params.origin },
-      })]
+        metadata: { event: /skill/.test(drop.reason) ? "skill_proposal_dropped" : "persona_proposal_dropped", reason: drop.reason, origin: params.origin },
+      }))
     : [];
   if (!extracted.memory && !extracted.mutations.length && !persona && !skill) {
-    return { text: `${extracted.text}${cappedNote}`, content, events: cappedEvents, proposals: [] };
+    return { text: withNotes(extracted.text, cappedNote), content, events: cappedEvents, proposals: [] };
   }
   const approvals = store;
+  const personaCard = persona
+    ? approvals.propose({
+        kind: "persona_create" as const,
+        connectorId: params.origin,
+        sessionKey: params.sessionKey,
+        agentId: params.agentId,
+        createdAt: new Date().toISOString(),
+        summary: `persona proposal from ${params.origin}: ${persona.name} (${persona.id})`,
+        persona,
+        ...(components ? { components: components.listed } : {}),
+      })
+    : undefined;
+  // Each new component on its own card, linked to the persona's (#125).
+  const componentCards: ProposedAction[] = personaCard && persona && components
+    ? [
+        ...components.skills.map((component) => approvals.propose({
+          kind: "skill_install" as const,
+          connectorId: params.origin,
+          sessionKey: params.sessionKey,
+          agentId: params.agentId,
+          createdAt: new Date().toISOString(),
+          summary: `install skill ${component.id} for persona ${persona.id}: ${component.label}`,
+          skill: component,
+          parentApprovalId: personaCard.id,
+        })),
+        ...components.workflows.map((component) => approvals.propose({
+          kind: "workflow_create" as const,
+          connectorId: params.origin,
+          sessionKey: params.sessionKey,
+          agentId: params.agentId,
+          createdAt: new Date().toISOString(),
+          summary: `workflow ${component.id} for persona ${persona.id} (${component.definition.steps.length} step(s))`,
+          workflow: { id: component.id, personaId: persona.id, definition: component.definition },
+          parentApprovalId: personaCard.id,
+        })),
+        ...components.knowledgebases.map((component) => approvals.propose({
+          kind: "persona_kb_create" as const,
+          connectorId: params.origin,
+          sessionKey: params.sessionKey,
+          agentId: params.agentId,
+          createdAt: new Date().toISOString(),
+          summary: `private knowledge base ${component.id} for persona ${persona.id} (${component.sources.length} source(s))`,
+          knowledgebase: { personaId: persona.id, ...component },
+          parentApprovalId: personaCard.id,
+        })),
+      ]
+    : [];
   const proposals: ProposedAction[] = [
     ...(extracted.memory
       ? [approvals.propose({
@@ -520,17 +940,7 @@ export function applyActionProposalDiscipline(params: {
           memory: extracted.memory,
         })]
       : []),
-    ...(persona
-      ? [approvals.propose({
-          kind: "persona_create" as const,
-          connectorId: params.origin,
-          sessionKey: params.sessionKey,
-          agentId: params.agentId,
-          createdAt: new Date().toISOString(),
-          summary: `persona proposal from ${params.origin}: ${persona.name} (${persona.id})`,
-          persona,
-        })]
-      : []),
+    ...(personaCard ? [personaCard, ...componentCards] : []),
     ...(skill
       ? [approvals.propose({
           kind: "skill_install" as const,
@@ -549,7 +959,7 @@ export function applyActionProposalDiscipline(params: {
         sessionKey: params.sessionKey,
         agentId: params.agentId,
         createdAt: new Date().toISOString(),
-        summary: `${mutation.operation} ${mutation.resource} via ${mutation.connectorId}: ${JSON.stringify(mutation.data).slice(0, 80)}`,
+        summary: `${mutation.operation} ${mutation.resource} via ${mutation.connectorId}: ${summaryText(JSON.stringify(mutation.data).slice(0, 80))}`,
         mutation,
       }),
     ),
@@ -567,7 +977,7 @@ export function applyActionProposalDiscipline(params: {
         }),
       )
     : [];
-  return { text: `${extracted.text}${cappedNote}`, content, events: [...cappedEvents, ...events], proposals };
+  return { text: withNotes(extracted.text, cappedNote), content, events: [...cappedEvents, ...events], proposals };
 }
 
 /**
@@ -577,7 +987,8 @@ export function applyActionProposalDiscipline(params: {
  */
 export function sanitizeMemoryProposalPath(path: string): string | undefined {
   const cleaned = path.replace(/\\/g, "/").replace(/^\/+/, "").trim();
-  if (!cleaned || cleaned.includes("..")) return undefined;
+  // Also checked here, at approve time, for a card proposed before names were checked (#125 review).
+  if (!cleaned || cleaned.includes("..") || PROPOSAL_UNSAFE_NAME.test(cleaned)) return undefined;
   const withExt = cleaned.endsWith(".md") ? cleaned : `${cleaned}.md`;
   return withExt;
 }
