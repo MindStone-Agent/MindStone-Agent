@@ -35,6 +35,7 @@ cleanup() {
     kill "${embed_pid}" >/dev/null 2>&1 || true
     wait "${embed_pid}" >/dev/null 2>&1 || true
   fi
+  chmod -R u+w "${TEMP_RUNTIME}" 2>/dev/null || true
   rm -rf "${TEMP_RUNTIME}"
 }
 trap cleanup EXIT
@@ -1343,12 +1344,21 @@ cp "${TEMP_RUNTIME}/state-elsewhere-shared.json" "${DATA}/knowledgebases/.enc/re
 LINKED_OUT="${TEMP_RUNTIME}/outside-kb"
 mkdir -p "${LINKED_OUT}" && printf '{"name":"out"}' > "${LINKED_OUT}/kb.json" && cp "${TEMP_RUNTIME}/state-elsewhere-shared.json" "${LINKED_OUT}/reembed.json"
 ln -s "${LINKED_OUT}" "${DATA}/knowledgebases/via-link"
-for bad in "..%2Fpersonas%2Fgrower%2Fknowledgebases%2Fbeds" "%2Eenc" "a%00b" "%E0%A4%A" "via-link" "not%20listed"; do
+for bad in "..%2Fpersonas%2Fgrower%2Fknowledgebases%2Fbeds" "atlas%2F..%2Fatlas" "%2Eenc" "a%00b" "%E0%A4%A" "via-link" "not%20listed"; do
   code="$(curl -s --path-as-is -o "${BODY}" -w '%{http_code}' -X POST "${ADMIN[@]}" -d '{}' "${BASE}/admin/knowledgebases/${bad}/reembed")"
   [[ "${code}" == 404 ]] || { echo "the shared reset took \"${bad}\": ${code} $(cat "${BODY}")" >&2; exit 1; }
 done
 [[ -f "${DATA}/knowledgebases/.enc/reembed.json" && -f "${LINKED_OUT}/reembed.json" ]] || { echo "a refused reset cleared a state" >&2; exit 1; }
 rm -rf "${DATA}/knowledgebases/${ODD}" "${DATA}/knowledgebases/.enc" "${DATA}/knowledgebases/via-link" "${LINKED_OUT}"
+for long in "$(node -e 'process.stdout.write("é".repeat(255))')" 'back\slash'; do
+  # ext4 caps a name at 255 bytes, APFS at 255 characters: skip what this filesystem can't hold.
+  mkdir "${DATA}/knowledgebases/${long}" 2>/dev/null || { echo "(this filesystem can't hold a folder named ${long:0:12}...: skipped)"; continue; }
+  printf '{"name":"long"}' > "${DATA}/knowledgebases/${long}/kb.json"
+  cp "${TEMP_RUNTIME}/state-elsewhere-shared.json" "${DATA}/knowledgebases/${long}/reembed.json"
+  [[ "$(call POST "/admin/knowledgebases/$(enc "${long}")/reembed" '{}')" == 200 ]] || { echo "reset a KB named ${long:0:12}... ($(printf '%s' "${long}" | wc -c | tr -d ' ') bytes): $(cat "${BODY}")" >&2; exit 1; }
+  [[ ! -e "${DATA}/knowledgebases/${long}/reembed.json" ]] || { echo "the reset left the state of ${long:0:12}..." >&2; exit 1; }
+  rm -rf "${DATA}/knowledgebases/${long}"
+done
 # A folder named reembed.json is ignored when read, so a reset of that KB is a reset, not a 409 (#166).
 mkdir -p "${DATA}/knowledgebases/DirState/reembed.json"
 printf '{"name":"dir"}' > "${DATA}/knowledgebases/DirState/kb.json"
@@ -1434,16 +1444,18 @@ chat_ms "an owner question after the persona reset" >/dev/null
 for _ in $(seq 1 40); do grep -q '"model":"kbstub-d"' "${BEDS}/vectors.json" && break; sleep 0.5; done
 grep -q '"model":"kbstub-d"' "${BEDS}/vectors.json" || { echo "the reset persona KB wasn't embedded again at the next owner chat (the scan pause held)" >&2; exit 1; }
 # A reset while a scan that finds nothing is still running (#166): the scan doesn't set the pause
-# after the reset. A switch to kbstub-e makes every KB stale again; 3000 given-up copies of atlas
-# (named after it, so the scan reaches them after atlas) keep the scan running past the reset.
+# after the reset. A switch to kbstub-e makes every KB stale again; 3000 given-up copies of atlas in
+# a persona's folder keep the scan running past the reset. The scan takes every shared KB (atlas
+# among them) before any persona's, whatever the order a filesystem lists a folder in (#166 review).
 set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-e"'
 SPEC_E="${SPEC/kbstub-d/kbstub-e}"
 [[ "${SPEC_E}" != "${SPEC}" ]] || { echo "can't derive the kbstub-e spec from ${SPEC}" >&2; exit 1; }
 SPEC="${SPEC_E}" node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ version: 1, spec: process.env.SPEC, failures: 5, gaveUp: true, reason: "synthetic", updatedAt: new Date().toISOString() }))' "${TEMP_RUNTIME}/state-e.json"
 python3 - <<'PY'
 import os, pathlib, shutil
-root = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "knowledgebases"
-atlas = root / "atlas"
+data = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone"
+atlas = data / "knowledgebases" / "atlas"
+root = data / "personas" / "grower" / "knowledgebases"
 for i in range(3000):
     d = root / f"zz-copy-{i:04d}"
     d.mkdir()
@@ -1456,13 +1468,16 @@ for dir in "${DATA}"/knowledgebases/*/ "${DATA}"/personas/*/knowledgebases/*/; d
 done
 chat_ms "an owner question with every KB given up for kbstub-e" >/dev/null
 [[ "$(call POST /admin/knowledgebases/atlas/reembed '{}')" == 200 ]] || { echo "reset atlas during the scan: $(cat "${BODY}")" >&2; exit 1; }
-# The scan that was running must end before the next chat can start one: wait for it.
-sleep 5
+sleep 1
 grep -q '"model":"kbstub-e"' "${DATA}/knowledgebases/atlas/vectors.json" && { echo "atlas was embedded before the next chat: the reset landed before the scan reached it, so nothing was measured" >&2; exit 1; }
-chat_ms "an owner question after the reset during the scan" >/dev/null
-for _ in $(seq 1 40); do grep -q '"model":"kbstub-e"' "${DATA}/knowledgebases/atlas/vectors.json" && break; sleep 0.5; done
+# A chat while that scan still runs starts none, so ask again until one does: with the pause set
+# after the reset (the bug), none ever would.
+for _ in $(seq 1 12); do
+  chat_ms "an owner question after the reset during the scan" >/dev/null
+  for _ in 1 2 3 4 5 6; do grep -q '"model":"kbstub-e"' "${DATA}/knowledgebases/atlas/vectors.json" && break 2; sleep 0.5; done
+done
 grep -q '"model":"kbstub-e"' "${DATA}/knowledgebases/atlas/vectors.json" || { echo "a reset during a scan that found nothing was lost to the scan's pause" >&2; exit 1; }
-rm -rf "${DATA}"/knowledgebases/zz-copy-*
+rm -rf "${DATA}"/personas/grower/knowledgebases/zz-copy-*
 stub_mode ok
 
 echo "KB embeddings smoke test passed."

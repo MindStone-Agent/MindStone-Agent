@@ -749,6 +749,24 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
 }
 
 /**
+ * A shared KB's folder name from a percent-encoded path segment (#166): the
+ * name as the KB list shows it, or undefined for one no folder in the list can
+ * have (bad encoding, a path, a dot folder, a NUL). The reset itself matches
+ * the name against the folder listing, which is the guard; this only refuses
+ * early (#166 review).
+ */
+function decodedKnowledgebaseFolderName(segment: string): string | undefined {
+  let name: string;
+  try {
+    name = decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+  if (!name || name.startsWith(".") || name.includes("/") || name.includes("\0")) return undefined;
+  return name;
+}
+
+/**
  * After an owner's turn, a KB whose vectors another embedding model made is
  * embedded again in the background from its index (#151), as memory's chunks
  * are by the backfill (#140). One KB at a time, off the turn (nothing here can
@@ -758,22 +776,6 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
  * KB_REEMBED_LIMITS.retryAfterMs or until the model changes: a KB made stale
  * later (a CLI ingest with another embedder, a restored file) is still found.
  */
-/**
- * A shared KB's folder name from a percent-encoded path segment (#166): the
- * name as the KB list shows it, or undefined for one no folder in the list can
- * have (a path, a dot folder, a NUL, bad encoding, over 255 bytes).
- */
-function decodedKnowledgebaseFolderName(segment: string): string | undefined {
-  let name: string;
-  try {
-    name = decodeURIComponent(segment);
-  } catch {
-    return undefined;
-  }
-  if (!name || name.startsWith(".") || /[/\\\0]/.test(name) || Buffer.byteLength(name) > 255) return undefined;
-  return name;
-}
-
 let kbReembedRunning = false;
 let kbReembedClean: { spec: string; at: number } | undefined;
 /** Admin resets so far (#166): a scan that began before one doesn't set the pause again. */
@@ -2829,7 +2831,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
   }
   // A shared KB's id is its folder's name (#158 review, #166): any name the KB list shows,
   // percent-encoded as one path segment; never a dot folder or a path.
-  const globalKbReembedMatch = /^\/admin\/knowledgebases\/([^/]{1,1024})\/reembed$/.exec(url.pathname);
+  const globalKbReembedMatch = /^\/admin\/knowledgebases\/([^/]{1,4096})\/reembed$/.exec(url.pathname);
   if (req.method === "POST" && globalKbReembedMatch) {
     // Try again after a give-up (#158 review): clears the KB's re-embed state,
     // so the next owner chat embeds it again. The Console's retry; the CLI's is `kb ingest`.
