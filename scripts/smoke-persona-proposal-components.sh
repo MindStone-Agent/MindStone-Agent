@@ -44,7 +44,7 @@ npx tsx <<'TS'
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { applyActionProposalDiscipline, ApprovalActionError, ApprovalStore, approveProposedAction, checkApprovable, extractActionProposals, ingestApprovedPrivateKnowledgebase, MAX_PENDING_COMPONENTS, parsePersonaComponents, parseSkillProposal, PERSONA_PROPOSAL_INSTRUCTIONS, personaProposalInstructions, sanitizeMemoryProposalPath } from "./packages/mindstone-core/src/index.ts";
+import { applyActionProposalDiscipline, ApprovalActionError, ApprovalStore, approveProposedAction, checkApprovable, checkPersonaComponents, extractActionProposals, ingestApprovedPrivateKnowledgebase, MAX_PENDING_COMPONENTS, parsePersonaComponents, parseSkillProposal, personaComponentCatalog, PERSONA_PROPOSAL_INSTRUCTIONS, personaProposalInstructions, sanitizeMemoryProposalPath } from "./packages/mindstone-core/src/index.ts";
 const route = (extra = {}) => ({ id: "s", kind: "route", ...extra });
 assert.ok(parsePersonaComponents({ skills: ["a"], new: { workflows: [{ id: "w", steps: [route()] }] } }), "a plain component list parses");
 assert.equal(parsePersonaComponents({ new: { workflows: [{ id: "w", steps: [route({ personaId: "x" })] }] } }), undefined, "a proposed workflow routing to a persona must be refused");
@@ -195,6 +195,31 @@ assert.equal(extractActionProposals(block({ ...base, components: { skills: ["a"]
   const notOwner = applyActionProposalDiscipline({ replyText: block({ ...base, components: { bogus: 1 } }), origin: "unit", allowPersona: false, store: noteStore });
   assert.doesNotMatch(notOwner.text, /wasn't saved/, "a turn that can't propose a persona gets no note");
 }
+// The catalog lists exactly what approval accepts (#160 review): each listed id passes the
+// approval check, and each left out fails it.
+{
+  const root = join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "catalog");
+  const dirs = { skillsDir: join(root, "skills"), workflowsDir: join(root, "workflows"), knowledgebasesDir: join(root, "kbs") };
+  const put = (path, text) => { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, text); };
+  put(join(dirs.skillsDir, "good-skill", "skill.json"), JSON.stringify({ id: "good-skill", label: "Good", description: "Good." }));
+  put(join(dirs.skillsDir, "good-skill", "SKILL.md"), "# good\n");
+  put(join(dirs.skillsDir, "bad-skill", "skill.json"), "{");
+  const flow = JSON.stringify({ steps: [{ id: "s", kind: "route", when: { messagePrefix: "x:" } }] });
+  put(join(dirs.workflowsDir, "good-flow", "workflow.json"), flow);
+  put(join(dirs.workflowsDir, "My_Flow", "workflow.json"), flow);
+  put(join(dirs.workflowsDir, "broken-flow", "workflow.json"), "{");
+  put(join(root, "elsewhere", "workflow.json"), flow);
+  mkdirSync(join(dirs.workflowsDir, "linked-flow"), { recursive: true });
+  symlinkSync(join(root, "elsewhere", "workflow.json"), join(dirs.workflowsDir, "linked-flow", "workflow.json"));
+  put(join(dirs.knowledgebasesDir, "good-kb", "kb.json"), JSON.stringify({ name: "Good" }));
+  put(join(dirs.knowledgebasesDir, "bad-kb", "kb.json"), "{");
+  const catalog = personaComponentCatalog(dirs);
+  assert.deepEqual(catalog, { skills: ["good-skill"], workflows: ["good-flow"], knowledgebases: ["good-kb"] }, "only what loads, as approval finds it");
+  checkPersonaComponents(catalog, dirs);
+  for (const lists of [{ skills: ["bad-skill"] }, { workflows: ["My_Flow"] }, { workflows: ["linked-flow"] }, { workflows: ["broken-flow"] }, { knowledgebases: ["bad-kb"] }]) {
+    assert.throws(() => checkPersonaComponents(lists, dirs), undefined, `approval accepts ${JSON.stringify(lists)}, which the catalog leaves out`);
+  }
+}
 // An id this install doesn't have is caught in the turn (#160): no card that can only be
 // rejected, and the reply says which, so the agent can propose again.
 {
@@ -229,6 +254,7 @@ assert.equal(extractActionProposals(block({ ...base, components: { skills: ["a"]
   assert.ok(told.startsWith(PERSONA_PROPOSAL_INSTRUCTIONS));
   const example = JSON.parse(`{${PERSONA_PROPOSAL_INSTRUCTIONS.split("\n").find((line) => line.startsWith('"components"'))}}`).components;
   assert.deepEqual([example.skills, example.workflows, example.knowledgebases], [[], [], []], "the example lists no existing id");
+  assert.deepEqual(example.new, { skills: [], workflows: [], privateKnowledgebases: [] }, "the example brings no new component a model could copy");
   assert.doesNotMatch(PERSONA_PROPOSAL_INSTRUCTIONS, /shared-kb|existing-skill/);
 }
 // Plain skill proposals (#104) don't count toward the component cap (#125 review).
@@ -413,7 +439,7 @@ node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
 PERSONA_CARD="$(card p2 persona_create)"; SKILL_CARD="$(card p2 skill_install)"; WF_CARD="$(card p2 workflow_create)"; KB_CARD="$(card p2 persona_kb_create)"
 # The owner's turn was told this install's ids (#160).
 node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").filter(Boolean); process.stdout.write(JSON.parse(l.pop()).messages.map((m)=>m.text??"").join("\n"))' "${CAPTURE}" > "${TEMP_RUNTIME}/owner.prompt"
-grep -qF "installed skills: alpha-skill;" "${TEMP_RUNTIME}/owner.prompt" && grep -qF "shared knowledge bases: g1." "${TEMP_RUNTIME}/owner.prompt" || { echo "the owner's turn wasn't told this install's ids: $(grep -o 'On this install.*' "${TEMP_RUNTIME}/owner.prompt")" >&2; exit 1; }
+grep -qF "installed skills: alpha-skill; workflows: none; shared knowledge bases: g1." "${TEMP_RUNTIME}/owner.prompt" || { echo "the owner's turn wasn't told this install's ids: $(grep -o 'On this install.*' "${TEMP_RUNTIME}/owner.prompt")" >&2; exit 1; }
 echo "cards ok"
 # The CLI shows everything each card holds before it is approved (#125 review).
 shows() { # shows <card> <text>...

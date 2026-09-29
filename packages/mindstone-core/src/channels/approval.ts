@@ -836,7 +836,7 @@ export function applyActionProposalDiscipline(params: {
    * is dropped in the turn, and the reply says which id, so the agent can
    * propose again rather than leave a card that can only be rejected.
    */
-  componentCatalog?: () => PersonaComponentCatalog;
+  componentCatalog?: () => PersonaComponentCatalog | undefined;
 }): { text: string; content: unknown; events: TranscriptEntry[]; proposals: ProposedAction[] } {
   const extracted = extractActionProposals(params.replyText);
   // Sanitize content always: proposals may exist in content even when text
@@ -870,9 +870,8 @@ export function applyActionProposalDiscipline(params: {
     || overCap(components?.workflows.length ?? 0, "workflow_create")
     || overCap(components?.knowledgebases.length ?? 0, "persona_kb_create")
   );
-  const unknownComponent = params.allowPersona && !capped && extracted.persona && components && params.componentCatalog
-    ? unknownPersonaComponent(components, params.componentCatalog())
-    : undefined;
+  const catalog = params.allowPersona && !capped && extracted.persona && components ? params.componentCatalog?.() : undefined;
+  const unknownComponent = catalog && components ? unknownPersonaComponent(components, catalog) : undefined;
   const persona = params.allowPersona && !capped && !unknownComponent ? extracted.persona : undefined;
   // A separate skill proposal with the id of a skill the persona brings is
   // dropped: approving one would replace what was reviewed on the other (#125 review).
