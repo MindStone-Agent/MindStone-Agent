@@ -665,7 +665,8 @@ leaves the folder, if you added files of your own such as compose.override.yml.)
     # email and password: that stops the install (no marker, so a re-run reports
     # the account as existing). No answer or a server error is tried once more.
     # Anything else (a timeout, 403, 429, 5xx) means sign-in couldn't be checked:
-    # a warning, and the install goes on. Returns 'ok' or 'unchecked'.
+    # a warning, and the install goes on; a 403 is named as a Console setting, since
+    # a password reset can't help there. Returns 'ok' or 'unchecked'.
     function Confirm-AdminSignIn([string]$Url, [string]$Email, [string]$Secret, [string]$OpenUrl, [string]$ResetCommand) {
         $status = Test-ConsoleSignIn $Url $Email $Secret
         if ($status -eq 0 -or $status -ge 500) {
@@ -675,6 +676,12 @@ leaves the folder, if you added files of your own such as compose.override.yml.)
         if ($status -eq 200) { return 'ok' }
         if ($status -eq 404 -or $status -eq 422) {
             Exit-Install "The admin account $Email was created with role ADMIN, but the Console refused its password when the installer signed in (HTTP $status), so the password didn't reach the Console as it should. Set a new one, then sign in at ${OpenUrl}: $ResetCommand"
+        }
+        if ($status -eq 403) {
+            # 403 is a Console setting, not the password: email sign-in turned off
+            # (ALLOW_EMAIL_LOGIN=false) or sign-in through LDAP or SSO. A reset can't help.
+            Write-InstallWarning "The admin account $Email was created with role ADMIN, but the Console's settings refused email sign-in (HTTP 403), so its password couldn't be checked. Email sign-in may be turned off (ALLOW_EMAIL_LOGIN=false), or sign-in may go through LDAP or SSO. Sign in at $OpenUrl the way this Console is set up."
+            return 'unchecked'
         }
         $what = "HTTP $status"
         if ($status -eq 0) { $what = 'no answer' }
