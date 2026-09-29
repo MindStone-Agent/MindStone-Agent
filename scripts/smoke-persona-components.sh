@@ -351,12 +351,13 @@ conversation_entries conv-eight
 entries_check "persona-eight: the gate was not capped at 5 attempts" 'es.some((e)=>e.metadata?.event==="workflow_gate" && e.metadata.workflowId==="wf-cap" && e.metadata.attempts===5)'
 echo "gate cap ok"
 
-# --- 7c. A list file that doesn't parse: the persona fails to load, and none of its private KBs are used.
+# --- 7c. A list file that doesn't parse: the persona fails to load, and the
+# turn gets no skills and no KBs, private or global, rather than all of them (#142 review).
 set_config persona-bad
 chat admin conv-bad
-expect conv-bad absent "PERSONA-BAD" "PBAD-7111"
+expect conv-bad absent "PERSONA-BAD" "PBAD-7111" "SKILLBODY-alpha-skill" "GATTACHED-7101"
 conversation_entries conv-bad
-entries_check "persona-bad: it loaded anyway" '!a.personaComponents'
+entries_check "persona-bad: its turn wasn't marked as failed closed" 'a.personaComponents?.loadFailed === true && a.personaComponents.skills.length === 0 && a.personaComponents.globalKnowledgebases.length === 0'
 echo "malformed list ok"
 
 # --- 8. No persona active: a step's lists are only logged, as before.

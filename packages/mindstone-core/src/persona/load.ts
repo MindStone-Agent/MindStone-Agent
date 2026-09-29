@@ -20,16 +20,13 @@ function readJsonFile(path: string): unknown {
   return JSON.parse(readFileSync(path, "utf-8"));
 }
 
-function stringList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-}
-
 /**
  * Reads ids from a capability reference file that is either ["id"] or
- * {"skills": ["id"]}-shaped. A file that exists but doesn't parse is an
+ * {"skills": ["id"]}-shaped; no file is no list. A file that doesn't parse,
+ * or isn't exactly one of those shapes with non-empty string ids, is an
  * error: read as "no list" it would mean every skill or every global KB
- * (#125), so the persona fails to load instead, as with a bad metadata.json.
+ * (#125), so the persona fails to load instead, as with a bad metadata.json
+ * (#142 review: `{}`, `null`, a typo'd key, `[1]` and `[""]` all refused).
  */
 function capabilityIds(path: string, key: string): string[] | { error: string } {
   let parsed: unknown;
@@ -38,9 +35,15 @@ function capabilityIds(path: string, key: string): string[] | { error: string } 
   } catch (error) {
     return { error: `${key}.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
-  if (Array.isArray(parsed)) return stringList(parsed);
-  if (parsed && typeof parsed === "object") return stringList((parsed as Record<string, unknown>)[key]);
-  return [];
+  if (parsed === undefined) return [];
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
+  const list = Array.isArray(parsed)
+    ? parsed
+    : record && Object.keys(record).length === 1 && Array.isArray(record[key]) ? (record[key] as unknown[]) : undefined;
+  if (!list || list.some((entry) => typeof entry !== "string" || !entry.trim())) {
+    return { error: `${key}.json must be a list of ids, ["a", "b"], or {"${key}": ["a", "b"]}` };
+  }
+  return list as string[];
 }
 
 export type LoadPersonaResult =

@@ -57,6 +57,7 @@
     "smoke:kb": "./scripts/smoke-kb.sh",
     "smoke:packs": "./scripts/smoke-packs.sh",
     "smoke:kb-sources": "./scripts/smoke-kb-sources.sh",
+    "smoke:kb-url-guard": "./scripts/smoke-kb-url-guard.sh",
     "smoke:persona-components": "./scripts/smoke-persona-components.sh",
     "smoke:persona-admin": "./scripts/smoke-persona-admin.sh",
     "smoke:persona-proposal-components": "./scripts/smoke-persona-proposal-components.sh",

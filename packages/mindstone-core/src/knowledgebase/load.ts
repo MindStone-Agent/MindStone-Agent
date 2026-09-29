@@ -227,7 +227,18 @@ function entriesFromParsedSource(params: {
 export async function ingestMindStoneKnowledgebase(
   kbDir: string,
   kbId: string,
-  options: { now?: string; maxSummaryChars?: number; noLinks?: boolean; fetchTimeoutMs?: number; maxFetchBytes?: number } = {},
+  options: {
+    now?: string;
+    maxSummaryChars?: number;
+    noLinks?: boolean;
+    fetchTimeoutMs?: number;
+    maxFetchBytes?: number;
+    /**
+     * A persona's private KB (#125): its URLs are fetched with the host checks
+     * of `loadUrlSourceDocument`'s `privateKb` (#142 review).
+     */
+    privateKbUrls?: { allowPrivateHosts: boolean };
+  } = {},
 ): Promise<IngestKnowledgebaseResult> {
   // A persona's private KB (#125, `noLinks`) is its own files: no links
   // anywhere in it, and no folder sources outside it.
@@ -254,7 +265,7 @@ export async function ingestMindStoneKnowledgebase(
       if (source.type === "folder") {
         externalDocuments.push(...loadFolderSourceDocuments(source, kb.dir));
       } else {
-        externalDocuments.push(await loadUrlSourceDocument(source, { now: options.now, timeoutMs: options.fetchTimeoutMs, maxBytes: options.maxFetchBytes }));
+        externalDocuments.push(await loadUrlSourceDocument(source, { now: options.now, timeoutMs: options.fetchTimeoutMs, maxBytes: options.maxFetchBytes, privateKb: options.privateKbUrls }));
       }
     } catch (error) {
       return { ok: false, kbId, error: `external source "${source.id}" failed: ${error instanceof Error ? error.message : String(error)}` };

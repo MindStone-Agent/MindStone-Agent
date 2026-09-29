@@ -170,9 +170,16 @@ With no persona active, nothing changes.
 
 ## Behavior notes
 
-- A resolved-but-unloadable persona (missing `PERSONA.md`, bad `metadata.json`)
-  never blocks the turn: the turn runs without the overlay and a
-  `persona_load_failed` event is appended to the transcript.
+- A resolved-but-unloadable persona (missing `PERSONA.md`, bad `metadata.json`,
+  a list file that isn't a list) never blocks the turn: the turn runs without
+  the overlay and a `persona_load_failed` event is appended to the transcript.
+  It runs with **no skills and no knowledge bases** (#142 review), not with
+  every skill and every collection, and its `personaComponents` say
+  `loadFailed: true`.
+- `skills.json`, `workflows.json` and `knowledgebases.json` are `["id", …]` or
+  `{"<name>": ["id", …]}` with only that key; ids are non-empty strings. Any
+  other shape (`{}`, `null`, a misspelt key, `[1]`, `[""]`) makes the persona
+  fail to load, since reading it as "no list" would mean everything.
 - Route/chat responses report the injected persona in `personaContext`
   (`personaId`, `reason`, `tokenEstimate`), mirroring `identityContext`.
 - Visibility: `mindstone status` (Personas/Persona active lines),

@@ -85,7 +85,9 @@ os.symlink(data / "personas" / "existing", data / "personas" / "linked")
 PY
 ./scripts/mindstone kb ingest g1 --json >/dev/null
 
-./scripts/start-gateway.sh >"${TEMP_RUNTIME}/gateway.log" 2>&1 &
+# The source stub is on this machine: the host's opt-out lets private KBs
+# reach it. Section 8 restarts the gateway without it (#142 review).
+MINDSTONE_KB_PRIVATE_HOSTS=1 ./scripts/start-gateway.sh >"${TEMP_RUNTIME}/gateway.log" 2>&1 &
 gateway_pid=$!
 for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sleep 0.5; done
 
@@ -270,5 +272,64 @@ done
 code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${PADMIN_TOKEN}" -H 'x-mindstone-user-role: admin' -H 'x-mindstone-user-id: smoke-admin' -H 'content-type: application/json' -d '{"id":"sneak","name":"S","personaMarkdown":"x"}' "${BASE}/admin/personas")"
 [[ "${code}" != 201 && ! -e "${DATA}/personas/sneak" ]] || { echo "a write without the admin credential created a persona (${code})" >&2; exit 1; }
 echo "housekeeping ok"
+
+# --- 8. Without the host's opt-out (#142 review), and a persona that doesn't load.
+# List files of the wrong shape make a persona fail to load, instead of meaning "all".
+npx tsx <<'TS'
+import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { loadMindStonePersona } from "./packages/mindstone-core/src/index.ts";
+const dir = join(process.env.MINDSTONE_AGENT_RUNTIME_DIR!, "shapes");
+for (const [index, text] of ['{"skills":"x"}', '{"skilz":["a"]}', "null", "[1,2]", '""', '[""]', "{}", '{"skills":["a"],"extra":1}'].entries()) {
+  mkdirSync(join(dir, `p${index}`), { recursive: true });
+  writeFileSync(join(dir, `p${index}`, "PERSONA.md"), "# P\n");
+  writeFileSync(join(dir, `p${index}`, "skills.json"), text);
+  assert.equal(loadMindStonePersona(dir, `p${index}`).ok, false, `skills.json ${text} must make the persona fail to load`);
+}
+for (const [index, text] of ['["a"]', '{"skills":["a"]}', "[]"].entries()) {
+  mkdirSync(join(dir, `ok${index}`), { recursive: true });
+  writeFileSync(join(dir, `ok${index}`, "PERSONA.md"), "# P\n");
+  writeFileSync(join(dir, `ok${index}`, "skills.json"), text);
+  assert.equal(loadMindStonePersona(dir, `ok${index}`).ok, true, `skills.json ${text} is a list`);
+}
+console.log("list shapes ok");
+TS
+# An active persona that doesn't load: the turn has no skills and no KBs, not all of them.
+mkdir -p "${DATA}/personas/broken"
+printf '# Broken\n\nPersona sentinel BROKEN.\n' > "${DATA}/personas/broken/PERSONA.md"
+printf '{not json' > "${DATA}/personas/broken/skills.json"
+node -e 'const f=process.argv[1]; const c=JSON.parse(require("fs").readFileSync(f,"utf8")); c.personas.active="broken"; require("fs").writeFileSync(f, JSON.stringify(c, null, 2));' "${DATA}/config.json"
+kill "${gateway_pid}" >/dev/null 2>&1 || true; wait "${gateway_pid}" >/dev/null 2>&1 || true
+./scripts/start-gateway.sh >"${TEMP_RUNTIME}/gateway2.log" 2>&1 &
+gateway_pid=$!
+for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sleep 0.5; done
+: > "${CAPTURE}"
+code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${PADMIN_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: admin' -H 'x-mindstone-user-id: smoke-admin' -H 'x-mindstone-conversation-id: conv-broken' -d '{"model":"mindstone/default","messages":[{"role":"user","content":"Which global reference code applies for this collection?"}]}' "${BASE}/v1/chat/completions")"
+[[ "${code}" == 200 ]] || { echo "the chat under a broken persona failed (${code}): $(cat "${BODY}")" >&2; exit 1; }
+node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").filter(Boolean); process.stdout.write(JSON.parse(l.pop()).messages.map((m)=>m.text??"").join("\n"))' "${CAPTURE}" > "${TEMP_RUNTIME}/broken.prompt"
+for text in SKILLBODY-alpha GFACT-8800; do
+  grep -qF "${text}" "${TEMP_RUNTIME}/broken.prompt" && { echo "a persona that doesn't load widened the turn: '${text}' is in the prompt" >&2; exit 1; }
+done
+grep -qF '"loadFailed":true' "${BODY}" || grep -qF '"loadFailed": true' "${BODY}" || { echo "the response doesn't say the persona didn't load: $(head -c 600 "${BODY}")" >&2; exit 1; }
+grep -qF 'persona_load_failed' "${DATA}/transcripts/"*/* 2>/dev/null || grep -rqF 'persona_load_failed' "${DATA}" || { echo "no persona_load_failed event was written" >&2; exit 1; }
+# Control: with the persona fixed, the same question does reach the global KB.
+printf '[]' > "${DATA}/personas/broken/skills.json"
+: > "${CAPTURE}"
+curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${PADMIN_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: admin' -H 'x-mindstone-user-id: smoke-admin' -H 'x-mindstone-conversation-id: conv-fixed' -d '{"model":"mindstone/default","messages":[{"role":"user","content":"Which global reference code applies for this collection?"}]}' "${BASE}/v1/chat/completions"
+node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").filter(Boolean); process.stdout.write(JSON.parse(l.pop()).messages.map((m)=>m.text??"").join("\n"))' "${CAPTURE}" > "${TEMP_RUNTIME}/fixed.prompt"
+grep -qF GFACT-8800 "${TEMP_RUNTIME}/fixed.prompt" || { echo "control: the fixed persona's turn lacks the global KB, so the check above proved nothing" >&2; exit 1; }
+echo "fail closed ok"
+# Private KB URLs on this machine are refused when added, and when fetched.
+expect 400 "a loopback URL without the opt-out" POST /admin/personas/built/knowledgebases/notes/sources "{\"kind\":\"url\",\"name\":\"local2\",\"url\":\"http://2130706433:${STUB_PORT}/doc.md\"}" "public address"
+expect 422 "ingest of a stored loopback URL without the opt-out" POST /admin/personas/built/knowledgebases/notes/ingest '{}' "this machine or a private network"
+grep -qE 'ECONN|EHOST|ETIMEDOUT' "${BODY}" && { echo "an ingest error named a socket code: $(cat "${BODY}")" >&2; exit 1; }
+# The CLI's ingest of a persona's private KB applies the same rule.
+if ./scripts/mindstone kb ingest --persona built notes > "${TEMP_RUNTIME}/cli-ingest.txt" 2>&1; then
+  echo "the CLI fetched a private KB's loopback URL: $(cat "${TEMP_RUNTIME}/cli-ingest.txt")" >&2; exit 1
+fi
+grep -qF "this machine or a private network" "${TEMP_RUNTIME}/cli-ingest.txt" || { echo "the CLI ingest failed for another reason: $(cat "${TEMP_RUNTIME}/cli-ingest.txt")" >&2; exit 1; }
+MINDSTONE_KB_PRIVATE_HOSTS=1 ./scripts/mindstone kb ingest --persona built notes > "${TEMP_RUNTIME}/cli-ingest.txt" 2>&1 || { echo "control: the CLI ingest with the host's opt-out failed: $(cat "${TEMP_RUNTIME}/cli-ingest.txt")" >&2; exit 1; }
+echo "url guard ok"
 
 echo "Persona admin smoke test passed."
