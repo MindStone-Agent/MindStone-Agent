@@ -213,7 +213,10 @@ export function readKbVectors(
     if (options.noLinks && lstatSync(path).isSymbolicLink()) return { state: "missing", reason: "vectors.json is a link" };
     parsed = parsedVectorsFile(path, options.noLinks === true);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { state: "missing", reason: "vectors.json isn't a file that can be read; re-ingest" };
+    const code = (error as NodeJS.ErrnoException).code;
+    // Not a file (a pipe, a folder) or a link swapped in: re-ingest writes a file. Anything else may pass.
+    if (!code || code === "ELOOP") return { state: "missing", reason: "vectors.json isn't a file that can be read; re-ingest" };
+    if (code !== "ENOENT") return { state: "missing", reason: `vectors.json can't be read now (${code})` };
     return { state: "missing", reason: embedder ? "not embedded yet; re-ingest" : "no embedder is configured" };
   }
   if (parsed === "too_large") return { state: "stale", reason: `vectors.json is larger than ${KB_EMBED_LIMITS.maxFileBytes / 1024 / 1024} MB; recall uses word match for this KB` };

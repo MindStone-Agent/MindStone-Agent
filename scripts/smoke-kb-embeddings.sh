@@ -647,7 +647,16 @@ read -r gw_persona gw_kb cli_persona cli_kb <<<"${cards}"
 stub_mode slow
 curl -s -o "${TEMP_RUNTIME}/approve-kb.json" -w '%{http_code}' -X POST "${ADMIN[@]}" -d '{}' "${BASE}/admin/approvals/${gw_kb}/approve" > "${TEMP_RUNTIME}/approve-kb.code" &
 approve_pid=$!
-sleep 1.5
+# Only once the approve is embedding (the stub has its request) does the write below prove anything.
+for _ in $(seq 1 50); do
+  seen="$(node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>console.log(s.requests.length))' "${STUB}/_test/state")"
+  [[ "${seen}" -gt 0 ]] && break
+  sleep 0.1
+done
+[[ "${seen}" -gt 0 ]] || { echo "the approve never reached the embedder" >&2; exit 1; }
+# Its key is held: an admin ingest of the same KB is refused meanwhile.
+[[ "$(call POST /admin/personas/pa-gateway/knowledgebases/beds/ingest '{}')" == "409" ]] || { echo "admin ingest during the approve's ingest: $(cat "${BODY}")" >&2; exit 1; }
+grep -q ingest_running "${BODY}" || { echo "expected ingest_running: $(cat "${BODY}")" >&2; exit 1; }
 started=$(node -e 'console.log(Date.now())')
 [[ "$(call POST /admin/personas/grower/knowledgebases '{"id":"meanwhile"}')" == "201" ]] || { echo "admin write during an approve: $(cat "${BODY}")" >&2; exit 1; }
 took=$(( $(node -e 'console.log(Date.now())') - started ))
