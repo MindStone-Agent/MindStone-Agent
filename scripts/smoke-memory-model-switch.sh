@@ -302,6 +302,12 @@ createServer((req, res) => {
     const input = Array.isArray(body.input) ? body.input : [body.input];
     const request = { model: body.model, input, t: Date.now() };
     state.requests.push(request);
+    if (input.some((text) => String(text).includes("POISON-CHUNK"))) {
+      request.done = Date.now();
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "input is too long for the context" } }));
+      return;
+    }
     const size = body.model === "model-a" ? 3 : 4;
     const answer = () => {
       request.done = Date.now();
@@ -517,5 +523,54 @@ late_addr="$(reembed_chunks $((addr_at + 250)) model-e)"
 addr_run=$(( $(reembed_chunks 0 model-e) - before_addr ))
 (( addr_run < 128 )) || { echo "control: that run had already finished (${addr_run} chunks) before the address changed" >&2; exit 1; }
 echo "a run stopped when the endpoint address changed after ${addr_run} chunks"
+
+# --- 4. Another model's chunk the new embedder refuses never costs a turn its own vectors (Hearth's
+# #167 review, #155 item 2): the turn's update leaves other models' chunks to the paced run, and a
+# run that fails is left for a minute, not sent again after every turn.
+STUB_PORT="${STUB_PORT}" python3 - <<'PY'
+import json, os, pathlib
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+c["memory"]["embeddingProvider"] = "ollama:model-f"
+c["memory"].pop("autoRecall", None)
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+curl -s -X POST -d '{"mode":"ok"}' "${STUB}/_test/mode" >/dev/null
+# The newest chunk another model made, so every batch of another model's chunks starts with it.
+npx tsx - <<'TS'
+import { DatabaseSync } from "node:sqlite";
+import { runtimePathsFromEnv, sqliteMemoryDatabasePath } from "./packages/mindstone-core/src/index.ts";
+const db = new DatabaseSync(sqliteMemoryDatabasePath(runtimePathsFromEnv()));
+db.prepare("INSERT INTO memory_sources (id, kind, path, title, timestamp, content_hash, metadata_json, updated_at) VALUES ('poison', 'memory', NULL, NULL, NULL, 'poison-hash', '{}', '2099-01-01T00:00:00.000Z')").run();
+db.prepare("INSERT INTO memory_chunks (chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, embedding_spec, metadata_json, updated_at) VALUES ('poison#0', 'poison', 'memory', NULL, NULL, 0, 'an old note, POISON-CHUNK, too long for the new model', 8, '[1,0,0,0]', 'ollama:model-old', '{}', '2099-01-01T00:00:00.000Z')").run();
+db.close();
+TS
+poison_sent() { node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>console.log(s.requests.filter((q)=>q.input.some((t)=>String(t).includes("POISON-CHUNK"))).length))' "${STUB}/_test/state"; }
+chat "a switch question: the vault code is TOKEN-157Q" >/dev/null
+judge "the chat with an unembeddable old chunk around should be answered" 'b.ok === true'
+# The turn's own chunks get vectors from the new model, though the old chunk can't be embedded.
+tokens_embedded() { npx tsx - <<'TS'
+import { DatabaseSync } from "node:sqlite";
+import { runtimePathsFromEnv, sqliteMemoryDatabasePath } from "./packages/mindstone-core/src/index.ts";
+const db = new DatabaseSync(sqliteMemoryDatabasePath(runtimePathsFromEnv()));
+const rows = db.prepare("SELECT embedding_json AS e, embedding_spec AS spec FROM memory_chunks WHERE text LIKE '%TOKEN-157Q%'").all() as Array<{ e: string | null; spec: string | null }>;
+db.close();
+console.log(rows.length > 0 && rows.every((row) => row.e !== null && row.spec === "ollama:model-f") ? "yes" : `no ${JSON.stringify(rows.map((row) => row.spec))}`);
+TS
+}
+for _ in $(seq 1 20); do [[ "$(tokens_embedded)" == yes ]] && break; sleep 0.5; done
+state="$(tokens_embedded)"
+[[ "${state}" == yes ]] || { echo "the turn's own chunks weren't embedded because another model's chunk was refused: ${state}" >&2; exit 1; }
+# Control: the paced run did try the refused chunk (so it was in reach), once.
+for _ in $(seq 1 20); do [[ "$(poison_sent)" -gt 0 ]] && break; sleep 0.5; done
+first_poison="$(poison_sent)"
+[[ "${first_poison}" -gt 0 ]] || { echo "control: the paced run never sent the refused chunk, so this checked nothing" >&2; exit 1; }
+# A failed run is left for a minute: two more turns don't send the refused chunk again.
+chat "a switch question right after the failed run" >/dev/null
+sleep 1
+chat "another switch question right after the failed run" >/dev/null
+sleep 2
+[[ "$(poison_sent)" == "${first_poison}" ]] || { echo "the refused chunk was sent again within a minute of the failed run: $(poison_sent) requests, ${first_poison} before" >&2; exit 1; }
+echo "a refused old chunk left the turn's vectors alone and wasn't retried within the minute"
 
 echo "Memory embedding model switch smoke test passed."
