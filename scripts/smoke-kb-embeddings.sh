@@ -540,11 +540,11 @@ for bad in "--embed-timeout" "--embed-timeout --json" "--embed-timeout 0" "--emb
 done
 ${MS} kb ingest garage --embed-timeout=300 --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{if (JSON.parse(d).vectors.state!=="ready") process.exit(1);})'
 ${MS} kb ingest garage --embed-timeout 300 --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{if (JSON.parse(d).vectors.state!=="ready") process.exit(1);})'
-# A request timeout that isn't a number falls back to the default, rather than aborting every request.
 # Ingest gives a request 60 s, whatever the query-time EMBEDDER_TIMEOUT_MS (1.5 s here): an embedder slower than that still embeds.
 stub_mode slow
 ${MS} kb ingest pantry --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const r=JSON.parse(d); if (r.vectors.state!=="ready") { console.error("slow embedder at ingest:", JSON.stringify(r.vectors)); process.exit(1); }})'
 stub_mode ok
+# A request timeout that isn't a number falls back to the default, rather than aborting every request.
 EMBEDDER_TIMEOUT_MS=abc ${MS} kb ingest garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const r=JSON.parse(d); if (r.vectors.state!=="ready") { console.error("EMBEDDER_TIMEOUT_MS=abc:", JSON.stringify(r.vectors)); process.exit(1); }})'
 
 # A question sharing no words with the KB recalls it by meaning, and only the

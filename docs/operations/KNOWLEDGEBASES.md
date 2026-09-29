@@ -116,7 +116,8 @@ alike.
   sources found by meaning don't compete with memory on score: they take up to
   `knowledgebases.recall.maxResults` of the turn's `memory.recall.maxResults`
   slots; memory keeps at least one of them when it has a hit of its own (any
-  hit whose kind isn't `kb`, #151). In the prompt's
+  hit whose kind isn't `kb`, #151). So with `memory.recall.maxResults: 1`, a
+  KB source found by meaning gets in only on a turn with no memory hit. In the prompt's
   recall token budget (`memory.recall.maxPromptTokens`), when there is a slot
   for each, the best KB source and the best memory hit always go in, even past the budget (by up to one KB
   source, about 650 tokens at 5 sections); other KB sources take up to half
@@ -128,7 +129,11 @@ alike.
 - **Ignored vectors.** If the embedder is down at recall, if a KB's vectors
   are not `ready`, or if their dimension differs from the question's, that KB
   is searched by words only. A source with an entry missing from
-  `vectors.json` stays on word match.
+  `vectors.json` stays on word match. An embedder that returns an all-zero
+  vector for any entry fails that KB's embedding (`missing`, "the embedder
+  returned an all-zero vector"), so the whole KB stays on word match until it
+  is re-ingested; an all-zero vector for the question recalls nothing by
+  meaning.
 - The similarity threshold depends on the embedding model: models differ in
   how similar unrelated text scores. Raise `minSimilarity` if unrelated
   sources show up; lower it if related ones don't. Both settings are in the
