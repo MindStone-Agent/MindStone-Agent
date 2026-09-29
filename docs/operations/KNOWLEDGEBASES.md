@@ -119,7 +119,7 @@ alike.
   vectors, and that doesn't count as a failure. Each attempt is recorded in the
   admin audit log as `kb_reembedded` (with `reason` when it failed,
   `gaveUp: true` on the fifth failure, and `superseded: true` when an ingest
-  finished meanwhile) and in the gateway log. Once nothing is left
+  rewrote the index meanwhile) and in the gateway log. Once nothing is left
   to embed again for the model, the gateway looks again only after 30 minutes
   or when the model changes, so a KB made stale later (for example by a CLI
   `kb ingest` whose environment names another embedder) is picked up within
