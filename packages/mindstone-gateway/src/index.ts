@@ -807,6 +807,24 @@ function queueMemoryReembed(config: MindStoneConfig | undefined): void {
 }
 
 /**
+ * A shared KB's folder name from a percent-encoded path segment (#166): the
+ * name as the KB list shows it, or undefined for one no folder in the list can
+ * have (bad encoding, a path, a dot folder, a NUL). The reset itself matches
+ * the name against the folder listing, which is the guard; this only refuses
+ * early (#166 review).
+ */
+function decodedKnowledgebaseFolderName(segment: string): string | undefined {
+  let name: string;
+  try {
+    name = decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
+  if (!name || name.startsWith(".") || name.includes("/") || name.includes("\0")) return undefined;
+  return name;
+}
+
+/**
  * After an owner's turn, a KB whose vectors another embedding model made is
  * embedded again in the background from its index (#151), as memory's chunks
  * are by the backfill (#140). One KB at a time, off the turn (nothing here can
@@ -818,6 +836,14 @@ function queueMemoryReembed(config: MindStoneConfig | undefined): void {
  */
 let kbReembedRunning = false;
 let kbReembedClean: { spec: string; at: number } | undefined;
+/** Admin resets so far (#166): a scan that began before one doesn't set the pause again. */
+let kbReembedResets = 0;
+
+/** After an admin reset (#158 review, #166): the next owner chat scans again, whatever a running scan finds. */
+function noteKbReembedReset(): void {
+  kbReembedClean = undefined;
+  kbReembedResets += 1;
+}
 
 function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
   if (kbReembedRunning) return;
@@ -829,6 +855,7 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
     if (!embedder) return;
     const spec = memoryEmbeddingSpec(embedder);
     if (kbReembedClean?.spec === spec && Date.now() - kbReembedClean.at < KB_REEMBED_LIMITS.retryAfterMs) return;
+    const resetsAtStart = kbReembedResets;
     const paths = runtimePathsFromEnv();
     const personasDir = personasDirFromConfig(config, paths);
     const kbDirs = [
@@ -870,7 +897,7 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
       else if (done.gaveUp) console.warn(`[mindstone] stopped embedding knowledge base ${where} again for ${spec} after ${KB_REEMBED_LIMITS.maxFailures} failures; it uses word match until it is tried again (the Console's Try again, or the reembed route) or ingested again`);
       else if (done.vectors.superseded) console.info(`[mindstone] knowledge base ${where} was ingested while it was embedded again; any vectors the ingest wrote are kept`);
       else console.warn(`[mindstone] knowledge base ${where} not embedded again for ${spec} (word match meanwhile; retried later): ${done.vectors.reason}`);
-    } else if (result.deferred === 0) {
+    } else if (result.deferred === 0 && kbReembedResets === resetsAtStart) {
       kbReembedClean = { spec, at: Date.now() };
     }
   })()
@@ -2860,14 +2887,19 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     });
     return;
   }
-  // A shared KB's id is its folder's name (#158 review): any name but a dot folder, one path segment.
-  const globalKbReembedMatch = /^\/admin\/knowledgebases\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/reembed$/.exec(url.pathname);
+  // A shared KB's id is its folder's name (#158 review, #166): any name the KB list shows,
+  // percent-encoded as one path segment; never a dot folder or a path.
+  const globalKbReembedMatch = /^\/admin\/knowledgebases\/([^/]{1,4096})\/reembed$/.exec(url.pathname);
   if (req.method === "POST" && globalKbReembedMatch) {
     // Try again after a give-up (#158 review): clears the KB's re-embed state,
     // so the next owner chat embeds it again. The Console's retry; the CLI's is `kb ingest`.
     const body = await readAdminBody(req, res);
     if (!body) return;
-    const kbId = globalKbReembedMatch[1]!;
+    const kbId = decodedKnowledgebaseFolderName(globalKbReembedMatch[1]!);
+    if (kbId === undefined) {
+      refuse(404, { error: "no knowledge base by that name", code: "not_found" }, { reason: "not_found" });
+      return;
+    }
     const outcome = resetKnowledgebaseReembed(knowledgebasesDirFromConfig(gateConfig.config, paths), kbId);
     if (outcome === "not_found") {
       refuse(404, { error: `no knowledge base named "${kbId}"`, code: "not_found" }, { reason: "not_found", knowledgebase: kbId });
@@ -2877,7 +2909,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       refuse(409, { error: "the knowledge base's reembed.json couldn't be removed (is its folder read-only?)", code: "reset_failed" }, { reason: "reset_failed", knowledgebase: kbId });
       return;
     }
-    kbReembedClean = undefined;
+    noteKbReembedReset();
     appendAdminAudit(paths.dataDir, { userId, action: "kb_reembed_reset", knowledgebase: kbId });
     sendJson(res, 200, { ok: true });
     return;
@@ -2904,7 +2936,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         refuse(409, { error: "the knowledge base's reembed.json couldn't be removed (is its folder read-only?)", code: "reset_failed" }, { reason: "reset_failed", persona: id, knowledgebase: kbId });
         return;
       }
-      kbReembedClean = undefined;
+      noteKbReembedReset();
       appendAdminAudit(paths.dataDir, { userId, action: "kb_reembed_reset", persona: id, knowledgebase: kbId });
       sendJson(res, 200, { ok: true });
       return;

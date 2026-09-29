@@ -443,6 +443,7 @@ export async function reembedStaleKnowledgebase(options: {
         deferred += 1;
         continue;
       }
+      const resetsAtStart = KB_REEMBED_RESETS.get(resolve(loaded.kb.dir)) ?? 0;
       try {
         const vectors = await writeKbVectors({
           kbDir: loaded.kb.dir,
@@ -476,6 +477,11 @@ export async function reembedStaleKnowledgebase(options: {
           // limiting requests; anything else, or no cause at all, counts (#158 review).
           const free = (vectors.cause === "unavailable" || vectors.cause === "rate-limited") && !((vectors.embedded ?? 0) > 0);
           const counts = !free;
+          // An admin reset while this attempt ran: it started before the embedder was
+          // fixed, so it records nothing and the next owner chat tries again (#166).
+          if ((KB_REEMBED_RESETS.get(resolve(loaded.kb.dir)) ?? 0) !== resetsAtStart) {
+            return { reembedded: { kbId: summary.id, personaId, vectors }, deferred };
+          }
           // Read again now: a reset during this attempt starts the count afresh (#164).
           const failures = (reembedState(loaded.kb.dir, spec, noLinks)?.failures ?? 0) + (counts ? 1 : 0);
           const gaveUp = counts && failures >= KB_REEMBED_LIMITS.maxFailures;
@@ -536,18 +542,26 @@ export function resetKnowledgebaseReembed(
   options: { noLinks?: boolean } = {},
 ): "reset" | "not_found" | "not_cleared" {
   if (options.noLinks && privateKnowledgebaseLinkError(kbDir, kbId)) return "not_found";
-  // Exactly its folder's name: a case-folding filesystem would find "GARAGE" for "garage" (#164).
+  // Exactly a KB the listing shows (#164, #166): the folder's own name (a case-folding
+  // filesystem would find "GARAGE" for "garage"), a folder and not a link, never a dot folder.
+  if (kbId.startsWith(".")) return "not_found";
   try {
-    if (!readdirSync(kbDir).includes(kbId)) return "not_found";
+    if (!readdirSync(kbDir, { withFileTypes: true }).some((entry) => entry.name === kbId && entry.isDirectory())) return "not_found";
   } catch {
     return "not_found";
   }
   const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
   if (!loaded.ok) return "not_found";
+  const key = resolve(loaded.kb.dir);
+  KB_REEMBED_RESETS.set(key, (KB_REEMBED_RESETS.get(key) ?? 0) + 1);
   clearKbReembedState(loaded.kb.dir);
-  // A state file that couldn't be removed (a read-only folder) would still apply: say so (#164 review).
-  return existsSync(join(loaded.kb.dir, KB_REEMBED_STATE_FILE)) ? "not_cleared" : "reset";
+  // A state that couldn't be removed (a read-only folder) would still apply: say so (#164 review).
+  // Anything the reader ignores (a folder in its place, #166) doesn't.
+  return readKbReembedState(loaded.kb.dir, { noLinks: options.noLinks }) ? "not_cleared" : "reset";
 }
+
+/** Resets per KB folder (#166): an attempt that was running when one came records nothing. */
+const KB_REEMBED_RESETS = new Map<string, number>();
 
 /** Whether turns in flight (their start times) hold a background re-embed back (#156 review, #158). */
 export function turnsHoldReembed(starts: Iterable<number>, now = Date.now(), waitMs = KB_REEMBED_LIMITS.turnWaitMs): boolean {

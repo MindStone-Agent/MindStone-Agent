@@ -35,6 +35,7 @@ cleanup() {
     kill "${embed_pid}" >/dev/null 2>&1 || true
     wait "${embed_pid}" >/dev/null 2>&1 || true
   fi
+  chmod -R u+w "${TEMP_RUNTIME}" 2>/dev/null || true
   rm -rf "${TEMP_RUNTIME}"
 }
 trap cleanup EXIT
@@ -131,7 +132,7 @@ import { join } from "node:path";
 import {
   KB_EMBED_LIMITS, KB_REEMBED_STATE_FILE, KB_VECTORS_FILE, cosineSimilarity, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbReembedState, readKbVectors, writeKbReembedState, writeKbVectors,
 } from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
-import { KB_REEMBED_LIMITS, ingestMindStoneKnowledgebase, knowledgebaseReembedState, mindStoneKbStatus, privateKnowledgebaseLinkError, reembedState, reembedStaleKnowledgebase, resetKnowledgebaseReembed, turnsHoldReembed, waitWhileTurnsRun } from "./packages/mindstone-core/src/knowledgebase/load.ts";
+import { KB_REEMBED_LIMITS, ingestMindStoneKnowledgebase, knowledgebaseReembedState, loadMindStoneKnowledgebase, mindStoneKbStatus, privateKnowledgebaseLinkError, reembedState, reembedStaleKnowledgebase, resetKnowledgebaseReembed, turnsHoldReembed, waitWhileTurnsRun } from "./packages/mindstone-core/src/knowledgebase/load.ts";
 import { KnowledgebaseRecallProvider, knowledgebaseRecallSettings } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
 import { buildMemoryRecallPrompt, CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, recallMindStoneMemory, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
 import { createMemoryEmbeddingProvider, sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
@@ -737,7 +738,8 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     await kb(root, "d-kb", "# D\n\nalpha d\n", "m1");
     assert.ok(existsSync(join(root, "d-kb", KB_VECTORS_FILE)), "the ingest kept its vectors");
   }
-  // A reset during an attempt starts the count afresh: the attempt's failure is the first, not the fifth (#164).
+  // A reset during an attempt: the attempt started before the fix, so it records nothing and
+  // the next owner chat tries again at once (#166; #164 only restarted the count).
   {
     const root = mkdtempSync(join(tmpdir(), "kbvec-r5-race-"));
     await kb(root, "r-kb", "# R\n\nalpha r\n", "old");
@@ -748,7 +750,49 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     } } as any;
     const result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: resetMeanwhile });
     assert.equal(result.reembedded?.gaveUp, undefined, "not given up");
-    assert.equal(readKbReembedState(join(root, "r-kb"))?.failures, 1, "the count after a reset is this attempt's alone");
+    assert.equal(readKbReembedState(join(root, "r-kb")), undefined, "an attempt a reset overtook records nothing");
+    assert.equal(reembedState(join(root, "r-kb"), "stub:m1"), undefined, "nor keeps a state in memory");
+    // Control: the same failure with no reset meanwhile is recorded, and waits.
+    const failing = { id: "stub", model: "m1", async embedTexts() { throw Object.assign(new Error("x"), { status: 400 }); } } as any;
+    await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: failing });
+    const recorded = readKbReembedState(join(root, "r-kb"));
+    assert.equal(recorded?.failures, 1, "control: a failure with no reset is recorded");
+    assert.ok(recorded?.nextAttemptAt && Date.parse(recorded.nextAttemptAt) > Date.now(), "control: and waits");
+    // A reset of another KB during the attempt changes nothing for this one.
+    await kb(root, "r2-kb", "# R2\n\nalpha r2\n", "old");
+    assert.ok(writeKbReembedState(join(root, "r-kb"), { version: 1, spec: "stub:m1", failures: 1, nextAttemptAt: new Date(0).toISOString(), updatedAt: new Date().toISOString() }));
+    assert.ok(writeKbReembedState(join(root, "r2-kb"), { version: 1, spec: "stub:m1", failures: 5, gaveUp: true, updatedAt: new Date().toISOString() }));
+    const resetOther = { id: "stub", model: "m1", async embedTexts() {
+      assert.equal(resetKnowledgebaseReembed(root, "r2-kb"), "reset");
+      throw Object.assign(new Error("x"), { status: 400 });
+    } } as any;
+    await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: resetOther });
+    assert.equal(readKbReembedState(join(root, "r-kb"))?.failures, 2, "a reset of another KB doesn't cancel this one's record");
+  }
+  // A folder named reembed.json isn't a state that still applies: the reset reports a reset (#166).
+  {
+    const root = mkdtempSync(join(tmpdir(), "kbvec-r6-dir-reset-"));
+    await kb(root, "dr-kb", "# DR\n\nalpha dr\n", "old");
+    mkdirSync(join(root, "dr-kb", KB_REEMBED_STATE_FILE));
+    assert.equal(resetKnowledgebaseReembed(root, "dr-kb"), "reset");
+  }
+  // Exactly a KB the listing shows (#166): any folder name, but not a link to a folder or a dot folder.
+  {
+    const root = mkdtempSync(join(tmpdir(), "kbvec-r6-names-"));
+    const odd = "HR Policies #1 é?%";
+    await kb(root, odd, "# HR\n\nalpha hr\n", "old");
+    assert.ok(writeKbReembedState(join(root, odd), { version: 1, spec: "stub:m1", failures: 5, gaveUp: true, updatedAt: new Date().toISOString() }));
+    assert.equal(resetKnowledgebaseReembed(root, odd), "reset", "a folder name with spaces, # ? % and an accent");
+    assert.equal(readKbReembedState(join(root, odd)), undefined);
+    const outside = mkdtempSync(join(tmpdir(), "kbvec-r6-outside-"));
+    await kb(outside, "real", "# Real\n\nalpha real\n", "old");
+    assert.ok(writeKbReembedState(join(outside, "real"), { version: 1, spec: "stub:m1", failures: 5, gaveUp: true, updatedAt: new Date().toISOString() }));
+    symlinkSync(join(outside, "real"), join(root, "via-link"));
+    assert.equal(loadMindStoneKnowledgebase(root, "via-link").ok, true, "control: the linked folder loads as a KB");
+    assert.equal(resetKnowledgebaseReembed(root, "via-link"), "not_found", "a linked folder isn't in the listing");
+    assert.equal(readKbReembedState(join(outside, "real"))?.gaveUp, true, "and its state is left");
+    await kb(root, ".dot", "# Dot\n\nalpha dot\n", "old");
+    assert.equal(resetKnowledgebaseReembed(root, ".dot"), "not_found", "a dot folder isn't in the listing");
   }
   // A reset that can't remove the state file says so, rather than reporting a reset that didn't happen.
   {
@@ -1274,6 +1318,7 @@ node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
 grep -q '"action":"kb_reembed_reset"' "${DATA}/admin/audit.jsonl" || { echo "the reset wasn't audited" >&2; exit 1; }
 [[ "$(call POST /admin/knowledgebases/no-such-kb/reembed '{}')" == 404 ]] || { echo "resetting a KB that doesn't exist: $(cat "${BODY}")" >&2; exit 1; }
 # A shared KB's id is its folder's name, capitals, underscores and dots included.
+printf '{"version":1,"spec":"x:y","failures":5,"gaveUp":true,"updatedAt":"2026-01-01T00:00:00.000Z"}' > "${TEMP_RUNTIME}/state-elsewhere-shared.json"
 mkdir -p "${DATA}/knowledgebases/HR_Hand.book"
 printf '{"name":"HR"}' > "${DATA}/knowledgebases/HR_Hand.book/kb.json"
 printf '{"version":1,"spec":"x:y","failures":1,"nextAttemptAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-01T00:00:00.000Z"}' > "${DATA}/knowledgebases/HR_Hand.book/reembed.json"
@@ -1281,6 +1326,50 @@ printf '{"version":1,"spec":"x:y","failures":1,"nextAttemptAt":"2026-01-01T00:00
 [[ ! -e "${DATA}/knowledgebases/HR_Hand.book/reembed.json" ]] || { echo "the reset left its state" >&2; exit 1; }
 [[ "$(call POST /admin/knowledgebases/.hidden/reembed '{}')" == 404 ]] || { echo "a dot folder must not be reset: $(cat "${BODY}")" >&2; exit 1; }
 rm -rf "${DATA}/knowledgebases/HR_Hand.book"
+# Any folder name the list shows, percent-encoded as one segment (#166): spaces, # ? %, an accent.
+ODD="HR Policies #1 é?%"
+mkdir -p "${DATA}/knowledgebases/${ODD}"
+printf '{"name":"HR"}' > "${DATA}/knowledgebases/${ODD}/kb.json"
+cp "${TEMP_RUNTIME}/state-elsewhere-shared.json" "${DATA}/knowledgebases/${ODD}/reembed.json"
+enc() { node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$1"; }
+[[ "$(call GET /admin/knowledgebases)" == 200 ]] || exit 1
+ODD="${ODD}" node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!(b.knowledgebases??[]).some((k)=>k.id===process.env.ODD)) { console.error("control: the KB list should show the odd folder name: " + JSON.stringify((b.knowledgebases??[]).map((k)=>k.id))); process.exit(1); }' "${BODY}"
+[[ "$(call POST "/admin/knowledgebases/$(enc "${ODD}")/reembed" '{}')" == 200 ]] || { echo "reset a KB whose folder name has spaces and symbols: $(cat "${BODY}")" >&2; exit 1; }
+[[ ! -e "${DATA}/knowledgebases/${ODD}/reembed.json" ]] || { echo "the reset left the odd folder's state" >&2; exit 1; }
+ODD="${ODD}" node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").map((x)=>JSON.parse(x)); if (!l.some((e)=>e.action==="kb_reembed_reset" && e.knowledgebase===process.env.ODD)) { console.error("the odd reset was not audited with its name"); process.exit(1); }' "${DATA}/admin/audit.jsonl"
+# Refused: a path, a dot folder spelled encoded, a NUL, bad encoding, a linked folder, a name not listed.
+mkdir -p "${DATA}/knowledgebases/.enc"
+printf '{"name":"hidden"}' > "${DATA}/knowledgebases/.enc/kb.json"
+cp "${TEMP_RUNTIME}/state-elsewhere-shared.json" "${DATA}/knowledgebases/.enc/reembed.json"
+LINKED_OUT="${TEMP_RUNTIME}/outside-kb"
+mkdir -p "${LINKED_OUT}" && printf '{"name":"out"}' > "${LINKED_OUT}/kb.json" && cp "${TEMP_RUNTIME}/state-elsewhere-shared.json" "${LINKED_OUT}/reembed.json"
+ln -s "${LINKED_OUT}" "${DATA}/knowledgebases/via-link"
+for bad in "..%2Fpersonas%2Fgrower%2Fknowledgebases%2Fbeds" "atlas%2F..%2Fatlas" "%2Eenc" "a%00b" "%E0%A4%A" "via-link" "not%20listed"; do
+  code="$(curl -s --path-as-is -o "${BODY}" -w '%{http_code}' -X POST "${ADMIN[@]}" -d '{}' "${BASE}/admin/knowledgebases/${bad}/reembed")"
+  [[ "${code}" == 404 ]] || { echo "the shared reset took \"${bad}\": ${code} $(cat "${BODY}")" >&2; exit 1; }
+done
+[[ -f "${DATA}/knowledgebases/.enc/reembed.json" && -f "${LINKED_OUT}/reembed.json" ]] || { echo "a refused reset cleared a state" >&2; exit 1; }
+rm -rf "${DATA}/knowledgebases/${ODD}" "${DATA}/knowledgebases/.enc" "${DATA}/knowledgebases/via-link" "${LINKED_OUT}"
+# 255 three-byte letters (2295 characters encoded, near the longest name a folder can have) and a
+# backslash reset like any other name the list shows (#166 review).
+for long in "$(node -e 'process.stdout.write("漢".repeat(255))')" 'back\slash'; do
+  # ext4 caps a name at 255 bytes, APFS at 255 UTF-16 units: skip only a name too long for this
+  # filesystem; any other failure to make the folder fails the smoke.
+  made="$(LONG_DIR="${DATA}/knowledgebases/${long}" node -e 'try { require("fs").mkdirSync(process.env.LONG_DIR); console.log("made") } catch (e) { if (e.code !== "ENAMETOOLONG") throw e; console.log("too-long") }')" || { echo "couldn't make the folder ${long:0:12}..." >&2; exit 1; }
+  [[ "${made}" == made ]] || { echo "(this filesystem can't hold a folder named ${long:0:12}...: skipped)"; continue; }
+  printf '{"name":"long"}' > "${DATA}/knowledgebases/${long}/kb.json"
+  cp "${TEMP_RUNTIME}/state-elsewhere-shared.json" "${DATA}/knowledgebases/${long}/reembed.json"
+  [[ "$(call GET /admin/knowledgebases)" == 200 ]] || exit 1
+  LONG="${long}" node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!(b.knowledgebases??[]).some((k)=>k.id===process.env.LONG)) { console.error("control: the KB list should show the long or backslash name"); process.exit(1); }' "${BODY}" || exit 1
+  [[ "$(call POST "/admin/knowledgebases/$(enc "${long}")/reembed" '{}')" == 200 ]] || { echo "reset a KB named ${long:0:12}... ($(printf '%s' "${long}" | wc -c | tr -d ' ') bytes): $(cat "${BODY}")" >&2; exit 1; }
+  [[ ! -e "${DATA}/knowledgebases/${long}/reembed.json" ]] || { echo "the reset left the state of ${long:0:12}..." >&2; exit 1; }
+  rm -rf "${DATA}/knowledgebases/${long}"
+done
+# A folder named reembed.json is ignored when read, so a reset of that KB is a reset, not a 409 (#166).
+mkdir -p "${DATA}/knowledgebases/DirState/reembed.json"
+printf '{"name":"dir"}' > "${DATA}/knowledgebases/DirState/kb.json"
+[[ "$(call POST /admin/knowledgebases/DirState/reembed '{}')" == 200 ]] || { echo "a folder named reembed.json gave: $(cat "${BODY}")" >&2; exit 1; }
+rm -rf "${DATA}/knowledgebases/DirState"
 # A persona's KB: a reembed.json that is a link isn't read for its list; a real one is, and resets.
 SPEC="$(node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").map((x)=>JSON.parse(x)).filter((e)=>e.action==="kb_reembedded"); process.stdout.write(l.pop().embeddingProvider)' "${DATA}/admin/audit.jsonl")"
 BEDS="${DATA}/personas/grower/knowledgebases/beds"
@@ -1303,6 +1392,25 @@ ln -s "${OTHER}" "${DATA}/personas/grower/knowledgebases/linked"
 [[ "$(call POST /admin/personas/grower/knowledgebases/linked/reembed '{}')" == 404 ]] || { echo "a reset through a linked KB folder: $(cat "${BODY}")" >&2; exit 1; }
 [[ -f "${OTHER}/reembed.json" ]] || { echo "a reset through a linked folder cleared another persona's state" >&2; exit 1; }
 rm "${DATA}/personas/grower/knowledgebases/linked" "${OTHER}/reembed.json"
+# A state that couldn't be removed (a read-only folder) is a 409 on both routes (#166), and stays.
+if [[ "$(id -u)" != 0 ]]; then
+  mkdir -p "${DATA}/knowledgebases/Stuck"
+  printf '{"name":"stuck"}' > "${DATA}/knowledgebases/Stuck/kb.json"
+  cp "${TEMP_RUNTIME}/state-elsewhere.json" "${DATA}/knowledgebases/Stuck/reembed.json"
+  cp "${TEMP_RUNTIME}/state-elsewhere.json" "${BEDS}/reembed.json"
+  chmod 555 "${DATA}/knowledgebases/Stuck" "${BEDS}"
+  shared_code="$(call POST /admin/knowledgebases/Stuck/reembed '{}')"; cp "${BODY}" "${TEMP_RUNTIME}/stuck-shared.json"
+  private_code="$(call POST /admin/personas/grower/knowledgebases/beds/reembed '{}')"; cp "${BODY}" "${TEMP_RUNTIME}/stuck-private.json"
+  chmod 755 "${DATA}/knowledgebases/Stuck" "${BEDS}"
+  for pair in "shared:${shared_code}" "private:${private_code}"; do
+    [[ "${pair#*:}" == 409 ]] || { echo "a ${pair%%:*} reset that couldn't remove the state: ${pair#*:} $(cat "${TEMP_RUNTIME}/stuck-${pair%%:*}.json")" >&2; exit 1; }
+    node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (b.code !== "reset_failed") { console.error(process.argv[2] + " 409 should say reset_failed: " + JSON.stringify(b)); process.exit(1); }' "${TEMP_RUNTIME}/stuck-${pair%%:*}.json" "${pair%%:*}" || exit 1
+  done
+  [[ -f "${DATA}/knowledgebases/Stuck/reembed.json" && -f "${BEDS}/reembed.json" ]] || { echo "control: the read-only folders kept their state" >&2; exit 1; }
+  rm -rf "${DATA}/knowledgebases/Stuck" "${BEDS}/reembed.json"
+else
+  echo "(running as root: the read-only 409 checks are skipped)"
+fi
 # A dot folder is refused by the route itself, even one that loads as a KB (#164).
 mkdir -p "${DATA}/knowledgebases/.hidden"
 printf '{"name":"hidden"}' > "${DATA}/knowledgebases/.hidden/kb.json"
@@ -1341,6 +1449,41 @@ grep -q '"model":"kbstub-d"' "${BEDS}/vectors.json" && { echo "a given-up person
 chat_ms "an owner question after the persona reset" >/dev/null
 for _ in $(seq 1 40); do grep -q '"model":"kbstub-d"' "${BEDS}/vectors.json" && break; sleep 0.5; done
 grep -q '"model":"kbstub-d"' "${BEDS}/vectors.json" || { echo "the reset persona KB wasn't embedded again at the next owner chat (the scan pause held)" >&2; exit 1; }
+# A reset while a scan that finds nothing is still running (#166): the scan doesn't set the pause
+# after the reset. A switch to kbstub-e makes every KB stale again; 3000 given-up copies of atlas in
+# a persona's folder keep the scan running past the reset. The scan takes every shared KB (atlas
+# among them) before any persona's, whatever the order a filesystem lists a folder in (#166 review).
+set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-e"'
+SPEC_E="${SPEC/kbstub-d/kbstub-e}"
+[[ "${SPEC_E}" != "${SPEC}" ]] || { echo "can't derive the kbstub-e spec from ${SPEC}" >&2; exit 1; }
+SPEC="${SPEC_E}" node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ version: 1, spec: process.env.SPEC, failures: 5, gaveUp: true, reason: "synthetic", updatedAt: new Date().toISOString() }))' "${TEMP_RUNTIME}/state-e.json"
+python3 - <<'PY'
+import os, pathlib, shutil
+data = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone"
+atlas = data / "knowledgebases" / "atlas"
+root = data / "personas" / "grower" / "knowledgebases"
+for i in range(3000):
+    d = root / f"zz-copy-{i:04d}"
+    d.mkdir()
+    for name in ("kb.json", "index.json", "vectors.json"):
+        shutil.copyfile(atlas / name, d / name)
+PY
+for dir in "${DATA}"/knowledgebases/*/ "${DATA}"/personas/*/knowledgebases/*/; do
+  [[ -L "${dir%/}" ]] && continue
+  cp "${TEMP_RUNTIME}/state-e.json" "${dir}reembed.json"
+done
+chat_ms "an owner question with every KB given up for kbstub-e" >/dev/null
+[[ "$(call POST /admin/knowledgebases/atlas/reembed '{}')" == 200 ]] || { echo "reset atlas during the scan: $(cat "${BODY}")" >&2; exit 1; }
+sleep 1
+grep -q '"model":"kbstub-e"' "${DATA}/knowledgebases/atlas/vectors.json" && { echo "atlas was embedded before the next chat: the reset landed before the scan reached it, so nothing was measured" >&2; exit 1; }
+# A chat while that scan still runs starts none, so ask again until one does: with the pause set
+# after the reset (the bug), none ever would.
+for _ in $(seq 1 12); do
+  chat_ms "an owner question after the reset during the scan" >/dev/null
+  for _ in 1 2 3 4 5 6; do grep -q '"model":"kbstub-e"' "${DATA}/knowledgebases/atlas/vectors.json" && break 2; sleep 0.5; done
+done
+grep -q '"model":"kbstub-e"' "${DATA}/knowledgebases/atlas/vectors.json" || { echo "a reset during a scan that found nothing was lost to the scan's pause" >&2; exit 1; }
+rm -rf "${DATA}"/personas/grower/knowledgebases/zz-copy-*
 stub_mode ok
 
 echo "KB embeddings smoke test passed."
