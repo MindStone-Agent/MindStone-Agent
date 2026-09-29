@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ConnectorOutboundMessage } from "./connector.js";
-import { ApprovalStore, sanitizeMemoryProposalPath, type ProposedAction } from "./approval.js";
+import { ApprovalStore, sanitizeMemoryProposalPath, summaryText, type ProposedAction } from "./approval.js";
 import { ConnectorDeliveryQueue } from "./queue.js";
 import { composeMindStoneSkillDraft, validateSkillId, writeInstalledMindStoneSkill } from "../skills/artifacts.js";
 import { PersonaExistsError, writeProposedPersona } from "../persona/create.js";
@@ -313,7 +313,8 @@ export function approveProposedAction(
   if (action.kind === "memory_write" && action.memory) {
     const safePath = sanitizeMemoryProposalPath(action.memory.path);
     // Quoted as JSON: a path from before one-line names can't draw lines of its own.
-    if (!safePath) throw new ApprovalActionError(`memory proposal path ${JSON.stringify(action.memory.path)} is not a safe relative path`, "unsafe_path", 422);
+    // Shown escaped: a path from before names were checked can't act on a terminal here.
+    if (!safePath) throw new ApprovalActionError(`memory proposal path "${summaryText(action.memory.path)}" is not a safe relative path`, "unsafe_path", 422);
     const target = join(options.memoryDir, safePath);
     if (existsSync(target) && !options.force) {
       throw new ApprovalActionError(

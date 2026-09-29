@@ -473,7 +473,7 @@ export function addPersonaComponentId(personaDir: string, key: "skills" | "workf
   // Read as the persona loader reads it: a file of the wrong shape is the
   // owner's to fix, never rewritten with only this id (#125 review).
   const checked = capabilityList(data, key);
-  if (!Array.isArray(checked)) throw new PersonaComposeError(`${key}.json isn't a list of ids; fix it in the persona editor`, "invalid_persona", 422);
+  if (!Array.isArray(checked)) throw new PersonaComposeError(`${key}.json isn't a list of ids; fix the file by hand (the persona editor can't open a persona that doesn't load)`, "invalid_persona", 422);
   const list: string[] = [...checked];
   // No skills listed means every installed skill, this one included: writing
   // the list would take all the others away (#125 review).

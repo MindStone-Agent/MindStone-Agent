@@ -105,6 +105,12 @@ for (const [field, value] of [["description", "Desc \u001b]0;TITLE\u0007"], ["in
     assert.equal(sanitizeMemoryProposalPath(path), undefined, `an old card's path ${JSON.stringify(path)} must be refused at approve`);
   }
   assert.equal(sanitizeMemoryProposalPath("notes/todo"), "notes/todo.md", "control: a plain path");
+  // Scripts that spell with zero-width joiners keep their names: Persian, Devanagari, an emoji family.
+  for (const path of ["notes/یادداشت\u200cها.md", "notes/क्\u200dष.md", "notes/👨\u200d👩\u200d👧.md", "notes/会议记录.md"]) {
+    assert.equal(sanitizeMemoryProposalPath(path), path, `a real file name must pass: ${JSON.stringify(path)}`);
+    const fence = "```mindstone-memory-proposal\n" + JSON.stringify({ path, content: "x" }) + "\n```";
+    assert.equal(extractActionProposals(fence).memory?.path, path, `a real file name must be proposed: ${JSON.stringify(path)}`);
+  }
   // A mutation's summary shows unsafe characters in its data escaped: summaries reach logs and the TUI as they are.
   const summaryStore = new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "summary-approvals.json") });
   const withC1 = applyActionProposalDiscipline({ replyText: "```mindstone-calendar-proposal\n" + JSON.stringify({ operation: "create", resource: "event", data: { title: "a\u009b8mb\u202ec" } }) + "\n```", origin: "unit", store: summaryStore });

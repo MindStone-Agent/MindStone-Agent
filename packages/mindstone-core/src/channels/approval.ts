@@ -357,10 +357,12 @@ function boundedList(value: unknown): string[] | undefined {
  */
 const PROPOSAL_UNSAFE_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u2028\u2029\u{E0000}-\u{E007F}]/u;
 /** A name (a memory path, a mutation resource) is one line too: a line break would draw a line of its own (#125 review). */
-const PROPOSAL_UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\u2800\ufeff\u{E0000}-\u{E007F}]/u;
+// Zero-width joiners (U+200C, U+200D) stay allowed: Persian, Indic scripts and
+// emoji spell with them. U+200B, bidi marks and the rest have no such use.
+const PROPOSAL_UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\u2800\ufeff\u{E0000}-\u{E007F}]/u;
 
 /** Text for a summary line, with anything unsafe shown as \u{..}: summaries reach logs and the TUI as they are. */
-function summaryText(text: string): string {
+export function summaryText(text: string): string {
   return text.replace(new RegExp(PROPOSAL_UNSAFE_NAME.source, "gu"), (char) => `\\u{${char.codePointAt(0)!.toString(16)}}`);
 }
 
