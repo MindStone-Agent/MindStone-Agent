@@ -77,6 +77,7 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - Pi 0.87 ships the Azure OpenAI (Responses), Amazon Bedrock and Google Vertex providers that #126 builds on.
 
 ### Fixed
+- **A model download (`POST /admin/memory/pull`) no longer fails at 5 minutes** (#145). Node's `fetch` gives up after 300 s without response headers, and both the gateway (asking Ollama for one answer) and the Console (asking the gateway) waited that long for them. The gateway now streams the download from Ollama, and answers its client at once: headers first, a newline every 10 s while the download runs, then the same `{ ok, error? }` JSON. An `error` line from Ollama, or a stream that ends before `success`, is reported as a failure.
 - **Hidden CLI prompts: escape sequences, pasted text and Ctrl-D** (#133).
   - Escape sequences such as arrow keys are skipped whole, even when they arrive split across input chunks, so no `[A` ends up in a key.
   - A bracketed paste keeps its text, with line breaks removed.
