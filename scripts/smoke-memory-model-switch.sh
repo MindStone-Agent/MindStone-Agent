@@ -578,6 +578,16 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   const uncapped = { id: "stub", model: "u", async embedTexts(texts: string[]) { if (texts.some((text) => bad.has(text))) throw tooLong(); return B.embedTexts(texts); } };
   const whole = await backfillSqliteMemoryEmbeddings({ paths, provider: uncapped });
   if (whole.chunksRejected !== bad.size || whole.chunksEmbedded !== whole.chunksConsidered - bad.size) fail(`a full backfill should count all ${bad.size} and embed the rest in one run: ${JSON.stringify(whole)}`);
+  // A turn's update has the limit too: with 40 chunks without a vector that it can't take, it stops after 32 alone.
+  toOther();
+  const noVectorBad = new DatabaseSync(dbPath);
+  noVectorBad.prepare("UPDATE memory_chunks SET embedding_json = NULL, embedding_spec = NULL WHERE text IN (SELECT value FROM json_each(?))").run(JSON.stringify([...bad]));
+  noVectorBad.close();
+  const turnCapped = await indexSqliteMemoryTurn({ transcriptFile: join(paths.transcriptDir, "paced-turn.jsonl"), config: { memory: { vectorStore: "sqlite-vec" } }, paths, provider: { id: "stub", model: "x", async embedTexts(texts: string[]) { if (texts.some((text) => bad.has(text))) throw tooLong(); return B.embedTexts(texts); } }, otherModelLimit: 0 });
+  if (turnCapped.chunksRejected !== MEMORY_EMBED_SINGLES_PER_RUN) fail(`a turn's update should stop after ${MEMORY_EMBED_SINGLES_PER_RUN} chunks alone: ${JSON.stringify(turnCapped)}`);
+  const refill = new DatabaseSync(dbPath);
+  refill.prepare("UPDATE memory_chunks SET embedding_json = '[0,1,0,0]', embedding_spec = 'stub:a' WHERE embedding_json IS NULL").run();
+  refill.close();
   toOther();
   // During the single sends: a stop in beforeBatch stops the run, a row gone meanwhile isn't sent,
   // and an outage stops the run without counting a refusal.
