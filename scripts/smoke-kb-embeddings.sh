@@ -1312,6 +1312,18 @@ grep -q '"model":"kbstub-d"' "${DATA}/knowledgebases/atlas/vectors.json" && { ec
 chat_ms "an owner question after the reset" >/dev/null
 for _ in $(seq 1 40); do grep -q '"model":"kbstub-d"' "${DATA}/knowledgebases/atlas/vectors.json" && break; sleep 0.5; done
 grep -q '"model":"kbstub-d"' "${DATA}/knowledgebases/atlas/vectors.json" || { echo "the reset KB wasn't embedded again at the next owner chat (the scan pause held)" >&2; exit 1; }
+# The same for a persona's own KB.
+for dir in "${DATA}"/knowledgebases/*/ "${DATA}"/personas/*/knowledgebases/*/; do
+  [[ -L "${dir%/}" ]] && continue
+  cp "${TEMP_RUNTIME}/state-elsewhere.json" "${dir}reembed.json"
+done
+chat_ms "another owner question with every KB given up" >/dev/null
+sleep 2
+grep -q '"model":"kbstub-d"' "${BEDS}/vectors.json" && { echo "a given-up persona KB was embedded again" >&2; exit 1; }
+[[ "$(call POST /admin/personas/grower/knowledgebases/beds/reembed '{}')" == 200 ]] || { echo "reset beds again: $(cat "${BODY}")" >&2; exit 1; }
+chat_ms "an owner question after the persona reset" >/dev/null
+for _ in $(seq 1 40); do grep -q '"model":"kbstub-d"' "${BEDS}/vectors.json" && break; sleep 0.5; done
+grep -q '"model":"kbstub-d"' "${BEDS}/vectors.json" || { echo "the reset persona KB wasn't embedded again at the next owner chat (the scan pause held)" >&2; exit 1; }
 stub_mode ok
 
 echo "KB embeddings smoke test passed."
