@@ -1887,7 +1887,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`--- PERSONA.md ---\n${printableText(renderPersonaMarkdown(action.persona))}--- end PERSONA.md ---\n`);
     }
     const componentReview = personaComponentReview(action, store, workflowsDirFromConfig(loadMindStoneConfig(resolveConfigPath()).config));
-    if (componentReview) output.write(`${componentReview}\n`);
+    if (componentReview) output.write(`${printableText(componentReview)}\n`);
     if (action.status !== "pending") {
       output.write(`Decided: ${action.decidedAt ?? "?"} by ${action.decidedBy ?? "?"}${action.decisionNote ? ` — ${action.decisionNote}` : ""}\n`);
     }

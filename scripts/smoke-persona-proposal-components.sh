@@ -44,7 +44,7 @@ npx tsx <<'TS'
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { applyActionProposalDiscipline, ApprovalActionError, ApprovalStore, approveProposedAction, checkApprovable, extractActionProposals, ingestMindStoneKnowledgebase, MAX_PENDING_COMPONENTS, parsePersonaComponents, parseSkillProposal } from "./packages/mindstone-core/src/index.ts";
+import { applyActionProposalDiscipline, ApprovalActionError, ApprovalStore, approveProposedAction, checkApprovable, extractActionProposals, ingestMindStoneKnowledgebase, MAX_PENDING_COMPONENTS, parsePersonaComponents, parseSkillProposal, sanitizeMemoryProposalPath } from "./packages/mindstone-core/src/index.ts";
 const route = (extra = {}) => ({ id: "s", kind: "route", ...extra });
 assert.ok(parsePersonaComponents({ skills: ["a"], new: { workflows: [{ id: "w", steps: [route()] }] } }), "a plain component list parses");
 assert.equal(parsePersonaComponents({ new: { workflows: [{ id: "w", steps: [route({ personaId: "x" })] }] } }), undefined, "a proposed workflow routing to a persona must be refused");
@@ -97,6 +97,14 @@ for (const [field, value] of [["description", "Desc \u001b]0;TITLE\u0007"], ["in
   assert.equal(extractActionProposals(lfMemory).memory, undefined, "a memory path with a line break must be dropped");
   const lfCalendar = "```mindstone-calendar-proposal\n" + JSON.stringify({ operation: "create", resource: "event\nApproved — fake", data: { title: "t" } }) + "\n```";
   assert.equal(extractActionProposals(lfCalendar).mutations.length, 0, "a resource with a line break drops the mutation");
+  // Zero-width and bidi marks too: a path that looks like notes/todo.md must be notes/todo.md.
+  const zwMemory = "```mindstone-memory-proposal\n" + JSON.stringify({ path: "notes/to\u200bdo.md", content: "x" }) + "\n```";
+  assert.equal(extractActionProposals(zwMemory).memory, undefined, "a memory path with a zero-width space must be dropped");
+  // And at approve time, for a card proposed before names were checked.
+  for (const path of ["notes/a\u001b[8m.md", "notes/a\nb.md", "notes/to\u200fdo.md"]) {
+    assert.equal(sanitizeMemoryProposalPath(path), undefined, `an old card's path ${JSON.stringify(path)} must be refused at approve`);
+  }
+  assert.equal(sanitizeMemoryProposalPath("notes/todo"), "notes/todo.md", "control: a plain path");
   // A mutation's summary shows unsafe characters in its data escaped: summaries reach logs and the TUI as they are.
   const summaryStore = new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "summary-approvals.json") });
   const withC1 = applyActionProposalDiscipline({ replyText: "```mindstone-calendar-proposal\n" + JSON.stringify({ operation: "create", resource: "event", data: { title: "a\u009b8mb\u202ec" } }) + "\n```", origin: "unit", store: summaryStore });
@@ -423,6 +431,13 @@ say admin conv-p15 "$(proposal "${P15}")"
 expect 200 "approve p15" POST "/admin/approvals/$(card p15 persona_create)/approve" '{}'
 printf '{"skills":"x"}' > "${DATA}/personas/p15/skills.json"
 expect 200 "p15's KB with the persona broken" POST "/admin/approvals/$(card p15 persona_kb_create)/approve" '{}' "doesn't load"
+# A persona's workflows.json of the wrong shape is reported, never rewritten with only the new id.
+P17='{"id":"p17","name":"Seventeen","voice":"x","components":{"new":{"workflows":[{"id":"wf-seventeen","steps":[{"id":"s","kind":"route"}]}]}}}'
+say admin conv-p17 "$(proposal "${P17}")"
+expect 200 "approve p17" POST "/admin/approvals/$(card p17 persona_create)/approve" '{}'
+printf '{"workflows":"x"}' > "${DATA}/personas/p17/workflows.json"
+expect 200 "p17's workflow with a broken list" POST "/admin/approvals/$(card p17 workflow_create)/approve" '{}' "isn't a list of ids"
+[[ "$(cat "${DATA}/personas/p17/workflows.json")" == '{"workflows":"x"}' ]] || { echo "a malformed workflows.json was rewritten: $(cat "${DATA}/personas/p17/workflows.json")" >&2; exit 1; }
 # A new skill for a persona that lists no skills and no longer loads: nothing was added, and the note says so.
 P16='{"id":"p16","name":"Sixteen","voice":"x","components":{"new":{"skills":[{"id":"sixteen-skill","label":"S","description":"D","whenToUse":["w"],"outputs":["o"],"safetyNotes":["s"]}]}}}'
 say admin conv-p16 "$(proposal "${P16}")"

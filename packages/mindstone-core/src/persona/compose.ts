@@ -7,7 +7,7 @@ import { loadMindStoneWorkflow } from "../workflow/load.js";
 import { isRealWorkflowDir } from "../workflow/validate.js";
 import { isRealDirectory, isSafeComponentId, personaKnowledgebasesDir, readablePersonaKnowledgebasesDir } from "./components.js";
 import { PERSONA_PROPOSAL_ID } from "./create.js";
-import { loadMindStonePersona } from "./load.js";
+import { capabilityList, loadMindStonePersona } from "./load.js";
 
 /**
  * Owner-built personas (#125): create and edit a persona with its component
@@ -470,7 +470,11 @@ export function addPersonaComponentId(personaDir: string, key: "skills" | "workf
     if (error instanceof PersonaComposeError) throw error;
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new PersonaComposeError(`${key}.json can't be read`, "invalid_persona", 422);
   }
-  const list = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray((data as Record<string, unknown>)[key]) ? ((data as Record<string, unknown>)[key] as unknown[]) : [];
+  // Read as the persona loader reads it: a file of the wrong shape is the
+  // owner's to fix, never rewritten with only this id (#125 review).
+  const checked = capabilityList(data, key);
+  if (!Array.isArray(checked)) throw new PersonaComposeError(`${key}.json isn't a list of ids; fix it in the persona editor`, "invalid_persona", 422);
+  const list: string[] = [...checked];
   // No skills listed means every installed skill, this one included: writing
   // the list would take all the others away (#125 review).
   if (key === "skills" && list.length === 0) return "all";

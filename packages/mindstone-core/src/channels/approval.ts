@@ -357,7 +357,7 @@ function boundedList(value: unknown): string[] | undefined {
  */
 const PROPOSAL_UNSAFE_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u2028\u2029\u{E0000}-\u{E007F}]/u;
 /** A name (a memory path, a mutation resource) is one line too: a line break would draw a line of its own (#125 review). */
-const PROPOSAL_UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u2028\u2029\u{E0000}-\u{E007F}]/u;
+const PROPOSAL_UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\u2800\ufeff\u{E0000}-\u{E007F}]/u;
 
 /** Text for a summary line, with anything unsafe shown as \u{..}: summaries reach logs and the TUI as they are. */
 function summaryText(text: string): string {
@@ -656,7 +656,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
       } else if (fenceKind === "skill") {
         if (!skill) {
           skill = parseSkillProposal(parsed);
-          if (!skill) skillProposalError ??= "its fields don't hold up (an id, a one-line label and a description are needed, within their limits)";
+          if (!skill) skillProposalError ??= "its fields don't hold up (an id, a one-line label and a one-line description are needed, within their limits)";
         }
       } else {
         const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
@@ -940,7 +940,8 @@ export function applyActionProposalDiscipline(params: {
  */
 export function sanitizeMemoryProposalPath(path: string): string | undefined {
   const cleaned = path.replace(/\\/g, "/").replace(/^\/+/, "").trim();
-  if (!cleaned || cleaned.includes("..")) return undefined;
+  // Also checked here, at approve time, for a card proposed before names were checked (#125 review).
+  if (!cleaned || cleaned.includes("..") || PROPOSAL_UNSAFE_NAME.test(cleaned)) return undefined;
   const withExt = cleaned.endsWith(".md") ? cleaned : `${cleaned}.md`;
   return withExt;
 }

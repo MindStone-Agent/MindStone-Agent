@@ -110,7 +110,9 @@ The agent's `mindstone-persona-proposal` can carry `components`:
   Approving a proposed KB ingests its text sources only; if a URL
   source was added to it in between, ingest it from the persona editor. A
   component approved into a persona that no longer loads is added to its
-  list but reported as not in use (`listed: false`).
+  list but reported as not in use (`listed: false`); a skill for one that
+  lists no skills adds nothing. A list file of the wrong shape is never
+  rewritten: the component is reported as not added, to fix it by hand.
   Components are refused for: invisible characters or stacked combining marks
   in any of their text, a skill or workflow id both listed and brought as new
   (a shared KB and a private KB may share an id: they are separate), or a new
