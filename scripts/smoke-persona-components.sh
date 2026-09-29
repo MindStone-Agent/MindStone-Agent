@@ -273,6 +273,15 @@ last_prompt tenant
 expect tenant present "PERSONA-ONE" "PONE-7103" "GATTACHED-7101"
 expect tenant absent "PTWO-7104" "GOTHER-7102" "SKILLBODY-"
 node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const w=b.workflow; if (!w || w.workflowId !== "wf-one" || !w.decision || JSON.stringify(w.tried) !== JSON.stringify(["wf-nomatch","wf-one"])) { console.error("tenant: persona-one did not use its own workflows: " + JSON.stringify(w)); process.exit(1); } if (b.personaComponents?.personaId !== "persona-one" || b.personaComponents.globalKnowledgebases?.[0] !== "global-attached") { console.error("tenant: components not persona-one s: " + JSON.stringify(b.personaComponents)); process.exit(1); }' "${BODY}"
+# The request names persona-one and wf-route, whose step routes to persona-two
+# and narrows: persona-one answers, and that step doesn't narrow it.
+: > "${CAPTURE}"
+payload="$(TEXT="${QUESTION}" node -e 'process.stdout.write(JSON.stringify({ text: process.env.TEXT, appId: "shop", tenantId: "acme", userId: "cust43", personaId: "persona-one", workflowId: "wf-route" }))')"
+code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${COMPONENTS_TOKEN}" -H 'content-type: application/json' -d "${payload}" "${BASE}/agents/default/runs")"
+[[ "${code}" == 200 ]] || { echo "the tenant run with a workflow failed (${code}): $(cat "${BODY}")" >&2; exit 1; }
+last_prompt tenant-wf
+expect tenant-wf present "PERSONA-ONE" "PONE-7103" "GATTACHED-7101"
+expect tenant-wf absent "PERSONA-TWO" "PTWO-7104" "GOTHER-7102"
 echo "tenant ok"
 
 # --- 4. A non-owner chat under persona-one gets no recall, and its response doesn't name the persona's components.
