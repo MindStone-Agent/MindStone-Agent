@@ -389,7 +389,11 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   sent.length = 0;
   await backfillSqliteMemoryEmbeddings({ paths, provider: P, force: true });
   if (refusedSends() === 0) fail("--force should send a skipped chunk too");
-  // A new text is tried afresh.
+  // A new text is tried afresh, even after 3 refusals of the old one.
+  const three = new DatabaseSync(dbPath);
+  three.prepare("UPDATE memory_embed_rejections SET failures = ? WHERE chunk_id = 'refused#0' AND spec = 'stub:p'").run(MEMORY_EMBED_SKIP_AFTER);
+  three.close();
+  if (sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(P), paths).skipped !== 1) fail("control: the chunk refused 3 times should count as skipped before its text changes");
   const edit = new DatabaseSync(dbPath);
   edit.prepare("UPDATE memory_chunks SET text = 'an old note holding REFUSEDTEXT, edited' WHERE chunk_id = 'refused#0'").run();
   edit.close();
@@ -613,6 +617,34 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   if (!(outageResult instanceof Error) || rejections("stub:s") !== before) fail(`an outage during the single sends should stop the run and count nothing: ${String(outageResult)}, ${before} -> ${rejections("stub:s")}`);
   // The request, the test text, then the first single send.
   if (outageAlone.sent.length !== 3) fail(`it should stop at the first single send: ${outageAlone.sent.length} requests`);
+  // An embedder that turns to refusing everything during the single sends: the test text is sent again, is
+  // refused, and nothing is counted (#170 review 4).
+  toOther();
+  let probesSeen = 0;
+  const turns = { id: "stub", model: "f", sent: 0, async embedTexts(texts: string[]) {
+    this.sent += 1;
+    if (texts.length === 1 && texts[0]!.startsWith(`${MEMORY_EMBED_PROBE_TEXT} `)) { probesSeen += 1; if (probesSeen === 1) return [[0, 1, 0, 0]]; }
+    throw tooLong();
+  } };
+  const turned = await reembedSqliteMemoryOtherModel({ paths, provider: turns, limit: MEMORY_REEMBED_BATCH }).then(() => undefined, (error: unknown) => error);
+  if (!(turned instanceof Error) || !(turned as { refusedEverything?: boolean }).refusedEverything || rejections("stub:f") !== 0) fail(`an embedder that turned during the single sends should stop the run and count nothing: ${String(turned)}, ${rejections("stub:f")}`);
+  if (probesSeen !== 2 || turns.sent !== 1 + 1 + MEMORY_REEMBED_BATCH + 1) fail(`the request, the test text, its chunks alone and the test text again: ${turns.sent} requests, ${probesSeen} test texts`);
+  // A chunk rewritten after its single send was refused keeps no record of the old text (#170 review 3).
+  toOther();
+  gate = 0;
+  const rewrittenAfter = batchRefused((text) => (text === newest[0]!.text ? tooLong() : [0, 1, 0, 0]));
+  rewrittenAfter.model = "r";
+  await reembedSqliteMemoryOtherModel({ paths, provider: rewrittenAfter, limit: MEMORY_REEMBED_BATCH, beforeBatch: async () => {
+    gate += 1;
+    // Gates: the request, the test text, the first chunk alone (refused), then the second.
+    if (gate === 4) {
+      const db = new DatabaseSync(dbPath);
+      db.prepare("UPDATE memory_chunks SET text = text || ' (rewritten again)' WHERE chunk_id = ?").run(newest[0]!.id);
+      db.close();
+    }
+  } });
+  if (!rewrittenAfter.sent.some((texts) => texts.length === 1 && texts[0] === newest[0]!.text)) fail("control: the first chunk should have been sent alone before it was rewritten");
+  if (rejections("stub:r") !== 0) fail(`a refusal of a text the chunk no longer has shouldn't be recorded: ${rejections("stub:r")}`);
   // A turn's own chunk refused on its own is in the turn's result, which the gateway logs.
   const turnFile = join(paths.transcriptDir, "refused-turn.jsonl");
   writeFileSync(turnFile, JSON.stringify({ id: "t3", sessionKey: "agent:console:console:admin:c3", agentId: "default", role: "user", text: "a note holding TURNREFUSED", timestamp: "t", source: { substrate: "openai", channel: "openai-chat-completions", chatType: "internal" } }) + "\n");
@@ -648,6 +680,16 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   if (locked) lock.exec("ROLLBACK");
   lock.close();
   if (!(storeFailure instanceof Error) || !/writing the memory index failed/.test(storeFailure.message) || rejections("stub:k") !== 0) fail(`a locked index should stop the run, counting no refusal: ${String(storeFailure)}, ${rejections("stub:k")}`);
+  // Locked for a whole request's write too: the run stops at that request, sending no test text or chunk alone.
+  toOther();
+  const lockedAll = new DatabaseSync(dbPath);
+  lockedAll.exec("BEGIN IMMEDIATE");
+  let lockedCalls = 0;
+  const lockedRequest = { id: "stub", model: "k", async embedTexts(texts: string[]) { lockedCalls += 1; return B.embedTexts(texts); } };
+  const requestStoreFailure = await reembedSqliteMemoryOtherModel({ paths, provider: lockedRequest, limit: MEMORY_REEMBED_BATCH }).then(() => undefined, (error: unknown) => error);
+  lockedAll.exec("ROLLBACK");
+  lockedAll.close();
+  if (!(requestStoreFailure instanceof Error) || lockedCalls !== 1) fail(`a locked index on a whole request should stop the run there: ${String(requestStoreFailure)}, ${lockedCalls} requests`);
 }
 console.log(`recall index: ${total} chunks, switching models checked`);
 TS
