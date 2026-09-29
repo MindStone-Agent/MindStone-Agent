@@ -118,6 +118,7 @@ import {
   loadRoutePersonaContextById,
   unknownKnowledgebaseIds,
   knowledgebasesDirFromConfig,
+  personaKnowledgebasesDir,
   decisionForAnsweringPersona,
   personaComponentsSummary,
   privateKnowledgebasesAllowed,
@@ -1469,7 +1470,12 @@ async function runConfiguredRoute(input: {
           turnComponents,
           route.skills,
           privateKnowledgebasesAllowed(input.audience)
-            ? unknownKnowledgebaseIds(turnComponents.stepKnowledgebases, [knowledgebasesDirFromConfig(input.config), turnComponents.privateKnowledgebases?.dir])
+            ? unknownKnowledgebaseIds(turnComponents.stepKnowledgebases, [
+                knowledgebasesDirFromConfig(input.config),
+                // The persona's own folder, even when its private KBs weren't
+                // searched (a link): an id that exists isn't a typo.
+                personaResult.persona ? personaKnowledgebasesDir(personaResult.persona.dir) : undefined,
+              ])
             : undefined,
         )
       : undefined;

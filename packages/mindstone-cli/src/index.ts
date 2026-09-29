@@ -1321,7 +1321,10 @@ function personaKbDir(argv: string[], config: MindStoneConfig, paths: MindStoneR
   const personasDir = personasDirFromConfig(config, paths);
   const persona = loadMindStonePersona(personasDir, personaId);
   if (!persona.ok) throw new Error(`Persona "${personaId}" not found: ${persona.error}`);
-  const kbDir = isRealDirectory(persona.persona.dir) ? readablePersonaKnowledgebasesDir(persona.persona.dir) : undefined;
+  if (!isRealDirectory(persona.persona.dir)) {
+    throw new Error(`Persona "${personaId}" is a link to another folder; a link there is not used for its knowledge bases`);
+  }
+  const kbDir = readablePersonaKnowledgebasesDir(persona.persona.dir);
   if (!kbDir) {
     throw new Error(`Persona "${personaId}" has no knowledge bases folder at ${personaKnowledgebasesDir(persona.persona.dir)} (a link there is not used)`);
   }

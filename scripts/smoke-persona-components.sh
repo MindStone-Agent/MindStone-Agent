@@ -179,6 +179,10 @@ expect() {
 last_prompt cli
 expect cli present PONE-7103 GATTACHED-7101 SKILLBODY-alpha-skill
 expect cli absent PTWO-7104 GOTHER-7102 SKILLBODY-beta-skill
+# The CLI path records a step's unknown KB id too (persona-five's step names "no-such-kb").
+PERSONA=persona-five python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"])/"mindstone"/"config.json"; c=json.loads(p.read_text()); c["personas"]={"active":os.environ["PERSONA"]}; p.write_text(json.dumps(c,indent=2)+"\n")'
+./scripts/mindstone chat --once "${QUESTION}" --json >"${BODY}"
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const pc=b.assistantEntry?.metadata?.personaComponents; if (JSON.stringify(pc?.stepKnowledgebasesUnknown) !== JSON.stringify(["no-such-kb"])) { console.error("cli chat: the unknown step KB id was not recorded: " + JSON.stringify(pc)); process.exit(1); }' "${BODY}"
 echo "cli chat ok"
 
 # --- In-process App Engine (runMindStone): a tenant run under persona-one gets its private KB.

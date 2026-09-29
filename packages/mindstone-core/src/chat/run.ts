@@ -17,6 +17,7 @@ import {
   PERSONA_PROPOSAL_INSTRUCTIONS,
   decisionForAnsweringPersona,
   personaComponentsSummary,
+  personaKnowledgebasesDir,
   privateKnowledgebasesAllowed,
   resolveRoutePersonaContext,
   resolveTurnComponents,
@@ -761,7 +762,10 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
             personaComponents: personaComponentsSummary(
               turnComponents,
               route.skills,
-              unknownKnowledgebaseIds(turnComponents.stepKnowledgebases, [knowledgebasesDirFromConfig(input.config), turnComponents.privateKnowledgebases?.dir]),
+              unknownKnowledgebaseIds(turnComponents.stepKnowledgebases, [
+                knowledgebasesDirFromConfig(input.config),
+                personaResolution.persona ? personaKnowledgebasesDir(personaResolution.persona.dir) : undefined,
+              ]),
             ),
           }
         : {}),
