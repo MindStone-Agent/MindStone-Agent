@@ -668,7 +668,8 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     const run = async (name: string, script: (call: number) => unknown, rateLimit: any, timeoutMs?: number) => {
       const dir = mkdtempSync(join(tmpdir(), `kbvec-r3-${name}-`));
       let calls = 0;
-      const embedder = { id: "stub", model: "m1", async embedTexts(texts: string[]) { calls += 1; const error = script(calls); if (error) throw error; return texts.map(() => [1, 0, 0]); } } as any;
+      // 20 ms an answer: past a spent budget, the timeout would win the race (a microtask never loses).
+      const embedder = { id: "stub", model: "m1", async embedTexts(texts: string[]) { calls += 1; await new Promise((resolve) => setTimeout(resolve, 20)); const error = script(calls); if (error) throw error; return texts.map(() => [1, 0, 0]); } } as any;
       const started = Date.now();
       const result = await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder, batchSize: 1, rateLimit, ...(timeoutMs ? { timeoutMs } : {}) }) as any;
       return { result, calls, ms: Date.now() - started };
