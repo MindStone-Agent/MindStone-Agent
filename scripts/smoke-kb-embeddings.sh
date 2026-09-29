@@ -830,7 +830,7 @@ set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-b"'
 stub_mode ok
 ${MS} kb status pantry --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="stale") { console.error("pantry before the chat:", JSON.stringify(s.vectors)); process.exit(1); }})'
 # 20 s at most: a turn never waits for the re-embed (#156 review).
-code="$(curl -s --max-time 20 -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H 'content-type: application/json' -d '{"text":"anything new about the garden?"}' "${BASE}/chat/send")"
+code="$(curl -s --max-time 20 -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H 'content-type: application/json' -d '{"text":"anything new about the garden?"}' "${BASE}/chat/send")" || true
 [[ "${code}" == "200" ]] || { echo "gateway chat after the switch ${code} (000: no answer in 20 s): $(cat "${BODY}")" >&2; exit 1; }
 for _ in $(seq 1 40); do
   grep -q '"model":"kbstub-b"' "${DATA}/knowledgebases/pantry/vectors.json" 2>/dev/null && break
