@@ -381,6 +381,7 @@ const BOOKKEEPING_EVENTS = new Set([
   "routing_failed",
   "abort_requested",
   "persona_proposal_dropped",
+  "skill_proposal_dropped",
   "persona_load_failed",
   "client_system_prompt_ignored",
   "approval_proposed",

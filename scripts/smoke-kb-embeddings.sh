@@ -618,4 +618,29 @@ QUESTION="${GQ}" node -e '
   if (!ids.includes("pkb:grower:beds:beds.md")) { console.error("gateway turn did not recall the private KB by meaning:", JSON.stringify(last?.metadata?.hits)); process.exit(1); }'
 [[ "$(stub_count "${GQ}")" == "1" ]] || { echo "gateway: query embedded $(stub_count "${GQ}") times" >&2; exit 1; }
 
+# An agent-proposed private KB is embedded when its card is approved, through the gateway and the CLI.
+stub_mode ok
+cards="$(MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
+import { applyActionProposalDiscipline, ApprovalStore } from "./packages/mindstone-core/src/index.ts";
+const store = new ApprovalStore();
+const ids: string[] = [];
+for (const id of ["pa-gateway", "pa-cli"]) {
+  const block = { id, name: id, voice: "Plain.", components: { new: { privateKnowledgebases: [{ id: "beds", sources: [{ text: "# Beds\n\nRaised garden beds drain well." }] }] } } };
+  const made = applyActionProposalDiscipline({ replyText: "Here.\n```mindstone-persona-proposal\n" + JSON.stringify(block) + "\n```", origin: "smoke", allowPersona: true, store, sessionKey: "smoke:approve" });
+  if (made.proposals.length !== 2) throw new Error(`expected a persona card and a KB card for ${id}, got ${made.proposals.length}`);
+  ids.push(...made.proposals.map((card) => card.id));
+}
+console.log(ids.join(" "));
+TS
+)"
+read -r gw_persona gw_kb cli_persona cli_kb <<<"${cards}"
+[[ "$(call POST "/admin/approvals/${gw_persona}/approve" '{}')" == "200" ]] || { echo "approve persona: $(cat "${BODY}")" >&2; exit 1; }
+[[ "$(call POST "/admin/approvals/${gw_kb}/approve" '{}')" == "200" ]] || { echo "approve KB: $(cat "${BODY}")" >&2; exit 1; }
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (b.result?.ingested?.vectors?.state!=="ready") { console.error("gateway approve-path ingest vectors:", JSON.stringify(b)); process.exit(1); }' "${BODY}"
+[[ -f "${DATA}/personas/pa-gateway/knowledgebases/beds/vectors.json" ]] || { echo "the gateway's approved KB has no vectors.json" >&2; exit 1; }
+${MS} approvals approve "${cli_persona}" --yes >/dev/null
+${MS} approvals approve "${cli_kb}" --yes > "${TEMP_RUNTIME}/cli-approve.txt"
+grep -q "vectors: ready" "${TEMP_RUNTIME}/cli-approve.txt" || { echo "CLI approve-path ingest: $(cat "${TEMP_RUNTIME}/cli-approve.txt")" >&2; exit 1; }
+[[ -f "${DATA}/personas/pa-cli/knowledgebases/beds/vectors.json" ]] || { echo "the CLI's approved KB has no vectors.json" >&2; exit 1; }
+
 echo "KB embeddings smoke test passed."

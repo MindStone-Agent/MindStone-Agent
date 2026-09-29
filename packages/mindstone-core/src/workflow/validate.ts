@@ -1,5 +1,8 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { MindStoneConfig } from "../config/types.js";
+import type { MindStoneRuntimePaths } from "../paths/runtime.js";
+import { discoverMindStonePersonas, loadMindStonePersona, personasDirFromConfig } from "../persona/load.js";
 import { MAX_WORKFLOW_GATE_ATTEMPTS } from "./load.js";
 import type { MindStoneWorkflowCondition, MindStoneWorkflowStep } from "./types.js";
 
@@ -289,4 +292,14 @@ export function referencedWorkflowIds(
   for (const rule of Array.isArray(config?.workflows?.routes) ? config.workflows.routes : []) add((rule as { workflowId?: unknown })?.workflowId);
   for (const id of personaListed) add(id);
   return ids;
+}
+
+/** `referencedWorkflowIds` with the ids every loadable persona on disk lists (#125). */
+export function workflowIdsInUse(config: MindStoneConfig | undefined, paths?: MindStoneRuntimePaths): Set<string> {
+  const personasDir = personasDirFromConfig(config, paths);
+  const listed = discoverMindStonePersonas(personasDir).flatMap((summary) => {
+    const persona = summary.error ? undefined : loadMindStonePersona(personasDir, summary.id);
+    return persona?.ok ? persona.persona.workflows : [];
+  });
+  return referencedWorkflowIds(config, listed);
 }

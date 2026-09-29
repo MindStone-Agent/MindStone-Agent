@@ -257,12 +257,14 @@ import {
   addPrivateKnowledgebaseSource,
   ensurePersonaKnowledgebasesDir,
   ingestMindStoneKnowledgebase,
+  ingestApprovedPrivateKnowledgebase,
   KB_URL_FETCH_LIMITS,
   isSafeComponentId,
   discoverMindStoneKnowledgebases,
   workflowForEditing,
   referencedWorkflowIds,
   PRIVATE_KB_LIMITS,
+  workflowIdsInUse,
 } from "@mindstone-agent/core";
 
 export type GatewayOptions = {
@@ -2100,7 +2102,19 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       sendJson(res, 404, { ok: false, error: `no proposed action matches id "${approvalMatch[1]}"` });
       return;
     }
-    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation, persona: action.persona, skill: action.skill } });
+    // A persona's listed workflows with their steps (#125 review): what the
+    // persona would run, as the CLI shows it; a missing one is null.
+    const listedWorkflows = action.components?.workflows.length
+      ? (() => {
+          const workflowsDir = workflowsDirFromConfig(loadMindStoneConfig(configPath).config, paths);
+          return action.components!.workflows.map((id) => {
+            // As the approval finds it: that exact folder name only (#125 review).
+            const loaded = isRealWorkflowDir(workflowsDir, id) ? loadMindStoneWorkflow(workflowsDir, id) : undefined;
+            return { id, steps: loaded?.ok ? loaded.workflow.steps : null };
+          });
+        })()
+      : undefined;
+    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation, persona: action.persona, skill: action.skill, components: action.components, ...(listedWorkflows ? { listedWorkflows } : {}), workflow: action.workflow, knowledgebase: action.knowledgebase } });
     return;
   }
   if (req.method === "GET" && url.pathname === "/admin/skills") {
@@ -2380,7 +2394,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         goal: body.goal,
       });
       if (!overrides) {
-        sendJson(res, 400, { ok: false, error: "id must be lowercase letters, digits and hyphens; label, description and goal at most 2000 characters" });
+        sendJson(res, 400, { ok: false, error: "id must be lowercase letters, digits and hyphens; label and description one line; label, description and goal at most 2000 characters; no field may hold control, hidden or direction characters (soft hyphens, zero-width spaces, direction marks)" });
         return;
       }
       draftInput = {
@@ -2398,7 +2412,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       if (!skill) {
         sendJson(res, 400, {
           ok: false,
-          error: "a skill needs an id (lowercase letters, digits, hyphens), a label and a description; goal, whenToUse, outputs, safetyNotes and instructions are optional and bounded",
+          error: "a skill needs an id (lowercase letters, digits, hyphens), a one-line label and a one-line description; goal, whenToUse, outputs, safetyNotes and instructions are optional and bounded; no field may hold control, hidden or direction characters (soft hyphens, zero-width spaces, direction marks)",
         });
         return;
       }
@@ -2546,12 +2560,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         }
         // An id the config already runs (workflows.active, a route rule), or a
         // persona already lists, would take effect on save.
-        const personasForRefs = personasDirFromConfig(gateConfig.config, paths);
-        const listedByPersonas = discoverMindStonePersonas(personasForRefs).flatMap((summary) => {
-          const persona = summary.error ? undefined : loadMindStonePersona(personasForRefs, summary.id);
-          return persona?.ok ? persona.persona.workflows : [];
-        });
-        if (referencedWorkflowIds(loadMindStoneConfig(configPath).config, listedByPersonas).has(id)) {
+        if (workflowIdsInUse(loadMindStoneConfig(configPath).config, paths).has(id)) {
           throw new WorkflowWriteError(`the config or a persona already names a workflow "${id}", so creating it would take effect with no switch; choose another id`, "workflow_referenced", 409);
         }
         const personasDir = personasDirFromConfig(gateConfig.config, paths);
@@ -2722,7 +2731,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     try {
       if (decision === "approve") {
         // Under the admin write lock, like every config-adjacent write.
-        await withAdminWriteLock(() => {
+        await withAdminWriteLock(async () => {
           const current = loadMindStoneConfig(configPath).config;
           const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
             decidedBy: `console:${userId}`,
@@ -2732,7 +2741,38 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
             onDecision,
             personasDir: personasDirFromConfig(current, paths),
             referencedPersonaIds: referencedPersonaIds(current, paths),
+            workflowsDir: workflowsDirFromConfig(current, paths),
+            knowledgebasesDir: knowledgebasesDirFromConfig(current, paths),
+            referencedWorkflowIds: workflowIdsInUse(current, paths),
           });
+          if (result.kind === "persona_kb_create" && result.outcome === "approved") {
+            // Approving a proposed private KB writes and ingests it (#125). Text
+            // sources only, so nothing is fetched. A failed ingest leaves the KB
+            // written, and says so, even when the ingest throws (#125 review):
+            // the approval has happened by then. It counts as that KB's
+            // ingest, so an admin ingest of it can't overlap (#125 review).
+            const ingestKey = `${result.personaId}/${result.kbId}`;
+            const ingested = PRIVATE_KB_INGESTS.has(ingestKey) || PRIVATE_KB_INGESTS.size >= MAX_PRIVATE_KB_INGESTS
+              ? { ok: false as const, error: "other ingests are running; ingest it from the persona editor when they finish" }
+              : await (async () => {
+                  PRIVATE_KB_INGESTS.add(ingestKey);
+                  try {
+                    return await ingestApprovedPrivateKnowledgebase(result.kbRoot, result.kbId, {
+                      now: new Date().toISOString(),
+                      embedder: createMemoryEmbeddingProvider(loadMindStoneConfig(configPath).config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs }),
+                    });
+                  } catch (error) {
+                    return { ok: false as const, error: error instanceof Error ? error.message : String(error) };
+                  } finally {
+                    PRIVATE_KB_INGESTS.delete(ingestKey);
+                  }
+                })();
+            const { kbRoot: _root, ...shown } = result;
+            sendJson(res, 200, { ok: true, result: { ...shown, ingested: ingested.ok
+              ? { entryCount: ingested.entryCount, vectors: ingested.vectors.state === "ready" ? { state: "ready" } : { state: ingested.vectors.state, reason: ingested.vectors.reason } }
+              : { error: publicKbText(ingested.error, result.kbRoot) } } });
+            return;
+          }
           sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
         });
       } else {
@@ -4136,6 +4176,8 @@ function approvalSummary(action: ProposedAction) {
     decidedBy: action.decidedBy,
     decisionNote: action.decisionNote,
     queueState: action.queueState,
+    // A component card's persona card (#125), so the list can group them.
+    ...(action.parentApprovalId ? { parentApprovalId: action.parentApprovalId } : {}),
   };
 }
 

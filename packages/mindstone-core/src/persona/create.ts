@@ -24,11 +24,13 @@ export const PERSONA_PROPOSAL_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
  */
 export const PERSONA_PROPOSAL_INSTRUCTIONS = [
   "# Proposing a persona",
-  "When the user asks you to, or once identity formation has given you enough to go on, you can propose a working persona for yourself: your name, voice, working style and boundaries. It is saved only if the owner approves it in the MindStone Console, and it takes effect only when they switch to it there.",
+  "When the user asks you to, or once identity formation has given you enough to go on, you can propose a working persona for yourself: your name, voice, working style and boundaries, and the skills, workflows and knowledge bases it works with. It is saved only if the owner approves it in the MindStone Console, and it takes effect only when they switch to it there.",
   "Propose it by ending your reply with exactly one fenced code block, not inside any other block. Its first line is exactly ```mindstone-persona-proposal (no space or line break between the backticks and the name), then one line of JSON, then a line of three backticks. `id` is lowercase letters, digits and hyphens. The JSON looks like this:",
   '{"id":"wren","name":"Wren","description":"One line on who this persona is.","voice":"How you speak.","workingStyle":"How you work with the user.","boundaries":["Something you will not do."]}',
-  "The block is removed from what the user sees, so also say in your reply that you've put a persona up for approval. A persona adjusts voice and working style only: it never overrides your core identity, the user's boundaries or safety rules. Don't claim it is active until the user says they switched to it.",
-  "Once switched to, a persona is used in every chat, including other people's chats and connectors, so keep private details about the user out of it: those belong in USER.md.",
+  "It can also carry `components`: existing skills, workflows and shared knowledge bases by id (listing none means all skills and all shared knowledge bases), and new ones it brings. Each new one is its own card that the owner approves after the persona. Bring a new skill only when the owner asked for one; otherwise list existing skills. Limits: up to 3 new skills, each with the fields of a skill proposal and not an existing skill's id; up to 3 new workflows, each with a lowercase id and route or gate steps, none of which names a persona; up to 2 new private knowledge bases, each with a lowercase id and 1 to 5 sources of markdown `text` (at most 20,000 characters each). Don't list an id you also bring as new. If any part doesn't hold up, nothing is saved and your reply says why. For example:",
+  '"components":{"skills":["existing-skill"],"workflows":[],"knowledgebases":["shared-kb"],"new":{"skills":[],"workflows":[{"id":"triage","steps":[{"id":"urgent","kind":"route","when":{"messagePrefix":"urgent:"},"skills":["existing-skill"]}]}],"privateKnowledgebases":[{"id":"notes","sources":[{"text":"# Notes\\n\\nWhat this persona should know."}]}]}}',
+  "The block is removed from what the user sees, so also say in your reply that you've put a persona up for approval. A persona sets your voice, working style, and the skills, workflows and knowledge bases you use in it: it never overrides your core identity, the user's boundaries or safety rules. Don't claim it is active until the user says they switched to it.",
+  "Once switched to, a persona is used in every chat, including other people's chats and connectors, so keep private details about the user out of it and out of its knowledge bases: those belong in USER.md.",
 ].join("\n");
 
 const LIMITS = { name: 60, description: 300, voice: 1500, workingStyle: 1500, boundary: 300, boundaries: 12 };
@@ -41,8 +43,11 @@ const LIMITS = { name: 60, description: 300, voice: 1500, workingStyle: 1500, bo
  */
 const INVISIBLE = /[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u2800\u3164\uFFA0\u115F\u1160]/u;
 
+/** The same check for text a persona proposal brings with it (#125): KB sources. */
+export const PERSONA_TEXT_INVISIBLE = INVISIBLE;
+
 /** Three or more combining marks on one character: they can draw over the card rows around them (#105 review). */
-const STACKED_MARKS = /\p{M}{3,}/u;
+export const STACKED_MARKS = /\p{M}{3,}/u;
 
 function text(value: unknown, max: number, singleLine = false): string | undefined | false {
   if (value === undefined) return undefined;
@@ -105,7 +110,7 @@ export function renderPersonaMarkdown(persona: PersonaProposalPayload): string {
   if (persona.voice) lines.push("## Voice", "", quoteHeadings(persona.voice), "");
   if (persona.workingStyle) lines.push("## Working style", "", quoteHeadings(persona.workingStyle), "");
   if (persona.boundaries?.length) lines.push("## Boundaries", "", ...persona.boundaries.map((item) => `- ${quoteHeadings(item)}`), "");
-  lines.push("This persona was proposed by the agent and approved by its owner. It adjusts voice and working style only; the core identity, the user's boundaries and the safety rules still govern.");
+  lines.push("This persona was proposed by the agent and approved by its owner. It sets voice, working style and the components it lists; the core identity, the user's boundaries and the safety rules still govern.");
   return `${lines.join("\n")}\n`;
 }
 
@@ -121,6 +126,8 @@ export function writeProposedPersona(params: {
   persona: PersonaProposalPayload;
   approvedBy: string;
   now: string;
+  /** The persona card's approval id: its component cards attach only to this folder (#146 review). */
+  approvalId?: string;
 }): string {
   if (!PERSONA_PROPOSAL_ID.test(params.persona.id)) throw new Error(`not a persona id: ${params.persona.id}`);
   const dir = join(params.personasDir, params.persona.id);
@@ -137,7 +144,7 @@ export function writeProposedPersona(params: {
   writeFileSync(join(dir, "PERSONA.md"), renderPersonaMarkdown(params.persona), { flag: "wx" });
   writeFileSync(
     join(dir, "metadata.json"),
-    `${JSON.stringify({ name: params.persona.name, version: "1", description: params.persona.description, createdBy: "agent", approvedBy: params.approvedBy, approvedAt: params.now }, null, 2)}\n`,
+    `${JSON.stringify({ name: params.persona.name, version: "1", description: params.persona.description, createdBy: "agent", approvedBy: params.approvedBy, approvedAt: params.now, ...(params.approvalId ? { approvalId: params.approvalId } : {}) }, null, 2)}\n`,
     { flag: "wx" },
   );
   } catch (error) {
