@@ -415,6 +415,10 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   calls = 0;
   const wholeBackfill = await backfillSqliteMemoryEmbeddings({ paths, provider: everything }).then(() => undefined, (error: unknown) => error);
   if (!(wholeBackfill instanceof Error) || rejections("stub:q") !== 0) fail(`a whole backfill against it should stop and mark nothing: ${String(wholeBackfill)}, ${rejections("stub:q")}`);
+  // A run of one request against it, all refused: nothing embedded and never worked here, so at the
+  // end of the run it stops too, marking nothing.
+  const oneRequest = await reembedSqliteMemoryOtherModel({ paths, provider: everything, limit: MEMORY_REEMBED_BATCH }).then(() => undefined, (error: unknown) => error);
+  if (!(oneRequest instanceof Error) || rejections("stub:q") !== 0) fail(`a one-request run against it should stop and mark nothing: ${String(oneRequest)}, ${rejections("stub:q")}`);
   // A model that has embedded here before and now refuses everything: the run stops, and only the
   // chunks of those two requests are counted (so a real run of bad texts at the head is got past).
   const worked = { id: "stub", model: "w", embedTexts: (texts: string[]) => B.embedTexts(texts) };
