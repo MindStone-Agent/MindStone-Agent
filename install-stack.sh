@@ -155,7 +155,7 @@ dc() {
   for name in $(compgen -e); do
     case "${name}" in
       COMPOSE_* | OLLAMA_BASE_URL | CONSOLE_PORT | MINDSTONE_GATEWAY_PORT | MINDSTONE_REF | CONSOLE_REF | \
-        MINDSTONE_BUILD_CONTEXT | CONSOLE_BUILD_CONTEXT | UID | GID) unset+=(-u "${name}") ;;
+        MINDSTONE_BUILD_CONTEXT | CONSOLE_BUILD_CONTEXT | MINDSTONE_MONGO_DATA | MINDSTONE_MONGO_USER | UID | GID) unset+=(-u "${name}") ;;
     esac
   done
   env ${unset[@]+"${unset[@]}"} docker compose --project-directory "${INSTALL_DIR}" "${files[@]}" "$@"
