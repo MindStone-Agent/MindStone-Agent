@@ -28,7 +28,17 @@ export type SqliteMemoryEmbeddingBackfillOptions = {
   force?: boolean;
   /** Embed the newest chunks first (live indexing, #106), so a backlog doesn't hold up the latest turn. */
   newestFirst?: boolean;
+  /**
+   * At most this many chunks another model (or an unrecorded one) embedded
+   * are embedded again in this run, newest first; chunks with no vector are
+   * always embedded. Absent: all of them (#140 review: a whole-index
+   * re-embed on the per-turn queue held up every later turn's own chunks).
+   */
+  otherModelLimit?: number;
 };
+
+/** How many of another model's chunks each turn's index update embeds again (#140 review). */
+export const MEMORY_REEMBED_PER_TURN = 128;
 
 export type SqliteMemoryEmbeddingBackfillResult = {
   databasePath: string;
@@ -708,7 +718,11 @@ export async function indexSqliteMemoryTurn(options: {
     db.close();
   }
   const provider = options.provider ?? createMemoryEmbeddingProvider(options.config);
-  const embedded = provider ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true }) : undefined;
+  // The turn's own chunks, then a few of another model's: a model switch is finished over later turns
+  // (or at once by `mindstone memory backfill --embed`), never ahead of this turn's chunks (#140 review).
+  const embedded = provider
+    ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true, otherModelLimit: MEMORY_REEMBED_PER_TURN })
+    : undefined;
   return { databasePath, sourcesIndexed, chunksEmbedded: embedded?.chunksEmbedded ?? 0 };
 }
 
@@ -721,22 +735,36 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
   const spec = memoryEmbeddingSpec(provider);
   const db = openDatabase(databasePath);
   initializeSchema(db);
-  // Chunks with no vector, and chunks another model (or an unrecorded one) embedded (#140).
+  const order = `ORDER BY updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC`;
+  // Chunks with no vector, and chunks another model (or an unrecorded one) embedded (#140);
+  // with otherModelLimit, every chunk with no vector first, then at most that many of the others, newest first.
   const rows = (options.force
-    ? db.prepare(`SELECT chunk_id, text FROM memory_chunks ORDER BY updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC`).all()
-    : db.prepare(`
-      SELECT chunk_id, text
-      FROM memory_chunks
-      WHERE embedding_json IS NULL OR embedding_spec IS NULL OR embedding_spec != ?
-      ORDER BY updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC
-    `).all(spec)) as Array<{ chunk_id: string; text: string }>;
+    ? db.prepare(`SELECT chunk_id, text FROM memory_chunks ${order}`).all()
+    : options.otherModelLimit === undefined
+      ? db.prepare(`
+        SELECT chunk_id, text
+        FROM memory_chunks
+        WHERE embedding_json IS NULL OR embedding_spec IS NULL OR embedding_spec != ?
+        ${order}
+      `).all(spec)
+      : [
+          ...db.prepare(`SELECT chunk_id, text FROM memory_chunks WHERE embedding_json IS NULL ${order}`).all(),
+          ...db.prepare(`
+            SELECT chunk_id, text
+            FROM memory_chunks
+            WHERE embedding_json IS NOT NULL AND (embedding_spec IS NULL OR embedding_spec != ?)
+            ORDER BY updated_at DESC, chunk_id ASC
+            LIMIT ?
+          `).all(spec, Math.max(0, Math.floor(options.otherModelLimit))),
+        ]) as Array<{ chunk_id: string; text: string }>;
 
   const batchSize = Math.max(1, options.batchSize ?? 16);
   let chunksEmbedded = 0;
   let dimensions: number | undefined;
   // updated_at is left alone: an embedding isn't a change to the chunk, and recall ranks its window by
   // it, so re-embedding a whole index (after a model switch) must not turn old chats into new ones (#140 review).
-  const update = db.prepare("UPDATE memory_chunks SET embedding_json = ?, embedding_spec = ? WHERE chunk_id = ?");
+  // Only the text that was embedded: a chunk re-indexed meanwhile keeps its own (#140 review).
+  const update = db.prepare("UPDATE memory_chunks SET embedding_json = ?, embedding_spec = ? WHERE chunk_id = ? AND text = ?");
 
   try {
     for (let offset = 0; offset < rows.length; offset += batchSize) {
@@ -749,8 +777,8 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
       try {
         embeddings.forEach((embedding, index) => {
           dimensions ??= embedding.length;
-          update.run(JSON.stringify(embedding), spec, batch[index].chunk_id);
-          chunksEmbedded += 1;
+          const changed = update.run(JSON.stringify(embedding), spec, batch[index].chunk_id, batch[index].text);
+          if (Number(changed.changes) > 0) chunksEmbedded += 1;
         });
         db.exec("COMMIT");
       } catch (error) {

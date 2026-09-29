@@ -41,7 +41,11 @@ printf '# Garden\n\nTomatoes grow along the south fence.\n' > "${DATA}/memory/ga
 # --- 1. The recall index, directly: models A (3 numbers), B (4) and C (3, a different model).
 npx tsx - <<'TS'
 import { DatabaseSync } from "node:sqlite";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
+  MEMORY_REEMBED_PER_TURN,
+  indexSqliteMemoryTurn,
   backfillSqliteMemoryEmbeddings,
   backfillSqliteMemoryIndex,
   memoryEmbeddingSpec,
@@ -62,7 +66,7 @@ const stub = (model: string, size: number) => ({
   async embedTexts(texts: string[]) {
     return texts.map((text) => {
       const v = new Array(size).fill(0);
-      v[/lighthouse/i.test(text) ? 0 : /zebraword/i.test(text) ? 2 : 1] = 1;
+      v[/lighthouse/i.test(text) ? 0 : /zebraword/i.test(text) ? 2 : /biscuit/i.test(text) && size > 3 ? 3 : 1] = 1;
       return v;
     });
   },
@@ -149,6 +153,10 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
 
 // Vectors from before the model was recorded count as another model's, and are embedded again.
 {
+  // Proper B vectors first, and a control: with the model recorded, B finds the lighthouse by its vector.
+  await backfillSqliteMemoryEmbeddings({ paths, provider: B, force: true });
+  const control = await modes(B);
+  if (!control[0]?.startsWith("embedding:lh")) fail(`control: B should find the lighthouse by embedding before the model is cleared: ${JSON.stringify(control)}`);
   const db = new DatabaseSync(dbPath);
   db.prepare("UPDATE memory_chunks SET embedding_spec = NULL").run();
   db.close();
@@ -186,6 +194,31 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
     fail(`after re-embedding a large index, the newest chunk should still be recalled by its vector: ${JSON.stringify(hits.map((h) => [h.metadata?.recallMode, h.text.slice(0, 30)]))}`);
   }
 }
+// A switch in progress: every chunk is another model's. One turn's index update embeds that turn's
+// own chunks, then only the newest MEMORY_REEMBED_PER_TURN of the others, and a fact said in that
+// turn is recalled from another chat by its vector at once.
+{
+  const db = new DatabaseSync(dbPath);
+  db.prepare("UPDATE memory_chunks SET embedding_spec = 'stub:a' WHERE embedding_json IS NOT NULL").run();
+  const otherBefore = sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(B), paths).otherModel;
+  const newest = (db.prepare(`SELECT chunk_id AS id FROM memory_chunks WHERE embedding_json IS NOT NULL ORDER BY updated_at DESC, chunk_id ASC LIMIT ?`).all(MEMORY_REEMBED_PER_TURN) as Array<{ id: string }>).map((row) => row.id).sort();
+  db.close();
+  mkdirSync(paths.transcriptDir, { recursive: true });
+  const file = join(paths.transcriptDir, "switch-turn.jsonl");
+  writeFileSync(file, JSON.stringify({ id: "t1", sessionKey: "agent:console:console:admin:c1", agentId: "default", role: "user", text: "my dog's name is BISCUIT-9431", timestamp: "t", source: { substrate: "openai", channel: "openai-chat-completions", chatType: "internal" } }) + "\n");
+  const turn = await indexSqliteMemoryTurn({ transcriptFile: file, config: { memory: { vectorStore: "sqlite-vec" } }, paths, provider: B });
+  const otherAfter = sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(B), paths).otherModel;
+  if (otherBefore - otherAfter !== MEMORY_REEMBED_PER_TURN) fail(`one turn should re-embed exactly ${MEMORY_REEMBED_PER_TURN} of another model's chunks: ${otherBefore} -> ${otherAfter}`);
+  if (turn.chunksEmbedded !== MEMORY_REEMBED_PER_TURN + 1) fail(`the turn should embed its own chunk and ${MEMORY_REEMBED_PER_TURN} others: ${JSON.stringify(turn)}`);
+  const after = new DatabaseSync(dbPath);
+  const redone = (after.prepare("SELECT chunk_id AS id FROM memory_chunks WHERE embedding_spec = 'stub:b' AND chunk_id NOT LIKE 'transcript:%'").all() as Array<{ id: string }>).map((row) => row.id).sort();
+  after.close();
+  if (JSON.stringify(redone) !== JSON.stringify(newest)) fail(`the chunks re-embedded should be the newest ${MEMORY_REEMBED_PER_TURN}: ${redone.length} redone, ${redone.filter((id) => !newest.includes(id)).length} not among the newest`);
+  const hits = await new SqliteMemoryRecallProvider({ databasePath: dbPath, embeddingProvider: B }).search({ text: "BISCUIT-9431 dog", limit: 4 });
+  if (!hits.some((hit) => hit.text.includes("BISCUIT-9431") && hit.metadata?.recallMode === "embedding")) {
+    fail(`a fact said while the switch is in progress should be recalled by its vector: ${JSON.stringify(hits.map((h) => [h.metadata?.recallMode, h.text.slice(0, 30)]))}`);
+  }
+}
 console.log(`recall index: ${total} chunks, switching models checked`);
 TS
 
@@ -198,8 +231,12 @@ createServer((req, res) => {
   req.on("data", (chunk) => (raw += chunk)).on("end", () => {
     const body = raw ? JSON.parse(raw) : {};
     const size = body.model === "model-a" ? 3 : 4;
+    // model-slow answers after 12 s, as a cold model loading would: past the 10 s chat timeout.
+    const delay = body.model === "model-slow" ? 12_000 : 0;
+    setTimeout(() => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ data: (body.input ?? []).map((_, index) => ({ index, embedding: Array.from({ length: size }, (_, i) => (i === 0 ? 1 : 0)) })) }));
+    }, delay);
   });
 }).listen(Number(process.env.STUB_PORT), "127.0.0.1");
 NODE
@@ -236,5 +273,8 @@ judge() { node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1]
 judge "the check for model-b should count every memory as another model's" 'b.ok === true && Number.isInteger(b.index?.embedded) && b.index.embedded >= 2 && b.index.otherModel === b.index.embedded'
 [[ "$(post /admin/memory/check '{"embeddingProvider":"ollama:model-a"}')" == 200 ]] || { echo "checking model-a failed: $(cat "${BODY}")" >&2; exit 1; }
 judge "the check for the model that embedded them should count none" 'b.ok === true && Number.isInteger(b.index?.embedded) && b.index.embedded >= 2 && b.index.otherModel === 0'
+# A model that takes 12 s to answer (loading) still passes the check, which waits 45 s for it.
+[[ "$(post /admin/memory/check '{"embeddingProvider":"ollama:model-slow"}')" == 200 ]] || { echo "checking model-slow failed: $(cat "${BODY}")" >&2; exit 1; }
+judge "the check should wait for a model that takes 12 s to load" 'b.ok === true && b.dimensions === 4'
 
 echo "Memory embedding model switch smoke test passed."
