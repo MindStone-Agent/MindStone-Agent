@@ -58,22 +58,34 @@ export function parseExternalSources(raw: unknown): MindStoneKbExternalSource[] 
   return sources;
 }
 
-/** Query parameters whose values are credentials, by name. */
-const SECRET_PARAM = /(token|key|secret|sig|signature|auth|password|passwd|pwd|credential|session|code)/i;
+/**
+ * A path segment that may be a credential, by the gateway's masking rule for
+ * config reads (`maskUrlCredentials`): a colon, 24 or more characters, or 16
+ * or more mixing letters and digits.
+ */
+function isSecretPathSegment(segment: string): boolean {
+  if (segment.includes(":") || segment.length >= 24) return true;
+  return segment.length >= 16 && /[A-Za-z]/.test(segment) && /\d/.test(segment);
+}
 
 /**
- * An address as it may be shown: in an error, a citation, recall text (#125).
- * No user name or password, and the value of any query parameter named like
- * a credential (`token`, `key`, `sig`, …) is `***`. What is fetched is the
- * stored address; this is only what is written down.
+ * An address as it may be written down: in an error, a citation, recall text
+ * (#125). No user name or password, no query and no fragment (shown as `?…`
+ * when there was one, since no list of credential names is complete), matrix
+ * parameters (`;jsessionid=…`) cut from each path segment, and a segment that
+ * may be a credential written as `***`. What is fetched is the stored address.
  */
 export function publicAddress(url: string): string {
   try {
     const parsed = new URL(url);
-    const query = [...parsed.searchParams.entries()]
-      .map(([name, value]) => `${encodeURIComponent(name)}=${SECRET_PARAM.test(name) ? "***" : encodeURIComponent(value)}`)
-      .join("&");
-    return `${parsed.protocol}//${parsed.host}${parsed.pathname}${query ? `?${query}` : ""}`;
+    const path = parsed.pathname
+      .split("/")
+      .map((segment) => {
+        const plain = segment.split(";")[0] ?? "";
+        return plain && isSecretPathSegment(decodeURIComponent(plain)) ? "***" : plain;
+      })
+      .join("/");
+    return `${parsed.protocol}//${parsed.host}${path}${parsed.search || parsed.hash ? "?…" : ""}`;
   } catch {
     return "(an address that doesn't parse)";
   }

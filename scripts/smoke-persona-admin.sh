@@ -203,15 +203,21 @@ expect 409 "an eleventh URL" POST /admin/personas/built/knowledgebases/many/sour
 # An eleventh put in kb.json by hand is refused at ingest.
 node -e 'const f=process.argv[1]; const c=JSON.parse(require("fs").readFileSync(f,"utf8")); c.externalSources.push({id:"u11",type:"url",url:"http://127.0.0.1:1/x"}); require("fs").writeFileSync(f, JSON.stringify(c));' "${DATA}/personas/built/knowledgebases/many/kb.json"
 expect 422 "ingest with eleven URLs" POST /admin/personas/built/knowledgebases/many/ingest '{}' too_many_sources
-# Two ingests of one KB at once: the second is refused while the first runs.
-expect 201 "a KB for the overlap check" POST /admin/personas/built/knowledgebases '{"id":"slow"}'
-expect 201 "a slow URL" POST /admin/personas/built/knowledgebases/slow/sources "{\"kind\":\"url\",\"name\":\"slow\",\"url\":\"http://127.0.0.1:${STUB_PORT}/slow.md\"}"
+# Overlapping ingests: one per KB (ingest_running), two at once (ingest_busy).
+for kb in slow slow2 slow3; do
+  expect 201 "KB ${kb}" POST /admin/personas/built/knowledgebases "{\"id\":\"${kb}\"}"
+  expect 201 "a slow URL in ${kb}" POST "/admin/personas/built/knowledgebases/${kb}/sources" "{\"kind\":\"url\",\"name\":\"slow\",\"url\":\"http://127.0.0.1:${STUB_PORT}/slow.md\"}"
+done
 curl -s -o "${TEMP_RUNTIME}/first-ingest.json" -X POST "${ADMIN[@]}" -d '{}' "${BASE}/admin/personas/built/knowledgebases/slow/ingest" &
 first_ingest=$!
+curl -s -o "${TEMP_RUNTIME}/second-ingest.json" -X POST "${ADMIN[@]}" -d '{}' "${BASE}/admin/personas/built/knowledgebases/slow2/ingest" &
+second_ingest=$!
 sleep 1
-expect 409 "a second ingest while the first runs" POST /admin/personas/built/knowledgebases/slow/ingest '{}' ingest_running
-wait "${first_ingest}"
-grep -q '"entryCount"' "${TEMP_RUNTIME}/first-ingest.json" || { echo "the first ingest failed: $(cat "${TEMP_RUNTIME}/first-ingest.json")" >&2; exit 1; }
+expect 409 "the same KB while it runs" POST /admin/personas/built/knowledgebases/slow/ingest '{}' ingest_running
+expect 409 "a third KB while two run" POST /admin/personas/built/knowledgebases/slow3/ingest '{}' ingest_busy
+wait "${first_ingest}" "${second_ingest}"
+grep -q '"entryCount"' "${TEMP_RUNTIME}/first-ingest.json" && grep -q '"entryCount"' "${TEMP_RUNTIME}/second-ingest.json" || { echo "an overlapped ingest failed: $(cat "${TEMP_RUNTIME}/first-ingest.json" "${TEMP_RUNTIME}/second-ingest.json")" >&2; exit 1; }
+expect 200 "the third KB once they finish" POST /admin/personas/built/knowledgebases/slow3/ingest '{}'
 expect 200 "read the notes sources" GET /admin/personas/built/knowledgebases/notes/sources
 body_check "sources" 'JSON.stringify(b.sources.text) === JSON.stringify(["facts"]) && b.sources.urls.length === 1 && b.sources.urls[0].id === "web"'
 # Fetching needs the advanced permission, whoever added the URL.
@@ -222,7 +228,7 @@ expect 200 "grant advanced settings again" POST /admin/permissions/advanced '{"e
 expect 201 "a URL with a token that answers" POST /admin/personas/built/knowledgebases/notes/sources "{\"kind\":\"url\",\"name\":\"tokdoc\",\"url\":\"http://127.0.0.1:${STUB_PORT}/doc.md?token=smoke-tok-5555\"}"
 expect 200 "ingest" POST /admin/personas/built/knowledgebases/notes/ingest '{}'
 grep -q 'smoke-tok-5555' "${DATA}/personas/built/knowledgebases/notes/index.json" && { echo "a URL token was written into the index" >&2; exit 1; }
-grep -q 'token=\*\*\*' "${DATA}/personas/built/knowledgebases/notes/index.json" || { echo "the tokened source was not indexed under its public address" >&2; exit 1; }
+grep -qF '/doc.md?…' "${DATA}/personas/built/knowledgebases/notes/index.json" || { echo "the tokened source was not indexed under its written address" >&2; exit 1; }
 body_check "ingest" 'b.knowledgebase.entryCount >= 3 && b.knowledgebase.sourceCount === 3'
 grep -q 'URLFACT-8802' "${DATA}/personas/built/knowledgebases/notes/index.json" || { echo "the URL source was not fetched at ingest" >&2; exit 1; }
 # Over the size cap: the ingest fails and says why.
@@ -248,6 +254,9 @@ code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer
 node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").filter(Boolean); process.stdout.write(JSON.parse(l.pop()).messages.map((m)=>m.text??"").join("\n"))' "${CAPTURE}" > "${TEMP_RUNTIME}/built.prompt"
 for text in BUILT-8810 PADMIN-8801 GFACT-8800 URLFACT-8802; do grep -qF "${text}" "${TEMP_RUNTIME}/built.prompt" || { echo "chat: '${text}' is missing from the prompt" >&2; exit 1; }; done
 grep -q 'smoke-tok-5555' "${TEMP_RUNTIME}/built.prompt" && { echo "a URL token reached the prompt" >&2; exit 1; }
+# The tokened source itself is in the prompt (so the check above tested something), under its written address.
+grep -qF 'source: url:tokdoc' "${TEMP_RUNTIME}/built.prompt" || { echo "the tokened source is not in the prompt, so the token check proved nothing" >&2; exit 1; }
+grep -qF '/doc.md?…' "${TEMP_RUNTIME}/built.prompt" || { echo "the tokened source's written address is not in the prompt" >&2; exit 1; }
 echo "chat ok"
 
 # --- 7. Housekeeping: no staging folders left; writes audited; a non-admin can't write.

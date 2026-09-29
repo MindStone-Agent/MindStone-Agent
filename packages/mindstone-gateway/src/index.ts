@@ -2519,14 +2519,19 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       try {
         const { id, ...definition } = body;
         if (typeof id !== "string" || !WORKFLOW_ID.test(id)) throw new WorkflowWriteError("id must be 1 to 40 lowercase letters, digits and hyphens", "invalid_workflow", 400);
-        // An id the config already runs (workflows.active, a route rule) would take effect on save.
+        // One already on disk is simply taken; checked first, so its answer says so.
+        if (existsSync(workflowsDirFromConfig(gateConfig.config, paths)) && readdirSync(workflowsDirFromConfig(gateConfig.config, paths)).some((name) => name.toLowerCase() === id)) {
+          throw new WorkflowWriteError(`a workflow named ${id} already exists`, "workflow_exists", 409);
+        }
+        // An id the config already runs (workflows.active, a route rule), or a
+        // persona already lists, would take effect on save.
         const personasForRefs = personasDirFromConfig(gateConfig.config, paths);
         const listedByPersonas = discoverMindStonePersonas(personasForRefs).flatMap((summary) => {
           const persona = summary.error ? undefined : loadMindStonePersona(personasForRefs, summary.id);
           return persona?.ok ? persona.persona.workflows : [];
         });
         if (referencedWorkflowIds(loadMindStoneConfig(configPath).config, listedByPersonas).has(id)) {
-          throw new WorkflowWriteError(`the config already runs a workflow named "${id}", so creating it would take effect with no switch; choose another id`, "workflow_referenced", 409);
+          throw new WorkflowWriteError(`the config or a persona already names a workflow "${id}", so creating it would take effect with no switch; choose another id`, "workflow_referenced", 409);
         }
         const personasDir = personasDirFromConfig(gateConfig.config, paths);
         const checked = validateWorkflowDefinition(definition, adminWorkflowContext(personasDir, skillsDirFromConfig(gateConfig.config, paths)));
