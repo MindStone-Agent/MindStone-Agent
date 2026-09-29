@@ -115,16 +115,17 @@ export function isQuotaHit(hit: MemoryHit): boolean {
 export function selectRecallHits(hits: MemoryHit[], limit: number): MemoryHit[] {
   const allQuota = hits.filter(isQuotaHit);
   // KB slots come out of the same limit: when memory has a hit of its own
-  // (not a KB source's word copy), it keeps at least one slot (#151).
-  // Memory's own: not a KB source, whether found by meaning or only by words (#151 review).
-  const memoryWaiting = hits.some((hit) => hit.kind !== "kb");
+  // (any hit not from a knowledge base), it keeps at least one slot (#151).
+  // Only when KB sources ranked by meaning take slots; with none, selection
+  // is by rank alone, as before.
+  const memoryWaiting = allQuota.length > 0 && hits.some((hit) => hit.kind !== "kb");
   const quota = allQuota.slice(0, Math.max(0, memoryWaiting ? limit - 1 : limit));
   const inByQuota = new Set(quota.map((hit) => hit.id));
   const candidates = hits.filter((hit) => !isQuotaHit(hit) && !inByQuota.has(hit.id));
   const room = Math.max(0, limit - quota.length);
   let others = candidates.slice(0, room);
   // The slot kept for memory goes to a hit of memory's own, not to a KB
-  // source's word copy ranked above it (#151 review).
+  // source found by words and ranked above it (#151 review).
   if (memoryWaiting && room > 0 && !others.some((hit) => hit.kind !== "kb")) {
     const memory = candidates.find((hit) => hit.kind !== "kb");
     if (memory) others = [...others.slice(0, room - 1), memory];

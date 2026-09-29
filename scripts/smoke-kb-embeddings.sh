@@ -338,6 +338,8 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   const kindTag = (h: any) => `${h.id}:${isQuotaHit(h) ? "meaning" : h.kind === "kb" ? "kb-words" : "memory"}`;
   assert.deepEqual(selectRecallHits([...three, kbWords("kx"), hit("m1", 0.5)], 3).map(kindTag), ["k1:meaning", "k2:meaning", "m1:memory"]);
   assert.deepEqual(selectRecallHits([...three, kbWords("kx")], 3).map(kindTag), ["k1:meaning", "k2:meaning", "k3:meaning"], "with no memory hit, KB sources keep every slot");
+  // With no KB source ranked by meaning, selection is by rank alone, as before #151.
+  assert.deepEqual(selectRecallHits([kbWords("ka"), kbWords("kb"), kbWords("kc"), hit("m1", 0.5)], 3).map(kindTag), ["ka:kb-words", "kb:kb-words", "kc:kb-words"]);
   // In the prompt, the forced hit is memory's own, not a word copy ranked above it.
   const wordCopy = { ...hit("k8", 0.95, false, "kb"), text: "words ".repeat(900) };
   const promptWithCopy = buildMemoryRecallPrompt([hit("k8", 0.9, true, "kb"), wordCopy, hit("m1", 0.5)], 500);
