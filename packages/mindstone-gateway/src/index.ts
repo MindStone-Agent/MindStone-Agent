@@ -2810,8 +2810,13 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const body = await readAdminBody(req, res);
     if (!body) return;
     const kbId = globalKbReembedMatch[1]!;
-    if (!resetKnowledgebaseReembed(knowledgebasesDirFromConfig(gateConfig.config, paths), kbId)) {
+    const outcome = resetKnowledgebaseReembed(knowledgebasesDirFromConfig(gateConfig.config, paths), kbId);
+    if (outcome === "not_found") {
       refuse(404, { error: `no knowledge base named "${kbId}"`, code: "not_found" }, { reason: "not_found", knowledgebase: kbId });
+      return;
+    }
+    if (outcome === "not_cleared") {
+      refuse(409, { error: "the knowledge base's reembed.json couldn't be removed (is its folder read-only?)", code: "reset_failed" }, { reason: "reset_failed", knowledgebase: kbId });
       return;
     }
     kbReembedClean = undefined;
@@ -2832,8 +2837,13 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     if (action === "reembed") {
       // The private KB's retry after a give-up (#158 review), as for a shared one.
       const privateDir = readablePersonaKnowledgebasesDir(join(personasDir, id));
-      if (!privateDir || !resetKnowledgebaseReembed(privateDir, kbId, { noLinks: true })) {
+      const outcome = privateDir ? resetKnowledgebaseReembed(privateDir, kbId, { noLinks: true }) : "not_found";
+      if (outcome === "not_found") {
         refuse(404, { error: `persona "${id}" has no knowledge base named "${kbId}"`, code: "not_found" }, { reason: "not_found", persona: id, knowledgebase: kbId });
+        return;
+      }
+      if (outcome === "not_cleared") {
+        refuse(409, { error: "the knowledge base's reembed.json couldn't be removed (is its folder read-only?)", code: "reset_failed" }, { reason: "reset_failed", persona: id, knowledgebase: kbId });
         return;
       }
       kbReembedClean = undefined;

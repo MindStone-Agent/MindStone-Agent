@@ -530,18 +530,23 @@ export async function waitWhileTurnsRun(starts: () => Iterable<number>, pollMs =
  * review): the admin's reset after fixing the embedder. False if there is no
  * such KB, or a private one is linked.
  */
-export function resetKnowledgebaseReembed(kbDir: string, kbId: string, options: { noLinks?: boolean } = {}): boolean {
-  if (options.noLinks && privateKnowledgebaseLinkError(kbDir, kbId)) return false;
+export function resetKnowledgebaseReembed(
+  kbDir: string,
+  kbId: string,
+  options: { noLinks?: boolean } = {},
+): "reset" | "not_found" | "not_cleared" {
+  if (options.noLinks && privateKnowledgebaseLinkError(kbDir, kbId)) return "not_found";
   // Exactly its folder's name: a case-folding filesystem would find "GARAGE" for "garage" (#164).
   try {
-    if (!readdirSync(kbDir).includes(kbId)) return false;
+    if (!readdirSync(kbDir).includes(kbId)) return "not_found";
   } catch {
-    return false;
+    return "not_found";
   }
   const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
-  if (!loaded.ok) return false;
+  if (!loaded.ok) return "not_found";
   clearKbReembedState(loaded.kb.dir);
-  return true;
+  // A state file that couldn't be removed (a read-only folder) would still apply: say so (#164 review).
+  return existsSync(join(loaded.kb.dir, KB_REEMBED_STATE_FILE)) ? "not_cleared" : "reset";
 }
 
 /** Whether turns in flight (their start times) hold a background re-embed back (#156 review, #158). */

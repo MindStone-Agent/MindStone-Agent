@@ -743,12 +743,24 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     await kb(root, "r-kb", "# R\n\nalpha r\n", "old");
     assert.ok(writeKbReembedState(join(root, "r-kb"), { version: 1, spec: "stub:m1", failures: 4, nextAttemptAt: new Date(0).toISOString(), updatedAt: new Date().toISOString() }));
     const resetMeanwhile = { id: "stub", model: "m1", async embedTexts() {
-      assert.ok(resetKnowledgebaseReembed(root, "r-kb"));
+      assert.equal(resetKnowledgebaseReembed(root, "r-kb"), "reset");
       throw Object.assign(new Error("x"), { status: 400 });
     } } as any;
     const result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: resetMeanwhile });
     assert.equal(result.reembedded?.gaveUp, undefined, "not given up");
     assert.equal(readKbReembedState(join(root, "r-kb"))?.failures, 1, "the count after a reset is this attempt's alone");
+  }
+  // A reset that can't remove the state file says so, rather than reporting a reset that didn't happen.
+  {
+    const root = mkdtempSync(join(tmpdir(), "kbvec-r5-ro-reset-"));
+    await kb(root, "ro-kb", "# RO\n\nalpha ro\n", "old");
+    assert.ok(writeKbReembedState(join(root, "ro-kb"), { version: 1, spec: "stub:m1", failures: 5, gaveUp: true, updatedAt: new Date().toISOString() }));
+    execFileSync("chmod", ["555", join(root, "ro-kb")]);
+    try {
+      assert.equal(resetKnowledgebaseReembed(root, "ro-kb"), "not_cleared");
+    } finally {
+      execFileSync("chmod", ["755", join(root, "ro-kb")]);
+    }
   }
   // A state with more failures than a give-up takes is a hand edit: not read.
   {
@@ -766,8 +778,8 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     assert.equal(readKbReembedState(join(root, "l-kb"), { noLinks: true }), undefined, "a link isn't followed for a private KB");
     assert.equal(readKbReembedState(join(root, "l-kb"))?.gaveUp, true, "control: the same file read without noLinks");
     assert.ok(privateKnowledgebaseLinkError(root, "l-kb"), "a linked reembed.json makes a private KB linked");
-    assert.equal(resetKnowledgebaseReembed(root, "l-kb", { noLinks: true }), false, "a linked private KB isn't reset");
-    assert.equal(resetKnowledgebaseReembed(root, "L-KB"), false, "an id in another case isn't this KB, even where the filesystem folds case");
+    assert.equal(resetKnowledgebaseReembed(root, "l-kb", { noLinks: true }), "not_found", "a linked private KB isn't reset");
+    assert.equal(resetKnowledgebaseReembed(root, "L-KB"), "not_found", "an id in another case isn't this KB (this check can only fail where the filesystem folds case)");
     assert.ok(existsSync(join(root, "l-kb", KB_REEMBED_STATE_FILE)), "and its link is left alone");
   }
   // The wait for turns: a turn that runs holds it, one past turnWaitMs doesn't.
@@ -1308,6 +1320,11 @@ done
 chat_ms "an owner question with every KB given up" >/dev/null
 sleep 2
 grep -q '"model":"kbstub-d"' "${DATA}/knowledgebases/atlas/vectors.json" && { echo "a given-up KB was embedded again" >&2; exit 1; }
+# Control: the scan paused. With atlas's state removed by hand (not by the route), an owner chat still doesn't embed it.
+rm "${DATA}/knowledgebases/atlas/reembed.json"
+chat_ms "an owner question while the scan is paused" >/dev/null
+sleep 2
+grep -q '"model":"kbstub-d"' "${DATA}/knowledgebases/atlas/vectors.json" && { echo "the scan didn't pause after finding nothing to do, so this test can't show the reset clears the pause" >&2; exit 1; }
 [[ "$(call POST /admin/knowledgebases/atlas/reembed '{}')" == 200 ]] || { echo "reset atlas: $(cat "${BODY}")" >&2; exit 1; }
 chat_ms "an owner question after the reset" >/dev/null
 for _ in $(seq 1 40); do grep -q '"model":"kbstub-d"' "${DATA}/knowledgebases/atlas/vectors.json" && break; sleep 0.5; done
