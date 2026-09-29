@@ -42,7 +42,42 @@ type KbVectorsFile = {
 
 export type KbVectorsWriteResult =
   | { state: "ready"; provider: string; model: string; dimension: number; count: number }
-  | { state: "missing"; reason: string; superseded?: true };
+  | {
+    state: "missing";
+    reason: string;
+    superseded?: true;
+    /**
+     * Why embedding stopped (#158): the embedder couldn't be reached or used
+     * (down, a 5xx, a timeout, no key), it was limiting requests (429), or it
+     * refused the text (a 400, a zero or wrong-size vector).
+     */
+    cause?: KbEmbedFailureCause;
+    /** Entries embedded before it stopped. */
+    embedded?: number;
+  };
+
+export type KbEmbedFailureCause = "unavailable" | "rate-limited" | "rejected";
+
+/** The re-embed's state for a KB (#158), beside its vectors, so a restart keeps it. */
+export const KB_REEMBED_STATE_FILE = "reembed.json";
+/** Counted failures after which a KB isn't embedded again for that model (#158). */
+export const KB_REEMBED_MAX_FAILURES = 5;
+/** How the stale reason ends while the gateway may still embed the KB again. */
+export const KB_REEMBED_NOTE = " (a KB of at most 512 entries is also embedded again after an owner's chat through the gateway)";
+
+export type KbReembedState = {
+  version: 1;
+  /** The model spec the attempts were for: a state for another model doesn't apply. */
+  spec: string;
+  /** Failures that count toward giving up. */
+  failures: number;
+  /** When it may be tried again; absent once given up. */
+  nextAttemptAt?: string;
+  gaveUp?: true;
+  /** The last attempt's fixed reason. */
+  reason?: string;
+  updatedAt: string;
+};
 
 export type LoadedKbVectors = {
   provider: string;
@@ -95,6 +130,72 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 class KbEmbedTimeout extends Error {}
 class KbZeroVector extends Error {}
 
+/** Why an embed request failed (#158), from the error the embedding provider threw. */
+function embedFailureCause(error: unknown): KbEmbedFailureCause {
+  const { status, unavailable } = (error ?? {}) as { status?: unknown; unavailable?: unknown };
+  if (status === 429) return "rate-limited";
+  // A 5xx, a request timeout, or a key, permission or model the embedder doesn't have: nothing about the text.
+  if (typeof status === "number") return status >= 500 || [401, 403, 404, 408].includes(status) ? "unavailable" : "rejected";
+  // Not reached (the provider marks it), not answered in time, or not usable as configured. Anything
+  // else, a reply it couldn't use included, is the embedder's work done, so it counts (#158 review).
+  if (unavailable === true || error instanceof KbEmbedTimeout || isAbort(error)) return "unavailable";
+  return "rejected";
+}
+
+/** The re-embed state beside a KB's vectors, if it is a small file (never a link for a private KB). */
+export function readKbReembedState(kbDir: string, options: { noLinks?: boolean } = {}): KbReembedState | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(join(kbDir, KB_REEMBED_STATE_FILE), constants.O_RDONLY | constants.O_NONBLOCK | (options.noLinks ? constants.O_NOFOLLOW : 0));
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > 4096) return undefined;
+    const state = JSON.parse(readFileSync(fd, "utf8")) as Partial<KbReembedState>;
+    if (
+      state?.version !== 1 || typeof state.spec !== "string" || typeof state.updatedAt !== "string"
+      || typeof state.failures !== "number" || !Number.isInteger(state.failures) || state.failures < 0
+      // Never more than a give-up takes: a larger number is a hand edit (#158 review).
+      || state.failures > KB_REEMBED_MAX_FAILURES
+      || (state.nextAttemptAt !== undefined && (typeof state.nextAttemptAt !== "string" || Number.isNaN(Date.parse(state.nextAttemptAt))))
+      || (state.gaveUp !== undefined && state.gaveUp !== true)
+      || (state.reason !== undefined && (typeof state.reason !== "string" || state.reason.length > 300 || /\p{C}/u.test(state.reason)))
+    ) {
+      return undefined;
+    }
+    return state as KbReembedState;
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/** Writes the re-embed state whole (moved into place); false if it can't be written. */
+export function writeKbReembedState(kbDir: string, state: KbReembedState): boolean {
+  const temp = join(kbDir, `.${KB_REEMBED_STATE_FILE}.${process.pid}.${Date.now().toString(36)}.tmp`);
+  try {
+    writeFileSync(temp, `${JSON.stringify(state)}\n`, { flag: "wx" });
+    renameSync(temp, join(kbDir, KB_REEMBED_STATE_FILE));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+/** A state that couldn't be written to its KB folder (a read-only folder): kept here meanwhile. */
+export const KB_REEMBED_STATE_FALLBACK = new Map<string, KbReembedState>();
+
+/** Removes the re-embed state, best effort: it never fails what called it (#158 review). */
+export function clearKbReembedState(kbDir: string): void {
+  KB_REEMBED_STATE_FALLBACK.delete(kbDir);
+  try {
+    rmSync(join(kbDir, KB_REEMBED_STATE_FILE), { force: true });
+  } catch {
+    // A folder in its place: left, and ignored when read.
+  }
+}
+
 /** A request the embedder didn't answer in time (fetch's abort), not an error the embedder sent back. */
 function isAbort(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
@@ -129,6 +230,12 @@ export async function writeKbVectors(params: {
    * the budget.
    */
   beforeBatch?: () => Promise<void>;
+  /**
+   * A 429 is a pause, not a failure (#158): wait (Retry-After, within
+   * minMs..maxMs) and send the same entry again, up to maxWaits times in a
+   * row. Waiting doesn't count against the budget.
+   */
+  rateLimit?: { minMs: number; maxMs: number; maxWaits: number; maxTotalMs: number };
 }): Promise<KbVectorsWriteResult> {
   const { embedder } = params;
   const indexStillCurrent = () => {
@@ -153,6 +260,8 @@ export async function writeKbVectors(params: {
   const encoded: Record<string, string> = {};
   let dimension = 0;
   let paused = 0;
+  /** Time spent waiting on 429s in this run: capped by rateLimit.maxTotalMs (#158 review). */
+  let limitedFor = 0;
   const embedBatch = async (batch: MindStoneKbIndexEntry[]) => {
     const texts = batch.map((entry) => kbEntryEmbeddingText(entry));
     // The embedder drops blank inputs, which would shift every vector after one.
@@ -178,19 +287,42 @@ export async function writeKbVectors(params: {
         paused += Date.now() - waitStarted;
       }
       const batch = params.entries.slice(offset, offset + batchSize);
-      try {
-        await embedBatch(batch);
-      } catch (error) {
-        // A request the embedder couldn't finish in time: its entries once more, one a request.
-        if (error instanceof KbEmbedTimeout || !isAbort(error) || batch.length === 1) throw error;
-        for (const entry of batch) await embedBatch([entry]);
+      for (let waits = 0; ; waits += 1) {
+        try {
+          try {
+            await embedBatch(batch);
+          } catch (error) {
+            // A request the embedder couldn't finish in time: its entries once more, one a request.
+            if (error instanceof KbEmbedTimeout || !isAbort(error) || batch.length === 1) throw error;
+            for (const entry of batch) await embedBatch([entry]);
+          }
+          break;
+        } catch (error) {
+          const limit = params.rateLimit;
+          if (!limit || embedFailureCause(error) !== "rate-limited" || waits >= limit.maxWaits) throw error;
+          const asked = (error as { retryAfterMs?: unknown }).retryAfterMs;
+          const wait = Math.min(limit.maxMs, Math.max(limit.minMs, typeof asked === "number" ? asked : 0));
+          // A run that has waited long enough on 429s stops, so it can't hold the job for days.
+          if (limitedFor + wait > limit.maxTotalMs) throw error;
+          limitedFor += wait;
+          const waitStarted = Date.now();
+          await new Promise((resolve) => setTimeout(resolve, wait));
+          // The resend waits for turns like any request (#158 review).
+          await params.beforeBatch?.();
+          paused += Date.now() - waitStarted;
+        }
       }
     }
   } catch (error) {
     dropOld();
+    const cause = embedFailureCause(error);
     return {
       state: "missing",
-      reason: error instanceof KbZeroVector
+      cause,
+      embedded: Object.keys(encoded).length,
+      reason: cause === "rate-limited"
+        ? "the embedder is limiting requests (HTTP 429)"
+        : error instanceof KbZeroVector
         ? "the embedder returned an all-zero vector for an entry; check the embedding model, then re-ingest"
         : error instanceof KbEmbedTimeout
         ? `embedding took longer than ${Math.round(budget / 1000)} s; ingest again with a longer limit (CLI: --embed-timeout <seconds>)`
@@ -221,10 +353,13 @@ export async function writeKbVectors(params: {
     renameSync(temp, path);
   } catch {
     dropOld();
-    return { state: "missing", reason: "the vectors file could not be written" };
+    // The embedding was done: a failure that cost something (#158 review).
+    return { state: "missing", reason: "the vectors file could not be written", embedded: Object.keys(encoded).length };
   } finally {
     rmSync(temp, { force: true });
   }
+  // Embedded for this model: nothing is left to retry or give up on (#158).
+  clearKbReembedState(params.kbDir);
   return { state: "ready", provider: file.provider, model: file.model, dimension, count: Object.keys(encoded).length };
 }
 
@@ -274,7 +409,7 @@ export function readKbVectors(
   if (memoryEmbeddingSpec({ id: file.provider, model: file.model }) !== memoryEmbeddingSpec(embedder)) {
     return {
       state: "stale",
-      reason: `made with ${memoryEmbeddingSpec({ id: file.provider, model: file.model })}, the install now uses ${memoryEmbeddingSpec(embedder)}; re-ingest (a KB of at most 512 entries is also embedded again after an owner's chat through the gateway)`,
+      reason: `made with ${memoryEmbeddingSpec({ id: file.provider, model: file.model })}, the install now uses ${memoryEmbeddingSpec(embedder)}; re-ingest${KB_REEMBED_NOTE}`,
       ...described,
       cause: "model",
     };

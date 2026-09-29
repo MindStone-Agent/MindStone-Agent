@@ -120,6 +120,9 @@ import {
   knowledgebasesDirFromConfig,
   personaKnowledgebasesDir,
   reembedStaleKnowledgebase,
+  knowledgebaseReembedState,
+  resetKnowledgebaseReembed,
+  waitWhileTurnsRun,
   decisionForAnsweringPersona,
   personaComponentsSummary,
   privateKnowledgebasesAllowed,
@@ -786,7 +789,7 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
       // if they overlap (#156 review).
       claim: ({ personaId, kbId }) => (personaId && PRIVATE_KB_INGESTS.has(`${personaId}/${kbId}`) ? undefined : () => undefined),
       beforeBatch: async () => {
-        while (turnsInFlight > 0) await new Promise<void>((resolve) => setTimeout(resolve, 200));
+        await waitWhileTurnsRun(() => turnsInFlight.values());
       },
     });
     const done = result.reembedded;
@@ -802,6 +805,7 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
         ...(done.vectors.state === "missing" ? { reason: done.vectors.reason } : {}),
         ...(done.gaveUp ? { gaveUp: true } : {}),
         ...(done.vectors.state === "missing" && done.vectors.superseded ? { superseded: true } : {}),
+        ...(done.vectors.state === "missing" && done.vectors.cause ? { cause: done.vectors.cause } : {}),
       });
       // One line an outcome: a give-up isn't retried, and a newer ingest's vectors are in place.
       if (done.vectors.state === "ready") console.info(`[mindstone] knowledge base ${where} embedded again for ${spec}`);
@@ -1221,15 +1225,19 @@ function releaseIdentityFormation(agentId: string): void {
   }
 }
 
-/** Turns being answered now: a background KB re-embed waits while any runs (#156 review). */
-let turnsInFlight = 0;
+/**
+ * When each turn being answered now started: a background KB re-embed waits
+ * while any runs (#156 review), unless it has run so long it may never end (#158).
+ */
+const turnsInFlight = new Map<symbol, number>();
 
 async function runConfiguredRoute(input: Parameters<typeof runConfiguredRouteUncounted>[0]): ReturnType<typeof runConfiguredRouteUncounted> {
-  turnsInFlight += 1;
+  const turn = Symbol("turn");
+  turnsInFlight.set(turn, Date.now());
   try {
     return await runConfiguredRouteUncounted(input);
   } finally {
-    turnsInFlight -= 1;
+    turnsInFlight.delete(turn);
   }
 }
 
@@ -2291,7 +2299,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         skills: persona.skills,
         workflows: persona.workflows,
         knowledgebases: persona.knowledgebases,
-        privateKnowledgebases: privateDir ? adminKnowledgebaseList(privateDir) : [],
+        privateKnowledgebases: privateDir ? adminKnowledgebaseList(privateDir, kbEmbedder(gateConfig.config), true) : [],
         active: gateConfig.config?.personas?.active === persona.id,
       },
     });
@@ -2318,7 +2326,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
   }
   if (req.method === "GET" && url.pathname === "/admin/knowledgebases") {
     // The global collections, for the persona editor's picker (#125). Creating one is the CLI's job.
-    sendJson(res, 200, { ok: true, knowledgebases: adminKnowledgebaseList(knowledgebasesDirFromConfig(gateConfig.config, paths)) });
+    sendJson(res, 200, { ok: true, knowledgebases: adminKnowledgebaseList(knowledgebasesDirFromConfig(gateConfig.config, paths), kbEmbedder(gateConfig.config)) });
     return;
   }
   const privateKbListMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases$/.exec(url.pathname);
@@ -2330,7 +2338,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       return;
     }
     const privateDir = readablePersonaKnowledgebasesDir(join(personasDir, id));
-    sendJson(res, 200, { ok: true, knowledgebases: privateDir ? adminKnowledgebaseList(privateDir) : [] });
+    sendJson(res, 200, { ok: true, knowledgebases: privateDir ? adminKnowledgebaseList(privateDir, kbEmbedder(gateConfig.config), true) : [] });
     return;
   }
   const privateKbSourcesMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases\/([a-z0-9][a-z0-9-]{0,39})\/sources$/.exec(url.pathname);
@@ -2794,14 +2802,43 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     });
     return;
   }
-  const privateKbSourceWriteMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases\/([a-z0-9][a-z0-9-]{0,39})\/(sources|ingest)$/.exec(url.pathname);
+  // A shared KB's id is its folder's name (#158 review): any name but a dot folder, one path segment.
+  const globalKbReembedMatch = /^\/admin\/knowledgebases\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/reembed$/.exec(url.pathname);
+  if (req.method === "POST" && globalKbReembedMatch) {
+    // Try again after a give-up (#158 review): clears the KB's re-embed state,
+    // so the next owner chat embeds it again. The Console's retry; the CLI's is `kb ingest`.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const kbId = globalKbReembedMatch[1]!;
+    if (!resetKnowledgebaseReembed(knowledgebasesDirFromConfig(gateConfig.config, paths), kbId)) {
+      refuse(404, { error: `no knowledge base named "${kbId}"`, code: "not_found" }, { reason: "not_found", knowledgebase: kbId });
+      return;
+    }
+    kbReembedClean = undefined;
+    appendAdminAudit(paths.dataDir, { userId, action: "kb_reembed_reset", knowledgebase: kbId });
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  const privateKbSourceWriteMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases\/([a-z0-9][a-z0-9-]{0,39})\/(sources|ingest|reembed)$/.exec(url.pathname);
   if (req.method === "POST" && privateKbSourceWriteMatch) {
     const body = await readAdminBody(req, res);
     if (!body) return;
-    const [, id, kbId, action] = privateKbSourceWriteMatch as unknown as [string, string, string, "sources" | "ingest"];
+    const [, id, kbId, action] = privateKbSourceWriteMatch as unknown as [string, string, string, "sources" | "ingest" | "reembed"];
     const personasDir = personasDirFromConfig(gateConfig.config, paths);
     if (!adminPersonaOnDisk(personasDir, id)) {
       refuse(404, { error: `no persona named "${id}"`, code: "not_found" }, { reason: "not_found", persona: id });
+      return;
+    }
+    if (action === "reembed") {
+      // The private KB's retry after a give-up (#158 review), as for a shared one.
+      const privateDir = readablePersonaKnowledgebasesDir(join(personasDir, id));
+      if (!privateDir || !resetKnowledgebaseReembed(privateDir, kbId, { noLinks: true })) {
+        refuse(404, { error: `persona "${id}" has no knowledge base named "${kbId}"`, code: "not_found" }, { reason: "not_found", persona: id, knowledgebase: kbId });
+        return;
+      }
+      kbReembedClean = undefined;
+      appendAdminAudit(paths.dataDir, { userId, action: "kb_reembed_reset", persona: id, knowledgebase: kbId });
+      sendJson(res, 200, { ok: true });
       return;
     }
     if (action === "sources") {
@@ -4470,17 +4507,34 @@ function adminPersonaLoads(personasDir: string, id: string): boolean {
 }
 
 /** Knowledge bases for the Console, without host paths. */
-function adminKnowledgebaseList(kbDir: string): Array<Record<string, unknown>> {
-  return discoverMindStoneKnowledgebases(kbDir).map(({ id, name, description, version, indexed, entryCount, sourceCount, error }) => ({
-    id,
-    name,
-    description,
-    version,
-    indexed,
-    entryCount,
-    sourceCount,
-    ...(error ? { error: "this knowledge base can't be loaded" } : {}),
-  }));
+/** The install's embedder, when one is configured: its provider and model, for the KB lists. */
+function kbEmbedder(config: MindStoneConfig | undefined): { id: string; model: string } | undefined {
+  const embedder = createMemoryEmbeddingProvider(config, process.env);
+  return embedder ? { id: embedder.id, model: embedder.model } : undefined;
+}
+
+/**
+ * The KBs in a folder for the Console. A KB the gateway is embedding again
+ * after a model switch carries `reembed` (#158): failures that counted, when
+ * it tries next or that it gave up, and the last fixed reason.
+ */
+function adminKnowledgebaseList(kbDir: string, embedder?: { id: string; model: string }, noLinks = false): Array<Record<string, unknown>> {
+  return discoverMindStoneKnowledgebases(kbDir).map(({ id, name, description, version, indexed, entryCount, sourceCount, error }) => {
+    const state = embedder && !error ? knowledgebaseReembedState(kbDir, id, embedder, noLinks) : undefined;
+    return {
+      id,
+      name,
+      description,
+      version,
+      indexed,
+      entryCount,
+      sourceCount,
+      ...(error ? { error: "this knowledge base can't be loaded" } : {}),
+      ...(state
+        ? { reembed: { failures: state.failures, ...(state.gaveUp ? { gaveUp: true } : { nextAttemptAt: state.nextAttemptAt }), ...(state.reason ? { reason: state.reason } : {}) } }
+        : {}),
+    };
+  });
 }
 
 /** An ingest error with the host's KB path replaced by the KB's own name. */
