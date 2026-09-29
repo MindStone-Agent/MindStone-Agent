@@ -25,16 +25,22 @@ function stringList(value: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
 }
 
-/** Reads ids from a capability reference file that is either ["id"] or {"skills": ["id"]}-shaped. */
-function capabilityIds(path: string, key: string): string[] {
+/**
+ * Reads ids from a capability reference file that is either ["id"] or
+ * {"skills": ["id"]}-shaped. A file that exists but doesn't parse is an
+ * error: read as "no list" it would mean every skill or every global KB
+ * (#125), so the persona fails to load instead, as with a bad metadata.json.
+ */
+function capabilityIds(path: string, key: string): string[] | { error: string } {
+  let parsed: unknown;
   try {
-    const parsed = readJsonFile(path);
-    if (Array.isArray(parsed)) return stringList(parsed);
-    if (parsed && typeof parsed === "object") return stringList((parsed as Record<string, unknown>)[key]);
-    return [];
-  } catch {
-    return [];
+    parsed = readJsonFile(path);
+  } catch (error) {
+    return { error: `${key}.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
+  if (Array.isArray(parsed)) return stringList(parsed);
+  if (parsed && typeof parsed === "object") return stringList((parsed as Record<string, unknown>)[key]);
+  return [];
 }
 
 export type LoadPersonaResult =
@@ -68,6 +74,15 @@ export function loadMindStonePersona(personasDir: string, personaId: string): Lo
     return { ok: false, personaId, error: `metadata.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
 
+  const lists = {
+    skills: capabilityIds(join(dir, "skills.json"), "skills"),
+    workflows: capabilityIds(join(dir, "workflows.json"), "workflows"),
+    knowledgebases: capabilityIds(join(dir, "knowledgebases.json"), "knowledgebases"),
+  };
+  for (const list of Object.values(lists)) {
+    if (!Array.isArray(list)) return { ok: false, personaId, error: list.error };
+  }
+
   const safetyPath = join(dir, "safety.md");
   const safetyMarkdown = existsSync(safetyPath) ? readFileSync(safetyPath, "utf-8") : undefined;
 
@@ -81,9 +96,9 @@ export function loadMindStonePersona(personasDir: string, personaId: string): Lo
       description: metadata.description,
       personaMarkdown,
       safetyMarkdown: safetyMarkdown?.trim() ? safetyMarkdown : undefined,
-      skills: capabilityIds(join(dir, "skills.json"), "skills"),
-      workflows: capabilityIds(join(dir, "workflows.json"), "workflows"),
-      knowledgebases: capabilityIds(join(dir, "knowledgebases.json"), "knowledgebases"),
+      skills: lists.skills as string[],
+      workflows: lists.workflows as string[],
+      knowledgebases: lists.knowledgebases as string[],
     },
   };
 }

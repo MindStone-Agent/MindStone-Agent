@@ -113,7 +113,8 @@ export function parseOwnerPersonaInput(body: Record<string, unknown>, mode: "cre
   const input: OwnerPersonaInput & { id?: string } = {
     ...(id ? { id } : {}),
     name: singleLine(body.name, "name", OWNER_PERSONA_LIMITS.name, mode === "create"),
-    description: singleLine(body.description, "description", OWNER_PERSONA_LIMITS.description, false),
+    // An edit may send "" to clear the description.
+    description: mode === "edit" && body.description === "" ? "" : singleLine(body.description, "description", OWNER_PERSONA_LIMITS.description, false),
     personaMarkdown: markdown(body.personaMarkdown, mode === "create"),
     skills: idList(body.skills, "skills"),
     workflows: idList(body.workflows, "workflows"),
@@ -229,8 +230,9 @@ export function updateOwnerPersona(params: Dirs & { id: string; input: OwnerPers
       existing = {};
     }
     const description = params.input.description ?? loaded.persona.description;
+    const { description: _previous, ...kept } = existing;
     const metadata = {
-      ...existing,
+      ...kept,
       name: params.input.name ?? loaded.persona.name,
       ...(description ? { description } : {}),
       updatedBy: params.updatedBy,

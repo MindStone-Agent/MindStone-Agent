@@ -308,6 +308,8 @@ function runSelectedWorkflow(
         }
         if (passed) break;
       }
+      // A gate that never passed leaves the loop one past its last try.
+      attempts = Math.min(attempts, maxAttempts);
       events.push({
         event: "workflow_gate",
         text: `Workflow gate ${step.id}: ${passed ? "passed" : "failed"} (${detail}${attempts > 1 ? `, ${attempts} attempt(s)` : ""}).`,

@@ -99,6 +99,15 @@ kb(five / "knowledgebases", "mine", "PFIVE-7108")
 kb(five / "knowledgebases", "other", "POTHER-7109")
 # A stop gate first: wf-one after it is never tried.
 persona("persona-six", workflows=["wf-stop", "wf-one"])
+# Its step names skills and KBs outside its own lists: nothing is widened.
+seven = persona("persona-seven", ["alpha-skill"], ["global-attached"], ["wf-wide"])
+kb(seven / "knowledgebases", "notes", "PSEVEN-7110")
+# A gate that never passes, asking for 9 attempts: capped at 5.
+persona("persona-eight", workflows=["wf-cap"])
+# A skills.json that doesn't parse: the persona fails to load, rather than reading as "every skill".
+bad = persona("persona-bad")
+write(bad / "skills.json", "{not json")
+kb(bad / "knowledgebases", "notes", "PBAD-7111")
 link = persona("persona-link")
 kb(data / "outside", "notes", "PLINK-7105")
 os.symlink(data / "outside", link / "knowledgebases")
@@ -121,6 +130,8 @@ workflow("wf-one", [{"id": "always", "kind": "route"}])
 workflow("wf-route", [{"id": "hand-off", "kind": "route", "personaId": "persona-two", "skills": ["beta-skill"], "knowledgebases": ["notes", "global-other"]}])
 workflow("wf-narrow", [{"id": "narrow", "kind": "route", "skills": ["beta-skill"], "knowledgebases": ["global-other"]}])
 workflow("wf-private-only", [{"id": "mine-only", "kind": "route", "knowledgebases": ["mine", "no-such-kb"]}])
+workflow("wf-wide", [{"id": "wide", "kind": "route", "skills": ["beta-skill"], "knowledgebases": ["global-other", "notes"]}])
+workflow("wf-cap", [{"id": "never", "kind": "gate", "gate": {"condition": {"messagePrefix": "zzz-never"}}, "retry": {"maxAttempts": 9}, "onFail": "continue"}, {"id": "then", "kind": "route"}])
 workflow("wf-stop", [{"id": "blocker", "kind": "gate", "gate": {"condition": {"messagePrefix": "zzz-never"}}, "onFail": "stop"}, {"id": "after", "kind": "route"}])
 PY
 
@@ -131,6 +142,8 @@ for kb_id in global-attached global-other; do ./scripts/mindstone kb ingest "${k
 ./scripts/mindstone kb ingest --persona persona-four p4 --json >/dev/null
 ./scripts/mindstone kb ingest --persona persona-five mine --json >/dev/null
 ./scripts/mindstone kb ingest --persona persona-five other --json >/dev/null
+./scripts/mindstone kb ingest --persona persona-seven notes --json >/dev/null
+DIR="${DATA}/personas/persona-bad/knowledgebases" npx tsx -e 'import { ingestMindStoneKnowledgebase } from "./packages/mindstone-core/src/index.ts"; ingestMindStoneKnowledgebase(process.env.DIR, "notes").then((r) => { if (!r.ok) { console.error(r.error); process.exit(1); } });'
 [[ -f "${DATA}/personas/persona-one/knowledgebases/notes/index.json" && -f "${DATA}/personas/persona-two/knowledgebases/notes/index.json" ]] || { echo "kb ingest --persona did not index the private KBs" >&2; exit 1; }
 # The linked folder's KB is indexed where it really lives, so only the link check keeps it out of recall.
 DIR="${DATA}/outside" npx tsx -e 'import { ingestMindStoneKnowledgebase } from "./packages/mindstone-core/src/index.ts"; ingestMindStoneKnowledgebase(process.env.DIR, "notes").then((r) => { if (!r.ok) { console.error(r.error); process.exit(1); } });'
@@ -315,6 +328,12 @@ expect conv-five present "PFIVE-7108" "GATTACHED-7101" "GOTHER-7102"
 expect conv-five absent "POTHER-7109"
 conversation_entries conv-five
 entries_check "persona-five: the step's unknown KB id was not recorded" 'JSON.stringify(a.personaComponents?.stepKnowledgebasesUnknown) === JSON.stringify(["no-such-kb"])'
+# A step naming skills and KBs outside the persona's lists widens nothing:
+# alpha-skill and beta-skill have no overlap, nor global-attached and global-other.
+set_config persona-seven
+chat admin conv-seven
+expect conv-seven present "PSEVEN-7110"
+expect conv-seven absent "SKILLBODY-beta-skill" "SKILLBODY-gamma-skill" "SKILLBODY-alpha-skill" "GOTHER-7102" "GATTACHED-7101"
 echo "step narrowing ok"
 
 # --- 7. A stop gate ends the selection: wf-one, listed after it, is never tried.
@@ -324,6 +343,21 @@ conversation_entries conv-six
 entries_check "persona-six: the stop gate did not run" 'es.some((e)=>e.metadata?.event==="workflow_failed" && e.metadata.workflowId==="wf-stop")'
 entries_check "persona-six: wf-one was tried after a stop gate" '!es.some((e)=>e.metadata?.event==="workflow_started" && e.metadata.workflowId==="wf-one")'
 echo "stop gate ok"
+
+# --- 7b. A gate is tried at most 5 times, whatever retry.maxAttempts asks.
+set_config persona-eight
+chat admin conv-eight
+conversation_entries conv-eight
+entries_check "persona-eight: the gate was not capped at 5 attempts" 'es.some((e)=>e.metadata?.event==="workflow_gate" && e.metadata.workflowId==="wf-cap" && e.metadata.attempts===5)'
+echo "gate cap ok"
+
+# --- 7c. A list file that doesn't parse: the persona fails to load, and none of its private KBs are used.
+set_config persona-bad
+chat admin conv-bad
+expect conv-bad absent "PERSONA-BAD" "PBAD-7111"
+conversation_entries conv-bad
+entries_check "persona-bad: it loaded anyway" '!a.personaComponents'
+echo "malformed list ok"
 
 # --- 8. No persona active: a step's lists are only logged, as before.
 set_config "" wf-narrow
@@ -342,6 +376,16 @@ set_config persona-alias
 chat admin conv-alias
 expect conv-alias present "PERSONA-TWO" "GATTACHED-7101"
 expect conv-alias absent "PTWO-7104" "PEXTRA-7106"
+# An id in another case than the folder on disk (a case-insensitive filesystem
+# finds it): its private KBs aren't used, so recall ids stay canonical.
+if [[ -d "${DATA}/personas/PERSONA-TWO" ]]; then
+  set_config PERSONA-TWO
+  chat admin conv-case
+  expect conv-case absent "PTWO-7104"
+  conversation_entries conv-case
+  entries_check "PERSONA-TWO: private KBs were used under a non-canonical id" '!a.memoryRecall || !a.memoryRecall.chunkIds.some((id) => id.startsWith("pkb:"))'
+  echo "case-variant id ok"
+fi
 echo "links ok"
 
 echo "Persona components smoke test passed."

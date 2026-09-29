@@ -1,5 +1,5 @@
-import { lstatSync } from "node:fs";
-import { join } from "node:path";
+import { lstatSync, readdirSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { MindStoneWorkflowDecision } from "../workflow/types.js";
 import type { MindStonePersona } from "./types.js";
 
@@ -74,6 +74,19 @@ function narrow(base: string[] | undefined, step: string[] | undefined): string[
   return base ? base.filter((id) => step.includes(id)) : unique(step);
 }
 
+/**
+ * The folder is on disk under exactly this name. A case-insensitive
+ * filesystem finds "Persona-Two" for "persona-two"; its private KBs are only
+ * used under the id as written on disk, so their recall ids are canonical.
+ */
+function isExactEntry(path: string): boolean {
+  try {
+    return readdirSync(dirname(path)).includes(basename(path));
+  } catch {
+    return false;
+  }
+}
+
 /** A real directory, not a link (checked on the last path part). */
 export function isRealDirectory(path: string): boolean {
   try {
@@ -106,7 +119,7 @@ export function resolveTurnComponents(params: {
   if (!persona) return {};
   const skills = narrow(persona.skills.length ? unique(persona.skills) : undefined, decision?.skills);
   const globalKnowledgebases = persona.knowledgebases.length ? unique(persona.knowledgebases) : undefined;
-  const privateDir = params.privateAllowed && isSafeComponentId(persona.id) && isRealDirectory(persona.dir)
+  const privateDir = params.privateAllowed && isSafeComponentId(persona.id) && isRealDirectory(persona.dir) && isExactEntry(persona.dir)
     ? readablePersonaKnowledgebasesDir(persona.dir)
     : undefined;
   return {

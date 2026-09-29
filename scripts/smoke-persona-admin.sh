@@ -173,6 +173,9 @@ expect 200 "rename the persona" PATCH /admin/personas/built '{"name":"Built Two"
 expect 200 "read it back" GET /admin/personas/built
 body_check "edit read" 'b.persona.name === "Built Two" && b.persona.description === "Made in the Console" && b.persona.skills.length === 0 && JSON.stringify(b.persona.workflows) === JSON.stringify(["wf-a"])'
 grep -q '"createdBy": "owner"' "${DATA}/personas/built/metadata.json" || { echo "an edit dropped the metadata's provenance" >&2; exit 1; }
+expect 200 "clear the description" PATCH /admin/personas/built '{"description":""}'
+expect 200 "read it back" GET /admin/personas/built
+body_check "description cleared" '!b.persona.description && b.persona.name === "Built Two"'
 echo "persona edit ok"
 
 # --- 5. Private knowledge bases.
