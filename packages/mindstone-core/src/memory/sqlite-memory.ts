@@ -61,6 +61,15 @@ export const MEMORY_REEMBED_BATCH = 4;
  */
 export const MEMORY_EMBED_SKIP_AFTER = 3;
 
+/**
+ * A chunk's refusals count at most once per this long (#170 review), so reaching
+ * MEMORY_EMBED_SKIP_AFTER takes at least 20 minutes of refusals, not one burst of runs.
+ */
+export const MEMORY_EMBED_REFUSAL_SPACING_MS = 10 * 60 * 1000;
+
+/** The short text sent after a request none of whose chunks went in, to tell a refused text from a refusing embedder (#170 review). */
+export const MEMORY_EMBED_PROBE_TEXT = "memory";
+
 export type SqliteMemoryEmbeddingBackfillResult = {
   databasePath: string;
   providerId: string;
@@ -847,40 +856,32 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
   const update = db.prepare("UPDATE memory_chunks SET embedding_json = ?, embedding_spec = ? WHERE chunk_id = ? AND text = ?");
   const still = db.prepare("SELECT 1 AS present FROM memory_chunks WHERE chunk_id = ? AND text = ?");
   const cleared = db.prepare("DELETE FROM memory_embed_rejections WHERE chunk_id = ? AND spec = ?");
-  // One more refusal on its own; the count starts again when the text has changed (#170).
+  // One more refusal on its own, at most one per MEMORY_EMBED_REFUSAL_SPACING_MS (#170 review): an embedder
+  // that refuses on and off can't skip a chunk in one burst of runs. The count starts again when the text changes.
   const refused = db.prepare(`
     INSERT INTO memory_embed_rejections (chunk_id, spec, text, failures, reason, updated_at)
     VALUES (?, ?, ?, 1, ?, ?)
     ON CONFLICT (chunk_id, spec) DO UPDATE SET
-      failures = CASE WHEN memory_embed_rejections.text = excluded.text THEN memory_embed_rejections.failures + 1 ELSE 1 END,
+      failures = CASE
+        WHEN memory_embed_rejections.text != excluded.text THEN 1
+        WHEN memory_embed_rejections.updated_at <= ? THEN memory_embed_rejections.failures + 1
+        ELSE memory_embed_rejections.failures
+      END,
+      updated_at = CASE
+        WHEN memory_embed_rejections.text != excluded.text OR memory_embed_rejections.updated_at <= ? THEN excluded.updated_at
+        ELSE memory_embed_rejections.updated_at
+      END,
       text = excluded.text,
-      reason = excluded.reason,
-      updated_at = excluded.updated_at
+      reason = excluded.reason
   `);
   let chunksRejected = 0;
-  /**
-   * Refusals of single chunks, recorded at the end of the run only if the embedder has shown it
-   * works for this model (it embedded a chunk in this run, or has embedded chunks before): an
-   * embedder that refuses every request (a chat model behind the embeddings route, a proxy's 400
-   * while its upstream is down) must not have every chunk it touches marked as skipped (#170 review).
-   */
-  const pending: Array<{ row: { chunk_id: string; text: string }; reason: string }> = [];
-  /** Requests in a row whose every chunk was refused, with nothing embedded yet in this run. */
-  let refusedInARow = 0;
-  /** This model has embedded chunks in this index before: a refusal is then about the text. */
-  const workedBefore = db.prepare("SELECT 1 AS present FROM memory_chunks WHERE embedding_spec = ? LIMIT 1").get(spec) !== undefined;
-  const commitPending = () => {
-    const now = new Date().toISOString();
-    for (const { row, reason } of pending) refused.run(row.chunk_id, spec, row.text, reason, now);
-    pending.length = 0;
+  const record = (row: { chunk_id: string; text: string }, reasonError: unknown) => {
+    const now = Date.now();
+    const spaced = new Date(now - MEMORY_EMBED_REFUSAL_SPACING_MS).toISOString();
+    const reason = (reasonError instanceof Error ? reasonError.message : String(reasonError)).replace(/\p{C}/gu, " ").slice(0, 300);
+    refused.run(row.chunk_id, spec, row.text, reason, new Date(now).toISOString(), spaced, spaced);
+    chunksRejected += 1;
   };
-  const refusedEverything = (marked: boolean) =>
-    Object.assign(
-      new Error(
-        `the embedding model ${spec} refused every chunk it was sent (${chunksRejected}); check the model and its endpoint. ${marked ? "The refused chunks were counted." : "Nothing was marked as skipped."}`,
-      ),
-      { refusedEverything: true },
-    );
 
   /** Waits in beforeBatch, then leaves out a chunk removed or rewritten meanwhile (#157 review). */
   const ready = async (batch: Array<{ chunk_id: string; text: string }>) => {
@@ -907,6 +908,21 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
       throw error;
     }
   };
+  /**
+   * After a request none of whose chunks went in, even alone: one short text, to tell texts this model
+   * can't take from an embedder that refuses everything (a chat model behind the embeddings route, a
+   * proxy's 400 while its upstream is down) (#170 review). An outage here stops the run as anywhere.
+   */
+  const probeAccepted = async () => {
+    await options.beforeBatch?.();
+    try {
+      await provider.embedTexts([MEMORY_EMBED_PROBE_TEXT]);
+      return true;
+    } catch (error) {
+      if (embeddingFailureCause(error) !== "rejected") throw error;
+      return false;
+    }
+  };
 
   try {
     for (let offset = 0; offset < rows.length; offset += batchSize) {
@@ -919,49 +935,35 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
         // the text gets the request's chunks one at a time, so a chunk it can't take (an old one
         // too long for a smaller model) doesn't stop the rest for good (#170).
         if (embeddingFailureCause(error) !== "rejected") throw error;
-        let refusedHere = 0;
-        const refuse = (row: { chunk_id: string; text: string }, reasonError: unknown) => {
-          chunksRejected += 1;
-          refusedHere += 1;
-          const reason = (reasonError instanceof Error ? reasonError.message : String(reasonError)).replace(/\p{C}/gu, " ").slice(0, 300);
-          pending.push({ row, reason });
-        };
-        let tried = 0;
-        // A request of one chunk was that chunk alone already.
+        const refusedAlone: Array<{ row: { chunk_id: string; text: string }; error: unknown }> = [];
+        let wentInAlone = false;
         if (batch.length === 1) {
-          tried = 1;
-          refuse(batch[0]!, error);
+          // A request of one chunk was that chunk alone already.
+          refusedAlone.push({ row: batch[0]!, error });
         } else {
           for (const row of batch) {
             const [single] = await ready([row]);
             if (!single) continue;
-            tried += 1;
             try {
               await embedAndStore([single]);
+              wentInAlone = true;
             } catch (alone) {
               if (embeddingFailureCause(alone) !== "rejected") throw alone;
-              refuse(single, alone);
+              refusedAlone.push({ row: single, error: alone });
             }
           }
         }
-        // Two requests in a row refused whole, and nothing embedded yet: the embedder refuses
-        // everything, not these texts. Stop, as for an outage, and mark nothing.
-        if (tried > 0 && refusedHere === tried && chunksEmbedded === 0) {
-          refusedInARow += 1;
-          if (refusedInARow >= 2) {
-            // A model that has embedded here before is refusing these texts: count them, so they go
-            // last next time and the run gets past them. One that never has is refusing everything.
-            if (workedBefore) commitPending();
-            throw refusedEverything(workedBefore);
-          }
-        } else {
-          refusedInARow = 0;
+        if (refusedAlone.length === 0) continue;
+        // Only a refusal shown to be about the text is counted: another chunk of the request went
+        // in, or the short test text did. Otherwise the embedder refuses everything: stop, count nothing.
+        if (!wentInAlone && !(await probeAccepted())) {
+          throw Object.assign(
+            new Error(`the embedding model ${spec} refused every chunk it was sent and a short test text; check the model and its endpoint. Nothing was counted as refused.`),
+            { refusedEverything: true },
+          );
         }
+        for (const { row, error: why } of refusedAlone) record(row, why);
       }
-    }
-    if (pending.length > 0) {
-      if (chunksEmbedded === 0 && !workedBefore) throw refusedEverything(false);
-      commitPending();
     }
   } finally {
     db.close();
@@ -1090,6 +1092,8 @@ export function maintainSqliteMemoryIndex(options: SqliteMemoryMaintenanceOption
         }
         const emptyResult = db.prepare("DELETE FROM memory_sources WHERE id NOT IN (SELECT DISTINCT source_id FROM memory_chunks)").run();
         emptySourcesRemoved = Number(emptyResult.changes ?? 0);
+        // A refusal record whose chunk is gone is dropped, text and all (#170 review).
+        db.exec("DELETE FROM memory_embed_rejections WHERE chunk_id NOT IN (SELECT chunk_id FROM memory_chunks)");
         db.exec("COMMIT");
       } catch (error) {
         db.exec("ROLLBACK");

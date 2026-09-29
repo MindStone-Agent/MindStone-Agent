@@ -46,8 +46,10 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  MEMORY_EMBED_REFUSAL_SPACING_MS,
   MEMORY_EMBED_SKIP_AFTER,
   MEMORY_REEMBED_BATCH,
+  maintainSqliteMemoryIndex,
   embeddingFailureCause,
   MEMORY_REEMBED_PER_TURN,
   indexSqliteMemoryTurn,
@@ -322,8 +324,21 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   sent.length = 0;
   const next = await reembedSqliteMemoryOtherModel({ paths, provider: P, limit: 8 });
   if (next.chunksEmbedded !== 8 || refusedSends() !== 0) fail(`a chunk refused before should go last: ${JSON.stringify(next)}, ${refusedSends()} sends`);
-  // A whole backfill retries it; after MEMORY_EMBED_SKIP_AFTER refusals it is skipped for that model.
+  // A refusal counts at most once per MEMORY_EMBED_REFUSAL_SPACING_MS (#170 review): refused again at once, it isn't counted again.
+  const soon = await backfillSqliteMemoryEmbeddings({ paths, provider: P });
+  if (soon.chunksRejected !== 1 || rejection()?.failures !== 1) fail(`a refusal again within the spacing shouldn't count again: ${JSON.stringify(soon)}, ${JSON.stringify(rejection())}`);
+  const age = (ms: number) => {
+    const db = new DatabaseSync(dbPath);
+    db.prepare("UPDATE memory_embed_rejections SET updated_at = ? WHERE chunk_id = 'refused#0' AND spec = 'stub:p'").run(new Date(Date.now() - ms).toISOString());
+    db.close();
+  };
+  // Just inside the spacing still doesn't count.
+  age(MEMORY_EMBED_REFUSAL_SPACING_MS - 60_000);
+  await backfillSqliteMemoryEmbeddings({ paths, provider: P });
+  if (rejection()?.failures !== 1) fail(`a refusal a minute inside the spacing shouldn't count again: ${JSON.stringify(rejection())}`);
+  // Spaced out, a whole backfill's refusal counts; after MEMORY_EMBED_SKIP_AFTER refusals it is skipped for that model.
   for (let run = 2; run <= MEMORY_EMBED_SKIP_AFTER; run += 1) {
+    age(MEMORY_EMBED_REFUSAL_SPACING_MS + 1000);
     const whole = await backfillSqliteMemoryEmbeddings({ paths, provider: P });
     if (whole.chunksRejected !== 1) fail(`backfill ${run} should be refused on that chunk alone: ${JSON.stringify(whole)}`);
   }
@@ -372,6 +387,15 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   count.prepare("DELETE FROM memory_sources WHERE id = 'refused'").run();
   count.close();
   if (rejectionsAfter !== rejectionsBefore) fail(`an outage shouldn't be recorded as a refusal: ${rejectionsBefore} -> ${rejectionsAfter}`);
+  // A record whose chunk is gone is dropped, text and all (#170 review): by maintenance, and at the start of an embedding run.
+  if (!rejection()) fail("control: the refused chunk's record should still be there before maintenance");
+  maintainSqliteMemoryIndex({ paths, removeStaleSources: false, optimize: false, vacuum: false });
+  if (rejection()) fail(`maintenance should drop the record of a chunk that is gone: ${JSON.stringify(rejection())}`);
+  const ghost = new DatabaseSync(dbPath);
+  ghost.prepare("INSERT INTO memory_embed_rejections (chunk_id, spec, text, failures, reason, updated_at) VALUES ('refused#0', 'stub:p', 'gone text', 1, 'x', '2026-01-01T00:00:00.000Z')").run();
+  ghost.close();
+  await backfillSqliteMemoryEmbeddings({ paths, provider: P });
+  if (rejection()) fail(`an embedding run should drop the record of a chunk that is gone: ${JSON.stringify(rejection())}`);
 }
 // #170 review: an embedder that refuses everything isn't a text it can't take.
 {
@@ -404,32 +428,63 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
     db.close();
   };
   toOther();
-  // A model that has never embedded here and refuses every request: the run stops after two whole
-  // requests (and their single sends) and marks nothing.
+  // A model that refuses every request (a chat model behind the embeddings route): the request, its
+  // chunks alone and then a short test text are refused, so the run stops and counts nothing (#170 review).
   let calls = 0;
+  let gates = 0;
   const everything = { id: "stub", model: "q", async embedTexts() { calls += 1; throw Object.assign(new Error("model does not support embeddings"), { status: 400 }); } };
-  const refusedAll = await reembedSqliteMemoryOtherModel({ paths, provider: everything, limit: 16 }).then(() => undefined, (error: unknown) => error);
+  const refusedAll = await reembedSqliteMemoryOtherModel({ paths, provider: everything, limit: 16, beforeBatch: async () => { gates += 1; } }).then(() => undefined, (error: unknown) => error);
   if (!(refusedAll instanceof Error) || !(refusedAll as { refusedEverything?: boolean }).refusedEverything) fail(`an embedder refusing everything should stop the run: ${String(refusedAll)}`);
-  if (calls !== 2 + 2 * MEMORY_REEMBED_BATCH) fail(`two whole requests and their single sends, then stop: ${calls} requests`);
+  if (calls !== 1 + MEMORY_REEMBED_BATCH + 1) fail(`the request, its chunks alone and the test text, then stop: ${calls} requests`);
+  if (gates !== calls) fail(`beforeBatch should run before every request, the test text included: ${gates} for ${calls}`);
   if (rejections("stub:q") !== 0) fail(`an embedder refusing everything marked ${rejections("stub:q")} chunks`);
-  calls = 0;
   const wholeBackfill = await backfillSqliteMemoryEmbeddings({ paths, provider: everything }).then(() => undefined, (error: unknown) => error);
-  if (!(wholeBackfill instanceof Error) || rejections("stub:q") !== 0) fail(`a whole backfill against it should stop and mark nothing: ${String(wholeBackfill)}, ${rejections("stub:q")}`);
-  // A run of one request against it, all refused: nothing embedded and never worked here, so at the
-  // end of the run it stops too, marking nothing.
-  const oneRequest = await reembedSqliteMemoryOtherModel({ paths, provider: everything, limit: MEMORY_REEMBED_BATCH }).then(() => undefined, (error: unknown) => error);
-  if (!(oneRequest instanceof Error) || rejections("stub:q") !== 0) fail(`a one-request run against it should stop and mark nothing: ${String(oneRequest)}, ${rejections("stub:q")}`);
-  // A model that has embedded here before and now refuses everything: the run stops, and only the
-  // chunks of those two requests are counted (so a real run of bad texts at the head is got past).
+  if (!(wholeBackfill instanceof Error) || rejections("stub:q") !== 0) fail(`a whole backfill against it should stop and count nothing: ${String(wholeBackfill)}, ${rejections("stub:q")}`);
+  // One that worked before, and in this run, then refuses everything (a proxy's 400 while its upstream
+  // is down): the same, nothing counted, whatever it embedded first (#170 review: it used to count them).
   const worked = { id: "stub", model: "w", embedTexts: (texts: string[]) => B.embedTexts(texts) };
   await reembedSqliteMemoryOtherModel({ paths, provider: worked, limit: 4 });
-  const nowRefusing = { id: "stub", model: "w", async embedTexts() { throw Object.assign(new Error("input too long"), { status: 400 }); } };
-  const stopped = await reembedSqliteMemoryOtherModel({ paths, provider: nowRefusing, limit: 64 }).then(() => undefined, (error: unknown) => error);
-  if (!(stopped instanceof Error) || rejections("stub:w") !== 2 * MEMORY_REEMBED_BATCH) fail(`it should stop after two requests, counting their ${2 * MEMORY_REEMBED_BATCH} chunks: ${String(stopped)}, ${rejections("stub:w")}`);
+  toOther();
+  let wCalls = 0;
+  const flips = { id: "stub", model: "w", async embedTexts(texts: string[]) {
+    wCalls += 1;
+    if (wCalls > 1) throw Object.assign(new Error("upstream unavailable"), { status: 400 });
+    return B.embedTexts(texts);
+  } };
+  const stopped = await reembedSqliteMemoryOtherModel({ paths, provider: flips, limit: 64 }).then((result) => result, (error: unknown) => error);
+  if (!(stopped instanceof Error) || !(stopped as { refusedEverything?: boolean }).refusedEverything) fail(`it should stop the run: ${JSON.stringify(stopped)}`);
+  if (rejections("stub:w") !== 0) fail(`an embedder that worked and then refused everything counted ${rejections("stub:w")} chunks`);
+  if (wCalls !== 1 + 1 + MEMORY_REEMBED_BATCH + 1) fail(`one request that worked, then a refused one, its chunks alone and the test text: ${wCalls} requests`);
+  // A model that has never worked here, with a first request of texts it can't take: the test text
+  // goes in, so they are counted and the run goes on (#170 review: it used to stall there).
+  toOther();
+  const head = (() => {
+    const db = new DatabaseSync(dbPath);
+    const rows = db.prepare("SELECT text FROM memory_chunks WHERE embedding_json IS NOT NULL ORDER BY updated_at DESC, chunk_id ASC LIMIT ?").all(MEMORY_REEMBED_BATCH) as Array<{ text: string }>;
+    db.close();
+    return new Set(rows.map((row) => row.text));
+  })();
+  const tooLong = () => Object.assign(new Error("input too long"), { status: 400 });
+  const badHead = { id: "stub", model: "h", async embedTexts(texts: string[]) { if (texts.some((text) => head.has(text))) throw tooLong(); return B.embedTexts(texts); } };
+  const pastHead = await reembedSqliteMemoryOtherModel({ paths, provider: badHead, limit: 2 * MEMORY_REEMBED_BATCH });
+  if (pastHead.chunksRejected !== MEMORY_REEMBED_BATCH || pastHead.chunksEmbedded !== MEMORY_REEMBED_BATCH || rejections("stub:h") !== MEMORY_REEMBED_BATCH) fail(`a head of texts it can't take should be counted and got past: ${JSON.stringify(pastHead)}, ${rejections("stub:h")}`);
   // A success clears a chunk's record for that model (a whole backfill reaches them: they go last).
   toOther();
-  await backfillSqliteMemoryEmbeddings({ paths, provider: worked });
-  if (rejections("stub:w") !== 0) fail(`a chunk embedded after a refusal should lose its record: ${rejections("stub:w")} left`);
+  await backfillSqliteMemoryEmbeddings({ paths, provider: { id: "stub", model: "h", embedTexts: (texts: string[]) => B.embedTexts(texts) } });
+  if (rejections("stub:h") !== 0) fail(`a chunk embedded after a refusal should lose its record: ${rejections("stub:h")} left`);
+  // A refusal shown to be about its text is kept when an outage stops the run later (#170 review).
+  toOther();
+  const [firstText] = [...head];
+  let lCalls = 0;
+  const laterOutage = { id: "stub", model: "l", async embedTexts(texts: string[]) {
+    lCalls += 1;
+    // The refused request (1), its chunks alone (4), one request that works (6), then the outage.
+    if (lCalls > 1 + MEMORY_REEMBED_BATCH + 1) throw Object.assign(new Error("service unavailable"), { status: 503 });
+    if (texts.includes(firstText!)) throw tooLong();
+    return B.embedTexts(texts);
+  } };
+  const outageLater = await reembedSqliteMemoryOtherModel({ paths, provider: laterOutage, limit: 3 * MEMORY_REEMBED_BATCH }).then(() => undefined, (error: unknown) => error);
+  if (!(outageLater instanceof Error) || rejections("stub:l") !== 1) fail(`the refusal found before the outage should be kept: ${String(outageLater)}, ${rejections("stub:l")}`);
   toOther();
   // During the single sends: a stop in beforeBatch stops the run, a row gone meanwhile isn't sent,
   // and an outage stops the run without counting a refusal.
@@ -471,6 +526,12 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   const outageResult = await reembedSqliteMemoryOtherModel({ paths, provider: outageAlone, limit: MEMORY_REEMBED_BATCH }).then(() => undefined, (error: unknown) => error);
   if (!(outageResult instanceof Error) || rejections("stub:s") !== before) fail(`an outage during the single sends should stop the run and count nothing: ${String(outageResult)}, ${before} -> ${rejections("stub:s")}`);
   if (outageAlone.sent.length !== 2) fail(`it should stop at the first single send: ${outageAlone.sent.length} requests`);
+  // A turn's own chunk refused on its own is in the turn's result, which the gateway logs.
+  const turnFile = join(paths.transcriptDir, "refused-turn.jsonl");
+  writeFileSync(turnFile, JSON.stringify({ id: "t3", sessionKey: "agent:console:console:admin:c3", agentId: "default", role: "user", text: "a note holding TURNREFUSED", timestamp: "t", source: { substrate: "openai", channel: "openai-chat-completions", chatType: "internal" } }) + "\n");
+  const turnRefuser = { id: "stub", model: "t", async embedTexts(texts: string[]) { if (texts.some((text) => text.includes("TURNREFUSED"))) throw tooLong(); return B.embedTexts(texts); } };
+  const refusedTurn = await indexSqliteMemoryTurn({ transcriptFile: turnFile, config: { memory: { vectorStore: "sqlite-vec" } }, paths, provider: turnRefuser, otherModelLimit: 0 });
+  if (refusedTurn.chunksRejected !== 1) fail(`the turn's refused chunk should be in its result: ${JSON.stringify(refusedTurn)}`);
 }
 console.log(`recall index: ${total} chunks, switching models checked`);
 TS
