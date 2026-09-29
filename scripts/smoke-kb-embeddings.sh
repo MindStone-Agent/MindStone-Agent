@@ -129,12 +129,12 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import {
-  KB_EMBED_LIMITS, KB_VECTORS_FILE, cosineSimilarity, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbVectors, writeKbVectors,
+  KB_EMBED_LIMITS, KB_REEMBED_STATE_FILE, KB_VECTORS_FILE, cosineSimilarity, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbReembedState, readKbVectors, writeKbVectors,
 } from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
-import { ingestMindStoneKnowledgebase, reembedStaleKnowledgebase } from "./packages/mindstone-core/src/knowledgebase/load.ts";
+import { KB_REEMBED_LIMITS, ingestMindStoneKnowledgebase, mindStoneKbStatus, reembedStaleKnowledgebase, turnsHoldReembed } from "./packages/mindstone-core/src/knowledgebase/load.ts";
 import { KnowledgebaseRecallProvider, knowledgebaseRecallSettings } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
 import { buildMemoryRecallPrompt, CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, recallMindStoneMemory, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
-import { sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
+import { createMemoryEmbeddingProvider, sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
 
 const entry = (id: string, text: string, section?: string) => ({
   entryId: id, sourceId: "s.md", sourcePath: "s.md", sourceTitle: "Title", section, citation: `s.md § ${section ?? id}`, summary: text.slice(0, 40), text, sourceMtimeMs: 0,
@@ -497,6 +497,144 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   assert.equal(readFileSync(join(race, "e-race", KB_VECTORS_FILE), "utf8"), beforeRace, "vectors made from an index replaced meanwhile are not written");
   assert.equal((result.reembedded?.vectors as any).superseded, true);
   assert.equal((await reembedStaleKnowledgebase({ kbDirs: [{ dir: race }], embedder: now })).reembedded?.kbId, "e-race", "an overtaken attempt isn't a failure: tried again at once");
+}
+// Why an embed stopped, and how far it got (#158): an outage, a 429 or the text refused.
+{
+  const cdir = mkdtempSync(join(tmpdir(), "kbvec-cause-"));
+  const failWith = (error: unknown) => ({ id: "stub", model: "m1", async embedTexts() { throw error; } }) as any;
+  for (const [error, cause] of [
+    [Object.assign(new Error("x"), { status: 429 }), "rate-limited"],
+    [Object.assign(new Error("x"), { status: 503 }), "unavailable"],
+    [Object.assign(new Error("x"), { status: 401 }), "unavailable"],
+    [Object.assign(new Error("x"), { status: 400 }), "rejected"],
+    [new TypeError("fetch failed"), "unavailable"],
+    [Object.assign(new Error("no key"), { unavailable: true }), "unavailable"],
+    [new Error("odd"), "rejected"],
+  ] as const) {
+    const result = await writeKbVectors({ kbDir: cdir, kbId: "k", entries, indexText, embedder: failWith(error) }) as any;
+    assert.deepEqual([result.cause, result.embedded], [cause, 0], `${(error as Error).message} ${(error as any).status ?? ""}`);
+  }
+  let calls = 0;
+  const partial = { id: "stub", model: "m1", async embedTexts(texts: string[]) { if (calls++ >= 1) throw new TypeError("fetch failed"); return texts.map(() => [1, 0, 0]); } } as any;
+  const partly = await writeKbVectors({ kbDir: cdir, kbId: "k", entries, indexText, embedder: partial, batchSize: 1 }) as any;
+  assert.deepEqual([partly.cause, partly.embedded], ["unavailable", 1], "an outage after one entry says so");
+  const zeroed = await writeKbVectors({ kbDir: cdir, kbId: "k", entries, indexText, embedder: { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.map(() => [0, 0, 0]); } } as any }) as any;
+  assert.equal(zeroed.cause, "rejected", "a zero vector is the text's");
+  const limited = await writeKbVectors({ kbDir: cdir, kbId: "k", entries, indexText, embedder: failWith(Object.assign(new Error("x"), { status: 429 })) }) as any;
+  assert.match(limited.reason, /limiting requests/);
+}
+// The provider carries the HTTP status on its error, JSON or not (#158).
+{
+  const { createServer } = await import("node:http");
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (req.url?.includes("limited")) { res.writeHead(429, { "content-type": "application/json" }); res.end('{"error":{"message":"slow down"}}'); return; }
+      res.writeHead(502, { "content-type": "text/html" }); res.end("<html>bad gateway</html>");
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as any).port;
+  try {
+    for (const [path, status, message] of [["limited", 429, /slow down/], ["proxy", 502, /HTTP 502/]] as const) {
+      const provider = createMemoryEmbeddingProvider(undefined, { MINDSTONE_EMBEDDING_PROVIDER: "ollama:m1", EMBEDDER_BASE_URL: `http://127.0.0.1:${port}/${path}` } as any)!;
+      const error = await provider.embedTexts(["x"]).then(() => undefined, (e) => e);
+      assert.equal(error?.status, status, `${path}: ${error?.message}`);
+      assert.match(error.message, message);
+    }
+  } finally {
+    server.close();
+  }
+}
+// Paused time never counts against the budget (#158, N6).
+{
+  const pdir = mkdtempSync(join(tmpdir(), "kbvec-paused-"));
+  let first = true;
+  const paused = await writeKbVectors({
+    kbDir: pdir, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }), batchSize: 1, timeoutMs: 300,
+    beforeBatch: async () => { if (first) { first = false; await new Promise((resolve) => setTimeout(resolve, 400)); } },
+  });
+  assert.equal(paused.state, "ready", "a 400 ms pause under a 300 ms budget still embeds");
+}
+// A turn running past turnWaitMs no longer holds the re-embed back: it may never end (#158).
+{
+  const now = 1_000_000_000;
+  assert.equal(turnsHoldReembed([], now), false);
+  assert.equal(turnsHoldReembed([now - 1000], now), true);
+  assert.equal(turnsHoldReembed([now - KB_REEMBED_LIMITS.turnWaitMs], now), false);
+  assert.equal(turnsHoldReembed([now - KB_REEMBED_LIMITS.turnWaitMs - 1, now - 5], now), true);
+}
+// The re-embed's state (#158): kept in the KB, so a restart keeps it; only failures that cost
+// something count (exact doubling, N3); an outage or a 429 only waits; another model starts afresh;
+// status says so; embedding the KB clears it.
+{
+  const kb = async (root: string, id: string, text: string, model: string) => {
+    mkdirSync(join(root, id, "sources"), { recursive: true });
+    writeFileSync(join(root, id, "kb.json"), JSON.stringify({ name: id }));
+    writeFileSync(join(root, id, "sources", "a.md"), text);
+    await ingestMindStoneKnowledgebase(root, id, { embedder: { ...fixed({ alpha: [1, 0, 0] }), model } as any });
+  };
+  const failing = (error: () => unknown, model = "m1") => ({ id: "stub", model, calls: 0, async embedTexts() { this.calls += 1; throw error(); } }) as any;
+  const working = { ...fixed({ alpha: [1, 0, 0] }), model: "m1" } as any;
+  const MIN = 60_000;
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => clock;
+  try {
+    // Refused text: 30, 60, 120, 240 minutes to the minute, then given up; never early.
+    const refused = mkdtempSync(join(tmpdir(), "kbvec-state-refused-"));
+    await kb(refused, "r-kb", "# R\n\nalpha r\n", "old");
+    const bad = failing(() => Object.assign(new Error("x"), { status: 400 }));
+    let result: any;
+    for (const [attempt, wait] of [[1, 30], [2, 60], [3, 120], [4, 240]] as const) {
+      result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: refused }], embedder: bad });
+      assert.equal(result.reembedded?.kbId, "r-kb", `attempt ${attempt} runs`);
+      const state = readKbReembedState(join(refused, "r-kb"))!;
+      assert.deepEqual([state.failures, Date.parse(state.nextAttemptAt!) - clock], [attempt, wait * MIN], `after failure ${attempt}, ${wait} minutes`);
+      clock += wait * MIN - 1;
+      const calls = bad.calls;
+      assert.deepEqual(await reembedStaleKnowledgebase({ kbDirs: [{ dir: refused }], embedder: bad }), { deferred: 1 }, `not a millisecond early (${attempt})`);
+      assert.equal(bad.calls, calls, "waiting sends nothing");
+      clock += 1;
+    }
+    result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: refused }], embedder: bad });
+    assert.equal(result.reembedded?.gaveUp, true, "the fifth failure gives up");
+    const given = readKbReembedState(join(refused, "r-kb"))!;
+    assert.deepEqual([given.gaveUp, given.failures, given.nextAttemptAt, given.spec], [true, 5, undefined, "stub:m1"], "the give-up is in the file, for a restart");
+    const status = mindStoneKbStatus(refused, "r-kb", { embedder: working }) as any;
+    assert.equal(status.vectors.reembed?.gaveUp, true);
+    assert.match(status.vectors.reason, /stopped embedding it again after 5 failures/);
+    assert.doesNotMatch(status.vectors.reason, /also embedded again after an owner's chat/);
+    // Another model starts afresh (b -> c -> b): its attempt runs, and its own state replaces the old one.
+    const other = failing(() => Object.assign(new Error("x"), { status: 400 }), "m2");
+    assert.equal((await reembedStaleKnowledgebase({ kbDirs: [{ dir: refused }], embedder: other })).reembedded?.kbId, "r-kb", "another model's give-up doesn't apply");
+    assert.equal(readKbReembedState(join(refused, "r-kb"))!.spec, "stub:m2");
+    assert.equal((await reembedStaleKnowledgebase({ kbDirs: [{ dir: refused }], embedder: working })).reembedded?.vectors.state, "ready", "back on m1: tried again, and embedded");
+    assert.ok(!existsSync(join(refused, "r-kb", KB_REEMBED_STATE_FILE)), "embedding the KB clears the state");
+    // An embedder that can't be reached, or limits requests, never gives up: 30 minutes each time.
+    for (const [name, error] of [["down", () => new TypeError("fetch failed")], ["limited", () => Object.assign(new Error("x"), { status: 429 })]] as const) {
+      const root = mkdtempSync(join(tmpdir(), `kbvec-state-${name}-`));
+      await kb(root, "o-kb", "# O\n\nalpha o\n", "old");
+      const embedder = failing(error);
+      for (let attempt = 1; attempt <= 7; attempt += 1) {
+        result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder });
+        assert.ok(result.reembedded && !result.reembedded.gaveUp, `${name}: attempt ${attempt} runs and doesn't give up`);
+        const state = readKbReembedState(join(root, "o-kb"))!;
+        assert.deepEqual([state.failures, Date.parse(state.nextAttemptAt!) - clock], [0, 30 * MIN], `${name}: nothing counted`);
+        clock += 30 * MIN;
+      }
+      assert.equal((mindStoneKbStatus(root, "o-kb", { embedder: working }) as any).vectors.reembed?.failures, 0);
+    }
+    // An outage after some entries were embedded cost something, so it counts.
+    const spent = mkdtempSync(join(tmpdir(), "kbvec-state-spent-"));
+    await kb(spent, "s-kb", "# S\n\n## One\n\nalpha one\n\n## Two\n\nalpha two\n", "old");
+    let calls = 0;
+    const halfway = { id: "stub", model: "m1", async embedTexts(texts: string[]) { if (calls++ >= 1) throw new TypeError("fetch failed"); return texts.map(() => [1, 0, 0]); } } as any;
+    await reembedStaleKnowledgebase({ kbDirs: [{ dir: spent }], embedder: halfway });
+    assert.equal(readKbReembedState(join(spent, "s-kb"))!.failures, 1, "an outage after an entry counts");
+  } finally {
+    Date.now = realNow;
+  }
 }
 // Two ingests of one KB: the one whose index was replaced meanwhile keeps nothing and removes nothing (#156 review).
 {
@@ -909,7 +1047,7 @@ node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
 [[ "$(library_requests_between 0 "$(node -e 'console.log(Date.now())')")" -gt 0 ]] || { echo "no re-embed request was seen at all" >&2; exit 1; }
 for _ in $(seq 1 120); do grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" && break; sleep 0.5; done
 grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" || { echo "the library KB was never embedded again" >&2; exit 1; }
-grep -q '"action":"kb_reembedded"' "${DATA}/admin-audit.jsonl" 2>/dev/null || grep -rq 'kb_reembedded' "${DATA}" || { echo "the re-embed left no audit entry" >&2; exit 1; }
+grep -q '"action":"kb_reembedded"' "${DATA}/admin/audit.jsonl" || { echo "the re-embed left no audit entry" >&2; exit 1; }
 stub_mode ok
 
 echo "KB embeddings smoke test passed."

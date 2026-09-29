@@ -120,6 +120,7 @@ import {
   knowledgebasesDirFromConfig,
   personaKnowledgebasesDir,
   reembedStaleKnowledgebase,
+  turnsHoldReembed,
   decisionForAnsweringPersona,
   personaComponentsSummary,
   privateKnowledgebasesAllowed,
@@ -785,7 +786,7 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
       // if they overlap (#156 review).
       claim: ({ personaId, kbId }) => (personaId && PRIVATE_KB_INGESTS.has(`${personaId}/${kbId}`) ? undefined : () => undefined),
       beforeBatch: async () => {
-        while (turnsInFlight > 0) await new Promise<void>((resolve) => setTimeout(resolve, 200));
+        while (turnsHoldReembed(turnsInFlight.values())) await new Promise<void>((resolve) => setTimeout(resolve, 200));
       },
     });
     const done = result.reembedded;
@@ -801,6 +802,7 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
         ...(done.vectors.state === "missing" ? { reason: done.vectors.reason } : {}),
         ...(done.gaveUp ? { gaveUp: true } : {}),
         ...(done.vectors.state === "missing" && done.vectors.superseded ? { superseded: true } : {}),
+        ...(done.vectors.state === "missing" && done.vectors.cause ? { cause: done.vectors.cause } : {}),
       });
       // One line an outcome: a give-up isn't retried, and a newer ingest's vectors are in place.
       if (done.vectors.state === "ready") console.info(`[mindstone] knowledge base ${where} embedded again for ${spec}`);
@@ -1220,15 +1222,19 @@ function releaseIdentityFormation(agentId: string): void {
   }
 }
 
-/** Turns being answered now: a background KB re-embed waits while any runs (#156 review). */
-let turnsInFlight = 0;
+/**
+ * When each turn being answered now started: a background KB re-embed waits
+ * while any runs (#156 review), unless it has run so long it may never end (#158).
+ */
+const turnsInFlight = new Map<symbol, number>();
 
 async function runConfiguredRoute(input: Parameters<typeof runConfiguredRouteUncounted>[0]): ReturnType<typeof runConfiguredRouteUncounted> {
-  turnsInFlight += 1;
+  const turn = Symbol("turn");
+  turnsInFlight.set(turn, Date.now());
   try {
     return await runConfiguredRouteUncounted(input);
   } finally {
-    turnsInFlight -= 1;
+    turnsInFlight.delete(turn);
   }
 }
 

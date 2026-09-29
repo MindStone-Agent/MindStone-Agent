@@ -157,7 +157,8 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
   async embedTexts(texts: string[]): Promise<number[][]> {
     const normalized = texts.map((text) => text.trim()).filter((text) => text.length > 0);
     if (normalized.length === 0) return [];
-    if (this.#unavailable) throw new Error(this.#unavailable);
+    // Marked, so a background re-embed can tell an embedder it can't reach from one that refuses the text (#158).
+    if (this.#unavailable) throw Object.assign(new Error(this.#unavailable), { unavailable: true });
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
@@ -173,10 +174,17 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
         redirect: this.#followRedirects ? "follow" : "error",
         signal: controller.signal,
       });
-      const body = await response.json() as OpenAiEmbeddingResponse;
       if (!response.ok) {
-        throw new Error(body.error?.message || `embedding request failed with HTTP ${response.status}`);
+        // The status goes with the error (#158): a 429 or a 5xx is the embedder's state, a 400 the text's.
+        let message: string | undefined;
+        try {
+          message = ((await response.json()) as OpenAiEmbeddingResponse).error?.message;
+        } catch {
+          // Not JSON (a proxy's error page): the status says enough.
+        }
+        throw Object.assign(new Error(message || `embedding request failed with HTTP ${response.status}`), { status: response.status });
       }
+      const body = await response.json() as OpenAiEmbeddingResponse;
       const data = body.data;
       if (!Array.isArray(data) || data.length !== normalized.length) {
         throw new Error(`embedding response returned ${data?.length ?? 0} vectors for ${normalized.length} inputs`);

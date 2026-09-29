@@ -68,6 +68,11 @@ export type MindStoneKbVectorsStatus = {
   model?: string;
   dimension?: number;
   count?: number;
+  /**
+   * Stale after a model switch, and the gateway has tried to embed it again
+   * (#158): failures that counted, when it tries next, or that it gave up.
+   */
+  reembed?: { failures: number; nextAttemptAt?: string; gaveUp?: true; reason?: string };
 };
 
 export type MindStoneKbStatus = {
