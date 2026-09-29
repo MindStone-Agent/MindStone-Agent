@@ -66,6 +66,8 @@ for (let i = 0; i < 3; i += 1) {
   assert.equal(r.proposals.length, 3, `proposal ${i} should make a persona card and two KB cards`);
 }
 assert.equal(store.pending().filter((a) => a.kind === "persona_kb_create").length, MAX_PENDING_COMPONENTS);
+// The persona cards are decided, so only the KB cap can refuse the next one (the persona cap is 3).
+for (const card of store.pending().filter((a) => a.kind === "persona_create")) store.decide(card.id, { status: "approved", decidedBy: "unit", now: "t" });
 const capped = applyActionProposalDiscipline({ replyText: block({ id: "cap9", name: "Cap", voice: "x", components: { new: { privateKnowledgebases: kbs(1) } } }), origin: "unit", allowPersona: true, store });
 assert.equal(capped.proposals.length, 0, "a proposal past the KB cap must be dropped whole");
 assert.match(capped.text, /wasn't saved/);
