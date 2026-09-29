@@ -135,6 +135,8 @@ import {
   createSqliteMemoryRecallProvider,
   selectMemoryRecallProvider,
   indexSqliteMemoryTurn,
+  memoryEmbeddingSpec,
+  sqliteMemoryEmbeddingMix,
   isAutoRecallEnabled,
   transcriptPathForSession,
   decideGatewayAuth,
@@ -3284,8 +3286,13 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const missingModel = !ok && spec.startsWith("ollama:") && /not found|pull/i.test(error ?? "");
     lastMissingOllamaModel = missingModel ? spec.slice("ollama:".length) : undefined;
     appendAdminAudit(paths.dataDir, { userId, action: "memory_checked", embeddingProvider: spec, ok });
+    // Memories another model embedded are embedded again after a switch, and
+    // until then found only by their words (#140): the check says how many.
+    const index = ok && probe!.providerId && probe!.model
+      ? sqliteMemoryEmbeddingMix(memoryEmbeddingSpec({ id: probe!.providerId, model: probe!.model }), paths)
+      : undefined;
     sendJson(res, 200, ok
-      ? { ok: true, providerId: probe!.providerId, model: probe!.model, dimensions: probe!.dimensions }
+      ? { ok: true, providerId: probe!.providerId, model: probe!.model, dimensions: probe!.dimensions, ...(index ? { index } : {}) }
       : { ok: false, error, missingModel });
     return;
   }

@@ -117,6 +117,7 @@ type StoredChunk = {
   text: string;
   token_estimate: number;
   embedding_json?: string;
+  embedding_spec?: string;
   metadata_json?: string;
 };
 
@@ -254,6 +255,43 @@ function initializeSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_memory_chunks_kind ON memory_chunks(kind);
     CREATE INDEX IF NOT EXISTS idx_memory_sources_kind ON memory_sources(kind);
   `);
+  // Which embedding model made each chunk's vector (#140): vectors from
+  // another model, or of another size, are never compared with a query's.
+  const columns = db.prepare("PRAGMA table_info(memory_chunks)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "embedding_spec")) {
+    db.exec("ALTER TABLE memory_chunks ADD COLUMN embedding_spec TEXT");
+  }
+}
+
+/**
+ * The embedding model a vector comes from, as recorded with each chunk
+ * (#140): `<provider id>:<model>`. A chunk embedded by another model (or
+ * before this was recorded) is embedded again by the next backfill, and until
+ * then recall finds it by its words.
+ */
+export function memoryEmbeddingSpec(provider: Pick<MemoryEmbeddingProvider, "id" | "model">): string {
+  return `${provider.id}:${provider.model}`;
+}
+
+/** How many chunks have a vector, and how many of those another model made (or an unrecorded one). */
+export function sqliteMemoryEmbeddingMix(
+  spec: string,
+  paths: MindStoneRuntimePaths = runtimePathsFromEnv(),
+): { embedded: number; otherModel: number } {
+  const databasePath = sqliteMemoryDatabasePath(paths);
+  if (!existsSync(databasePath)) return { embedded: 0, otherModel: 0 };
+  const db = openDatabase(databasePath);
+  try {
+    initializeSchema(db);
+    const row = db.prepare(`
+      SELECT count(*) AS embedded,
+             sum(CASE WHEN embedding_spec IS NULL OR embedding_spec != ? THEN 1 ELSE 0 END) AS otherModel
+      FROM memory_chunks WHERE embedding_json IS NOT NULL
+    `).get(spec) as { embedded: number; otherModel: number | null };
+    return { embedded: Number(row.embedded ?? 0), otherModel: Number(row.otherModel ?? 0) };
+  } finally {
+    db.close();
+  }
 }
 
 function words(text: string): Set<string> {
@@ -290,7 +328,9 @@ function parseEmbedding(value: string | undefined): number[] | undefined {
 }
 
 function cosineSimilarity(a: number[], b: number[]): number {
-  const length = Math.min(a.length, b.length);
+  // Vectors of different sizes come from different models: no similarity (#140).
+  if (a.length !== b.length) return 0;
+  const length = a.length;
   if (length === 0) return 0;
   let dot = 0;
   let normA = 0;
@@ -483,13 +523,14 @@ function transcriptDocuments(paths: MindStoneRuntimePaths, options: { includeNon
   return docs;
 }
 
-function preservedChunkEmbeddings(db: DatabaseSync, sourceId: string): Map<string, string> {
-  const rows = db.prepare("SELECT text, embedding_json FROM memory_chunks WHERE source_id = ? AND embedding_json IS NOT NULL").all(sourceId) as Array<{ text: string; embedding_json?: string }>;
-  const output = new Map<string, string>();
+function preservedChunkEmbeddings(db: DatabaseSync, sourceId: string): Map<string, { json: string; spec: string | null }> {
+  const rows = db.prepare("SELECT text, embedding_json, embedding_spec FROM memory_chunks WHERE source_id = ? AND embedding_json IS NOT NULL").all(sourceId) as Array<{ text: string; embedding_json?: string; embedding_spec?: string | null }>;
+  const output = new Map<string, { json: string; spec: string | null }>();
   for (const row of rows) {
     if (!row.embedding_json || !parseEmbedding(row.embedding_json)) continue;
     const key = hashText(row.text.trim());
-    if (!output.has(key)) output.set(key, row.embedding_json);
+    // The model travels with the vector, so a kept vector is never taken for the current model's.
+    if (!output.has(key)) output.set(key, { json: row.embedding_json, spec: row.embedding_spec ?? null });
   }
   return output;
 }
@@ -522,8 +563,8 @@ function indexDocument(db: DatabaseSync, document: MemoryDocument): { chunksInde
   db.prepare("DELETE FROM memory_chunks WHERE source_id = ?").run(document.id);
 
   const insertChunk = db.prepare(`
-    INSERT INTO memory_chunks (chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, metadata_json, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO memory_chunks (chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, embedding_spec, metadata_json, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const chunks = chunkText(document.text);
   let chunkEmbeddingsPreserved = 0;
@@ -539,7 +580,8 @@ function indexDocument(db: DatabaseSync, document: MemoryDocument): { chunksInde
       ordinal,
       text,
       estimatePromptTokens(text),
-      preservedEmbedding ?? null,
+      preservedEmbedding?.json ?? null,
+      preservedEmbedding?.spec ?? null,
       JSON.stringify({ ...(document.metadata ?? {}), sourceId: document.id }),
       now,
     );
@@ -675,19 +717,23 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
   const provider = options.provider ?? createMemoryEmbeddingProvider(options.config);
   if (!provider) throw new Error("No memory embedding provider configured. Set memory.embeddingProvider, e.g. ollama:nomic-embed-text.");
 
+  const spec = memoryEmbeddingSpec(provider);
   const db = openDatabase(databasePath);
   initializeSchema(db);
-  const rows = db.prepare(`
-    SELECT chunk_id, text
-    FROM memory_chunks
-    ${options.force ? "" : "WHERE embedding_json IS NULL"}
-    ORDER BY updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC
-  `).all() as Array<{ chunk_id: string; text: string }>;
+  // Chunks with no vector, and chunks another model (or an unrecorded one) embedded (#140).
+  const rows = (options.force
+    ? db.prepare(`SELECT chunk_id, text FROM memory_chunks ORDER BY updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC`).all()
+    : db.prepare(`
+      SELECT chunk_id, text
+      FROM memory_chunks
+      WHERE embedding_json IS NULL OR embedding_spec IS NULL OR embedding_spec != ?
+      ORDER BY updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC
+    `).all(spec)) as Array<{ chunk_id: string; text: string }>;
 
   const batchSize = Math.max(1, options.batchSize ?? 16);
   let chunksEmbedded = 0;
   let dimensions: number | undefined;
-  const update = db.prepare("UPDATE memory_chunks SET embedding_json = ?, updated_at = ? WHERE chunk_id = ?");
+  const update = db.prepare("UPDATE memory_chunks SET embedding_json = ?, embedding_spec = ?, updated_at = ? WHERE chunk_id = ?");
 
   try {
     for (let offset = 0; offset < rows.length; offset += batchSize) {
@@ -700,7 +746,7 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
       try {
         embeddings.forEach((embedding, index) => {
           dimensions ??= embedding.length;
-          update.run(JSON.stringify(embedding), new Date().toISOString(), batch[index].chunk_id);
+          update.run(JSON.stringify(embedding), spec, new Date().toISOString(), batch[index].chunk_id);
           chunksEmbedded += 1;
         });
         db.exec("COMMIT");
@@ -945,7 +991,12 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
    * A scoped query (a tenant's App Engine run) never gets the owner's
    * unscoped chat transcripts (#106 review, pending #71).
    */
-  #rows(embedded: boolean | "pending", scope: Record<string, string> | undefined, excludeOwnerTranscripts = false): StoredChunk[] {
+  /**
+   * embedded: chunks with a vector from `spec`'s model; "pending": chunks
+   * without one (not embedded yet, or embedded by another model), found by
+   * their words (#140); false: every chunk.
+   */
+  #rows(embedded: boolean | "pending", scope: Record<string, string> | undefined, excludeOwnerTranscripts = false, spec?: string): StoredChunk[] {
     const db = openDatabase(this.#databasePath);
     initializeSchema(db);
     const scopeClauses = RECALL_SCOPE_DIMENSIONS.map(
@@ -955,7 +1006,11 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     // json_extract throw and the whole recall fail.
     const scoped = excludeOwnerTranscripts || isScopedQuery(scope);
     const where = [
-      ...(embedded === true ? ["embedding_json IS NOT NULL"] : embedded === "pending" ? ["embedding_json IS NULL"] : []),
+      ...(embedded === true
+        ? ["embedding_json IS NOT NULL AND embedding_spec = ?"]
+        : embedded === "pending"
+          ? ["(embedding_json IS NULL OR embedding_spec IS NULL OR embedding_spec != ?)"]
+          : []),
       "(metadata_json IS NULL OR json_valid(metadata_json))",
       ...scopeClauses,
       ...(scoped ? ["NOT (source_id LIKE 'transcript:%' AND (metadata_json IS NULL OR json_extract(metadata_json, '$.scope') IS NULL))"] : []),
@@ -966,7 +1021,10 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
       WHERE ${where.join(" AND ")}
       ORDER BY CASE WHEN source_id LIKE 'transcript:%' THEN 1 ELSE 0 END, updated_at DESC
       LIMIT 5000
-    `).all(...RECALL_SCOPE_DIMENSIONS.map((dim) => scope?.[dim] ?? null)) as StoredChunk[];
+    `).all(
+      ...(embedded === false ? [] : [spec ?? ""]),
+      ...RECALL_SCOPE_DIMENSIONS.map((dim) => scope?.[dim] ?? null),
+    ) as StoredChunk[];
     db.close();
     return rows;
   }
@@ -992,7 +1050,7 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
     const [queryEmbedding] = await this.#embeddingProvider.embedTexts([query.text]);
     if (!queryEmbedding) return [];
     const limit = query.limit ?? 8;
-    return this.#rows(true, query.scope, excludesOwnerTranscripts(query))
+    return this.#rows(true, query.scope, excludesOwnerTranscripts(query), memoryEmbeddingSpec(this.#embeddingProvider))
       .filter((row) => this.#inScope(row, query))
       .map((row) => {
         const embedding = parseEmbedding(row.embedding_json);
@@ -1006,7 +1064,12 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
 
   #lexicalSearch(query: MemoryQuery, pendingOnly = false): MemoryHit[] {
     const limit = query.limit ?? 8;
-    return this.#rows(pendingOnly ? "pending" : false, query.scope, excludesOwnerTranscripts(query))
+    return this.#rows(
+      pendingOnly ? "pending" : false,
+      query.scope,
+      excludesOwnerTranscripts(query),
+      this.#embeddingProvider ? memoryEmbeddingSpec(this.#embeddingProvider) : undefined,
+    )
       .filter((row) => this.#inScope(row, query))
       .map((row) => this.#hitFromRow(row, lexicalScore(query.text, row.text), "lexical"))
       .filter((hit) => hit.score > 0)
