@@ -8,6 +8,8 @@
 #   - the next backfill (the per-turn one included) embeds them again and
 #     records the model; re-indexing keeps each vector's model with it
 #   - POST /admin/memory/check says how many memories another model embedded
+#   - the gateway paces that per-turn share: a few chunks a request, none sent
+#     while a turn runs, and off the index update the next turn waits for (#157)
 # Binds gateway port base+39 and an embedding stub on base+40; serialize per
 # smoke protocol. Synthetic text only.
 set -euo pipefail
@@ -44,8 +46,10 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  MEMORY_REEMBED_BATCH,
   MEMORY_REEMBED_PER_TURN,
   indexSqliteMemoryTurn,
+  reembedSqliteMemoryOtherModel,
   backfillSqliteMemoryEmbeddings,
   backfillSqliteMemoryIndex,
   memoryEmbeddingSpec,
@@ -219,6 +223,67 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
     fail(`a fact said while the switch is in progress should be recalled by its vector: ${JSON.stringify(hits.map((h) => [h.metadata?.recallMode, h.text.slice(0, 30)]))}`);
   }
 }
+// The gateway's split (#157): its turn update embeds only the turn's own chunks, and the paced
+// re-embed does another model's, MEMORY_REEMBED_BATCH a request, waiting on beforeBatch before each.
+{
+  const db = new DatabaseSync(dbPath);
+  db.prepare("UPDATE memory_chunks SET embedding_spec = 'stub:a' WHERE embedding_json IS NOT NULL").run();
+  db.close();
+  const file = join(paths.transcriptDir, "paced-turn.jsonl");
+  writeFileSync(file, JSON.stringify({ id: "t2", sessionKey: "agent:console:console:admin:c2", agentId: "default", role: "user", text: "the spare key is under PEBBLE-157", timestamp: "t", source: { substrate: "openai", channel: "openai-chat-completions", chatType: "internal" } }) + "\n");
+  const otherBefore = sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(B), paths).otherModel;
+  if (otherBefore < MEMORY_REEMBED_PER_TURN + 8) fail(`not enough of another model's chunks to measure: ${otherBefore}`);
+  const turn = await indexSqliteMemoryTurn({ transcriptFile: file, config: { memory: { vectorStore: "sqlite-vec" } }, paths, provider: B, otherModelLimit: 0 });
+  if (turn.chunksEmbedded !== 1) fail(`with otherModelLimit 0, the turn should embed only its own chunk: ${JSON.stringify(turn)}`);
+  if (sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(B), paths).otherModel !== otherBefore) fail("with otherModelLimit 0, the turn embedded another model's chunks again");
+  // A chunk with no vector is the turn update's, never the paced re-embed's.
+  const unembedded = new DatabaseSync(dbPath);
+  unembedded.prepare("UPDATE memory_chunks SET embedding_json = NULL, embedding_spec = NULL WHERE chunk_id = 'bulk:0#0'").run();
+  const newest = (unembedded.prepare(`SELECT chunk_id AS id FROM memory_chunks WHERE embedding_json IS NOT NULL AND embedding_spec = 'stub:a' ORDER BY updated_at DESC, chunk_id ASC LIMIT ?`).all(MEMORY_REEMBED_PER_TURN) as Array<{ id: string }>).map((row) => row.id).sort();
+  const bBefore = new Set((unembedded.prepare("SELECT chunk_id AS id FROM memory_chunks WHERE embedding_spec = 'stub:b'").all() as Array<{ id: string }>).map((row) => row.id));
+  unembedded.close();
+  const sizes: number[] = [];
+  const events: string[] = [];
+  const counting = { id: B.id, model: B.model, async embedTexts(texts: string[]) { sizes.push(texts.length); events.push("send"); return B.embedTexts(texts); } };
+  const paced = await reembedSqliteMemoryOtherModel({ paths, provider: counting, beforeBatch: async () => { events.push("gate"); } });
+  if (paced.chunksEmbedded !== MEMORY_REEMBED_PER_TURN) fail(`the paced re-embed should embed ${MEMORY_REEMBED_PER_TURN} chunks: ${JSON.stringify(paced)}`);
+  if (MEMORY_REEMBED_BATCH > 4 || sizes.some((n) => n > MEMORY_REEMBED_BATCH)) fail(`requests of more than ${MEMORY_REEMBED_BATCH} (at most 4) chunks: ${JSON.stringify(sizes)}`);
+  if (sizes.length !== Math.ceil(MEMORY_REEMBED_PER_TURN / MEMORY_REEMBED_BATCH)) fail(`expected ${Math.ceil(MEMORY_REEMBED_PER_TURN / MEMORY_REEMBED_BATCH)} requests: ${sizes.length}`);
+  if (events.join(",") !== Array(sizes.length).fill("gate,send").join(",")) fail(`beforeBatch should run before every request: ${events.slice(0, 6).join(",")}...`);
+  const check = new DatabaseSync(dbPath);
+  const redone = (check.prepare("SELECT chunk_id AS id FROM memory_chunks WHERE embedding_spec = 'stub:b'").all() as Array<{ id: string }>).map((row) => row.id).filter((id) => !bBefore.has(id)).sort();
+  const stillNull = check.prepare("SELECT embedding_json AS e FROM memory_chunks WHERE chunk_id = 'bulk:0#0'").get() as { e: string | null };
+  check.close();
+  if (JSON.stringify(redone) !== JSON.stringify(newest)) fail(`the paced re-embed should do the newest ${MEMORY_REEMBED_PER_TURN}: ${redone.length} redone`);
+  if (stillNull.e !== null) fail("the paced re-embed embedded a chunk with no vector");
+  // Nothing is sent until beforeBatch lets it.
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let sent = 0;
+  const held = reembedSqliteMemoryOtherModel({ paths, limit: MEMORY_REEMBED_BATCH, provider: { id: B.id, model: B.model, async embedTexts(texts: string[]) { sent += 1; return B.embedTexts(texts); } }, beforeBatch: () => gate });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (sent !== 0) fail("the paced re-embed sent a request before beforeBatch returned");
+  release();
+  const heldResult = await held;
+  if (sent !== 1 || heldResult.chunksEmbedded !== MEMORY_REEMBED_BATCH) fail(`after beforeBatch returned, one request of ${MEMORY_REEMBED_BATCH}: ${sent} sent, ${JSON.stringify(heldResult)}`);
+  // A chunk rewritten or removed while the run waited in beforeBatch isn't sent; the others are.
+  const pending = new DatabaseSync(dbPath);
+  const next = pending.prepare(`SELECT chunk_id AS id, text FROM memory_chunks WHERE embedding_json IS NOT NULL AND embedding_spec = 'stub:a' ORDER BY updated_at DESC, chunk_id ASC LIMIT ?`).all(MEMORY_REEMBED_BATCH) as Array<{ id: string; text: string }>;
+  pending.close();
+  if (next.length !== MEMORY_REEMBED_BATCH) fail(`not enough chunks left for the rewrite check: ${next.length}`);
+  const texts: string[] = [];
+  let changedMeanwhile = false;
+  await reembedSqliteMemoryOtherModel({ paths, limit: MEMORY_REEMBED_BATCH, provider: { id: B.id, model: B.model, async embedTexts(input: string[]) { texts.push(...input); return B.embedTexts(input); } }, beforeBatch: async () => {
+    if (changedMeanwhile) return;
+    changedMeanwhile = true;
+    const db = new DatabaseSync(dbPath);
+    db.prepare("UPDATE memory_chunks SET text = text || ' (rewritten)' WHERE chunk_id = ?").run(next[0]!.id);
+    db.prepare("DELETE FROM memory_chunks WHERE chunk_id = ?").run(next[1]!.id);
+    db.close();
+  } });
+  if (texts.includes(next[0]!.text) || texts.includes(next[1]!.text)) fail("a chunk rewritten or removed while the run waited was sent");
+  if (!texts.includes(next[2]!.text) || !texts.includes(next[3]!.text)) fail(`control: the chunks left alone should be sent: ${texts.length} sent`);
+}
 console.log(`recall index: ${total} chunks, switching models checked`);
 TS
 
@@ -226,17 +291,33 @@ TS
 # The stub answers any model; ollama:model-a gives 3 numbers, anything else 4.
 STUB_PORT="${STUB_PORT}" node <<'NODE' >"${TEMP_RUNTIME}/stub.log" 2>&1 &
 const { createServer } = require("node:http");
+// Every embedding request is logged (arrival and answer time) for the pacing check (#157).
+const state = { mode: "ok", requests: [], queue: Promise.resolve() };
 createServer((req, res) => {
   let raw = "";
   req.on("data", (chunk) => (raw += chunk)).on("end", () => {
+    if (req.url === "/_test/state") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ requests: state.requests })); return; }
+    if (req.url === "/_test/mode") { state.mode = JSON.parse(raw).mode; res.writeHead(200); res.end("{}"); return; }
     const body = raw ? JSON.parse(raw) : {};
+    const input = Array.isArray(body.input) ? body.input : [body.input];
+    const request = { model: body.model, input, t: Date.now() };
+    state.requests.push(request);
+    if (input.some((text) => String(text).includes("POISON-CHUNK"))) {
+      request.done = Date.now();
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "input is too long for the context" } }));
+      return;
+    }
     const size = body.model === "model-a" ? 3 : 4;
+    const answer = () => {
+      request.done = Date.now();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: input.map((_, index) => ({ index, embedding: Array.from({ length: size }, (_, i) => (i === 0 ? 1 : 0)) })) }));
+    };
+    // One request at a time, 150 ms a chunk, like Ollama's default (#157).
+    if (state.mode === "serial") { state.queue = state.queue.then(() => new Promise((resolve) => setTimeout(() => { answer(); resolve(); }, 150 * input.length))); return; }
     // model-slow answers after 12 s, as a cold model loading would: past the 10 s chat timeout.
-    const delay = body.model === "model-slow" ? 12_000 : 0;
-    setTimeout(() => {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ data: (body.input ?? []).map((_, index) => ({ index, embedding: Array.from({ length: size }, (_, i) => (i === 0 ? 1 : 0)) })) }));
-    }, delay);
+    setTimeout(answer, body.model === "model-slow" ? 12_000 : 0);
   });
 }).listen(Number(process.env.STUB_PORT), "127.0.0.1");
 NODE
@@ -276,5 +357,221 @@ judge "the check for the model that embedded them should count none" 'b.ok === t
 # A model that takes 12 s to answer (loading) still passes the check, which waits 45 s for it.
 [[ "$(post /admin/memory/check '{"embeddingProvider":"ollama:model-slow"}')" == 200 ]] || { echo "checking model-slow failed: $(cat "${BODY}")" >&2; exit 1; }
 judge "the check should wait for a model that takes 12 s to load" 'b.ok === true && b.dimensions === 4'
+
+# --- 3. A switch in progress never slows a turn (#157). The index holds thousands of model-a
+# chunks; on an embedder that answers one request at a time, each turn's query embedding waits
+# behind one small request of them at most, none is sent while it waits, and the next turn
+# never waits for them.
+STUB="http://127.0.0.1:${STUB_PORT}"
+python3 - <<'PY'
+import json, os, pathlib
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+c["memory"]["embeddingProvider"] = "ollama:model-b"
+c["routing"] = {"mode": "mock", "defaultAgentId": "default", "defaultModel": "mindstone/mock", "mock": {"responsePrefix": "switch"}}
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+curl -s -X POST -d '{"mode":"serial"}' "${STUB}/_test/mode" >/dev/null
+chat() { # chat <text>: prints the ms the gateway took to answer
+  local started
+  started=$(node -e 'console.log(Date.now())')
+  curl -s --max-time 30 -o "${BODY}" -X POST -H "Authorization: Bearer ${MS_TOKEN}" -H 'content-type: application/json' -d "{\"text\":\"$1\"}" "${BASE}/chat/send" || { echo "chat \"$1\" failed or got no answer in 30 s" >&2; exit 1; }
+  echo $(( $(node -e 'console.log(Date.now())') - started ))
+}
+chat "the first question after the switch" >/dev/null
+judge "the first chat after the switch should be answered" 'b.ok === true'
+sleep 2
+turn_ms=()
+for i in 1 2 3; do turn_ms+=("$(chat "question ${i} during the switch")"); sleep 0.5; done
+node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
+  const b = s.requests.filter((q)=>q.model === "model-b");
+  const queries = b.filter((q)=>q.input.length === 1 && /^question \d during the switch$/.test(q.input[0]));
+  // Everything else sent for model-b that holds none of these chats text is the re-embed.
+  const reembed = b.filter((q)=>!queries.includes(q) && !q.input.some((t)=>/switch/.test(t)) && q.input[0] !== "MindStone embedding health check");
+  if (queries.length !== 3) { console.error(`expected 3 query embeddings, saw ${queries.length}: ${JSON.stringify(b.filter((q)=>!reembed.includes(q)).map((q)=>q.input))}`); process.exit(1); }
+  const big = reembed.filter((q)=>q.input.length > 4).length;
+  if (big) { console.error(`the re-embed sent ${big} requests of more than 4 chunks`); process.exit(1); }
+  // The re-embed was running throughout: a request before the first query and between each two.
+  const bounds = [0, ...queries.map((q)=>q.t)];
+  for (let i = 1; i < bounds.length; i += 1) {
+    if (!reembed.some((r)=>r.t > bounds[i - 1] && r.t < bounds[i])) { console.error(`no re-embed request before query ${i}: nothing was measured`); process.exit(1); }
+  }
+  for (const q of queries) {
+    if (!(q.done >= q.t)) { console.error("a query embedding was never answered"); process.exit(1); }
+    const sent = reembed.filter((r)=>r.t > q.t && r.t < q.done).length;
+    if (sent) { console.error(`the re-embed sent ${sent} requests while a turn waited on the embedder`); process.exit(1); }
+    // Behind one request of 4 at most: 600 ms, its own 150 ms, and 300 ms of slack (16 a request took 2.4 s).
+    if (q.done - q.t > 1050) { console.error(`a turn waited ${q.done - q.t} ms for its query embedding`); process.exit(1); }
+  }
+  console.log(`query waits ${queries.map((q)=>q.done - q.t).join(", ")} ms; ${reembed.length} re-embed requests so far`);
+})' "${STUB}/_test/state" || exit 1
+# The turn itself: never the 5 s the next turn would wait if the re-embed held up the index update.
+for ms in "${turn_ms[@]}"; do (( ms < 3000 )) || { echo "a turn took ${ms} ms during the switch (turns: ${turn_ms[*]})" >&2; exit 1; }; done
+echo "turns during the switch: ${turn_ms[*]} ms"
+# reembed_chunks [after ms]: chunks the re-embed sent for model-b (after that time, if given); as above.
+reembed_chunks() { # reembed_chunks [after ms] [model, default model-b]
+node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
+  const b = s.requests.filter((q)=>q.model === (process.argv[3] || "model-b") && q.t > Number(process.argv[2] || 0));
+  const reembed = b.filter((q)=>!(q.input.length === 1 && /^question \d during the switch$/.test(q.input[0])) && !q.input.some((t)=>/switch/.test(t)) && q.input[0] !== "MindStone embedding health check");
+  console.log(reembed.reduce((n, q)=>n + q.input.length, 0));
+})' "${STUB}/_test/state" "${1:-0}" "${2:-}"; }
+# One run does 128 at most: with the embedder fast again, the first run ends there, and nothing more
+# is sent until a turn starts another run.
+curl -s -X POST -d '{"mode":"ok"}' "${STUB}/_test/mode" >/dev/null
+for _ in $(seq 1 60); do [[ "$(reembed_chunks)" -ge 128 ]] && break; sleep 0.5; done
+sleep 1
+first_run="$(reembed_chunks)"
+[[ "${first_run}" == 128 ]] || { echo "one run should embed 128 of another model's chunks again: ${first_run}" >&2; exit 1; }
+chat "a switch question after the first run" >/dev/null
+for _ in $(seq 1 60); do [[ "$(reembed_chunks)" -gt 128 ]] && break; sleep 0.5; done
+[[ "$(reembed_chunks)" -gt 128 ]] || { echo "a turn after the first run ended started no second run" >&2; exit 1; }
+# A run stops when the config changes under it (#157 review): here the embedding model.
+curl -s -X POST -d '{"mode":"serial"}' "${STUB}/_test/mode" >/dev/null
+sleep 1
+before_run3="$(reembed_chunks)"
+chat "a switch question before the model changes again" >/dev/null
+for _ in $(seq 1 20); do [[ "$(reembed_chunks)" -gt "${before_run3}" ]] && break; sleep 0.5; done
+[[ "$(reembed_chunks)" -gt "${before_run3}" ]] || { echo "control: the third run sent nothing, so the config change can't be measured" >&2; exit 1; }
+python3 - <<'PY'
+import json, os, pathlib
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+c["memory"]["embeddingProvider"] = "ollama:model-c"
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+changed_at=$(node -e 'console.log(Date.now())')
+sleep 3
+# One request may have passed its check just before the change; nothing is sent after it.
+late="$(reembed_chunks $((changed_at + 250)))"
+[[ "${late}" == 0 ]] || { echo "the run sent ${late} chunks for the old model after the config changed" >&2; exit 1; }
+third_run=$(( $(reembed_chunks) - before_run3 ))
+(( third_run < 128 )) || { echo "control: the third run had already finished (${third_run} chunks) before the change" >&2; exit 1; }
+echo "a run stopped at the config change after ${third_run} chunks"
+# A stop isn't a failure (#157 review round 2): the next turn starts a run for the new model at once.
+chat "a switch question once the model is model-c" >/dev/null
+for _ in $(seq 1 20); do [[ "$(reembed_chunks 0 model-c)" -gt 0 ]] && break; sleep 0.5; done
+[[ "$(reembed_chunks 0 model-c)" -gt 0 ]] || { echo "after a stop, the next turn started no run for the new model" >&2; exit 1; }
+# Turning automatic recall off stops a run too.
+python3 - <<'PY'
+import json, os, pathlib
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+c["memory"]["autoRecall"] = False
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+off_at=$(node -e 'console.log(Date.now())')
+sleep 3
+late_c="$(reembed_chunks $((off_at + 250)) model-c)"
+[[ "${late_c}" == 0 ]] || { echo "the run sent ${late_c} chunks after automatic recall was turned off" >&2; exit 1; }
+c_run="$(reembed_chunks 0 model-c)"
+(( c_run < 128 )) || { echo "control: the model-c run had already finished (${c_run} chunks) before recall was turned off" >&2; exit 1; }
+echo "a run stopped when recall was turned off after ${c_run} chunks"
+# A registered endpoint whose key changes under the same model name stops a run too (#157 review
+# round 3): the run's embedder is the one resolved when it started, address and key included.
+STUB_PORT="${STUB_PORT}" python3 - <<'PY'
+import json, os, pathlib
+agent = pathlib.Path(os.environ["PI_CODING_AGENT_DIR"])
+agent.mkdir(parents=True, exist_ok=True)
+models = agent / "models.json"
+m = json.loads(models.read_text()) if models.exists() else {}
+m.setdefault("providers", {})["enterprise-openai"] = {"baseUrl": "http://127.0.0.1:" + os.environ["STUB_PORT"] + "/v1"}
+models.write_text(json.dumps(m, indent=2) + "\n")
+auth = agent / "auth.json"
+a = json.loads(auth.read_text()) if auth.exists() else {}
+a["enterprise-openai"] = {"type": "api_key", "key": "synthetic-endpoint-key-a"}
+auth.write_text(json.dumps(a, indent=2) + "\n")
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+c["memory"]["embeddingProvider"] = "enterprise-openai:model-e"
+c["memory"].pop("autoRecall", None)
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+chat "a switch question once the model is model-e" >/dev/null
+for _ in $(seq 1 20); do [[ "$(reembed_chunks 0 model-e)" -gt 0 ]] && break; sleep 0.5; done
+[[ "$(reembed_chunks 0 model-e)" -gt 0 ]] || { echo "control: no run started for the registered endpoint, so a key change can't be measured" >&2; exit 1; }
+python3 - <<'PY'
+import json, os, pathlib
+auth = pathlib.Path(os.environ["PI_CODING_AGENT_DIR"]) / "auth.json"
+a = json.loads(auth.read_text())
+a["enterprise-openai"]["key"] = "synthetic-endpoint-key-b"
+auth.write_text(json.dumps(a, indent=2) + "\n")
+PY
+key_at=$(node -e 'console.log(Date.now())')
+sleep 3
+late_e="$(reembed_chunks $((key_at + 250)) model-e)"
+[[ "${late_e}" == 0 ]] || { echo "the run sent ${late_e} chunks with the old key after the key changed" >&2; exit 1; }
+e_run="$(reembed_chunks 0 model-e)"
+(( e_run < 128 )) || { echo "control: the model-e run had already finished (${e_run} chunks) before the key changed" >&2; exit 1; }
+echo "a run stopped when the endpoint key changed after ${e_run} chunks"
+# And when its address changes (#157 review round 4): the same stub under another name, so a run
+# that didn't notice would go on sending.
+before_addr="$(reembed_chunks 0 model-e)"
+chat "a switch question with the new endpoint key" >/dev/null
+for _ in $(seq 1 20); do [[ "$(reembed_chunks 0 model-e)" -gt "${before_addr}" ]] && break; sleep 0.5; done
+[[ "$(reembed_chunks 0 model-e)" -gt "${before_addr}" ]] || { echo "control: no run started with the new key, so an address change can't be measured" >&2; exit 1; }
+STUB_PORT="${STUB_PORT}" python3 - <<'PY'
+import json, os, pathlib
+models = pathlib.Path(os.environ["PI_CODING_AGENT_DIR"]) / "models.json"
+m = json.loads(models.read_text())
+m["providers"]["enterprise-openai"]["baseUrl"] = "http://localhost:" + os.environ["STUB_PORT"] + "/v1"
+models.write_text(json.dumps(m, indent=2) + "\n")
+PY
+addr_at=$(node -e 'console.log(Date.now())')
+sleep 3
+late_addr="$(reembed_chunks $((addr_at + 250)) model-e)"
+[[ "${late_addr}" == 0 ]] || { echo "the run sent ${late_addr} chunks to the old address after it changed" >&2; exit 1; }
+addr_run=$(( $(reembed_chunks 0 model-e) - before_addr ))
+(( addr_run < 128 )) || { echo "control: that run had already finished (${addr_run} chunks) before the address changed" >&2; exit 1; }
+echo "a run stopped when the endpoint address changed after ${addr_run} chunks"
+
+# --- 4. Another model's chunk the new embedder refuses never costs a turn its own vectors (Hearth's
+# #167 review, #155 item 2): the turn's update leaves other models' chunks to the paced run, and a
+# run that fails is left alone for a while (a minute), so the turns right after it don't send it again.
+STUB_PORT="${STUB_PORT}" python3 - <<'PY'
+import json, os, pathlib
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+c["memory"]["embeddingProvider"] = "ollama:model-f"
+c["memory"].pop("autoRecall", None)
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+curl -s -X POST -d '{"mode":"ok"}' "${STUB}/_test/mode" >/dev/null
+# The newest chunk another model made, so every batch of another model's chunks starts with it.
+npx tsx - <<'TS'
+import { DatabaseSync } from "node:sqlite";
+import { runtimePathsFromEnv, sqliteMemoryDatabasePath } from "./packages/mindstone-core/src/index.ts";
+const db = new DatabaseSync(sqliteMemoryDatabasePath(runtimePathsFromEnv()));
+db.prepare("INSERT INTO memory_sources (id, kind, path, title, timestamp, content_hash, metadata_json, updated_at) VALUES ('poison', 'memory', NULL, NULL, NULL, 'poison-hash', '{}', '2099-01-01T00:00:00.000Z')").run();
+db.prepare("INSERT INTO memory_chunks (chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, embedding_spec, metadata_json, updated_at) VALUES ('poison#0', 'poison', 'memory', NULL, NULL, 0, 'an old note, POISON-CHUNK, too long for the new model', 8, '[1,0,0,0]', 'ollama:model-old', '{}', '2099-01-01T00:00:00.000Z')").run();
+db.close();
+TS
+poison_sent() { node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>console.log(s.requests.filter((q)=>q.input.some((t)=>String(t).includes("POISON-CHUNK"))).length))' "${STUB}/_test/state"; }
+chat "a switch question: the vault code is TOKEN-157Q" >/dev/null
+judge "the chat with an unembeddable old chunk around should be answered" 'b.ok === true'
+# The turn's own chunks get vectors from the new model, though the old chunk can't be embedded.
+tokens_embedded() { npx tsx - <<'TS'
+import { DatabaseSync } from "node:sqlite";
+import { runtimePathsFromEnv, sqliteMemoryDatabasePath } from "./packages/mindstone-core/src/index.ts";
+const db = new DatabaseSync(sqliteMemoryDatabasePath(runtimePathsFromEnv()));
+const rows = db.prepare("SELECT embedding_json AS e, embedding_spec AS spec FROM memory_chunks WHERE text LIKE '%TOKEN-157Q%'").all() as Array<{ e: string | null; spec: string | null }>;
+db.close();
+console.log(rows.length > 0 && rows.every((row) => row.e !== null && row.spec === "ollama:model-f") ? "yes" : `no ${JSON.stringify(rows.map((row) => row.spec))}`);
+TS
+}
+for _ in $(seq 1 20); do [[ "$(tokens_embedded)" == yes ]] && break; sleep 0.5; done
+state="$(tokens_embedded)"
+[[ "${state}" == yes ]] || { echo "the turn's own chunks weren't embedded because another model's chunk was refused: ${state}" >&2; exit 1; }
+# Control: the paced run did try the refused chunk (so it was in reach), exactly once.
+for _ in $(seq 1 20); do [[ "$(poison_sent)" -gt 0 ]] && break; sleep 0.5; done
+first_poison="$(poison_sent)"
+[[ "${first_poison}" == 1 ]] || { echo "control: the paced run should have sent the refused chunk once: ${first_poison}" >&2; exit 1; }
+# The two turns right after the failed run don't send the refused chunk again (the pause is a
+# minute; this covers the next few seconds of it).
+chat "a switch question right after the failed run" >/dev/null
+sleep 1
+chat "another switch question right after the failed run" >/dev/null
+sleep 2
+[[ "$(poison_sent)" == "${first_poison}" ]] || { echo "the refused chunk was sent again by the turns right after the failed run: $(poison_sent) requests, ${first_poison} before" >&2; exit 1; }
+echo "a refused old chunk left the turn's vectors alone and the next turns didn't send it again"
 
 echo "Memory embedding model switch smoke test passed."

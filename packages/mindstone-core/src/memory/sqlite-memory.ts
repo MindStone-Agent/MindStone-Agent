@@ -35,10 +35,24 @@ export type SqliteMemoryEmbeddingBackfillOptions = {
    * re-embed on the per-turn queue held up every later turn's own chunks).
    */
   otherModelLimit?: number;
+  /** With otherModelLimit: only chunks another model (or an unrecorded one) embedded; chunks with no vector are left (#157). */
+  otherModelOnly?: boolean;
+  /**
+   * Awaited before each request to the embedder: the gateway waits here while turns run (#157).
+   * After it, a chunk removed or rewritten meanwhile is left out of the request.
+   */
+  beforeBatch?: () => Promise<void>;
 };
 
 /** How many of another model's chunks each turn's index update embeds again (#140 review). */
 export const MEMORY_REEMBED_PER_TURN = 128;
+
+/**
+ * Chunks a request when the gateway embeds another model's chunks again (#157):
+ * a turn's query that arrives meanwhile waits behind at most this many on an
+ * embedder that answers one request at a time.
+ */
+export const MEMORY_REEMBED_BATCH = 4;
 
 export type SqliteMemoryEmbeddingBackfillResult = {
   databasePath: string;
@@ -677,6 +691,12 @@ export async function indexSqliteMemoryTurn(options: {
   config?: MindStoneConfig;
   paths?: MindStoneRuntimePaths;
   provider?: MemoryEmbeddingProvider;
+  /**
+   * How many of another model's chunks to embed again after the turn's own
+   * (default MEMORY_REEMBED_PER_TURN). The gateway passes 0 and paces them
+   * with reembedSqliteMemoryOtherModel, off the update a turn waits for (#157).
+   */
+  otherModelLimit?: number;
 }): Promise<SqliteMemoryTurnIndexResult> {
   const paths = options.paths ?? runtimePathsFromEnv();
   const databasePath = sqliteMemoryDatabasePath(paths);
@@ -708,12 +728,37 @@ export async function indexSqliteMemoryTurn(options: {
     db.close();
   }
   const provider = options.provider ?? createMemoryEmbeddingProvider(options.config);
-  // The turn's own chunks, then a few of another model's: a model switch is finished over later turns
-  // (or at once by `mindstone memory backfill --embed`), never ahead of this turn's chunks (#140 review).
+  // The turn's own chunks, then (unless otherModelLimit is 0, as the gateway passes, #157) a few of
+  // another model's: a model switch is finished over later turns (or at once by
+  // `mindstone memory backfill --embed`), never ahead of this turn's chunks (#140 review).
   const embedded = provider
-    ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true, otherModelLimit: MEMORY_REEMBED_PER_TURN })
+    ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true, otherModelLimit: options.otherModelLimit ?? MEMORY_REEMBED_PER_TURN })
     : undefined;
   return { databasePath, sourcesIndexed, chunksEmbedded: embedded?.chunksEmbedded ?? 0 };
+}
+
+/**
+ * Embeds again up to `limit` (default MEMORY_REEMBED_PER_TURN) of the newest
+ * chunks another model embedded, MEMORY_REEMBED_BATCH a request, awaiting
+ * `beforeBatch` before each (#157): the gateway's paced share of a model
+ * switch after a turn, which never holds up a turn's own chunks or its query.
+ */
+export async function reembedSqliteMemoryOtherModel(options: {
+  config?: MindStoneConfig;
+  paths?: MindStoneRuntimePaths;
+  provider: MemoryEmbeddingProvider;
+  limit?: number;
+  beforeBatch?: () => Promise<void>;
+}): Promise<SqliteMemoryEmbeddingBackfillResult> {
+  return backfillSqliteMemoryEmbeddings({
+    paths: options.paths,
+    config: options.config,
+    provider: options.provider,
+    otherModelOnly: true,
+    otherModelLimit: options.limit ?? MEMORY_REEMBED_PER_TURN,
+    batchSize: MEMORY_REEMBED_BATCH,
+    beforeBatch: options.beforeBatch,
+  });
 }
 
 export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbeddingBackfillOptions = {}): Promise<SqliteMemoryEmbeddingBackfillResult> {
@@ -738,7 +783,7 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
         ${order}
       `).all(spec)
       : [
-          ...db.prepare(`SELECT chunk_id, text FROM memory_chunks WHERE embedding_json IS NULL ${order}`).all(),
+          ...(options.otherModelOnly ? [] : db.prepare(`SELECT chunk_id, text FROM memory_chunks WHERE embedding_json IS NULL ${order}`).all()),
           ...db.prepare(`
             SELECT chunk_id, text
             FROM memory_chunks
@@ -755,10 +800,17 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
   // it, so re-embedding a whole index (after a model switch) must not turn old chats into new ones (#140 review).
   // Only the text that was embedded: a chunk re-indexed meanwhile keeps its own (#140 review).
   const update = db.prepare("UPDATE memory_chunks SET embedding_json = ?, embedding_spec = ? WHERE chunk_id = ? AND text = ?");
+  const still = db.prepare("SELECT 1 AS present FROM memory_chunks WHERE chunk_id = ? AND text = ?");
 
   try {
     for (let offset = 0; offset < rows.length; offset += batchSize) {
-      const batch = rows.slice(offset, offset + batchSize);
+      let batch = rows.slice(offset, offset + batchSize);
+      if (options.beforeBatch) {
+        await options.beforeBatch();
+        // The wait can be long: a chunk removed or rewritten meanwhile isn't sent (#157 review).
+        batch = batch.filter((row) => still.get(row.chunk_id, row.text) !== undefined);
+        if (batch.length === 0) continue;
+      }
       const embeddings = await provider.embedTexts(batch.map((row) => row.text));
       if (embeddings.length !== batch.length) {
         throw new Error(`embedding provider returned ${embeddings.length} vectors for ${batch.length} chunks`);

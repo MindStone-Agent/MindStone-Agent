@@ -144,6 +144,7 @@ import {
   KB_EMBED_LIMITS,
   KB_REEMBED_LIMITS,
   indexSqliteMemoryTurn,
+  reembedSqliteMemoryOtherModel,
   memoryEmbeddingSpec,
   sqliteMemoryEmbeddingMix,
   isAutoRecallEnabled,
@@ -739,12 +740,69 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
   const transcriptFile = transcriptPathForSession(sessionKey);
   recallIndexTail = recallIndexTail
     .then(async () => {
-      await indexSqliteMemoryTurn({ transcriptFile, config });
+      // Only the turn's own chunks here: this is what the next turn waits for (#157).
+      await indexSqliteMemoryTurn({ transcriptFile, config, otherModelLimit: 0 });
       recallIndexFailedAt = 0;
+      queueMemoryReembed(config);
     })
     .catch((error: unknown) => {
       recallIndexFailedAt = Date.now();
       console.warn(`[mindstone] recall index update failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+}
+
+/**
+ * After a switch of embedding model, a turn's index update is followed by a
+ * run that embeds up to MEMORY_REEMBED_PER_TURN of another model's chunks
+ * again, off the update the next turn waits for (#157): a few a request, and
+ * none sent while a turn runs, so a turn's query never queues behind them on
+ * an embedder that answers one request at a time. One run at a time (a turn
+ * that ends while one runs starts none); on a gateway that is always
+ * answering, a run waits for a gap. Before each request (after any wait for
+ * turns) the config is read again, and the run stops if the embedder (its
+ * model, address or key), the vector store or automatic recall changed
+ * meanwhile, and chunks removed or rewritten meanwhile aren't sent (#157 review). A failed run is logged and left for
+ * a minute (the chunks keep word match meanwhile).
+ */
+let memoryReembedRunning = false;
+let memoryReembedFailedAt = 0;
+
+class MemoryReembedStopped extends Error {}
+
+function queueMemoryReembed(config: MindStoneConfig | undefined): void {
+  if (memoryReembedRunning || (memoryReembedFailedAt && Date.now() - memoryReembedFailedAt < 60_000)) return;
+  memoryReembedRunning = true;
+  void (async () => {
+    const provider = createMemoryEmbeddingProvider(config);
+    if (!provider) return;
+    // The embedder as resolved, address and key included: a registered endpoint
+    // moved or removed under the same model name stops the run too (#157 review).
+    const embedderAtStart = JSON.stringify(resolveMemoryEmbeddingProviderConfig(config) ?? null);
+    await reembedSqliteMemoryOtherModel({
+      config,
+      provider,
+      beforeBatch: async () => {
+        await waitWhileTurnsRun(() => turnsInFlight.values());
+        const current = loadGatewayConfig().config;
+        if (
+          current?.memory?.vectorStore !== "sqlite-vec"
+          || !isAutoRecallEnabled(current)
+          || JSON.stringify(resolveMemoryEmbeddingProviderConfig(current) ?? null) !== embedderAtStart
+        ) {
+          throw new MemoryReembedStopped();
+        }
+      },
+    });
+    memoryReembedFailedAt = 0;
+  })()
+    .catch((error: unknown) => {
+      // A run the config overtook isn't a failure: the next turn starts one for the new config.
+      if (error instanceof MemoryReembedStopped) return;
+      memoryReembedFailedAt = Date.now();
+      console.warn(`[mindstone] memory re-embed after a model switch failed: ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(() => {
+      memoryReembedRunning = false;
     });
 }
 
