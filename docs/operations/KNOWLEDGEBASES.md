@@ -57,52 +57,75 @@ never injected via Auto Recall.
 ## Embedded vectors (#125 §5)
 
 The vectors are computed here, from the KB's own entries, with the install's
-embedder: the one memory recall uses (`memory.embeddingProvider`). Nothing is
-imported from another system. This applies to global collections and to a
-persona's private KBs alike.
+embedder: the one memory recall uses. Nothing is imported from another
+system. This applies to global collections and to a persona's private KBs
+alike.
 
+- **Which embedder, and where the text goes.** The embedder is the one
+  `memory.embeddingProvider` names or, when that is unset,
+  `MINDSTONE_EMBEDDING_PROVIDER` or `EMBEDDING_PROVIDER` in the environment
+  the CLI or gateway runs in (providers: `docs/refactor/MEMORY_STRATEGY.md`). KB
+  embedding runs whenever one of those is set, **even with no `sqlite-vec`
+  index**, which memory recall needs. Ingest then sends each entry's text,
+  and every turn that ranks by meaning sends the question, to that embedder.
+  With a hosted embedder (`openai:`, an enterprise endpoint), KB text leaves
+  this machine; check that an `EMBEDDING_PROVIDER` set for another tool isn't
+  in the environment.
 - **At ingest**, after `index.json` is written, each entry is embedded: its
   source title and heading, then the start of its text (6,000 characters at
-  most), 32 entries a request. The vectors go to `vectors.json` beside the
-  index, with the provider, the model, the dimension and a sha256 of the
-  index they were made from. The file is written whole and moved into place.
-- **Ingest never fails because of embedding.** With no embedder configured,
-  when the embedder fails, or when embedding takes more than 120 s, the index
-  is still written, any earlier `vectors.json` is removed, and recall uses
-  word match for that KB. `kb ingest` prints why (fixed text; run
+  most), 8 entries a request, each request given 60 s. A request that times
+  out is tried again an entry at a time. The vectors go to `vectors.json`
+  beside the index, with the provider, the model, the dimension and a sha256
+  of the index they were made from. The file is written whole and moved into
+  place. Entries whose headings would give the same id ("Example" twice,
+  "C++" and "C#") get a `~2`, `~3` suffix, so each has its own vector.
+- **Ingest never fails because of embedding.** With no embedder, when the
+  embedder fails, or when embedding takes longer than its time limit (120 s;
+  `mindstone kb ingest <id> --embed-timeout <seconds>` for a large KB), the
+  index is still written, any earlier `vectors.json` is removed, and recall
+  uses word match for that KB. `kb ingest` prints why (fixed text; run
   `mindstone doctor` to see the embedder's own error, with keys redacted). The
   admin API's ingest answers with `vectors: { state, reason }`.
-- **Where the text goes.** Embedding sends each entry's text to the configured
-  embedder, the same place memory and chat text already go for recall. With a
-  hosted embedder, KB text leaves this machine.
 - **Status.** `mindstone kb status <id>` has a `vectors` line (`--json`:
   `vectors: { state, reason?, provider?, model?, dimension?, count? }`):
-  - `ready`: recall ranks this KB by meaning;
+  - `ready`: recall can rank this KB by meaning;
   - `missing`: not embedded (no embedder at ingest, or it failed);
   - `stale`: made with another provider or model than the install's now, or
-    the index was written again after them, or the file can't be read.
-    Re-ingest;
+    the index was written again after them, or the file can't be read or is
+    over 256 MB. Re-ingest;
   - `unused`: vectors exist but no embedder is configured now.
+
+  Status can't see a change of dimension under the same provider and model
+  name (another server, or a model replaced under its name) without calling
+  the embedder: recall then ignores the vectors (below) and status still says
+  `ready`. Re-ingest after changing the embedder's server.
 - **At recall**, the question is embedded once per turn, shared with memory
-  recall. Each entry of a KB with `ready` vectors is scored by cosine
-  similarity; a source's score is its best entry's. Sources at or above
-  `knowledgebases.recall.minSimilarity` (default 0.5) are recalled, the best
-  `knowledgebases.recall.maxResults` (default 3, 0 to 20, 0 turns this off),
-  with the sections closest to the question listed first.
+  recall. `vectors.json` is read only on a turn that ranks by meaning, and
+  kept in memory while it doesn't change. Each entry of a KB with `ready`
+  vectors is scored by cosine similarity; a source's score is its best
+  entry's. Sources at or above `knowledgebases.recall.minSimilarity` (default
+  0.5; memory's `minScore` doesn't apply to them) are recalled, the best
+  `knowledgebases.recall.maxResults` (default 3, 0 to 20, 0 turns this off; a
+  value out of range falls back to the default). Such a source shows its 5
+  sections closest to the question, and says how many more it has.
 - **Their own quota.** Cosine and word-match scores aren't on one scale, so
   sources found by meaning don't compete with memory on score: they take up to
-  `maxResults` of the turn's `memory.recall.maxResults` slots, and memory and
-  word-match hits fill the rest. The prompt token budget still applies to all.
+  `knowledgebases.recall.maxResults` of the turn's `memory.recall.maxResults`
+  slots (a KB quota at or above it leaves memory no slot), and they take the
+  prompt's recall token budget (`memory.recall.maxPromptTokens`) first; memory
+  and word-match hits fill what is left, in their order.
 - **Word match still runs** for every KB source, so an exact term (an error
-  code, a part number) is found as before. A source found by meaning isn't
-  listed twice.
+  code, a part number) is found as before. A source found both ways is shown
+  once, as its meaning copy when that takes a quota slot.
 - **Ignored vectors.** If the embedder is down at recall, if a KB's vectors
   are not `ready`, or if their dimension differs from the question's, that KB
   is searched by words only. A source with an entry missing from
   `vectors.json` stays on word match.
 - The similarity threshold depends on the embedding model: models differ in
   how similar unrelated text scores. Raise `minSimilarity` if unrelated
-  sources show up; lower it if related ones don't.
+  sources show up; lower it if related ones don't. Both settings are in the
+  config (`knowledgebases.recall`), which the Console changes only with the
+  advanced-settings permission.
 - A private KB's `vectors.json` must not be a link, like its other files.
 - `mindstone kb search` is still word match.
 
