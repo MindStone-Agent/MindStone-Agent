@@ -131,7 +131,7 @@ import { join } from "node:path";
 import {
   KB_EMBED_LIMITS, KB_REEMBED_STATE_FILE, KB_VECTORS_FILE, cosineSimilarity, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbReembedState, readKbVectors, writeKbReembedState, writeKbVectors,
 } from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
-import { KB_REEMBED_LIMITS, ingestMindStoneKnowledgebase, knowledgebaseReembedState, mindStoneKbStatus, privateKnowledgebaseLinkError, reembedState, reembedStaleKnowledgebase, turnsHoldReembed, waitWhileTurnsRun } from "./packages/mindstone-core/src/knowledgebase/load.ts";
+import { KB_REEMBED_LIMITS, ingestMindStoneKnowledgebase, knowledgebaseReembedState, mindStoneKbStatus, privateKnowledgebaseLinkError, reembedState, reembedStaleKnowledgebase, resetKnowledgebaseReembed, turnsHoldReembed, waitWhileTurnsRun } from "./packages/mindstone-core/src/knowledgebase/load.ts";
 import { KnowledgebaseRecallProvider, knowledgebaseRecallSettings } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
 import { buildMemoryRecallPrompt, CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, recallMindStoneMemory, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
 import { createMemoryEmbeddingProvider, sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
@@ -750,6 +750,8 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     assert.equal(readKbReembedState(join(root, "l-kb"), { noLinks: true }), undefined, "a link isn't followed for a private KB");
     assert.equal(readKbReembedState(join(root, "l-kb"))?.gaveUp, true, "control: the same file read without noLinks");
     assert.ok(privateKnowledgebaseLinkError(root, "l-kb"), "a linked reembed.json makes a private KB linked");
+    assert.equal(resetKnowledgebaseReembed(root, "l-kb", { noLinks: true }), false, "a linked private KB isn't reset");
+    assert.ok(existsSync(join(root, "l-kb", KB_REEMBED_STATE_FILE)), "and its link is left alone");
   }
   // The wait for turns: a turn that runs holds it, one past turnWaitMs doesn't.
   {
