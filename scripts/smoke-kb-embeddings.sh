@@ -94,8 +94,11 @@ createServer((req, res) => {
       return;
     }
     const dims = state.mode === "dim5" ? 5 : 6;
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ object: "list", model: body.model, data: input.map((text, index) => ({ object: "embedding", index, embedding: vectorFor(text, dims) })) }));
+    const answer = () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ object: "list", model: body.model, data: input.map((text, index) => ({ object: "embedding", index, embedding: vectorFor(text, dims) })) }));
+    };
+    if (state.mode === "slow") setTimeout(answer, 6000); else answer();
   });
 }).listen(Number(process.env.EMBED_PORT), "127.0.0.1", () => console.log("stub embedder up"));
 NODE
@@ -640,8 +643,19 @@ TS
 )"
 read -r gw_persona gw_kb cli_persona cli_kb <<<"${cards}"
 [[ "$(call POST "/admin/approvals/${gw_persona}/approve" '{}')" == "200" ]] || { echo "approve persona: $(cat "${BODY}")" >&2; exit 1; }
-[[ "$(call POST "/admin/approvals/${gw_kb}/approve" '{}')" == "200" ]] || { echo "approve KB: $(cat "${BODY}")" >&2; exit 1; }
-node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (b.result?.ingested?.vectors?.state!=="ready") { console.error("gateway approve-path ingest vectors:", JSON.stringify(b)); process.exit(1); }' "${BODY}"
+# The approve-path ingest embeds outside the admin write lock: another admin write goes through meanwhile.
+stub_mode slow
+curl -s -o "${TEMP_RUNTIME}/approve-kb.json" -w '%{http_code}' -X POST "${ADMIN[@]}" -d '{}' "${BASE}/admin/approvals/${gw_kb}/approve" > "${TEMP_RUNTIME}/approve-kb.code" &
+approve_pid=$!
+sleep 1.5
+started=$(node -e 'console.log(Date.now())')
+[[ "$(call POST /admin/personas/grower/knowledgebases '{"id":"meanwhile"}')" == "201" ]] || { echo "admin write during an approve: $(cat "${BODY}")" >&2; exit 1; }
+took=$(( $(node -e 'console.log(Date.now())') - started ))
+[[ "${took}" -lt 3000 ]] || { echo "an admin write waited ${took} ms behind an approve-path ingest" >&2; exit 1; }
+wait "${approve_pid}"
+[[ "$(cat "${TEMP_RUNTIME}/approve-kb.code")" == "200" ]] || { echo "approve KB: $(cat "${TEMP_RUNTIME}/approve-kb.json")" >&2; exit 1; }
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (b.result?.ingested?.vectors?.state!=="ready") { console.error("gateway approve-path ingest vectors:", JSON.stringify(b)); process.exit(1); }' "${TEMP_RUNTIME}/approve-kb.json"
+stub_mode ok
 [[ -f "${DATA}/personas/pa-gateway/knowledgebases/beds/vectors.json" ]] || { echo "the gateway's approved KB has no vectors.json" >&2; exit 1; }
 ${MS} approvals approve "${cli_persona}" --yes >/dev/null
 ${MS} approvals approve "${cli_kb}" --yes > "${TEMP_RUNTIME}/cli-approve.txt"

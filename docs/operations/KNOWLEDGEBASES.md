@@ -66,7 +66,9 @@ alike.
   `MINDSTONE_EMBEDDING_PROVIDER` or `EMBEDDING_PROVIDER` in the environment
   the CLI or gateway runs in (providers: `docs/refactor/MEMORY_STRATEGY.md`). KB
   embedding runs whenever one of those is set, **even with no `sqlite-vec`
-  index**, which memory recall needs. Ingest then sends each entry's text,
+  index**, which memory recall needs. Every ingest does it: `kb ingest`, the
+  admin API's ingest, and approving an agent-proposed private KB (the card
+  shows its text in full). Ingest then sends each entry's text,
   and every turn that ranks by meaning sends the question, to that embedder.
   With a hosted embedder (`openai:`, an enterprise endpoint), KB text leaves
   this machine; check that an `EMBEDDING_PROVIDER` set for another tool isn't
@@ -115,9 +117,10 @@ alike.
   `knowledgebases.recall.maxResults` of the turn's `memory.recall.maxResults`
   slots (a KB quota at or above it leaves memory no slot). In the prompt's
   recall token budget (`memory.recall.maxPromptTokens`), the best KB source
-  and the best memory hit always go in; other KB sources take up to half the
-  budget, memory and word-match hits fill the rest in their order, and a KB
-  source left out gets any budget memory didn't use.
+  and the best memory hit always go in, even past the budget (by up to one KB
+  source, about 650 tokens at 5 sections); other KB sources take up to half
+  of what is left, memory and word-match hits fill the rest in their order,
+  and a KB source left out gets any budget memory didn't use.
 - **Word match still runs** for every KB source, so an exact term (an error
   code, a part number) is found as before. A source found both ways is shown
   once, as its meaning copy when that takes a quota slot.
