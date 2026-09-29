@@ -335,11 +335,13 @@ It prints `unchanged`, and `gateway` shows `(healthy)`.
 `install-stack.ps1` is the same installer for Windows, in PowerShell, with no WSL shell. **It is not yet tested on Windows**: it has been checked with PowerShell's own analyzer for Windows PowerShell 5.1 and PowerShell 7, and run end to end with PowerShell 7 on macOS. Steps A2 to A5 apply, with the PowerShell commands below.
 
 Requirements:
-- Windows 10 or 11 (x64), with Windows PowerShell 5.1 (built in) or PowerShell 7.
+- Windows 10 or 11 (x64 or arm64), with Windows PowerShell 5.1 (built in) or PowerShell 7, in FullLanguage mode (an AppLocker or WDAC policy that constrains PowerShell stops the installer, and it says so).
 - [Docker Desktop](https://docs.docker.com/desktop/) with Compose v2 or newer, running, and set to Linux containers (the default). Your account must be able to use it (the `docker-users` group).
 - About 10 GB of free disk space. The first build takes 10 to 20 minutes.
 - Optional: [Ollama for Windows](https://ollama.com) on this machine. As on macOS, the gateway container reaches it at `http://host.docker.internal:11434/v1`, and nothing needs changing. Or use `-WithOllama` to run Ollama in the stack.
+- With Docker Desktop's Hyper-V backend (not WSL 2), the drive holding the install folder must be shared with Docker (Settings, Resources, File sharing).
 - A normal PowerShell window is enough; don't run it as Administrator.
+- On an older Windows 10 where `irm` fails with a TLS or "could not create SSL/TLS secure channel" error, run `[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 'Tls12'` first, in the same window.
 
 **Install.** `irm | iex` takes no parameters, so set the options as environment variables first, or run the script as a script block, which takes them:
 
@@ -357,6 +359,9 @@ What differs from the bash installer:
 - The install folder is `%USERPROFILE%\.mindstone-stack` (`$HOME\.mindstone-stack`). The folder, the secrets files and `admin-password` can be read only by you (and SYSTEM): the Windows equivalent of modes 700 and 600, set with `icacls` and checked. The installer refuses a symbolic link or junction as the folder, your home folder, a drive's root, a folder that contains your home folder, and a network folder.
 - The Console's database is in the Docker volume `mindstone-stack_mongo-data`, not in `data\mongo`: MongoDB on a Windows folder shared into Docker is unreliable. `data` holds the Console's uploads and logs.
 - The commands it prints are PowerShell commands.
+- Options are PowerShell parameters (`-WithOllama`, not `--with-ollama`); a bash-style option, or any unnamed argument, stops the installer with the PowerShell spelling.
+- After creating the admin, it signs in to the Console once with the new password (never shown) and stops with the reset command if that fails.
+- Don't run `install-stack.sh --ref <a ref from before #180>` on a folder `install-stack.ps1` made: that older `compose.yml` doesn't know the volume and would start MongoDB on an empty `data/mongo`.
 - Before starting, it also checks that Docker Desktop runs Linux containers and that Windows hasn't reserved either port (`netsh interface ipv4 show excludedportrange protocol=tcp`).
 
 **Check** (in PowerShell; they count and compare, and never show a value):

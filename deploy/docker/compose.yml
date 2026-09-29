@@ -15,7 +15,7 @@
 # and CONSOLE_BUILD_CONTEXT to their paths.
 #
 # Don't edit this file: an update replaces it. Put your own changes in
-# compose.override.yml beside it; install-stack.sh uses it and never overwrites it.
+# compose.override.yml beside it; the installers use it and never overwrite it.
 #
 # Networks: `app` joins the gateway, the Console and the optional Ollama; `db`
 # joins only the Console and MongoDB, so nothing else can reach the database.

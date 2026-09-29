@@ -23,7 +23,9 @@ function Install-MindStoneStack {
     # The installer talks to the person at the console, as install-stack.sh does with printf;
     # Write-Host output is the Information stream on 5.1 and 7, so it can still be redirected (6>).
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Console installer output.')]
-    [CmdletBinding()]
+    # No positional parameters: a stray word or a bash-style --option is caught
+    # below (as Unexpected) instead of becoming the install folder.
+    [CmdletBinding(PositionalBinding = $false)]
     param(
         [string]$Dir,
         [string]$Ref,
@@ -36,8 +38,18 @@ function Install-MindStoneStack {
         [switch]$Uninstall,
         [switch]$Help,
         # Set only by the script's last line: without it, the download was cut off.
-        [string]$EndOfScript
+        [string]$EndOfScript,
+        # Anything else given, such as a bash-style --with-ollama.
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Unexpected
     )
+
+    # Under AppLocker or WDAC, PowerShell runs scripts in ConstrainedLanguage mode,
+    # where the .NET calls below are refused. Checked first, with nothing but a string.
+    if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+        Write-Host "[MindStone install error] PowerShell is in $($ExecutionContext.SessionState.LanguageMode) mode here (an AppLocker or WDAC policy), and the installer needs FullLanguage. Run it where scripts are allowed, or ask your administrator; the WSL 2 route in the README is an alternative."
+        throw 'The MindStone install stopped; see the message above.'
+    }
 
     Set-StrictMode -Version 2.0
     $ErrorActionPreference = 'Stop'
@@ -197,7 +209,27 @@ Your own changes to the stack (a GPU for Ollama, extra mounts) go in
         $info.RedirectStandardError = $true
         $info.StandardOutputEncoding = $Utf8NoBom
         $info.StandardErrorEncoding = $Utf8NoBom
-        $process = [System.Diagnostics.Process]::Start($info)
+        # .NET Framework (Windows PowerShell 5.1) builds the child's stdin writer from
+        # [Console]::InputEncoding and writes its preamble at once: with code page
+        # 65001 that is a UTF-8 BOM in front of the password. A BOM-less UTF-8 for
+        # the start, then the console's own again. (.NET Core writes no preamble.)
+        $savedInputEncoding = $null
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            try {
+                $savedInputEncoding = [Console]::InputEncoding
+                [Console]::InputEncoding = $Utf8NoBom
+            } catch {
+                # No console (the ISE): the default encoding is then a code page without a preamble.
+                $savedInputEncoding = $null
+            }
+        }
+        try {
+            $process = [System.Diagnostics.Process]::Start($info)
+        } finally {
+            if ($null -ne $savedInputEncoding) {
+                try { [Console]::InputEncoding = $savedInputEncoding } catch { Write-Verbose 'The console encoding could not be restored.' }
+            }
+        }
         $outTask = $process.StandardOutput.ReadToEndAsync()
         $errTask = $process.StandardError.ReadToEndAsync()
         if ($InputText) {
@@ -292,7 +324,7 @@ Your own changes to the stack (a GPU for Ollama, extra mounts) go in
             if ([IO.File]::Exists($Path)) {
                 try {
                     [IO.File]::Replace($tmp, $Path, [NullString]::Value)
-                } catch [System.IO.IOException] {
+                } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
                     # Held open (Docker Desktop shares it with a running container):
                     # write it in place instead; it keeps its own permissions.
                     [IO.File]::WriteAllText($Path, $Content, $Utf8NoBom)
@@ -374,7 +406,17 @@ Your own changes to the stack (a GPU for Ollama, extra mounts) go in
         $tmp = "$Dest.download.$(Get-RandomHex 4)"
         try {
             [IO.File]::WriteAllBytes($tmp, $bytes)
-            if ([IO.File]::Exists($Dest)) { [IO.File]::Replace($tmp, $Dest, [NullString]::Value) } else { [IO.File]::Move($tmp, $Dest) }
+            if ([IO.File]::Exists($Dest)) {
+                try {
+                    [IO.File]::Replace($tmp, $Dest, [NullString]::Value)
+                } catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+                    # Held open (librechat.yaml is shared with the running Console):
+                    # write it in place instead.
+                    [IO.File]::WriteAllBytes($Dest, $bytes)
+                }
+            } else {
+                [IO.File]::Move($tmp, $Dest)
+            }
         } finally {
             if ([IO.File]::Exists($tmp)) { [IO.File]::Delete($tmp) }
         }
@@ -592,6 +634,25 @@ leaves the folder, if you added files of your own such as compose.override.yml.)
         return "Set-Location -LiteralPath $(Format-Quoted $S.InstallDir); docker compose exec -T -e HOME=/tmp mongodb mongosh --quiet MindStoneConsole --eval '$eval'"
     }
 
+    # The HTTP status of a sign-in to the Console (0 when it didn't answer). The
+    # body is sent as UTF-8 bytes: Windows PowerShell 5.1 would send a string body
+    # as ISO-8859-1. Nothing of the request or response is printed.
+    function Test-ConsoleSignIn([string]$Url, [string]$Email, [string]$Secret) {
+        $body = $Utf8NoBom.GetBytes((@{ email = $Email; password = $Secret } | ConvertTo-Json -Compress))
+        try {
+            $response = Invoke-WebRequest -Uri $Url -Method Post -Body $body -ContentType 'application/json; charset=utf-8' -UseBasicParsing -TimeoutSec 30
+            return [int]$response.StatusCode
+        } catch {
+            $failed = $_.Exception
+            if ($null -ne $failed -and ($failed.PSObject.Properties.Name -contains 'Response') -and $null -ne $failed.Response) {
+                return [int]$failed.Response.StatusCode
+            }
+            return 0
+        } finally {
+            $body = $null
+        }
+    }
+
     # Whether this session can ask questions: a console that isn't redirected, and
     # PowerShell not started with -NonInteractive.
     function Test-Interactive {
@@ -648,6 +709,16 @@ leaves the folder, if you added files of your own such as compose.override.yml.)
     try {
         if ($EndOfScript -ne 'yes') {
             Exit-Install 'The installer did not download in full, so nothing was run. Run the command again.'
+        }
+        if ($null -ne $Unexpected -and $Unexpected.Count -gt 0) {
+            $first = [string]$Unexpected[0]
+            $hint = ''
+            if ($first -cmatch '\A--?([a-z][a-z-]*)\z') {
+                # --with-ollama is -WithOllama here.
+                $words = $Matches[1].Split('-') | Where-Object { $_ } | ForEach-Object { $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1) }
+                $hint = " PowerShell options have one dash and no inner dashes: -$($words -join '')."
+            }
+            Exit-Install "Unexpected argument: $first.$hint Options must be named, as in -Dir <path> -AdminEmail <email> -WithOllama (see -Help)."
         }
         if ($Help) {
             Show-Usage
@@ -882,7 +953,6 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
             }
         }
 
-        $newInstall = -not [IO.File]::Exists($S.EnvFile)
         Initialize-InstallDir
         Protect-Path $S.InstallDir -Directory
         $markerPath = [IO.Path]::Combine($S.InstallDir, $Marker)
@@ -912,13 +982,13 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
         } else {
             Clear-EnvValue $S.EnvFile 'COMPOSE_PROFILES'
         }
-        # Where the Console's database lives is chosen once. A new install uses the
-        # named volume; an earlier install keeps what it has (an install made by
-        # install-stack.sh keeps its data\mongo folder).
+        # Where the Console's database lives is chosen once, and recorded in .env. A
+        # data\mongo folder with anything in it (an install made by install-stack.sh,
+        # even one whose .env is gone) keeps it; otherwise the named volume.
         if (-not (Get-EnvValue $S.EnvFile 'MINDSTONE_MONGO_DATA')) {
             $mongoFolder = [IO.Path]::Combine([IO.Path]::Combine($S.InstallDir, 'data'), 'mongo')
             $mongoFolderUsed = [IO.Directory]::Exists($mongoFolder) -and @(Get-ChildItem -LiteralPath $mongoFolder -Force | Select-Object -First 1).Count -gt 0
-            if ($newInstall -or -not $mongoFolderUsed) {
+            if (-not $mongoFolderUsed) {
                 Write-EnvValue $S.EnvFile 'MINDSTONE_MONGO_DATA' $MongoVolume
                 Write-EnvValue $S.EnvFile 'MINDSTONE_MONGO_USER' $MongoUser
             } else {
@@ -1053,7 +1123,6 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
                     $adminSecret = [string]((Read-EnvLine $passwordFile) | Select-Object -First 1)
                 }
                 $created = Invoke-Compose -Capture -InputText ($adminSecret + "`n") -ArgumentList @('exec', '-T', 'console', 'npm', 'run', '--silent', 'create-user', '--', $AdminEmail, $AdminName, $adminUsername, '--email-verified=true')
-                $adminSecret = ''
                 $output = $created.Output + "`n" + $created.Errors
                 if ($created.ExitCode -ne 0 -or -not $output.Contains('User created successfully')) {
                     # Only the tool's own error lines, which never contain the password.
@@ -1070,6 +1139,15 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
                 if ($role -ne 'ADMIN') {
                     Exit-Install "The account $AdminEmail was created, but its role is $role, not ADMIN. Make it an admin with: $(Get-PromoteCommand $AdminEmail)"
                 }
+                # Sign in once, as the admin will, so a password that didn't arrive as
+                # typed is found now. No marker until it works: a re-run then reports
+                # the account as existing, with the reset command.
+                $status = Test-ConsoleSignIn "http://127.0.0.1:$consolePort/api/auth/login" $AdminEmail $adminSecret
+                $adminSecret = ''
+                if ($status -ne 200) {
+                    Exit-Install "The admin account $AdminEmail was created with role ADMIN, but signing in with its password failed (HTTP $status), so the password didn't reach the Console as it should. Set a new one, then sign in at http://localhost:${consolePort}: Set-Location -LiteralPath $dirQ; docker compose exec console npm run reset-password"
+                }
+                Write-InstallLog "Signed in to the Console as ${AdminEmail}: the password works."
                 Write-FileAtomic $adminMarker "$AdminEmail (username $adminUsername, role ADMIN)`n"
                 Write-InstallLog "Admin account created: $AdminEmail (username $adminUsername, role ADMIN)"
             }
