@@ -328,15 +328,22 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   assert.deepEqual(selectRecallHits(three, 3).map((h) => h.id), ["k1", "k2", "k3"], "with no memory hit, KB sources take every slot");
   assert.deepEqual(selectRecallHits([...three, hit("m1", 0.9)], 1).map((h) => h.id), ["m1"], "one slot: memory's");
   // A KB source's word copy isn't memory: it doesn't take a slot from the quota.
-  assert.deepEqual(selectRecallHits([...three, hit("k3", 0.95)], 3).map((h) => `${h.id}:${isQuotaHit(h) ? "meaning" : "words"}`), ["k1:meaning", "k2:meaning", "k3:meaning"]);
+  assert.deepEqual(selectRecallHits([...three, hit("k3", 0.95, false, "kb")], 3).map((h) => `${h.id}:${isQuotaHit(h) ? "meaning" : "words"}`), ["k1:meaning", "k2:meaning", "k3:meaning"]);
   // A capped-out source's word copy, ranked above memory's hit, doesn't take memory's slot.
   const tag = (h: any) => `${h.id}:${isQuotaHit(h) ? "meaning" : h.id.startsWith("k") ? "words" : "memory"}`;
-  assert.deepEqual(selectRecallHits([...three, hit("k3", 0.95), hit("m1", 0.5)], 3).map(tag), ["k1:meaning", "k2:meaning", "m1:memory"]);
-  assert.deepEqual(selectRecallHits([...three, hit("k1", 0.95), hit("m1", 0.5)], 1).map(tag), ["m1:memory"]);
+  assert.deepEqual(selectRecallHits([...three, hit("k3", 0.95, false, "kb"), hit("m1", 0.5)], 3).map(tag), ["k1:meaning", "k2:meaning", "m1:memory"]);
+  assert.deepEqual(selectRecallHits([...three, hit("k1", 0.95, false, "kb"), hit("m1", 0.5)], 1).map(tag), ["m1:memory"]);
+  // A KB source found only by words (no meaning copy) isn't memory either.
+  const kbWords = (id: string) => hit(id, 0.95, false, "kb");
+  const kindTag = (h: any) => `${h.id}:${isQuotaHit(h) ? "meaning" : h.kind === "kb" ? "kb-words" : "memory"}`;
+  assert.deepEqual(selectRecallHits([...three, kbWords("kx"), hit("m1", 0.5)], 3).map(kindTag), ["k1:meaning", "k2:meaning", "m1:memory"]);
+  assert.deepEqual(selectRecallHits([...three, kbWords("kx")], 3).map(kindTag), ["k1:meaning", "k2:meaning", "k3:meaning"], "with no memory hit, KB sources keep every slot");
   // In the prompt, the forced hit is memory's own, not a word copy ranked above it.
-  const wordCopy = { ...hit("k8", 0.95), text: "words ".repeat(900) };
+  const wordCopy = { ...hit("k8", 0.95, false, "kb"), text: "words ".repeat(900) };
   const promptWithCopy = buildMemoryRecallPrompt([hit("k8", 0.9, true, "kb"), wordCopy, hit("m1", 0.5)], 500);
   assert.ok(promptWithCopy.hits.some((h) => h.id === "m1"), `the best memory hit must go in before a word copy: ${promptWithCopy.hits.map((h) => h.id)}`);
+  const promptWithKbWords = buildMemoryRecallPrompt([hit("k8", 0.9, true, "kb"), { ...kbWords("kx"), text: "words ".repeat(900) }, hit("m1", 0.5)], 500);
+  assert.ok(promptWithKbWords.hits.some((h) => h.id === "m1"), `the best memory hit must go in before a KB source found by words: ${promptWithKbWords.hits.map((h) => h.id)}`);
 }
 
 // A request the embedder can't finish in time: the batch once more, an entry a request; one that
