@@ -1350,11 +1350,17 @@ for bad in "..%2Fpersonas%2Fgrower%2Fknowledgebases%2Fbeds" "atlas%2F..%2Fatlas"
 done
 [[ -f "${DATA}/knowledgebases/.enc/reembed.json" && -f "${LINKED_OUT}/reembed.json" ]] || { echo "a refused reset cleared a state" >&2; exit 1; }
 rm -rf "${DATA}/knowledgebases/${ODD}" "${DATA}/knowledgebases/.enc" "${DATA}/knowledgebases/via-link" "${LINKED_OUT}"
-for long in "$(node -e 'process.stdout.write("é".repeat(255))')" 'back\slash'; do
-  # ext4 caps a name at 255 bytes, APFS at 255 characters: skip what this filesystem can't hold.
-  mkdir "${DATA}/knowledgebases/${long}" 2>/dev/null || { echo "(this filesystem can't hold a folder named ${long:0:12}...: skipped)"; continue; }
+# 255 three-byte letters (2295 characters encoded, near the longest name a folder can have) and a
+# backslash reset like any other name the list shows (#166 review).
+for long in "$(node -e 'process.stdout.write("漢".repeat(255))')" 'back\slash'; do
+  # ext4 caps a name at 255 bytes, APFS at 255 UTF-16 units: skip only a name too long for this
+  # filesystem; any other failure to make the folder fails the smoke.
+  made="$(LONG_DIR="${DATA}/knowledgebases/${long}" node -e 'try { require("fs").mkdirSync(process.env.LONG_DIR); console.log("made") } catch (e) { if (e.code !== "ENAMETOOLONG") throw e; console.log("too-long") }')" || { echo "couldn't make the folder ${long:0:12}..." >&2; exit 1; }
+  [[ "${made}" == made ]] || { echo "(this filesystem can't hold a folder named ${long:0:12}...: skipped)"; continue; }
   printf '{"name":"long"}' > "${DATA}/knowledgebases/${long}/kb.json"
   cp "${TEMP_RUNTIME}/state-elsewhere-shared.json" "${DATA}/knowledgebases/${long}/reembed.json"
+  [[ "$(call GET /admin/knowledgebases)" == 200 ]] || exit 1
+  LONG="${long}" node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!(b.knowledgebases??[]).some((k)=>k.id===process.env.LONG)) { console.error("control: the KB list should show the long or backslash name"); process.exit(1); }' "${BODY}" || exit 1
   [[ "$(call POST "/admin/knowledgebases/$(enc "${long}")/reembed" '{}')" == 200 ]] || { echo "reset a KB named ${long:0:12}... ($(printf '%s' "${long}" | wc -c | tr -d ' ') bytes): $(cat "${BODY}")" >&2; exit 1; }
   [[ ! -e "${DATA}/knowledgebases/${long}/reembed.json" ]] || { echo "the reset left the state of ${long:0:12}..." >&2; exit 1; }
   rm -rf "${DATA}/knowledgebases/${long}"
