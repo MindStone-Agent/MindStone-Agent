@@ -117,7 +117,7 @@ alike.
   vectors (word match meanwhile) and is tried again later (#158):
   - A 429 is a pause: the job waits (the embedder's Retry-After, between 30
     seconds and 5 minutes, not counted against its budget) and sends the same
-    entry again, up to 5 times in a row.
+    entry again, once no turn is running, up to 5 times in a row.
   - Only a failure that cost nothing is free: nothing was embedded, and the
     embedder couldn't be reached, was down (a 5xx), had no key or model (401,
     403, 404), timed out (408, or no answer in time), or kept answering 429.
@@ -137,7 +137,7 @@ alike.
     and the last reason; a KB given up on says so in its reason), `--json` as
     `vectors.reembed`, and the gateway's KB lists (`GET /admin/knowledgebases`
     and a persona's) carry it as `reembed` (`failures`, `nextAttemptAt` or
-    `gaveUp`, `reason`).
+    `gaveUp`, `reason`) while the KB is still stale for the install's model.
   An ingest that finishes while a re-embed runs keeps its own vectors, and
   that doesn't count as a failure. Each attempt is recorded in the admin audit
   log as `kb_reembedded` (with `reason` and `cause`, `unavailable`,
