@@ -116,7 +116,21 @@ Bounds and what remains untested for these three: `docs/operations/LOCAL_MODELS.
 
 ## Quick start
 
+### Install everything (Docker)
+
+The gateway, the web Console and its database, all in Docker. You need only Docker with Compose v2 (Docker Desktop on macOS; Docker Engine on Linux):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | bash
+```
+
+The installer asks for the Console admin's email, name and password (the password isn't shown), builds and starts the stack, and ends with `Open http://localhost:3080`. Sign in there: the **Set up MindStone** banner walks you through the model, the persona and memory. Ollama on this machine is used as it is, for chat and for embeddings.
+
+Everything lives in `~/.mindstone`. Running the same command again updates the stack and keeps your secrets and data. For the options, and a step-by-step with a check after each step, see [Install guide for AI agents](#install-guide-for-ai-agents), path A; for what runs where, see [Docker](#docker).
+
 ### Install from the public repository
+
+The gateway and the `mindstone` CLI only, natively on this machine (Node.js 22.19 or newer):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install.sh | bash
@@ -130,7 +144,7 @@ curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/mai
   bash -s -- --dir "$HOME/Projects/MindStone-Agent"
 ```
 
-The installer clones or updates the repository, installs dependencies, builds the vendored Pi base, initializes isolated runtime directories and, on a first install, the runtime config (not onboarded yet), and links the `mindstone` CLI onto your PATH unless `--no-link` is used. `mindstone onboard` finishes setup in a terminal; to set up in the web Console instead, see the [install guide for AI agents](#install-guide-for-ai-agents), step 2(b).
+The installer clones or updates the repository, installs dependencies, builds the vendored Pi base, initializes isolated runtime directories and, on a first install, the runtime config (not onboarded yet), and links the `mindstone` CLI onto your PATH unless `--no-link` is used. `mindstone onboard` finishes setup in a terminal; to set up in the web Console instead, see the [install guide for AI agents](#install-guide-for-ai-agents), step B2(b).
 
 ### Install from source
 
@@ -151,18 +165,159 @@ For an unlinked checkout, use:
 
 ## Install guide for AI agents
 
-This section is written so an AI coding agent (Claude Code, Codex and similar) can install and run MindStone-Agent from start to finish; humans can follow it too. Every step ends with a check, and you shouldn't move on until the check passes. **Never print a token or credential into your output.** Write secrets straight to files, as the commands below do.
+This section is written so an AI coding agent (Claude Code, Codex and similar) can install and run MindStone-Agent from start to finish; humans can follow it too. Every step ends with a check, and you shouldn't move on until the check passes. **Never print a token, password or credential into your output.** Write secrets straight to files, as the commands below do, and check them by counting, never by showing them.
 
-### 0. Requirements
+Choose **one** path:
+- **A. The whole stack in Docker (recommended).** The gateway, the web Console and MongoDB run in Docker, set up by one installer. Nothing is built on the host, and setup finishes in the Console.
+- **B. Native.** The gateway and the `mindstone` CLI run on this machine (Node.js 22.19 or newer). Set it up in a terminal (`mindstone onboard`), or add the Console separately from its own repo.
+
+### A. The whole stack in Docker
+
+The commands below assume the default install folder `~/.mindstone` and the default ports: the Console on `127.0.0.1:3080` and the gateway on `127.0.0.1:19789`. Both listen on loopback only.
+
+#### A0. Requirements
+
+- macOS or Linux (arm64 or x86_64), with `curl`.
+- Docker with Compose v2: Docker Desktop on macOS, or Docker Engine with the Compose plugin on Linux. Docker must be running.
+- About 10 GB of free disk space for the images. The first build takes 10 to 20 minutes.
+- Optional: [Ollama](https://ollama.com) on this machine, for local models and embeddings. On Linux it must listen on an address the containers can reach (`OLLAMA_HOST=0.0.0.0`), or use `--with-ollama` (step A1) to run Ollama in the stack instead.
+
+**Check:**
+
+```bash
+docker info >/dev/null && docker compose version
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080
+```
+
+The first prints `Docker Compose version v2.…`. The second prints `000`: nothing is using port 3080 yet. If something is, choose other ports in step A1.
+
+#### A1. Install
+
+Without a terminal to type into, pass the admin's email. The installer then generates the admin password into `~/.mindstone/admin-password` (mode 600) and prints the file's path, never the password:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | \
+  bash -s -- --admin-email <the person's email>
+```
+
+A person at a terminal can leave out `--admin-email` and answer the prompts instead.
+
+Options go after `bash -s --`: `--dir <path>` (install folder), `--ref <git ref>` and `--console-ref <git ref>` (the MindStone-Agent and Console versions to build, `main` by default), `--admin-name <name>`, and `--with-ollama` (run Ollama in the stack too). Ports and the Compose project name are environment variables, set on `bash` (not on `curl`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | \
+  CONSOLE_PORT=3090 MINDSTONE_GATEWAY_PORT=19790 bash -s -- --admin-email <email>
+```
+
+If you change them, use your ports in place of 3080 and 19789 in the checks below. The installer saves them in `~/.mindstone/.env`, so later runs and `docker compose` commands use them too.
+
+What it does:
+- checks Docker and Compose v2;
+- downloads the compose file and the Console's config, pinned to the refs;
+- generates every secret into two 600 files, `gateway.env` and `console.env`. The admin credential's plaintext is only in `console.env`; the gateway gets its sha256;
+- builds and starts the stack (`docker compose up -d --build`) and waits until the gateway and the Console answer;
+- creates the Console admin account;
+- prints `Open http://localhost:3080`, and how to stop, update and uninstall.
+
+**Check:** the installer exits 0 and prints `Open http://localhost:3080`. Then:
+
+```bash
+cd ~/.mindstone && docker compose ps --format '{{.Service}} {{.Status}}'
+```
+
+It lists `gateway` as `Up … (healthy)`, and `console` and `mongodb` as `Up`.
+
+#### A2. Check the secrets and the gateway
+
+Run these in `~/.mindstone`. They count and compare, and never show a value:
+
+```bash
+cd ~/.mindstone
+grep -cE '^(CREDS_KEY|CREDS_IV|JWT_SECRET|JWT_REFRESH_SECRET|MINDSTONE_GATEWAY_TOKEN|MINDSTONE_ADMIN_TOKEN)=.+' console.env
+ls -l gateway.env console.env | cut -c1-10
+curl -s http://127.0.0.1:19789/health
+TOKEN_HEADER="Authorization: Bearer $(sed -n 's/^MINDSTONE_AGENT_GATEWAY_TOKEN=//p' gateway.env)"
+curl -s -o /dev/null -w '%{http_code}\n' -H "$TOKEN_HEADER" http://127.0.0.1:19789/v1/models
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:19789/v1/models
+unset TOKEN_HEADER
+```
+
+**Check:**
+- the count is `6`, and both files show `-rw-------`;
+- `/health` prints JSON with `"ok":true`;
+- `/v1/models` prints `200` with the token and `401` without it.
+
+#### A3. Check the Console and sign in
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080
+```
+
+**Check:** it prints `200`. Signing in works: with a generated password, this prints `200` without showing it (`--data @-` reads the request from stdin):
+
+```bash
+cd ~/.mindstone
+printf '{"email":"%s","password":"%s"}' "<the admin's email>" "$(head -n 1 admin-password)" | \
+  curl -s -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' --data @- http://127.0.0.1:3080/api/auth/login
+```
+
+Tell the person where the password file is. They should sign in once, store the password somewhere safe, and delete the file.
+
+#### A4. Finish setup in the Console
+
+Setup is done in the Console, in a browser: skip `mindstone onboard`, and don't set `routing` yourself. The person signs in at <http://localhost:3080>. Until setup is finished, an admin sees a **Set up MindStone** banner; the same setup is at <http://localhost:3080/mindstone/onboarding>. It chooses the model provider, the model and the persona, then sets up memory (an embedding model with a live check; with Ollama the Console can download it), optional chat connectors, and a short **About you** step. Its first step asks the person to type `enable advanced settings`.
+
+Ollama on this machine is reached from the gateway container as `http://host.docker.internal:11434/v1`: the Ollama choice in setup is already filled in with it. To check the container reaches it:
+
+```bash
+cd ~/.mindstone && docker compose exec gateway curl -s -o /dev/null -w '%{http_code}\n' http://host.docker.internal:11434/api/tags
+```
+
+**Check:**
+- that prints `200` (only if you use Ollama on this machine);
+- before setup, `docker compose exec gateway ./scripts/mindstone doctor` ends with `Result: ok`, and its `routing.mode` line is a warning showing `placeholder`;
+- once setup is finished, the banner is gone, `routing.mode` shows `pi-session`, and a chat message gets a real answer.
+
+The `mindstone` CLI runs inside the gateway container as `docker compose exec gateway ./scripts/mindstone <command>`, for example `status`, `doctor` or `config`. Interactive commands (`onboard`, `auth login`) need `docker compose exec -it`.
+
+#### A5. Update, restart, stop and uninstall
+
+- **Update:** run the step A1 command again, with the same `--dir` if you used one (`--admin-email` isn't needed again). It keeps the refs and ports saved in `.env`, rebuilds both images, and never regenerates a secret or touches your data. To move to other versions, pass `--ref` and `--console-ref`.
+- **Restart the gateway:** from the Console's settings page, or `docker compose restart gateway`. The container's restart policy brings the gateway back after the Console restarts it.
+- **Stop and start:** `cd ~/.mindstone && docker compose stop`, then `docker compose up -d`.
+- **Uninstall:** run the installer with `--uninstall` (and the same `--dir`). It stops and removes the containers and keeps the data: the Docker volumes, `~/.mindstone/data` and the secrets. It prints how to delete them, which can't be undone.
+
+**Check (after an update):** the secrets are unchanged, and the stack is healthy again:
+
+```bash
+cd ~/.mindstone
+cat gateway.env console.env | shasum -a 256 > .secrets-before.sha256   # before the update (sha256sum on Linux)
+# ... run the update ...
+cat gateway.env console.env | shasum -a 256 | diff -q - .secrets-before.sha256 >/dev/null && echo unchanged
+docker compose ps --format '{{.Service}} {{.Status}}'
+```
+
+It prints `unchanged`, and `gateway` shows `(healthy)`.
+
+**Don't:**
+- print or paste the contents of `gateway.env`, `console.env` or `admin-password`;
+- publish the ports on `0.0.0.0`. For another machine, put the Console behind a reverse proxy with HTTPS (see the Console README);
+- run the native gateway (path B) on the same port as the stack's gateway.
+
+### B. Native install
+
+The gateway and the `mindstone` CLI on this machine. The web Console is optional here (step B5); for the Console and the gateway together in Docker, use path A.
+
+#### B0. Requirements
 
 - macOS or Linux (arm64 or x86_64).
 - `git`, plus **Node.js 22.19 or newer** with `npm`. Check with `node --version`.
 - A C/C++ toolchain for native modules:
   - **macOS:** the Xcode Command Line Tools (`xcode-select --install`).
   - **Linux:** `build-essential` and `python3`.
-- Docker, but only if you'll also run the web Console (step 5).
+- Docker, but only if you'll also run the web Console (step B5). To run everything in Docker instead, use path A.
 
-### 1. Install
+#### B1. Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install.sh | bash
@@ -182,19 +337,19 @@ With `--no-link`, run the CLI as `./node_modules/.bin/mindstone` from inside the
 On a first install, the installer also creates the runtime config, `<checkout>/.runtime/mindstone/config.json`, with safe defaults:
 - not onboarded: `routing.mode` is `placeholder`, so no model is called yet;
 - the gateway on `127.0.0.1:19789`, with auth `none` and its HTTP APIs off;
-- placeholder identity and user files. `mindstone onboard` (2(a)) replaces them. On the Console path (2(b)), the Console's guided setup replaces them with the first-activation scaffold (its **About you** step), keeping `.pre-onboarding-placeholder.bak` backups, and the agent then forms its identity in its first Console chat ([#102](https://github.com/MindStone-Agent/MindStone-Agent/issues/102)).
+- placeholder identity and user files. `mindstone onboard` (B2(a)) replaces them. On the Console path (B2(b)), the Console's guided setup replaces them with the first-activation scaffold (its **About you** step), keeping `.pre-onboarding-placeholder.bak` backups, and the agent then forms its identity in its first Console chat ([#102](https://github.com/MindStone-Agent/MindStone-Agent/issues/102)).
 
-Re-running the installer (step 4) never changes an existing `config.json`.
+Re-running the installer (step B4) never changes an existing `config.json`.
 
 **Check:** `mindstone status` exits 0, prints the isolated runtime paths, all under `<checkout>/.runtime/`, and shows `Config exists: true`.
 
-### 2. Onboard: in a terminal, or in the web Console
+#### B2. Onboard: in a terminal, or in the web Console
 
 Choose **one** path.
 
-#### 2(a). In a terminal: `mindstone onboard`
+##### B2(a). In a terminal: `mindstone onboard`
 
-`mindstone onboard` and `mindstone auth login <provider>` are **interactive**: they need a real terminal (TTY), and an OAuth login opens a browser. If you are an agent without a TTY, either ask the human to run this in the checkout folder, or use path (b):
+`mindstone onboard` and `mindstone auth login <provider>` are **interactive**: they need a real terminal (TTY), and an OAuth login opens a browser. If you are an agent without a TTY, either ask the human to run this in the checkout folder, or use path B2(b):
 
 ```bash
 mindstone onboard
@@ -211,18 +366,18 @@ It updates the `config.json` the installer created. To change settings later, us
 - `mindstone doctor` reports no errors for runtime, config, identity and routing.
 - `mindstone chat --once "hello"` returns a real answer, not a setup prompt.
 
-#### 2(b). In the web Console: skip `mindstone onboard`
+##### B2(b). In the web Console: skip `mindstone onboard`
 
-This path needs no interactive terminal (TTY): steps 3 and 5 are still shell commands, but none of them prompts. Don't run `mindstone onboard`. Instead:
-1. start the gateway (step 3);
-2. set the gateway up for the Console (step 5);
-3. install the Console and run its guided setup, following the [Console README](https://github.com/MindStone-Agent/mindstone-console). Guided setup chooses the model provider, the model and the persona, then sets up memory (an embedding model with a live check; with local Ollama the Console can download it), optional chat connectors, and a short **About you** step that writes the identity scaffold. The gateway reports itself as onboarded once the provider, model, persona, memory and About you steps are done; connectors are optional (`GET /admin/status` shows each step), and the first Console chat starts identity formation.
+This path needs no interactive terminal (TTY): steps B3 and B5 are still shell commands, but none of them prompts. Don't run `mindstone onboard`. Instead:
+1. start the gateway (step B3);
+2. set the gateway up for the Console (step B5);
+3. install the Console and run its guided setup, following the [Console README](https://github.com/MindStone-Agent/mindstone-console) (its path B, for a gateway already installed). Guided setup chooses the model provider, the model and the persona, then sets up memory (an embedding model with a live check; with local Ollama the Console can download it), optional chat connectors, and a short **About you** step that writes the identity scaffold. The gateway reports itself as onboarded once the provider, model, persona, memory and About you steps are done; connectors are optional (`GET /admin/status` shows each step), and the first Console chat starts identity formation.
 
 Until then the gateway reports itself as not onboarded, and the Console shows a **Set up MindStone** banner.
 
 **Check:** `mindstone doctor` ends with `Result: ok`. Its `routing.mode` line is a warning showing `placeholder`, which is expected until the Console's guided setup finishes.
 
-### 3. Start the gateway
+#### B3. Start the gateway
 
 Choose **one** of these. Don't run both, or two gateways will fight over the port.
 
@@ -237,19 +392,19 @@ mindstone gateway install    # macOS only: a launchd service that starts at logi
 - **`MINDSTONE_AGENT_GATEWAY_PORT`**, an environment variable, moves the listener. Set it on every `mindstone gateway start` and `restart` (for example `MINDSTONE_AGENT_GATEWAY_PORT=19790 mindstone gateway start`). It isn't read from `config.json`.
 - **`gateway.port`** in `<checkout>/.runtime/mindstone/config.json` is the port the CLI uses: `gateway start`, `restart` and `status` check health there, and `mindstone status` and `doctor` report it.
 
-If they differ, the gateway runs, but the CLI's health checks report it as down. The macOS `gateway install` service always listens on 19789. Use the new port in place of 19789 in the checks here and in step 5, and in the Console's gateway URL.
+If they differ, the gateway runs, but the CLI's health checks report it as down. The macOS `gateway install` service always listens on 19789. Use the new port in place of 19789 in the checks here and in step B5, and in the Console's gateway URL.
 
-### 4. Update later
+#### B4. Update later
 
-Re-run the install command from step 1, with the same options if you used any (`--dir`, `--no-link`). It pulls the latest `main`, rebuilds, and keeps your `.runtime/` data; an existing `config.json` is left exactly as it is. Then restart the gateway (`mindstone gateway restart`, or reinstall the service).
+Re-run the install command from step B1, with the same options if you used any (`--dir`, `--no-link`). It pulls the latest `main`, rebuilds, and keeps your `.runtime/` data; an existing `config.json` is left exactly as it is. Then restart the gateway (`mindstone gateway restart`, or reinstall the service).
 
 **Check:** `mindstone doctor` is clean, and `/health` answers.
 
-### 5. The web Console (optional after 2(a), required for 2(b))
+#### B5. The web Console (optional after B2(a), required for B2(b))
 
 The MindStone Console is a web UI for chat and administration: settings, secrets, approvals, doctor and logs, and restart. It lives in [MindStone-Agent/mindstone-console](https://github.com/MindStone-Agent/mindstone-console), and its README has the install steps.
 
-The gateway side works on either path from step 2: after `mindstone onboard` (2(a)), or with no onboarding yet (2(b)), using the `config.json` the installer created. Start the gateway first (step 3). Then run these commands, which write the secrets to files and never print them.
+The gateway side works on either path from step B2: after `mindstone onboard` (B2(a)), or with no onboarding yet (B2(b)), using the `config.json` the installer created. Start the gateway first (step B3). Then run these commands, which write the secrets to files and never print them.
 
 1. **The gateway token.** Paths in the config are relative to the config file's folder:
    ```bash
@@ -278,18 +433,18 @@ The gateway side works on either path from step 2: after `mindstone onboard` (2(
      c.gateway.admin = { ...(c.gateway.admin || {}), tokenSha256: h };
      fs.writeFileSync(f, JSON.stringify(c, null, 2) + "\n");'
    ```
-   On Linux, use `sha256sum` in place of `shasum -a 256`. Don't add a `routing` section: onboarding (2(a)) or the Console's guided setup (2(b)) sets it.
+   On Linux, use `sha256sum` in place of `shasum -a 256`. Don't add a `routing` section: onboarding (B2(a)) or the Console's guided setup (B2(b)) sets it.
 4. **Check the route.** Run `mindstone doctor` and find the `routing.mode` line.
-   - **Console-first install (2(b)):** `placeholder` is expected. The Console's guided setup sets the route, so go on to 5.5. Console chat works once guided setup finishes.
-   - **After `mindstone onboard` (2(a)):** it should be `pi-session`. If it shows `placeholder`, onboarding didn't set a route: run `mindstone config --section routing` in a terminal, or finish setup in the Console instead. Without a route, Console chat fails.
-5. **Let the Console's container reach the gateway.** The gateway listens on `127.0.0.1:19789`. The address and port it listens on come from environment variables, not from config (see "Using another port" in step 3).
+   - **Console-first install (B2(b)):** `placeholder` is expected. The Console's guided setup sets the route, so go on to B5.5. Console chat works once guided setup finishes.
+   - **After `mindstone onboard` (B2(a)):** it should be `pi-session`. If it shows `placeholder`, onboarding didn't set a route: run `mindstone config --section routing` in a terminal, or finish setup in the Console instead. Without a route, Console chat fails.
+5. **Let the Console's container reach the gateway.** The gateway listens on `127.0.0.1:19789`. The address and port it listens on come from environment variables, not from config (see "Using another port" in step B3).
    - **Docker Desktop (macOS):** it reaches the gateway as `host.docker.internal`, so nothing needs to change.
    - **Linux:** a container can't reach the host's loopback. Start the gateway bound to the Docker bridge address, and use the same variable on every restart:
      ```bash
      MINDSTONE_AGENT_GATEWAY_HOST=172.17.0.1 mindstone gateway restart
      ```
      Also set `gateway.host` to `172.17.0.1` in `config.json`. That doesn't move the listener, but `restart` and `status` use it for their health check, which otherwise reports `false`. Use that address in place of `127.0.0.1` in the checks. The macOS `gateway install` service always uses `127.0.0.1`.
-6. **Restart the gateway** if you started it with `mindstone gateway start`: run `mindstone gateway restart`, with the variable from step 5 on Linux. If you used `gateway install`, skip this step. The gateway re-reads `config.json` on each request, and a `restart` would start a second process that can't get the port.
+6. **Restart the gateway** if you started it with `mindstone gateway start`: run `mindstone gateway restart`, with the variable from step B5 on Linux. If you used `gateway install`, skip this step. The gateway re-reads `config.json` on each request, and a `restart` would start a second process that can't get the port.
 
 **Check:**
 
@@ -772,7 +927,31 @@ See `docs/operations/CONNECTORS.md`, `EMAIL_CONNECTOR.md`, and
 
 ## Docker
 
-Build and validate the isolated runtime:
+### The whole stack
+
+`deploy/docker/compose.yml` runs MindStone in Docker: the gateway, the MindStone Console and MongoDB. `install-stack.sh` downloads it, generates the secrets and starts it ([Install everything (Docker)](#install-everything-docker); the steps with checks are path A of the [install guide](#install-guide-for-ai-agents)).
+
+| Service | What it is | Reached at |
+|---|---|---|
+| `gateway` | Built from this repo's `Dockerfile` at `MINDSTONE_REF` (the git URL, so no checkout is needed). Its entrypoint, `scripts/docker-gateway-entrypoint.sh`, runs `init-runtime.sh --if-no-config` on every start and merges the Console's settings into `config.json`: token auth, chat completions on and `gateway.admin.tokenSha256`, keeping everything else. It never touches `routing`. Then it runs the gateway in the foreground. | `127.0.0.1:${MINDSTONE_GATEWAY_PORT:-19789}` on the host, for the CLI and checks; `http://gateway:19789` from the Console |
+| `console` | The MindStone Console, built from [mindstone-console](https://github.com/MindStone-Agent/mindstone-console) at `CONSOLE_REF`, with its `mindstone/librechat.yaml`. Sign-up from the page is off; the installer creates the admin. | `127.0.0.1:${CONSOLE_PORT:-3080}` |
+| `mongodb` | `mongo:8.0.20`, the Console's database. | the stack's network only |
+| `ollama` | Optional (Compose profile `ollama`, or `install-stack.sh --with-ollama`): Ollama in a container, for Linux or a machine without Ollama. Pull models with `docker compose exec ollama ollama pull <model>`, or let the Console download the embedding model. | the stack's network only |
+
+What it keeps, and where (in the install folder, `~/.mindstone` by default):
+- **Secrets:** `gateway.env` (the gateway token and the admin credential's sha256) and `console.env` (the Console's secrets, the gateway token and the admin credential), both mode 600. The gateway's entrypoint writes the token to `secrets/gateway-token` (600) in its runtime and doesn't pass the variable on to the agent's processes.
+- **Settings:** `.env` holds the refs, ports, project name and UID/GID, and no secrets. Compose reads it, so plain `docker compose` commands in the folder use the same settings.
+- **Data:** the Docker volumes `<project>_gateway-runtime` (config, memory, transcripts), `<project>_pi-agent` and `<project>_pi-sessions` (Pi's isolated state), and `<project>_console-data`; the Console's database, uploads and logs are in `data/`.
+
+Ollama: the gateway reaches Ollama on the host as `http://host.docker.internal:11434/v1` (`OLLAMA_BASE_URL`), for chat models and for memory embeddings. Set `OLLAMA_BASE_URL` in `.env` to use another address.
+
+Restarting the gateway from the Console works: the service declares `MINDSTONE_AGENT_SUPERVISOR=docker` and `restart: unless-stopped`, so the gateway exits with code 75 and Docker starts it again (`docs/operations/GATEWAY_RESTART.md`). The gateway's own port can't be changed from the Console's settings in this stack: it listens on 19789 inside the container, and `MINDSTONE_GATEWAY_PORT` moves the host port.
+
+To build from local checkouts instead of the git URLs, set `MINDSTONE_BUILD_CONTEXT` and `CONSOLE_BUILD_CONTEXT` in `.env` to their paths.
+
+### The Pi container
+
+The root `docker-compose.yml` is a separate, interactive Pi container for development. Build and validate the isolated runtime:
 
 ```bash
 docker compose build
