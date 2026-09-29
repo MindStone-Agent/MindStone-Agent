@@ -852,12 +852,13 @@ stub_mode ok
 ${MS} kb ingest library --json >/dev/null
 chat_ms() { # chat_ms <text> [role]: prints "<start ms> <end ms>" of one gateway chat
   local started ended role="${2:-}"
+  : > "${BODY}" # a check on the body never reads an earlier chat's
   started=$(node -e 'console.log(Date.now())')
   if [[ -n "${role}" ]]; then
     # A Console user's turn, as the Console sends it: the OpenAI endpoint with the user's role.
-    curl -s --max-time 20 -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H "x-mindstone-user-role: ${role}" -H "x-mindstone-user-id: smoke-${role}" -H 'content-type: application/json' -d "{\"model\":\"mindstone/default\",\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}]}" "${BASE}/v1/chat/completions"
+    curl -s --max-time 20 -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H "x-mindstone-user-role: ${role}" -H "x-mindstone-user-id: smoke-${role}" -H 'content-type: application/json' -d "{\"model\":\"mindstone/default\",\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}]}" "${BASE}/v1/chat/completions" || { echo "chat \"$1\" failed or got no answer in 20 s" >&2; exit 1; }
   else
-    curl -s --max-time 20 -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H 'content-type: application/json' -d "{\"text\":\"$1\"}" "${BASE}/chat/send"
+    curl -s --max-time 20 -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H 'content-type: application/json' -d "{\"text\":\"$1\"}" "${BASE}/chat/send" || { echo "chat \"$1\" failed or got no answer in 20 s" >&2; exit 1; }
   fi
   ended=$(node -e 'console.log(Date.now())')
   echo "${started} ${ended}"
