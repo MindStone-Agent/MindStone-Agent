@@ -94,7 +94,33 @@ export function createLocalMemoryRecallProvider(documents: MemoryDocument[] | un
   return documents?.length ? new LocalMemoryRecallProvider(documents) : undefined;
 }
 
-/** Several providers searched as one: their hits merged by score. */
+/** The quota of KB sources ranked by meaning (#125 §5). */
+export const KB_RECALL_QUOTA = "knowledgebase";
+
+/**
+ * A hit with its own quota (#125 §5: KB sources ranked by meaning). Its score
+ * is on another scale, so it never competes with other hits on score: the
+ * merge keeps it next to the best `limit` others, and the turn's selection
+ * gives it a slot of its own. The provider that marks hits caps how many.
+ */
+export function isQuotaHit(hit: MemoryHit): boolean {
+  return hit.kind === "kb" && hit.metadata?.recallQuota === KB_RECALL_QUOTA;
+}
+
+/**
+ * The `limit` hits a turn keeps: quota hits first claim their slots, the rest
+ * go to the best others. A source already in by its quota copy isn't taken
+ * again by its other copy. Order is kept.
+ */
+export function selectRecallHits(hits: MemoryHit[], limit: number): MemoryHit[] {
+  const quota = hits.filter(isQuotaHit).slice(0, limit);
+  const inByQuota = new Set(quota.map((hit) => hit.id));
+  const others = hits.filter((hit) => !isQuotaHit(hit) && !inByQuota.has(hit.id)).slice(0, Math.max(0, limit - quota.length));
+  const kept = new Set([...quota, ...others]);
+  return hits.filter((hit) => kept.has(hit));
+}
+
+/** Several providers searched as one: their hits merged by score, quota hits kept beside them. */
 export class CombinedMemoryRecallProvider implements MemoryRecallProvider {
   readonly id: string;
   readonly #providers: MemoryRecallProvider[];
@@ -106,11 +132,14 @@ export class CombinedMemoryRecallProvider implements MemoryRecallProvider {
 
   async search(query: MemoryQuery): Promise<MemoryHit[]> {
     const limit = query.limit ?? DEFAULT_MAX_RESULTS;
-    const results = await Promise.all(this.#providers.map((provider) => provider.search(query)));
-    return results
-      .flat()
-      .sort((a, b) => b.score - a.score || a.chunkId.localeCompare(b.chunkId))
-      .slice(0, limit);
+    const results = (await Promise.all(this.#providers.map((provider) => provider.search(query)))).flat();
+    const byScore = (a: MemoryHit, b: MemoryHit) => b.score - a.score || a.chunkId.localeCompare(b.chunkId);
+    // Quota hits first: when a source's two copies carry the same text, the
+    // repeat check keeps the first one it sees.
+    return [
+      ...results.filter(isQuotaHit).sort(byScore),
+      ...results.filter((hit) => !isQuotaHit(hit)).sort(byScore).slice(0, limit),
+    ];
   }
 }
 
@@ -119,18 +148,19 @@ export class CombinedMemoryRecallProvider implements MemoryRecallProvider {
  * memory files and transcripts; knowledge-base documents and configured local
  * documents aren't in it, so they are searched next to it (#106: live
  * indexing creates the index on the first turn, which had dropped them).
- * Without the index, everything is searched locally.
+ * Without the index, memory files are searched locally too. Knowledge bases
+ * have their own provider (#125 §5), which also ranks by meaning.
  */
 export function selectMemoryRecallProvider(options: {
   sqlite?: MemoryRecallProvider;
   localDocuments?: MemoryDocument[];
   fileMemory: MemoryDocument[];
-  knowledgebases: MemoryDocument[];
+  knowledgebases?: MemoryRecallProvider;
 }): MemoryRecallProvider | undefined {
-  const localDocuments = options.localDocuments ?? [];
-  if (!options.sqlite) return createLocalMemoryRecallProvider([...localDocuments, ...options.fileMemory, ...options.knowledgebases]);
-  const extra = createLocalMemoryRecallProvider([...localDocuments, ...options.knowledgebases]);
-  return extra ? new CombinedMemoryRecallProvider([options.sqlite, extra]) : options.sqlite;
+  const local = createLocalMemoryRecallProvider([...(options.localDocuments ?? []), ...(options.sqlite ? [] : options.fileMemory)]);
+  const providers = [options.sqlite, local, options.knowledgebases].filter((provider): provider is MemoryRecallProvider => Boolean(provider));
+  if (providers.length <= 1) return providers[0];
+  return new CombinedMemoryRecallProvider(providers);
 }
 
 function formatHit(hit: MemoryHit, index: number): string {
@@ -143,17 +173,47 @@ function formatHit(hit: MemoryHit, index: number): string {
 }
 
 export function buildMemoryRecallPrompt(hits: MemoryHit[], maxPromptTokens = DEFAULT_MAX_PROMPT_TOKENS): { text?: string; tokens: number; hits: MemoryHit[] } {
-  const selected: MemoryHit[] = [];
-  const sections: string[] = [];
+  let selected: MemoryHit[] = [];
+  let sections: string[] = [];
   let tokens = estimatePromptTokens("Relevant MindStone memory:\n");
 
-  for (const hit of hits) {
-    const next = formatHit(hit, selected.length);
-    const nextTokens = estimatePromptTokens(next);
-    if (selected.length > 0 && tokens + nextTokens > maxPromptTokens) break;
-    selected.push(hit);
-    sections.push(next);
-    tokens += nextTokens;
+  if (hits.some(isQuotaHit)) {
+    // Quota hits (#125 §5) and memory share the budget: the best of each
+    // always goes in (as the best hit always did), other quota hits up to half
+    // the budget, then memory in order, then any quota hit left out, in what
+    // memory didn't use. The prompt keeps the ranked order.
+    const chosen = new Set<MemoryHit>();
+    const cost = (hit: MemoryHit) => estimatePromptTokens(formatHit(hit, hits.length));
+    const quota = hits.filter(isQuotaHit);
+    const others = hits.filter((candidate) => !isQuotaHit(candidate));
+    const take = (hit: MemoryHit) => {
+      chosen.add(hit);
+      tokens += cost(hit);
+    };
+    take(quota[0]!);
+    if (others[0]) take(others[0]);
+    const quotaBudget = tokens + Math.max(0, Math.floor((maxPromptTokens - tokens) / 2));
+    for (const hit of quota.slice(1)) {
+      if (tokens + cost(hit) <= quotaBudget) take(hit);
+    }
+    for (const hit of others.slice(1)) {
+      if (tokens + cost(hit) > maxPromptTokens) break;
+      take(hit);
+    }
+    for (const hit of quota) {
+      if (!chosen.has(hit) && tokens + cost(hit) <= maxPromptTokens) take(hit);
+    }
+    selected = hits.filter((hit) => chosen.has(hit));
+    sections = selected.map((hit, index) => formatHit(hit, index));
+  } else {
+    for (const hit of hits) {
+      const next = formatHit(hit, selected.length);
+      const nextTokens = estimatePromptTokens(next);
+      if (selected.length > 0 && tokens + nextTokens > maxPromptTokens) break;
+      selected.push(hit);
+      sections.push(next);
+      tokens += nextTokens;
+    }
   }
 
   if (sections.length === 0) return { tokens: 0, hits: [] };
@@ -213,13 +273,14 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
     seenTexts.add(text);
     return true;
   });
-  const thresholdHits = freshHits.filter((hit) => hit.score >= minScore);
+  // A quota hit met its own threshold (knowledgebases.recall.minSimilarity), on its own scale (#125 §5).
+  const thresholdHits = freshHits.filter((hit) => hit.score >= minScore || isQuotaHit(hit));
   const ranked = rankMemoryHitsWithScri(thresholdHits, {
     activeEntries: input.entries,
     dedupAgainstActiveContext: input.config?.dedupAgainstActiveContext,
     maxActiveEntriesForDedup: input.config?.maxActiveEntriesForDedup,
   });
-  const hits = ranked.hits.slice(0, limit);
+  const hits = selectRecallHits(ranked.hits, limit);
   if (hits.length === 0) {
     return {
       query,

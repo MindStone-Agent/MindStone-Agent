@@ -3,12 +3,14 @@ import { buildPromptWindow } from "../context/index.js";
 import type { MindStoneConfig } from "../config/index.js";
 import { loadMindStoneIdentity } from "../identity/index.js";
 import {
+  createMemoryEmbeddingProvider,
   createSqliteMemoryRecallProvider,
   discoverFileMemoryDocuments,
   isAutoRecallEnabled,
   selectMemoryRecallProvider,
+  sharedQueryEmbedder,
 } from "../memory/index.js";
-import { discoverKnowledgebaseRecallDocuments, knowledgebasesDirFromConfig, unknownKnowledgebaseIds } from "../knowledgebase/index.js";
+import { createKnowledgebaseRecallProvider, knowledgebasesDirFromConfig, unknownKnowledgebaseIds } from "../knowledgebase/index.js";
 import { providerDiagnosticsFromChatResult, type MindStoneModelInfo, type MindStoneModelProvider } from "../provider/index.js";
 import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
@@ -538,17 +540,19 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       ownerInstructions: ownerContext ? PERSONA_PROPOSAL_INSTRUCTIONS : undefined,
       memoryRecall: {
         enabled: isAutoRecallEnabled(input.config),
-        provider: selectMemoryRecallProvider({
-          sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config }) : undefined,
+        // One query embedding for memory and KB recall (#125 §5).
+        provider: ((embedder) => selectMemoryRecallProvider({
+          sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config, embeddingProvider: embedder }) : undefined,
           localDocuments: input.config?.memory?.localDocuments,
           fileMemory: fileMemoryDocuments,
-          knowledgebases: discoverKnowledgebaseRecallDocuments({
+          knowledgebases: createKnowledgebaseRecallProvider({
             config: input.config,
             only: turnComponents.globalKnowledgebases,
             step: turnComponents.stepKnowledgebases,
             private: turnComponents.privateKnowledgebases,
+            embedder,
           }),
-        }),
+        }))(sharedQueryEmbedder(createMemoryEmbeddingProvider(input.config))),
         config: input.config?.memory?.recall,
         scope: input.recallScope ?? input.scope,
         // An App Engine run that isn't the owner's never gets the owner's chats,

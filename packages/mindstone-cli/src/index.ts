@@ -56,6 +56,9 @@ import {
   skillsDirFromConfig,
   writeMindStoneConfig,
   probeMemoryEmbeddingProvider,
+  createMemoryEmbeddingProvider,
+  resolveMemoryEmbeddingProviderConfig,
+  KB_EMBED_LIMITS,
   resolveConfigPath,
   resolveConfiguredSessionKey,
   resolveDefaultSessionKey,
@@ -1340,6 +1343,13 @@ function personaKbDir(argv: string[], config: MindStoneConfig, paths: MindStoneR
   return { argv: rest, kbDir, personaId };
 }
 
+/** A KB's vectors in one line (#125 §5): used for recall by meaning, or why not. */
+function kbVectorsLine(vectors: { state: string; reason?: string; provider?: string; model?: string; dimension?: number; count?: number }): string {
+  const made = vectors.provider ? ` (${vectors.provider}:${vectors.model}, ${vectors.dimension} dimensions${vectors.count !== undefined ? `, ${vectors.count} entries` : ""})` : "";
+  if (vectors.state === "ready") return `vectors: ready${made}; recall ranks this KB by meaning`;
+  return `vectors: ${vectors.state}${made}: ${vectors.reason ?? "unknown"}; recall uses word match`;
+}
+
 async function runKbCommand(rawArgv: string[]): Promise<void> {
   const paths = runtimePathsFromEnv();
   const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
@@ -1380,13 +1390,26 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
 
   if (sub === "ingest") {
     const kbId = argv[4];
-    if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id>");
+    if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id> [--embed-timeout <seconds>]");
+    // --embed-timeout <seconds> or --embed-timeout=<seconds>: a whole number, 1 to 86400.
+    const isEmbedTimeout = (arg: string) => arg === "--embed-timeout" || arg.startsWith("--embed-timeout=");
+    if (argv.filter(isEmbedTimeout).length > 1) throw new Error("--embed-timeout takes a whole number of seconds, 1 to 86400, given once");
+    const embedTimeoutAt = argv.findIndex(isEmbedTimeout);
+    const embedTimeoutRaw = embedTimeoutAt < 0 ? undefined
+      : argv[embedTimeoutAt].includes("=") ? argv[embedTimeoutAt].slice("--embed-timeout=".length) : (argv[embedTimeoutAt + 1] ?? "");
+    const embedTimeoutSeconds = embedTimeoutRaw === undefined ? undefined : Number(embedTimeoutRaw);
+    if (embedTimeoutRaw !== undefined && !(/^\d+$/.test(embedTimeoutRaw) && embedTimeoutSeconds! >= 1 && embedTimeoutSeconds! <= 86_400)) {
+      throw new Error("--embed-timeout takes a whole number of seconds, 1 to 86400");
+    }
     // A persona's private KB: its URLs came through the admin API, so they get
     // the gateway's host checks and limits (#142 review).
     const result = await ingestMindStoneKnowledgebase(kbDir, kbId, {
       now: new Date().toISOString(),
       noLinks: Boolean(scoped.personaId),
       ...(scoped.personaId ? { privateKbUrls: {} } : {}),
+      // Each entry embedded with the install's embedder (#125 §5), a request at a time given longer than a query's.
+      embedder: createMemoryEmbeddingProvider(config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs }),
+      ...(embedTimeoutSeconds ? { embedTimeoutMs: embedTimeoutSeconds * 1000 } : {}),
     });
     if (!result.ok) throw new Error(result.error);
     if (json) {
@@ -1394,6 +1417,7 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
       return;
     }
     output.write(`${gold("🔶")} Ingested ${bold(kbId)}: ${result.entryCount} entries from ${result.sourceCount} source(s) → ${result.indexPath}\n`);
+    output.write(`${dim(`  ${kbVectorsLine(result.vectors)}`)}\n`);
     return;
   }
 
@@ -1419,7 +1443,10 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
   if (sub === "status") {
     const kbId = argv[4] && !argv[4].startsWith("--") ? argv[4] : undefined;
     if (kbId) {
-      const status = mindStoneKbStatus(kbDir, kbId);
+      // Only which embedder: its address and key stay out of the status.
+      const resolved = resolveMemoryEmbeddingProviderConfig(config);
+      const embedder = resolved ? { id: resolved.id, model: resolved.model } : undefined;
+      const status = mindStoneKbStatus(kbDir, kbId, { embedder, noLinks: Boolean(scoped.personaId) });
       if ("error" in status) throw new Error(status.error);
       if (json) {
         output.write(`${JSON.stringify(status, null, 2)}\n`);
@@ -1431,6 +1458,7 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
           `  dir: ${status.dir}`,
           `  indexed: ${status.indexed}${status.ingestedAt ? ` (ingested ${status.ingestedAt})` : ""}`,
           `  entries: ${status.entryCount} · sources: ${status.sourceCount} · needing attention: ${status.staleCount}`,
+          `  ${kbVectorsLine(status.vectors)}`,
           ...status.sources.map((source) => `    ${source.sourcePath}: ${source.state} (${source.entryCount} entries)`),
         ].join("\n"),
       );
@@ -1963,10 +1991,13 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
     } else if (result.kind === "persona_kb_create") {
       // The approval has happened by now: an ingest that throws is reported like one that fails.
       // Its text sources only: one with a URL source by now is left for `kb ingest --persona` (#125 review).
-      const ingested = await ingestApprovedPrivateKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString() })
+      const ingested = await ingestApprovedPrivateKnowledgebase(result.kbRoot, result.kbId, {
+        now: new Date().toISOString(),
+        embedder: createMemoryEmbeddingProvider(cliConfig, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs }),
+      })
         .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }));
       output.write(ingested.ok
-        ? `${gold("Approved")} — private knowledge base ${result.kbId} written and ingested for persona ${result.personaId} (${ingested.entryCount} entries).\n`
+        ? `${gold("Approved")} — private knowledge base ${result.kbId} written and ingested for persona ${result.personaId} (${ingested.entryCount} entries; ${kbVectorsLine(ingested.vectors)}).\n`
         : `${gold("Approved")} — private knowledge base ${result.kbId} written for persona ${result.personaId}, but the ingest failed: ${ingested.error}. Run: mindstone kb ingest --persona ${result.personaId} ${result.kbId}\n`);
       if (result.note) output.write(`Warning: ${result.note}.\n`);
     } else {

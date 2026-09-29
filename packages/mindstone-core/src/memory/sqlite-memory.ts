@@ -1098,10 +1098,15 @@ export class SqliteMemoryRecallProvider implements MemoryRecallProvider {
   }
 }
 
-export function createSqliteMemoryRecallProvider(options: { config?: MindStoneConfig; paths?: MindStoneRuntimePaths } = {}): MemoryRecallProvider | undefined {
+export function createSqliteMemoryRecallProvider(options: {
+  config?: MindStoneConfig;
+  paths?: MindStoneRuntimePaths;
+  /** The turn's shared embedder (#125 §5); by default one is made from the config. */
+  embeddingProvider?: MemoryEmbeddingProvider;
+} = {}): MemoryRecallProvider | undefined {
   const paths = options.paths ?? runtimePathsFromEnv();
   const databasePath = sqliteMemoryDatabasePath(paths);
   return existsSync(databasePath)
-    ? new SqliteMemoryRecallProvider({ databasePath, embeddingProvider: createMemoryEmbeddingProvider(options.config) })
+    ? new SqliteMemoryRecallProvider({ databasePath, embeddingProvider: options.embeddingProvider ?? createMemoryEmbeddingProvider(options.config) })
     : undefined;
 }

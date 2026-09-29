@@ -140,7 +140,8 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
     this.#headers = config.headers;
     this.#followRedirects = config.followRedirects !== false;
     this.#unavailable = config.unavailable;
-    this.#timeoutMs = config.timeoutMs ?? 10_000;
+    // A timeout that isn't a positive number (EMBEDDER_TIMEOUT_MS=abc) would abort every request at once.
+    this.#timeoutMs = typeof config.timeoutMs === "number" && Number.isFinite(config.timeoutMs) && config.timeoutMs > 0 ? config.timeoutMs : 10_000;
   }
 
   async embedTexts(texts: string[]): Promise<number[][]> {
@@ -182,9 +183,38 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
 export function createMemoryEmbeddingProvider(
   config?: MindStoneConfig,
   env: NodeJS.ProcessEnv = process.env,
+  /** A request timeout of its own (KB ingest embeds many entries a request, #125 §5); default EMBEDDER_TIMEOUT_MS or 10 s. */
+  options: { timeoutMs?: number } = {},
 ): MemoryEmbeddingProvider | undefined {
   const resolved = resolveMemoryEmbeddingProviderConfig(config, env);
-  return resolved ? new OpenAiCompatibleEmbeddingProvider(resolved) : undefined;
+  if (!resolved) return undefined;
+  // Never shorter than the one set for the install (EMBEDDER_TIMEOUT_MS on a slow machine).
+  const configured = typeof resolved.timeoutMs === "number" && Number.isFinite(resolved.timeoutMs) ? resolved.timeoutMs : 0;
+  return new OpenAiCompatibleEmbeddingProvider(options.timeoutMs ? { ...resolved, timeoutMs: Math.max(configured, options.timeoutMs) } : resolved);
+}
+
+/**
+ * A turn's embedder (#125 §5): a single text is embedded once however many
+ * recall providers ask for it at once, so memory and KB recall share one
+ * query embedding. Several texts pass straight through.
+ */
+export function sharedQueryEmbedder(provider: MemoryEmbeddingProvider | undefined): MemoryEmbeddingProvider | undefined {
+  if (!provider) return undefined;
+  const pending = new Map<string, Promise<number[][]>>();
+  return {
+    id: provider.id,
+    model: provider.model,
+    embedTexts(texts: string[]): Promise<number[][]> {
+      if (texts.length !== 1) return provider.embedTexts(texts);
+      const key = texts[0];
+      let result = pending.get(key);
+      if (!result) {
+        result = provider.embedTexts(texts);
+        pending.set(key, result);
+      }
+      return result;
+    },
+  };
 }
 
 /**
