@@ -1,12 +1,14 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { discoverMindStoneKnowledgebases, privateKnowledgebaseLinkError } from "../knowledgebase/load.js";
+import type { MindStoneConfig } from "../config/types.js";
+import { discoverMindStoneKnowledgebases, knowledgebasesDirFromConfig, privateKnowledgebaseLinkError } from "../knowledgebase/load.js";
 import { kbUrlHostRefused, parseExternalSources } from "../knowledgebase/sources.js";
-import { discoverMindStoneSkills } from "../skills/artifacts.js";
-import { loadMindStoneWorkflow } from "../workflow/load.js";
+import type { MindStoneRuntimePaths } from "../paths/runtime.js";
+import { discoverMindStoneSkills, skillsDirFromConfig } from "../skills/artifacts.js";
+import { discoverMindStoneWorkflows, loadMindStoneWorkflow, workflowsDirFromConfig } from "../workflow/load.js";
 import { isRealWorkflowDir } from "../workflow/validate.js";
 import { isRealDirectory, isSafeComponentId, personaKnowledgebasesDir, readablePersonaKnowledgebasesDir } from "./components.js";
-import { PERSONA_PROPOSAL_ID } from "./create.js";
+import { PERSONA_PROPOSAL_ID, type PersonaComponentCatalog } from "./create.js";
 import { capabilityList, loadMindStonePersona } from "./load.js";
 
 /**
@@ -76,6 +78,28 @@ function idList(value: unknown, field: string): string[] | undefined {
     throw new PersonaComposeError(`${field} must be a list of at most ${OWNER_PERSONA_LIMITS.components} ids`, "invalid_persona", 400);
   }
   return [...new Set(value as string[])];
+}
+
+/**
+ * The ids a persona can list, as `checkPersonaComponents` would find them
+ * (#160): installed skills, workflows that load and shared knowledge bases.
+ */
+export function personaComponentCatalog(dirs: Omit<Dirs, "personasDir">): PersonaComponentCatalog {
+  const safe = (ids: string[]) => ids.filter((id) => isSafeComponentId(id)).sort();
+  return {
+    skills: safe(discoverMindStoneSkills(dirs.skillsDir).filter((skill) => skill.source === "installed" && !skill.error).map((skill) => skill.id)),
+    workflows: safe(discoverMindStoneWorkflows(dirs.workflowsDir).filter((workflow) => !workflow.error).map((workflow) => workflow.id)),
+    knowledgebases: safe(discoverMindStoneKnowledgebases(dirs.knowledgebasesDir).filter((kb) => !kb.error).map((kb) => kb.id)),
+  };
+}
+
+/** `personaComponentCatalog` for the directories a config names. */
+export function personaComponentCatalogFromConfig(config: MindStoneConfig | undefined, paths?: MindStoneRuntimePaths): PersonaComponentCatalog {
+  return personaComponentCatalog({
+    skillsDir: skillsDirFromConfig(config, paths),
+    workflowsDir: workflowsDirFromConfig(config, paths),
+    knowledgebasesDir: knowledgebasesDirFromConfig(config, paths),
+  });
 }
 
 /** Checks that every listed component exists; the error names the first that doesn't. */

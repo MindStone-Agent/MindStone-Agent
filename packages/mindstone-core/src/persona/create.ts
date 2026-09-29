@@ -27,11 +27,34 @@ export const PERSONA_PROPOSAL_INSTRUCTIONS = [
   "When the user asks you to, or once identity formation has given you enough to go on, you can propose a working persona for yourself: your name, voice, working style and boundaries, and the skills, workflows and knowledge bases it works with. It is saved only if the owner approves it in the MindStone Console, and it takes effect only when they switch to it there.",
   "Propose it by ending your reply with exactly one fenced code block, not inside any other block. Its first line is exactly ```mindstone-persona-proposal (no space or line break between the backticks and the name), then one line of JSON, then a line of three backticks. `id` is lowercase letters, digits and hyphens. The JSON looks like this:",
   '{"id":"wren","name":"Wren","description":"One line on who this persona is.","voice":"How you speak.","workingStyle":"How you work with the user.","boundaries":["Something you will not do."]}',
-  "It can also carry `components`: existing skills, workflows and shared knowledge bases by id (listing none means all skills and all shared knowledge bases), and new ones it brings. Each new one is its own card that the owner approves after the persona. Bring a new skill only when the owner asked for one; otherwise list existing skills. Limits: up to 3 new skills, each with the fields of a skill proposal and not an existing skill's id; up to 3 new workflows, each with a lowercase id and route or gate steps, none of which names a persona; up to 2 new private knowledge bases, each with a lowercase id and 1 to 5 sources of markdown `text` (at most 20,000 characters each). Don't list an id you also bring as new. If any part doesn't hold up, nothing is saved and your reply says why. For example:",
-  '"components":{"skills":["existing-skill"],"workflows":[],"knowledgebases":["shared-kb"],"new":{"skills":[],"workflows":[{"id":"triage","steps":[{"id":"urgent","kind":"route","when":{"messagePrefix":"urgent:"},"skills":["existing-skill"]}]}],"privateKnowledgebases":[{"id":"notes","sources":[{"text":"# Notes\\n\\nWhat this persona should know."}]}]}}',
+  "It can also carry `components`: existing skills, workflows and shared knowledge bases by id (listing none means all skills and all shared knowledge bases), and new ones it brings. List only ids that exist here: never an id from this example. Each new one is its own card that the owner approves after the persona. Bring a new skill only when the owner asked for one; otherwise list existing skills. Limits: up to 3 new skills, each with the fields of a skill proposal and not an existing skill's id; up to 3 new workflows, each with a lowercase id and route or gate steps, none of which names a persona; up to 2 new private knowledge bases, each with a lowercase id and 1 to 5 sources of markdown `text` (at most 20,000 characters each). Don't list an id you also bring as new. If any part doesn't hold up, nothing is saved and your reply says why. For example:",
+  '"components":{"skills":[],"workflows":[],"knowledgebases":[],"new":{"skills":[],"workflows":[],"privateKnowledgebases":[{"id":"field-notes","sources":[{"text":"# Notes\\n\\nWhat this persona should know."}]}]}}',
   "The block is removed from what the user sees, so also say in your reply that you've put a persona up for approval. A persona sets your voice, working style, and the skills, workflows and knowledge bases you use in it: it never overrides your core identity, the user's boundaries or safety rules. Don't claim it is active until the user says they switched to it.",
   "Once switched to, a persona is used in every chat, including other people's chats and connectors, so keep private details about the user out of it and out of its knowledge bases: those belong in USER.md.",
 ].join("\n");
+
+/** The ids a persona proposal can list (#160): what the owner has installed now. */
+export type PersonaComponentCatalog = { skills: string[]; workflows: string[]; knowledgebases: string[] };
+
+/** Ids shown per kind: an install with more says how many more. */
+const CATALOG_SHOWN = 40;
+
+/**
+ * The instruction for an owner's turn, with the ids that exist on this
+ * install (#160): an agent that can't see them copies the example's.
+ */
+export function personaProposalInstructions(catalog?: PersonaComponentCatalog): string {
+  if (!catalog) return PERSONA_PROPOSAL_INSTRUCTIONS;
+  const shown = (ids: string[]) => {
+    if (!ids.length) return "none";
+    const head = ids.slice(0, CATALOG_SHOWN).join(", ");
+    return ids.length > CATALOG_SHOWN ? `${head}, and ${ids.length - CATALOG_SHOWN} more` : head;
+  };
+  return [
+    PERSONA_PROPOSAL_INSTRUCTIONS,
+    `On this install, the existing ids are: installed skills: ${shown(catalog.skills)}; workflows: ${shown(catalog.workflows)}; shared knowledge bases: ${shown(catalog.knowledgebases)}. List only these (or leave a list out), and in a new workflow's steps name only these skills and knowledge bases, or new ones the persona brings. A proposal that names any other id isn't saved, and your reply says which.`,
+  ].join("\n");
+}
 
 const LIMITS = { name: 60, description: 300, voice: 1500, workingStyle: 1500, boundary: 300, boundaries: 12 };
 

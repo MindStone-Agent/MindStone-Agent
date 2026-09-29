@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { appendTranscriptEntry, type TranscriptEntry, type TranscriptSource } from "../transcript/index.js";
 import type { ConnectorOutboundMessage } from "./connector.js";
-import { parsePersonaProposal, PERSONA_TEXT_INVISIBLE, STACKED_MARKS, type PersonaProposalPayload } from "../persona/create.js";
+import { parsePersonaProposal, PERSONA_TEXT_INVISIBLE, STACKED_MARKS, type PersonaComponentCatalog, type PersonaProposalPayload } from "../persona/create.js";
 import { validateWorkflowDefinition, WORKFLOW_ID, type WorkflowDefinitionInput } from "../workflow/validate.js";
 import { builtinMindStoneSkills } from "../skills/artifacts.js";
 
@@ -575,6 +575,34 @@ export function checkPersonaComponentsProposal(value: unknown): { ok: true; comp
   return { ok: true, components: parsed };
 }
 
+/**
+ * The first id a persona proposal names that this install doesn't have (#160),
+ * as the reply's reason: an existing skill, workflow or shared knowledge base
+ * it lists, or a skill or knowledge base a new workflow's step names that is
+ * neither installed nor brought by the persona. Ids are checked against
+ * COMPONENT_ID when parsed, so quoting one is safe.
+ */
+export function unknownPersonaComponent(components: ParsedPersonaComponents, catalog: PersonaComponentCatalog): string | undefined {
+  const skills = new Set([...catalog.skills, ...components.skills.map((skill) => skill.id)]);
+  const knowledgebases = new Set([...catalog.knowledgebases, ...components.knowledgebases.map((kb) => kb.id)]);
+  const workflows = new Set(catalog.workflows);
+  const skill = components.listed.skills.find((id) => !catalog.skills.includes(id));
+  if (skill) return `it lists a skill "${skill}" that isn't installed`;
+  const workflow = components.listed.workflows.find((id) => !workflows.has(id));
+  if (workflow) return `it lists a workflow "${workflow}" that doesn't exist`;
+  const kb = components.listed.knowledgebases.find((id) => !catalog.knowledgebases.includes(id));
+  if (kb) return `it lists a shared knowledge base "${kb}" that doesn't exist`;
+  for (const { id, definition } of components.workflows) {
+    for (const step of (definition as { steps?: Array<{ skills?: string[]; knowledgebases?: string[] }> }).steps ?? []) {
+      const stepSkill = step.skills?.find((ref) => !skills.has(ref));
+      if (stepSkill) return `its new workflow "${id}" names a skill "${stepSkill}" that isn't installed or brought by the persona`;
+      const stepKb = step.knowledgebases?.find((ref) => !knowledgebases.has(ref));
+      if (stepKb) return `its new workflow "${id}" names a knowledge base "${stepKb}" that isn't shared here or brought by the persona`;
+    }
+  }
+  return undefined;
+}
+
 /** `checkPersonaComponentsProposal` without the reason. */
 export function parsePersonaComponents(value: unknown): ParsedPersonaComponents | undefined {
   const checked = checkPersonaComponentsProposal(value);
@@ -803,6 +831,12 @@ export function applyActionProposalDiscipline(params: {
    * still stripped from the reply.
    */
   allowSkill?: boolean;
+  /**
+   * What this install has (#160): a persona proposal that names anything else
+   * is dropped in the turn, and the reply says which id, so the agent can
+   * propose again rather than leave a card that can only be rejected.
+   */
+  componentCatalog?: () => PersonaComponentCatalog;
 }): { text: string; content: unknown; events: TranscriptEntry[]; proposals: ProposedAction[] } {
   const extracted = extractActionProposals(params.replyText);
   // Sanitize content always: proposals may exist in content even when text
@@ -836,13 +870,18 @@ export function applyActionProposalDiscipline(params: {
     || overCap(components?.workflows.length ?? 0, "workflow_create")
     || overCap(components?.knowledgebases.length ?? 0, "persona_kb_create")
   );
-  const persona = params.allowPersona && !capped ? extracted.persona : undefined;
+  const unknownComponent = params.allowPersona && !capped && extracted.persona && components && params.componentCatalog
+    ? unknownPersonaComponent(components, params.componentCatalog())
+    : undefined;
+  const persona = params.allowPersona && !capped && !unknownComponent ? extracted.persona : undefined;
   // A separate skill proposal with the id of a skill the persona brings is
   // dropped: approving one would replace what was reviewed on the other (#125 review).
   const skillClash = Boolean(persona && extracted.skill && components?.skills.some((item) => item.id === extracted.skill!.id));
   const skill = params.allowSkill && !skillClash ? extracted.skill : undefined;
   // A dropped proposal is said, not swallowed: the owner reads why in the reply.
-  const refused = params.allowPersona ? extracted.personaProposalError : undefined;
+  const refused = params.allowPersona
+    ? extracted.personaProposalError ?? (unknownComponent ? `${unknownComponent}; list only the ids your instructions give for this install, or leave the list out` : undefined)
+    : undefined;
   const extraBlocks = persona ? extracted.personaBlocksDropped ?? 0 : 0;
   const cappedNote = [
     capped

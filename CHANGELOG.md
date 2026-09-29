@@ -78,6 +78,7 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - Pi 0.87 ships the Azure OpenAI (Responses), Amazon Bedrock and Google Vertex providers that #126 builds on.
 
 ### Fixed
+- **An agent's persona proposal no longer lists ids that don't exist** (#160). The example in the proposal instructions listed `existing-skill` and `shared-kb`, and a real model copied `shared-kb`: approval then refused the persona, while the chat said nothing was wrong. The example now lists no existing ids; each owner turn tells the agent the ids this install has (installed skills, workflows, shared knowledge bases); and a proposal naming any other id, in its lists or a new workflow's steps, is dropped in the same turn with the id in the reply, so the agent can propose again instead of leaving a card that can only be rejected. `personaProposalInstructions` and `personaComponentCatalog` are exported from core.
 - **Hidden CLI prompts: escape sequences, pasted text and Ctrl-D** (#133).
   - Escape sequences such as arrow keys are skipped whole, even when they arrive split across input chunks, so no `[A` ends up in a key.
   - A bracketed paste keeps its text, with line breaks removed.

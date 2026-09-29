@@ -126,7 +126,8 @@ import {
   resolveTurnComponents,
   personasDirFromConfig,
   referencedPersonaIds,
-  PERSONA_PROPOSAL_INSTRUCTIONS,
+  personaProposalInstructions,
+  personaComponentCatalogFromConfig,
   discoverMindStonePersonas,
   resolveRoutePersonaContext,
   runMindStoneWorkflow,
@@ -1366,7 +1367,8 @@ async function runConfiguredRouteUncounted(input: {
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
         identityFormation: input.audience === "owner" ? input.identityFormation : undefined,
-        ownerInstructions: input.audience === "owner" && !input.scope ? PERSONA_PROPOSAL_INSTRUCTIONS : undefined,
+        // With this install's ids, so a proposal never copies the example's (#160).
+        ownerInstructions: input.audience === "owner" && !input.scope ? personaProposalInstructions(personaComponentCatalogFromConfig(input.config)) : undefined,
         memoryRecall: {
           enabled: (input.audience === "owner" || input.audience === "tenant") && isAutoRecallEnabled(input.config),
           // One query embedding for memory and KB recall (#125 §5).
@@ -1599,6 +1601,7 @@ async function runConfiguredRouteUncounted(input: {
       // Only the owner's turns may propose a persona (#105).
       allowPersona: input.audience === "owner" && !input.scope,
       allowSkill: input.audience === "owner",
+      componentCatalog: () => personaComponentCatalogFromConfig(input.config),
     });
 
     // Which of the answering persona's components were in play (#125). A
