@@ -37,7 +37,10 @@ export type SqliteMemoryEmbeddingBackfillOptions = {
   otherModelLimit?: number;
   /** With otherModelLimit: only chunks another model (or an unrecorded one) embedded; chunks with no vector are left (#157). */
   otherModelOnly?: boolean;
-  /** Awaited before each request to the embedder: the gateway waits here while turns run (#157). */
+  /**
+   * Awaited before each request to the embedder: the gateway waits here while turns run (#157).
+   * After it, a chunk removed or rewritten meanwhile is left out of the request.
+   */
   beforeBatch?: () => Promise<void>;
 };
 
@@ -797,11 +800,17 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
   // it, so re-embedding a whole index (after a model switch) must not turn old chats into new ones (#140 review).
   // Only the text that was embedded: a chunk re-indexed meanwhile keeps its own (#140 review).
   const update = db.prepare("UPDATE memory_chunks SET embedding_json = ?, embedding_spec = ? WHERE chunk_id = ? AND text = ?");
+  const still = db.prepare("SELECT 1 AS present FROM memory_chunks WHERE chunk_id = ? AND text = ?");
 
   try {
     for (let offset = 0; offset < rows.length; offset += batchSize) {
-      await options.beforeBatch?.();
-      const batch = rows.slice(offset, offset + batchSize);
+      let batch = rows.slice(offset, offset + batchSize);
+      if (options.beforeBatch) {
+        await options.beforeBatch();
+        // The wait can be long: a chunk removed or rewritten meanwhile isn't sent (#157 review).
+        batch = batch.filter((row) => still.get(row.chunk_id, row.text) !== undefined);
+        if (batch.length === 0) continue;
+      }
       const embeddings = await provider.embedTexts(batch.map((row) => row.text));
       if (embeddings.length !== batch.length) {
         throw new Error(`embedding provider returned ${embeddings.length} vectors for ${batch.length} chunks`);

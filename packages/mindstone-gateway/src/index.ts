@@ -758,9 +758,10 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
  * none sent while a turn runs, so a turn's query never queues behind them on
  * an embedder that answers one request at a time. One run at a time (a turn
  * that ends while one runs starts none); on a gateway that is always
- * answering, a run waits for a gap. Before each request the config is read
- * again, and the run stops if the embedder, the vector store or automatic
- * recall changed meanwhile (#157 review). A failed run is logged and left for
+ * answering, a run waits for a gap. Before each request (after any wait for
+ * turns) the config is read again, and the run stops if the embedder (its
+ * model, address or key), the vector store or automatic recall changed
+ * meanwhile, and chunks removed or rewritten meanwhile aren't sent (#157 review). A failed run is logged and left for
  * a minute (the chunks keep word match meanwhile).
  */
 let memoryReembedRunning = false;
@@ -774,15 +775,20 @@ function queueMemoryReembed(config: MindStoneConfig | undefined): void {
   void (async () => {
     const provider = createMemoryEmbeddingProvider(config);
     if (!provider) return;
-    const spec = memoryEmbeddingSpec(provider);
+    // The embedder as resolved, address and key included: a registered endpoint
+    // moved or removed under the same model name stops the run too (#157 review).
+    const embedderAtStart = JSON.stringify(resolveMemoryEmbeddingProviderConfig(config) ?? null);
     await reembedSqliteMemoryOtherModel({
       config,
       provider,
       beforeBatch: async () => {
         await waitWhileTurnsRun(() => turnsInFlight.values());
         const current = loadGatewayConfig().config;
-        const now = createMemoryEmbeddingProvider(current);
-        if (current?.memory?.vectorStore !== "sqlite-vec" || !isAutoRecallEnabled(current) || !now || memoryEmbeddingSpec(now) !== spec) {
+        if (
+          current?.memory?.vectorStore !== "sqlite-vec"
+          || !isAutoRecallEnabled(current)
+          || JSON.stringify(resolveMemoryEmbeddingProviderConfig(current) ?? null) !== embedderAtStart
+        ) {
           throw new MemoryReembedStopped();
         }
       },

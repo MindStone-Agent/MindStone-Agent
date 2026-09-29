@@ -266,6 +266,23 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   release();
   const heldResult = await held;
   if (sent !== 1 || heldResult.chunksEmbedded !== MEMORY_REEMBED_BATCH) fail(`after beforeBatch returned, one request of ${MEMORY_REEMBED_BATCH}: ${sent} sent, ${JSON.stringify(heldResult)}`);
+  // A chunk rewritten or removed while the run waited in beforeBatch isn't sent; the others are.
+  const pending = new DatabaseSync(dbPath);
+  const next = pending.prepare(`SELECT chunk_id AS id, text FROM memory_chunks WHERE embedding_json IS NOT NULL AND embedding_spec = 'stub:a' ORDER BY updated_at DESC, chunk_id ASC LIMIT ?`).all(MEMORY_REEMBED_BATCH) as Array<{ id: string; text: string }>;
+  pending.close();
+  if (next.length !== MEMORY_REEMBED_BATCH) fail(`not enough chunks left for the rewrite check: ${next.length}`);
+  const texts: string[] = [];
+  let changedMeanwhile = false;
+  await reembedSqliteMemoryOtherModel({ paths, limit: MEMORY_REEMBED_BATCH, provider: { id: B.id, model: B.model, async embedTexts(input: string[]) { texts.push(...input); return B.embedTexts(input); } }, beforeBatch: async () => {
+    if (changedMeanwhile) return;
+    changedMeanwhile = true;
+    const db = new DatabaseSync(dbPath);
+    db.prepare("UPDATE memory_chunks SET text = text || ' (rewritten)' WHERE chunk_id = ?").run(next[0]!.id);
+    db.prepare("DELETE FROM memory_chunks WHERE chunk_id = ?").run(next[1]!.id);
+    db.close();
+  } });
+  if (texts.includes(next[0]!.text) || texts.includes(next[1]!.text)) fail("a chunk rewritten or removed while the run waited was sent");
+  if (!texts.includes(next[2]!.text) || !texts.includes(next[3]!.text)) fail(`control: the chunks left alone should be sent: ${texts.length} sent`);
 }
 console.log(`recall index: ${total} chunks, switching models checked`);
 TS
@@ -386,11 +403,12 @@ node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
 for ms in "${turn_ms[@]}"; do (( ms < 3000 )) || { echo "a turn took ${ms} ms during the switch (turns: ${turn_ms[*]})" >&2; exit 1; }; done
 echo "turns during the switch: ${turn_ms[*]} ms"
 # reembed_chunks [after ms]: chunks the re-embed sent for model-b (after that time, if given); as above.
-reembed_chunks() { node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
-  const b = s.requests.filter((q)=>q.model === "model-b" && q.t > Number(process.argv[2] || 0));
+reembed_chunks() { # reembed_chunks [after ms] [model, default model-b]
+node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
+  const b = s.requests.filter((q)=>q.model === (process.argv[3] || "model-b") && q.t > Number(process.argv[2] || 0));
   const reembed = b.filter((q)=>!(q.input.length === 1 && /^question \d during the switch$/.test(q.input[0])) && !q.input.some((t)=>/switch/.test(t)) && q.input[0] !== "MindStone embedding health check");
   console.log(reembed.reduce((n, q)=>n + q.input.length, 0));
-})' "${STUB}/_test/state" "${1:-0}"; }
+})' "${STUB}/_test/state" "${1:-0}" "${2:-}"; }
 # One run does 128 at most: with the embedder fast again, the first run ends there, and nothing more
 # is sent until a turn starts another run.
 curl -s -X POST -d '{"mode":"ok"}' "${STUB}/_test/mode" >/dev/null
@@ -423,5 +441,24 @@ late="$(reembed_chunks $((changed_at + 250)))"
 third_run=$(( $(reembed_chunks) - before_run3 ))
 (( third_run < 128 )) || { echo "control: the third run had already finished (${third_run} chunks) before the change" >&2; exit 1; }
 echo "a run stopped at the config change after ${third_run} chunks"
+# A stop isn't a failure (#157 review round 2): the next turn starts a run for the new model at once.
+chat "a switch question once the model is model-c" >/dev/null
+for _ in $(seq 1 20); do [[ "$(reembed_chunks 0 model-c)" -gt 0 ]] && break; sleep 0.5; done
+[[ "$(reembed_chunks 0 model-c)" -gt 0 ]] || { echo "after a stop, the next turn started no run for the new model" >&2; exit 1; }
+# Turning automatic recall off stops a run too.
+python3 - <<'PY'
+import json, os, pathlib
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+c["memory"]["autoRecall"] = False
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+off_at=$(node -e 'console.log(Date.now())')
+sleep 3
+late_c="$(reembed_chunks $((off_at + 250)) model-c)"
+[[ "${late_c}" == 0 ]] || { echo "the run sent ${late_c} chunks after automatic recall was turned off" >&2; exit 1; }
+c_run="$(reembed_chunks 0 model-c)"
+(( c_run < 128 )) || { echo "control: the model-c run had already finished (${c_run} chunks) before recall was turned off" >&2; exit 1; }
+echo "a run stopped when recall was turned off after ${c_run} chunks"
 
 echo "Memory embedding model switch smoke test passed."
