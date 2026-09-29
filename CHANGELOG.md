@@ -208,6 +208,7 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 
 ### Documentation
 - **A link to Quick start at the top of the README**, next to the one for AI agents.
+- **Windows in Quick start:** run the Docker install in a WSL 2 terminal with Docker Desktop. It is marked as not yet tested.
 - **An install guide for AI agents in the README.** It covers the requirements, the installer and its options, onboarding (which needs a person at a terminal), starting the gateway, updating, and the gateway settings the web Console needs. Those settings are token auth from a file, chat completions, and the admin credential's hash. On Linux, the gateway's address comes from `MINDSTONE_AGENT_GATEWAY_HOST`; `gateway.host` in config doesn't set it. Every step ends with a check, and secrets are written to files, never printed.
 - **MindStone Console design draft** (#46): a LibreChat fork, with the assistant-surfaces notes.
 - **Microsoft 365 tenant integration design for a Digital Employee** (#45). It is a design only; nothing in it is implemented.
