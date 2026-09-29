@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync, readSync, fstatSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { basename, dirname, isAbsolute, join, relative as relativePath, resolve as resolvePath, sep } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { MockMindStoneProvider } from "./mock-provider.js";
@@ -198,6 +198,7 @@ import {
   sanitizeRunnerStreamSubstrateEventPayload,
   writeAutoCompactHandoff,
   type MindStoneConfig,
+  resolvePathRelativeToConfig,
   type AgentRunResult,
   type AgentRunStreamEvent,
   type AgentRunner,
@@ -2275,6 +2276,27 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     sendJson(res, 200, { ok: true, secrets });
     return;
   }
+  if (req.method === "GET" && url.pathname === "/admin/user") {
+    // What the agent knows about the owner (#140): the default agent's USER.md,
+    // for the Console's Settings. Never a host path.
+    const file = adminUserFile(gateConfig.config, configPath);
+    if (!file.ok) {
+      sendJson(res, file.status, { ok: false, error: file.error });
+      return;
+    }
+    const text = file.exists ? readFileSync(file.path, "utf-8") : undefined;
+    const bytes = text === undefined ? 0 : Buffer.byteLength(text, "utf-8");
+    const tooLarge = bytes > USER_MD_MAX_BYTES;
+    sendJson(res, 200, {
+      ok: true,
+      exists: file.exists,
+      bytes,
+      etag: userMarkdownEtag(text),
+      ...(text !== undefined && !tooLarge ? { markdown: text } : {}),
+      ...(tooLarge ? { tooLarge: true, maxBytes: USER_MD_MAX_BYTES } : {}),
+    });
+    return;
+  }
   if (req.method !== "POST" && req.method !== "PATCH" && req.method !== "DELETE") {
     sendJson(res, 404, { ok: false, error: "unknown admin endpoint" });
     return;
@@ -2289,6 +2311,59 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     sendJson(res, status, { ok: false, ...body });
   };
 
+  if (req.method === "PATCH" && url.pathname === "/admin/user") {
+    // Replace the default agent's USER.md with the Console's text (#140). The
+    // agent updates this file too, so the etag read with it is required: a
+    // file changed meanwhile is never overwritten.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const ifMatch = typeof req.headers["if-match"] === "string" ? req.headers["if-match"].trim() : "";
+    if (!ifMatch || ifMatch === "*") {
+      refuse(428, { error: "send the etag read with USER.md (If-Match)" }, { reason: "etag_required", target: "user_md" });
+      return;
+    }
+    const unknown = Object.keys(body).find((key) => key !== "markdown");
+    const markdown = body.markdown;
+    if (unknown || typeof markdown !== "string") {
+      refuse(400, { error: "send { markdown } as text" }, { reason: "invalid", target: "user_md" });
+      return;
+    }
+    if (Buffer.byteLength(markdown, "utf-8") > USER_MD_MAX_BYTES) {
+      refuse(413, { error: `USER.md can be at most ${USER_MD_MAX_BYTES / 1024} KiB` }, { reason: "too_large", target: "user_md" });
+      return;
+    }
+    if (USER_MD_CONTROL.test(markdown)) {
+      refuse(400, { error: "USER.md can't hold control characters other than newlines and tabs" }, { reason: "control_characters", target: "user_md" });
+      return;
+    }
+    await withAdminWriteLock(() => {
+      if (!readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "changing USER.md needs the advanced-settings permission" }, { reason: "advanced", target: "user_md" });
+        return;
+      }
+      const loaded = loadMindStoneConfig(configPath);
+      if (loaded.error) {
+        sendJson(res, 503, { ok: false, error: CONFIG_UNREADABLE });
+        return;
+      }
+      // Found again under the lock, from the config as it is now.
+      const file = adminUserFile(loaded.config, configPath);
+      if (!file.ok) {
+        refuse(file.status, { error: file.error }, { reason: "user_md_unavailable", target: "user_md" });
+        return;
+      }
+      const current = file.exists ? readFileSync(file.path, "utf-8") : undefined;
+      if (!ifMatchSatisfied(ifMatch, userMarkdownEtag(current))) {
+        refuse(412, { error: "USER.md changed since you read it (the agent may have updated it); reload and try again" }, { reason: "etag", target: "user_md" });
+        return;
+      }
+      const mode = file.exists ? statSync(file.path).mode & 0o777 : 0o600;
+      writeFileAtomic(file.path, markdown, mode);
+      appendAdminAudit(paths.dataDir, { userId, action: "user_md_replaced", bytes: Buffer.byteLength(markdown, "utf-8") });
+      sendJson(res, 200, { ok: true, bytes: Buffer.byteLength(markdown, "utf-8"), etag: userMarkdownEtag(markdown) });
+    });
+    return;
+  }
   if (req.method === "POST" && url.pathname === "/admin/permissions/advanced") {
     const body = await readAdminBody(req, res);
     if (!body) return;
@@ -4224,6 +4299,55 @@ function removeOrEmpty(path: string): boolean {
     } catch {
       return false;
     }
+  }
+}
+
+/** USER.md through the admin API (#140): at most this many bytes, and no control characters but newline, CR and tab. */
+const USER_MD_MAX_BYTES = 64 * 1024;
+const USER_MD_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+
+/** The etag of USER.md as read (a missing file has its own), keyed per gateway process like the config's. */
+function userMarkdownEtag(text: string | undefined): string {
+  return configEtag(text === undefined ? "\u0000USER.md missing" : `\u0000USER.md\n${text}`);
+}
+
+/**
+ * The default agent's USER.md, as the agent reads it (its configured
+ * userPath, relative to the config), for GET/PATCH /admin/user (#140). Only a
+ * file named USER.md under the config folder's agents/ folder, reached
+ * without a link at any step, and a regular file when it exists: a config
+ * pointing userPath at a stored secret, the admin state or anywhere else on
+ * the host doesn't make the admin API read or write it.
+ */
+function adminUserFile(
+  config: MindStoneConfig | undefined,
+  configPath: string,
+): { ok: true; path: string; exists: boolean } | { ok: false; status: number; error: string } {
+  const agentId = config?.routing?.defaultAgentId ?? "default";
+  const userPath = config?.agents?.[agentId]?.userPath;
+  if (!userPath) return { ok: false, status: 409, error: "the default agent has no USER.md set up yet; finish guided setup first" };
+  const outside = { ok: false as const, status: 409, error: "USER.md isn't a plain USER.md file in the agents folder next to the gateway's config, so it can't be read or changed here" };
+  const target = resolvePathRelativeToConfig(userPath, configPath);
+  if (basename(target) !== "USER.md") return outside;
+  let root: string;
+  let parent: string;
+  try {
+    root = realpathSync(join(dirname(configPath), "agents"));
+    parent = realpathSync(dirname(target));
+    // The agents folder itself is a real folder next to the config, not a link to one elsewhere.
+    if (root !== join(realpathSync(dirname(configPath)), "agents")) return outside;
+  } catch {
+    return { ok: false, status: 409, error: "USER.md's folder doesn't exist yet; finish guided setup first" };
+  }
+  // Inside the agents folder once every link is followed.
+  if (parent !== root && !parent.startsWith(`${root}${sep}`)) return outside;
+  // The same folders by name as on disk: a link from one agent's folder to another is refused as well.
+  if (relativePath(resolvePath(dirname(configPath), "agents"), resolvePath(dirname(target))) !== relativePath(root, parent)) return outside;
+  const path = join(parent, basename(target));
+  try {
+    return lstatSync(path).isFile() ? { ok: true, path, exists: true } : outside;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? { ok: true, path, exists: false } : outside;
   }
 }
 
