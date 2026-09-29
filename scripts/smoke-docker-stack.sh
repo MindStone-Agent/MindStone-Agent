@@ -10,7 +10,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP_DIR="$(mktemp -d)"
+# Physical, as the installer prints paths (on macOS the temp folder is under a symlink).
+TMP_DIR="$(cd -P "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 cd "${ROOT}"
 
@@ -78,11 +79,10 @@ STUB="${TMP_DIR}/bin"
 mkdir -p "${STUB}"
 CALLS="${TMP_DIR}/docker-calls"
 FIXTURES="${TMP_DIR}/fixtures"
-# What the stubbed MongoDB answers: how many accounts have the email, and which usernames are taken.
-EMAIL_COUNT="${TMP_DIR}/email-count"
-TAKEN="${TMP_DIR}/taken-usernames"
-echo 0 >"${EMAIL_COUNT}"
-: >"${TAKEN}"
+# The stubbed Console database: one "email username role" line per account.
+# Like the Console, create-user makes only the first account ADMIN.
+export USERS_DB="${TMP_DIR}/users-db" NO_PROMOTE="${TMP_DIR}/no-promote" CALLS
+: >"${USERS_DB}"
 mkdir -p "${FIXTURES}"
 cat >"${FIXTURES}/env.example" <<'EOF'
 APP_TITLE=MindStone Console
@@ -111,20 +111,32 @@ case "\${url}" in
   *) exit 22 ;;
 esac
 EOF
-cat >"${STUB}/docker" <<EOF
+cat >"${STUB}/docker" <<'EOF'
 #!/usr/bin/env bash
-echo "\$*" >>"${CALLS}"
-case "\$*" in
+echo "$*" >>"${CALLS}"
+arg() { printf '%s' "$*" | sed -n "s/.*$1: '\([^']*\)'.*/\1/p"; }
+case "$*" in
   info*) exit 0 ;;
   "compose version --short") echo "2.33.1" ;;
   ps\ *) exit 0 ;;
-  *"mongosh"*"countDocuments({ email:"*) cat "${EMAIL_COUNT}" ;;
-  *"mongosh"*"countDocuments({ username:"*)
-    name="\$(printf '%s' "\$*" | sed -n "s/.*username: '\\([^']*\\)'.*/\\1/p")"
-    grep -qx "\${name}" "${TAKEN}" && echo 1 || echo 0 ;;
+  *mongosh*"findOne({ email:"*)
+    role="$(awk -v e="$(arg email "$*")" '$1 == e { print $3 }' "${USERS_DB}")"
+    echo "OK:${role:-none}" ;;
+  *mongosh*"countDocuments({})"*) echo "OK:$(wc -l <"${USERS_DB}" | tr -d ' ')" ;;
+  *mongosh*"countDocuments({ username:"*) echo "OK:$(awk -v u="$(arg username "$*")" '$2 == u' "${USERS_DB}" | wc -l | tr -d ' ')" ;;
+  *mongosh*"updateOne({ email:"*)
+    if [[ ! -e "${NO_PROMOTE}" ]]; then
+      e="$(arg email "$*")"
+      awk -v e="${e}" '$1 == e { $3 = "ADMIN" } { print }' "${USERS_DB}" >"${USERS_DB}.tmp" && mv "${USERS_DB}.tmp" "${USERS_DB}"
+    fi
+    echo "OK:1" ;;
   *" exec -T console npm run --silent create-user -- "*)
     IFS= read -r password
-    [[ \${#password} -ge 8 ]] || { echo "Error: password too short"; exit 1; }
+    [[ ${#password} -ge 8 ]] || { echo "Error: password too short"; exit 1; }
+    args="$*"
+    set -- ${args##*create-user -- }
+    role=USER; [[ -s "${USERS_DB}" ]] || role=ADMIN
+    echo "$1 $3 ${role}" >>"${USERS_DB}"
     echo "User created successfully!" ;;
 esac
 exit 0
@@ -182,7 +194,7 @@ check "--with-ollama turns the profile and in-stack address on" '[[ "$(value .en
 check "--with-ollama says Ollama runs in the stack, and how to switch back" '[[ "${ollama_out}" == *"Ollama runs in the stack"* && "${ollama_out}" == *"--without-ollama"* && "${ollama_out}" != *"Ollama on this machine is reached"* ]]'
 check "switching tells to change the provider address in Settings" '[[ "${ollama_out}" == *"change the Ollama provider"* ]]'
 back_out="$(run_installer "${INSTALL}" --without-ollama 2>&1)"
-check "--without-ollama goes back" '! grep -q "^COMPOSE_PROFILES=" "${INSTALL}/.env" && [[ "$(value .env OLLAMA_BASE_URL)" == "http://host.docker.internal:11434/v1" && "${back_out}" == *"Ollama on this machine is reached"* ]]'
+check "--without-ollama goes back" '! grep -q "^COMPOSE_PROFILES=" "${INSTALL}/.env" && [[ "$(value .env OLLAMA_BASE_URL)" == "http://host.docker.internal:11434/v1" && "${back_out}" == *"Ollama is reached by the gateway as http://host.docker.internal"* ]]'
 check "--without-ollama stops the in-stack Ollama" 'grep -q "rm --stop --force ollama" "${CALLS}"'
 warn_out="$(run_installer "${INSTALL}" --ollama-url http://localhost:11434 2>&1)"
 check "a loopback Ollama address and a missing /v1 are warned about" '[[ "${warn_out}" == *"is the container itself"* && "${warn_out}" == *"should end in /v1"* ]]'
@@ -218,7 +230,30 @@ out="$(refuse "${TMP_DIR}/home" || true)"
 check "a folder that contains the home folder is refused" '[[ "${out}" == *"Refusing to install"* ]]'
 out="$(refuse / || true)"
 check "the root is refused" '[[ "${out}" == *"Refusing to install"* ]]'
-check "nothing ran for a refused folder" '[[ "$(wc -l <"${CALLS}")" == "${calls_before}" ]]'
+# A symlink as the folder: refused whatever it points at (#173 review, round 2).
+ln -s "${OTHER}" "${TMP_DIR}/link-to-project"
+out="$(refuse "${TMP_DIR}/link-to-project" || true)"
+check "a symlink to a full folder is refused" '[[ "${out}" == *"is a symbolic link"* ]]'
+check "the folder behind it is left exactly as it was" '[[ "$(cat "${OTHER}/.env")" == "PROJECT_SETTING=1" && "$(mode "${OTHER}")" == 755 && ! -e "${OTHER}/.mindstone-stack" ]]'
+mkdir -p "${TMP_DIR}/empty-target"
+ln -s "${TMP_DIR}/empty-target" "${TMP_DIR}/link-to-empty"
+out="$(refuse "${TMP_DIR}/link-to-empty/" || true)"
+check "a symlink to an empty folder (with a trailing slash) is refused too" '[[ "${out}" == *"is a symbolic link"* && -z "$(ls -A "${TMP_DIR}/empty-target")" ]]'
+# ".." after a folder that doesn't exist yet resolves to where mkdir -p would land.
+printf 'HOME_SETTING=1\n' >"${FAKE_HOME}/.env"
+out="$(refuse "${FAKE_HOME}/newdir/.." || true)"
+check "HOME/newdir/.. is refused as the home folder" '[[ "${out}" == *"Refusing to install"* ]]'
+check "and nothing was created or changed" '[[ ! -e "${FAKE_HOME}/newdir" && "$(cat "${FAKE_HOME}/.env")" == "HOME_SETTING=1" && ! -e "${FAKE_HOME}/.mindstone-stack" ]]'
+out="$(refuse "${OTHER}/new/../" || true)"
+check "a full folder reached through .. is refused" '[[ "${out}" == *"isn'"'"'t empty"* && ! -e "${OTHER}/new" ]]'
+check "nothing ran for any refused folder" '[[ "$(wc -l <"${CALLS}")" == "${calls_before}" ]]'
+# A symlink earlier in the path (as /tmp is on macOS) is followed: the install
+# goes to the physical folder, and every check ran on that path.
+mkdir -p "${TMP_DIR}/real-parent"
+ln -s "${TMP_DIR}/real-parent" "${TMP_DIR}/linked-parent"
+out="$(run_installer "${TMP_DIR}/linked-parent/stack" 2>&1)"
+real_parent="$(cd -P "${TMP_DIR}/real-parent" && pwd -P)"
+check "a symlinked parent is followed to the physical folder" '[[ -f "${real_parent}/stack/.mindstone-stack" && "${out}" == *"Install dir:        ${real_parent}/stack"* ]]'
 mkdir -p "${TMP_DIR}/empty"
 check "an empty folder is adopted" 'run_installer "${TMP_DIR}/empty" >/dev/null 2>&1 && [[ -f "${TMP_DIR}/empty/.mindstone-stack" ]]'
 
@@ -231,21 +266,37 @@ fresh
 out="$(run_installer "${TMP_DIR}/a" --admin-email "o'\''x@example.com" 2>&1 || true)"
 check "an email with a quote is refused" '[[ "${out}" == *"is not an email address"* ]]'
 fresh
-run_installer "${TMP_DIR}/a" --admin-email a@example.com >/dev/null 2>&1
+run_installer "${TMP_DIR}/a" --admin-email a@example.com >/dev/null 2>&1 || true
 check "a one-letter local part gets a longer username" 'grep -qE "create-user -- a@example.com Admin a_[0-9a-f]{4} --email-verified=true" "${CALLS}"'
-fresh
-echo owner >"${TAKEN}"
-out="$(run_installer "${TMP_DIR}/a" --admin-email owner@work.example 2>&1)"
+fresh; : >"${USERS_DB}"
+printf 'owner@home.example owner ADMIN\n' >"${USERS_DB}"
+out="$(run_installer "${TMP_DIR}/a" --admin-email owner@work.example 2>&1 || true)"
 check "a taken username gets a longer one" 'grep -qE "create-user -- owner@work.example Admin owner_[0-9a-f]{4} --email-verified=true" "${CALLS}" && [[ "${out}" == *"(username owner_"* ]]'
-: >"${TAKEN}"
-fresh
-echo 1 >"${EMAIL_COUNT}"
+check "with other accounts, the new one is made ADMIN and it says so" 'grep -q "^owner@work.example owner_.* ADMIN$" "${USERS_DB}" && [[ "${out}" == *"already had 1 account(s)"* && "${out}" == *"role ADMIN"* ]]'
+fresh; : >"${USERS_DB}"
+run_installer "${TMP_DIR}/a" --admin-email first@example.com >/dev/null 2>&1 || true
+check "the first account is ADMIN without a promotion" 'grep -q "^first@example.com first ADMIN$" "${USERS_DB}" && ! tail -n 3 "${CALLS}" | grep -q updateOne'
+fresh; printf 'someone@example.com someone ADMIN\n' >"${USERS_DB}"; touch "${NO_PROMOTE}"
+out="$(run_installer "${TMP_DIR}/a" --admin-email second@example.com 2>&1 || true)"
+rm -f "${NO_PROMOTE}"
+check "an account that doesn't end up ADMIN fails, with the command to promote it" '[[ "${out}" == *"its role is USER, not ADMIN"* && "${out}" == *"updateOne({ email: '"'"'second@example.com'"'"' }"* && ! -e "${TMP_DIR}/a/.admin-created" ]]'
+fresh; printf 'owner@example.com owner USER\n' >"${USERS_DB}"
 creates_before="$(creates)"
-out="$(run_installer "${TMP_DIR}/a" --admin-email owner@example.com 2>&1)"
-check "an existing email: its own status, no account created" '[[ "$(creates)" == "${creates_before}" && "${out}" == *"already exists in this Console"* && "${out}" != *"The password is in"* ]]'
-check "an existing email: no password file is claimed or made" '[[ ! -e "${TMP_DIR}/a/admin-password" ]]'
-check "an existing email: later runs say it wasn't created here" 'grep -q "existed before" "${TMP_DIR}/a/.admin-created"'
-echo 0 >"${EMAIL_COUNT}"
+out="$(run_installer "${TMP_DIR}/a" --admin-email owner@example.com 2>&1 || true)"
+check "an existing email: its own status, no account created" '[[ "$(creates)" == "${creates_before}" && "${out}" == *"already exists in this Console as a"* && "${out}" != *"The password is in"* ]]'
+check "an existing regular user: the message gives the promote command" '[[ "${out}" == *"regular user (role USER)"* && "${out}" == *"\$set: { role: '"'"'ADMIN'"'"' }"* ]]'
+check "an existing email: no password file is claimed or made, and no marker" '[[ ! -e "${TMP_DIR}/a/admin-password" && ! -e "${TMP_DIR}/a/.admin-created" ]]'
+out="$(run_installer "${TMP_DIR}/a" --admin-email other@example.com 2>&1 || true)"
+check "after that, another --admin-email creates an admin" 'grep -q "^other@example.com other ADMIN$" "${USERS_DB}" && [[ "${out}" == *"Admin account created: other@example.com"* ]]'
+fresh; printf 'boss@example.com boss ADMIN\n' >"${USERS_DB}"
+out="$(run_installer "${TMP_DIR}/a" --admin-email boss@example.com 2>&1 || true)"
+check "an existing admin: says so, nothing created" '[[ "${out}" == *"An admin account with the email boss@example.com already exists"* ]]'
+: >"${USERS_DB}"
+for bad in .lead@example.com trail.@example.com two..dots@example.com pct%x@example.com; do
+  fresh
+  out="$(run_installer "${TMP_DIR}/a" --admin-email "${bad}" 2>&1 || true)"
+  check "the Console's email rules: ${bad} is refused before the build" '[[ "${out}" == *"is not an email address"* && "${out}" != *"Building"* ]]'
+done
 
 echo "== ports and truncation =="
 fresh

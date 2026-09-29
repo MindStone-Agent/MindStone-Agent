@@ -46,7 +46,9 @@ Options:
   --uninstall           Stop and remove the stack's containers. Data is kept
   --help                Show this help
 
-Environment (only these names are read; others, such as COMPOSE_*, are ignored):
+Environment (only these names are read; COMPOSE_* and the other variables
+compose.yml uses come from <dir>/.env only, and are unset for the installer's
+own docker compose commands):
   MINDSTONE_DIR, MINDSTONE_REF, CONSOLE_REF
   CONSOLE_PORT               the Console's port on 127.0.0.1. Default: 3080
   MINDSTONE_GATEWAY_PORT     the gateway's port on 127.0.0.1. Default: 19789
@@ -147,30 +149,53 @@ download() {
 # when present, and none of the calling shell's COMPOSE_* or stack variables,
 # which would override .env.
 dc() {
-  local files=(-f "${INSTALL_DIR}/compose.yml")
+  local files=(-f "${INSTALL_DIR}/compose.yml") unset=() name
   [[ -f "${INSTALL_DIR}/compose.override.yml" ]] && files+=(-f "${INSTALL_DIR}/compose.override.yml")
-  env -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_PROJECT_NAME -u COMPOSE_PATH_SEPARATOR \
-    -u OLLAMA_BASE_URL -u CONSOLE_PORT -u MINDSTONE_GATEWAY_PORT -u MINDSTONE_REF -u CONSOLE_REF -u UID -u GID \
-    docker compose --project-directory "${INSTALL_DIR}" "${files[@]}" "$@"
+  # Every COMPOSE_* variable, and every variable compose.yml reads, comes from .env only.
+  for name in $(compgen -e); do
+    case "${name}" in
+      COMPOSE_* | OLLAMA_BASE_URL | CONSOLE_PORT | MINDSTONE_GATEWAY_PORT | MINDSTONE_REF | CONSOLE_REF | \
+        MINDSTONE_BUILD_CONTEXT | CONSOLE_BUILD_CONTEXT | UID | GID) unset+=(-u "${name}") ;;
+    esac
+  done
+  env ${unset[@]+"${unset[@]}"} docker compose --project-directory "${INSTALL_DIR}" "${files[@]}" "$@"
 }
 
 have_tty() {
   [[ -r /dev/tty && -w /dev/tty ]] && { : </dev/tty; } 2>/dev/null
 }
 
-# A folder's physical path, or its would-be path when it doesn't exist yet.
-physical_path() {
-  local path="$1" parent
-  if [[ -d "${path}" ]]; then
-    (cd "${path}" && pwd -P)
-  else
-    parent="$(dirname "${path}")"
-    if [[ -d "${parent}" ]]; then
-      printf '%s/%s\n' "$(cd "${parent}" && pwd -P)" "$(basename "${path}")"
+# A folder's physical path, found the way `mkdir -p` and then `cd -P` would,
+# without creating anything: an existing component is followed (so /tmp is
+# /private/tmp on macOS), a missing one is taken as given, and ".." goes back
+# up from wherever that leaves it (so "$HOME/new/.." is $HOME). Prints the path;
+# returns 2 when the last component is a symlink, 3 when a component exists
+# but isn't a folder, 4 when a symlink can't be followed.
+resolve_dir() {
+  local path="$1" cur="" comp i last
+  local -a parts
+  IFS=/ read -r -a parts <<<"${path}"
+  last=$(( ${#parts[@]} - 1 ))
+  while (( last >= 0 )) && [[ -z "${parts[last]}" || "${parts[last]}" == "." ]]; do last=$((last - 1)); done
+  for (( i = 0; i < ${#parts[@]}; i++ )); do
+    comp="${parts[i]}"
+    case "${comp}" in
+      "" | .) continue ;;
+      ..) cur="${cur%/*}"; continue ;;
+    esac
+    if [[ -L "${cur}/${comp}" ]]; then
+      (( i != last )) || return 2
+      cur="$(cd -P "${cur}/${comp}" 2>/dev/null && pwd -P)" || return 4
+      [[ "${cur}" != "/" ]] || cur=""
+    elif [[ -d "${cur}/${comp}" ]]; then
+      cur="${cur}/${comp}"
+    elif [[ -e "${cur}/${comp}" ]]; then
+      return 3
     else
-      printf '%s\n' "${path}"
+      cur="${cur}/${comp}"
     fi
-  fi
+  done
+  printf '%s\n' "${cur:-/}"
 }
 
 # Whether a folder is a stack from before the marker file existed: it has the
@@ -180,25 +205,34 @@ legacy_stack() {
     grep -q "docker-gateway-entrypoint.sh" "$1/compose.yml" 2>/dev/null
 }
 
-# Refuse any folder the installer shouldn't own: the home folder, the root, an
-# ancestor of the home folder, or a folder with other things in it.
+# Resolve --dir to its physical path (INSTALL_DIR becomes that path), and
+# refuse any folder the installer shouldn't own: a symlink, the home folder,
+# the root, an ancestor of the home folder, or a folder with other things in
+# it. Every check runs on the resolved path, and nothing is created here.
 check_install_dir() {
-  local dir home
-  dir="$(physical_path "${INSTALL_DIR}")"
-  home="$(physical_path "${HOME}")"
+  local given="${INSTALL_DIR}" dir home rc=0
+  dir="$(resolve_dir "${given}")" || rc=$?
+  case "${rc}" in
+    0) ;;
+    2) fail "Refusing ${given}: it is a symbolic link. Give the folder itself." ;;
+    3) fail "Refusing ${given}: part of that path exists and isn't a folder." ;;
+    *) fail "Refusing ${given}: a symbolic link in that path can't be followed." ;;
+  esac
+  home="$(cd -P "${HOME}" 2>/dev/null && pwd -P)" || fail "Your home folder (${HOME}) can't be read."
   if [[ "${dir}" == "/" || "${dir}" == "${home}" || "${home}/" == "${dir}/"* ]]; then
-    fail "Refusing to install into ${INSTALL_DIR}: that is your home folder, the root, or a folder that contains your home folder. Choose a folder of its own, such as ~/${DEFAULT_DIR_NAME}."
+    fail "Refusing to install into ${given} (${dir}): that is your home folder, the root, or a folder that contains your home folder. Choose a folder of its own, such as ~/${DEFAULT_DIR_NAME}."
   fi
-  if [[ -e "${INSTALL_DIR}" && ! -d "${INSTALL_DIR}" ]]; then
-    fail "${INSTALL_DIR} exists and isn't a folder."
+  if [[ -d "${dir}" && ! -f "${dir}/${MARKER}" ]] && ! legacy_stack "${dir}" && [[ -n "$(ls -A "${dir}/" 2>/dev/null)" ]]; then
+    fail "${given} isn't empty and isn't a MindStone stack install (no ${MARKER} file), so it was left alone. Choose a new or empty folder with --dir."
   fi
-  if [[ -d "${INSTALL_DIR}" && ! -f "${INSTALL_DIR}/${MARKER}" ]]; then
-    if legacy_stack "${INSTALL_DIR}"; then
-      : # an earlier stack install; it gets the marker below
-    elif [[ -n "$(find "${INSTALL_DIR}" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]]; then
-      fail "${INSTALL_DIR} isn't empty and isn't a MindStone stack install (no ${MARKER} file), so it was left alone. Choose a new or empty folder with --dir."
-    fi
-  fi
+  INSTALL_DIR="${dir}"
+  HOME_PHYSICAL="${home}"
+}
+
+# Create the install folder, and check it is where check_install_dir resolved it.
+make_install_dir() {
+  mkdir -p "${INSTALL_DIR}"
+  [[ "$(cd -P "${INSTALL_DIR}" && pwd -P)" == "${INSTALL_DIR}" ]] || fail "${INSTALL_DIR} changed while installing (a symbolic link?); stopping."
 }
 
 # The commands that delete what the installer created, and nothing else.
@@ -214,7 +248,11 @@ To delete the stack's data as well, which can't be undone:
 MSG
 }
 
-valid_email() { [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; }
+# An email the Console accepts (its zod check), without quotes: the local part
+# is letters, digits and _ + - ., with no dot first, last or doubled.
+valid_email() {
+  [[ "$1" =~ ^[A-Za-z0-9_+-]([A-Za-z0-9_+.-]*[A-Za-z0-9_+-])?@([A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z]{2,}$ ]] && [[ "$1" != *..* ]]
+}
 valid_name() { [[ "${#1}" -ge 3 && "${#1}" -le 80 && "$1" != *[[:cntrl:]]* ]]; }
 
 # The Console's username from an email's local part: letters, digits, . and _
@@ -233,21 +271,34 @@ fallback_username() {
   printf '%s_%s' "${1:-admin}" "$(random_hex 2)"
 }
 
-# How many Console accounts have this email or username (FIELD VALUE). The
-# values are checked above to hold no quotes, so they are safe in the query.
-count_users() {
-  local count="" tries=0
+# A value from the Console's database, read in the mongodb container (the
+# gateway isn't on its network). EXPR is a mongosh expression; the values put in
+# it are checked above to hold no quotes. Retries while MongoDB starts.
+mongo_query() {
+  local out="" tries=0
   while (( tries < 10 )); do
-    count="$(dc exec -T -e HOME=/tmp mongodb mongosh --quiet --norc MindStoneConsole \
-      --eval "db.users.countDocuments({ $1: '$2' })" 2>/dev/null | tail -n 1 | tr -dc '0-9')" || count=""
-    if [[ -n "${count}" ]]; then
-      printf '%s' "${count}"
+    out="$(dc exec -T -e HOME=/tmp mongodb mongosh --quiet --norc MindStoneConsole \
+      --eval "print('OK:' + (${1}))" 2>/dev/null | grep '^OK:' | tail -n 1)" || out=""
+    if [[ -n "${out}" ]]; then
+      printf '%s' "${out#OK:}"
       return 0
     fi
     tries=$((tries + 1))
     sleep 3
   done
-  fail "Could not check the Console's accounts in MongoDB. The stack is running; re-run this command to try again."
+  fail "Could not read the Console's accounts in MongoDB. The stack is running; re-run this command to try again."
+}
+
+# The role of the account with this email, or "none".
+account_role() {
+  mongo_query "(db.users.findOne({ email: '$1' }) || {}).role || 'none'"
+}
+
+# The command that makes the account with this email a Console admin
+# (printed, not run: the $set is for mongosh).
+# shellcheck disable=SC2016
+promote_command() {
+  printf 'cd "%s" && docker compose exec -T -e HOME=/tmp mongodb mongosh --quiet MindStoneConsole --eval "db.users.updateOne({ email: '"'"'%s'"'"' }, { \\$set: { role: '"'"'ADMIN'"'"' } })"' "${INSTALL_DIR}" "$1"
 }
 
 port_in_use() {
@@ -288,12 +339,11 @@ main() {
   esac
   [[ "${INSTALL_DIR}" == /* ]] || INSTALL_DIR="${PWD}/${INSTALL_DIR}"
   while [[ "${INSTALL_DIR}" == */ && "${INSTALL_DIR}" != "/" ]]; do INSTALL_DIR="${INSTALL_DIR%/}"; done
+  check_install_dir
   ENV_FILE="${INSTALL_DIR}/.env"
   # How to name this install again in the commands printed at the end.
   local dir_flag=""
-  [[ "${INSTALL_DIR}" == "${HOME}/${DEFAULT_DIR_NAME}" ]] || dir_flag=" --dir \"${INSTALL_DIR}\""
-
-  check_install_dir
+  [[ "${INSTALL_DIR}" == "${HOME_PHYSICAL}/${DEFAULT_DIR_NAME}" ]] || dir_flag=" --dir \"${INSTALL_DIR}\""
 
   # -------------------------------------------------------------------------
   # Uninstall: stop and remove the containers. Volumes and files stay.
@@ -358,6 +408,8 @@ MSG
     *) ollama_url="" ;;
   esac
   [[ -z "${arg_ollama_url}" ]] || ollama_url="${arg_ollama_url}"
+  local previous_ollama_url
+  previous_ollama_url="$(env_get "${ENV_FILE}" OLLAMA_BASE_URL)"
   ollama_url="$(setting OLLAMA_BASE_URL "${ollama_url}" MINDSTONE_OLLAMA_BASE_URL "${HOST_OLLAMA_URL}")"
 
   for port in "${CONSOLE_PORT}" "${MINDSTONE_GATEWAY_PORT}"; do
@@ -387,7 +439,7 @@ MSG
   if [[ -f "${admin_marker}" ]]; then
     admin_mode="done"
   elif [[ -n "${admin_email}" ]]; then
-    valid_email "${admin_email}" || fail "--admin-email is not an email address (letters, digits and . _ % + - before the @)."
+    valid_email "${admin_email}" || fail "--admin-email is not an email address the Console accepts (letters, digits and _ + - . before the @, no dot first, last or doubled)."
     admin_name="${admin_name:-Admin}"
     valid_name "${admin_name}" || fail "--admin-name must be 3 to 80 characters."
     admin_mode="generated"
@@ -440,7 +492,7 @@ MSG
     fi
   done
 
-  mkdir -p "${INSTALL_DIR}"
+  make_install_dir
   chmod 700 "${INSTALL_DIR}"
   [[ -f "${INSTALL_DIR}/${MARKER}" ]] || printf 'This folder is a MindStone stack install (install-stack.sh). Delete it only with the commands --uninstall prints.\n' >"${INSTALL_DIR}/${MARKER}"
   [[ -f "${ENV_FILE}" ]] || { (umask 077; : >"${ENV_FILE}"); }
@@ -546,18 +598,21 @@ MSG
 
   # -------------------------------------------------------------------------
   # The Console's admin account
-  local password_file="${INSTALL_DIR}/admin-password" admin_status="${admin_mode}" output
+  local password_file="${INSTALL_DIR}/admin-password" admin_status="${admin_mode}" output existing_role="" other_accounts=0 role=""
   if [[ "${admin_mode}" == "done" ]]; then
     log "The admin account was set up by an earlier run: $(head -n 1 "${admin_marker}")."
   elif [[ "${admin_mode}" == "generated" || "${admin_mode}" == "asked" ]]; then
-    if [[ "$(count_users email "${admin_email}")" != "0" ]]; then
-      # The account exists already: it keeps its own password.
+    existing_role="$(account_role "${admin_email}")"
+    if [[ "${existing_role}" != "none" ]]; then
+      # The account exists already: it keeps its own password and role. No
+      # marker, so a later run with another --admin-email still creates one.
       admin_status="exists"
-      printf '%s (existed before; not created by this installer)\n' "${admin_email}" >"${admin_marker}"
     else
+      # The Console makes only its first account an admin: count them first.
+      other_accounts="$(mongo_query "db.users.countDocuments({})")"
       # A username another account has gets a longer one.
       local tries=0
-      while [[ "$(count_users username "${admin_username}")" != "0" ]]; do
+      while [[ "$(mongo_query "db.users.countDocuments({ username: '${admin_username}' })")" != "0" ]]; do
         tries=$((tries + 1))
         (( tries <= 5 )) || fail "Could not find a free username for ${admin_email}. The stack is running; re-run this command to try again."
         admin_username="$(fallback_username "$(username_for "${admin_email}")")"
@@ -567,15 +622,24 @@ MSG
         chmod 600 "${password_file}"
         admin_password="$(head -n 1 "${password_file}")"
       fi
-      if output="$(printf '%s\n' "${admin_password}" | dc exec -T console npm run --silent create-user -- "${admin_email}" "${admin_name}" "${admin_username}" --email-verified=true 2>&1)" &&
-        grep -q "User created successfully" <<<"${output}"; then
-        printf '%s (username %s)\n' "${admin_email}" "${admin_username}" >"${admin_marker}"
-        log "Admin account created: ${admin_email} (username ${admin_username})"
-      else
+      if ! { output="$(printf '%s\n' "${admin_password}" | dc exec -T console npm run --silent create-user -- "${admin_email}" "${admin_name}" "${admin_username}" --email-verified=true 2>&1)" &&
+        grep -q "User created successfully" <<<"${output}"; }; then
         # Only the tool's own error lines, which never contain the password.
         grep -iE "error" <<<"${output}" | head -n 5 >&2 || true
         fail "Could not create the admin account ${admin_email}. The stack is running; re-run this command to try again."
       fi
+      if [[ "${other_accounts}" != "0" ]]; then
+        # The Console created it as a regular user: the installer was asked for
+        # the admin, so it sets the role in the database (no Console script does).
+        mongo_query "db.users.updateOne({ email: '${admin_email}' }, { \$set: { role: 'ADMIN' } }).matchedCount" >/dev/null
+        log "The Console already had ${other_accounts} account(s), so it made ${admin_email} a regular user; the installer set its role to ADMIN."
+      fi
+      role="$(account_role "${admin_email}")"
+      if [[ "${role}" != "ADMIN" ]]; then
+        fail "The account ${admin_email} was created, but its role is ${role}, not ADMIN. Make it an admin with: $(promote_command "${admin_email}")"
+      fi
+      printf '%s (username %s, role ADMIN)\n' "${admin_email}" "${admin_username}" >"${admin_marker}"
+      log "Admin account created: ${admin_email} (username ${admin_username}, role ADMIN)"
     fi
   fi
   admin_password=""
@@ -597,13 +661,23 @@ MSG
       ;;
     asked) printf '  Sign in as %s with the password you chose.\n' "${admin_email}" ;;
     exists)
-      cat <<MSG
-  An account with the email ${admin_email} already exists in this Console, so no
-  account was created and no password was set. Sign in with that account's own
+      if [[ "${existing_role}" == "ADMIN" ]]; then
+        cat <<MSG
+  An admin account with the email ${admin_email} already exists in this Console,
+  so no account was created and no password was set. Sign in with its own
   password. If you've lost it:
     cd "${INSTALL_DIR}" && docker compose exec console npm run reset-password
-  If that account isn't an admin, re-run with --admin-email and another address.
 MSG
+      else
+        cat <<MSG
+  An account with the email ${admin_email} already exists in this Console as a
+  regular user (role ${existing_role}), so no account was created and no password
+  was set. To make it an admin:
+    $(promote_command "${admin_email}")
+  Or re-run with another --admin-email: the installer then creates that account
+  and makes it an admin.
+MSG
+      fi
       ;;
     done) ;;
     none)
@@ -613,21 +687,28 @@ MSG
 MSG
       ;;
   esac
-  if [[ "${profiles}" == *ollama* ]]; then
+  if [[ "${profiles}" == *ollama* && "${ollama_url}" == "${STACK_OLLAMA_URL}" ]]; then
     cat <<MSG
 
   Ollama runs in the stack (service ollama), reached by the gateway as ${ollama_url}.
   Pull a chat model with: cd "${INSTALL_DIR}" && docker compose exec ollama ollama pull <model>
   Back to Ollama on this machine: run the install command again with --without-ollama.
 MSG
-  else
-    printf '\n  Ollama on this machine is reached by the gateway as %s.\n' "${ollama_url}"
-  fi
-  if [[ -n "${ollama_mode}" ]]; then
+  elif [[ "${profiles}" == *ollama* ]]; then
     cat <<MSG
-  If setup is already done, change the Ollama provider's address to ${ollama_url}
-  in the Console (Settings, Your setup, model provider): chat keeps the address it
-  was set up with, while memory follows the new one.
+
+  Ollama also runs in the stack (service ollama), but the gateway uses ${ollama_url}.
+  To use the stack's Ollama, re-run with --with-ollama; to stop it, with --without-ollama.
+MSG
+  else
+    printf '\n  Ollama is reached by the gateway as %s.\n' "${ollama_url}"
+  fi
+  if [[ -n "${previous_ollama_url}" && "${previous_ollama_url}" != "${ollama_url}" ]]; then
+    cat <<MSG
+  The Ollama address changed (it was ${previous_ollama_url}). If setup is already
+  done, change the Ollama provider's address to ${ollama_url} in the Console
+  (Settings, Your setup, model provider): chat keeps the address it was set up
+  with, while memory follows the new one.
 MSG
   fi
   cat <<MSG
@@ -635,7 +716,8 @@ MSG
   The Console shows a "Set up MindStone" banner until guided setup is done: it
   picks the model, the persona and memory.
 
-Manage it (in ${INSTALL_DIR}):
+Manage it (in ${INSTALL_DIR}; plain docker compose there reads .env, but a
+COMPOSE_* or OLLAMA_BASE_URL exported in your shell overrides it, so unset those first):
   Status:     cd "${INSTALL_DIR}" && docker compose ps
   Logs:       cd "${INSTALL_DIR}" && docker compose logs -f gateway
   CLI:        cd "${INSTALL_DIR}" && docker compose exec gateway ./scripts/mindstone status

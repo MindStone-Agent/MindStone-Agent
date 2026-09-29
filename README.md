@@ -185,7 +185,7 @@ The commands below assume the default install folder `~/.mindstone-stack` and th
 - Your user can run Docker. On Linux, that means being in the `docker` group (`sudo usermod -aG docker $USER`, then log in again). Don't run the installer with `sudo`: it would install into root's home, with root's ids.
 - Optional: [Ollama](https://ollama.com) on this machine, for local models and embeddings.
   - **macOS (Docker Desktop):** nothing to do.
-  - **Linux:** the containers reach the host at its Docker bridge address (usually `172.17.0.1`; see `ip -4 addr show docker0`), and Ollama listens on `127.0.0.1` by default. Bind it to the bridge address as well (for example `OLLAMA_HOST=172.17.0.1` in its service's environment), or use `--with-ollama` (step A1) to run Ollama in the stack. Don't bind it to `0.0.0.0`: Ollama's API has no authentication, so that opens it to your whole network.
+  - **Linux:** the containers reach the host at its Docker bridge address (usually `172.17.0.1`; see `ip -4 addr show docker0`), and Ollama listens on `127.0.0.1` by default. The simplest choice is `--with-ollama` (step A1), which runs Ollama in the stack. To use the host's Ollama instead, set `OLLAMA_HOST=172.17.0.1` (the Docker bridge address) in its service's environment. `OLLAMA_HOST` takes one address, so this replaces `127.0.0.1`: the host's own `ollama` command and anything else that uses `localhost:11434` then need `OLLAMA_HOST=172.17.0.1` too. Don't bind it to `0.0.0.0`: Ollama's API has no authentication, so that opens it to your whole network.
 
 **Check:**
 
@@ -206,16 +206,18 @@ curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/mai
   bash -s -- --admin-email <the person's email>
 ```
 
-A person at a terminal can leave out `--admin-email` and answer the prompts instead. Either way the details are checked before the build: the name must be 3 to 80 characters, and the Console username is the email's local part (letters, digits, `.` and `_`), made longer when it's under 2 characters or already taken. If an account with that email already exists, the installer creates none, sets no password, and says so: sign in with that account's own password.
+A person at a terminal can leave out `--admin-email` and answer the prompts instead. Either way the details are checked before the build: the email must be one the Console accepts (no quotes, and no dot first, last or doubled before the `@`), the name must be 3 to 80 characters, and the Console username is the email's local part (letters, digits, `.` and `_`), made longer when it's under 2 characters or already taken.
+
+The Console makes only its first account an admin. When it already has accounts, the installer sets the new account's role to `ADMIN` in its database and says so; either way it checks that the role is `ADMIN` before reporting success. If an account with that email already exists, the installer creates none and sets no password: an admin signs in with its own password, and for a regular user it prints the command that makes it an admin (or re-run with another `--admin-email`).
 
 Options go after `bash -s --`:
-- `--dir <path>`: the install folder. It must be new, empty, or an earlier stack install (it carries a `.mindstone-stack` marker file); the installer refuses any other folder, your home folder, and any folder that contains it.
+- `--dir <path>`: the install folder. It must be new, empty, or an earlier stack install (it carries a `.mindstone-stack` marker file). The installer resolves the path physically first (following `..` and any symlinked parent, as `/tmp` is on macOS), then refuses any other folder, a symlink given as the folder itself, your home folder, and any folder that contains it.
 - `--ref <git ref>` and `--console-ref <git ref>`: the MindStone-Agent and Console versions to build, `main` by default.
 - `--admin-name <name>`.
 - `--with-ollama` runs Ollama in the stack too, and `--without-ollama` goes back to Ollama on this machine. If you switch after setup is done, also change the Ollama provider's address in the Console (Settings, **Your setup**, model provider): chat keeps the address it was set up with, while memory follows the new one.
 - `--ollama-url <url>`: Ollama as the gateway container sees it, ending in `/v1`. Inside the container `localhost` is the container itself, so the installer warns about it.
 
-Ports and the Compose project name (`mindstone-stack` by default) are environment variables, set on `bash` (not on `curl`). The installer reads only its own variables (`CONSOLE_PORT`, `MINDSTONE_GATEWAY_PORT`, `MINDSTONE_PROJECT`, `MINDSTONE_REF`, `CONSOLE_REF`, `MINDSTONE_OLLAMA_BASE_URL`, `MINDSTONE_DIR`), never `COMPOSE_*` or `OLLAMA_BASE_URL` from your shell:
+Ports and the Compose project name (`mindstone-stack` by default) are environment variables, set on `bash` (not on `curl`). The installer reads only its own variables from your shell (`CONSOLE_PORT`, `MINDSTONE_GATEWAY_PORT`, `MINDSTONE_PROJECT`, `MINDSTONE_REF`, `CONSOLE_REF`, `MINDSTONE_OLLAMA_BASE_URL`, `MINDSTONE_DIR`), and runs its own `docker compose` commands with every `COMPOSE_*` variable and every variable `compose.yml` reads unset, so those come from `.env`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | \
@@ -954,7 +956,7 @@ See `docs/operations/CONNECTORS.md`, `EMAIL_CONNECTOR.md`, and
 
 What it keeps, and where (in the install folder, `~/.mindstone-stack` by default):
 - **Secrets:** `gateway.env` (the gateway token and the admin credential's sha256) and `console.env` (the Console's secrets, the gateway token and the admin credential), both mode 600. The gateway's entrypoint writes the token to `secrets/gateway-token` (600) in its runtime and doesn't pass the variable on to the agent's processes.
-- **Settings:** `.env` holds the refs, ports, project name and UID/GID, and no secrets. Compose reads it, so plain `docker compose` commands in the folder use the same settings.
+- **Settings:** `.env` holds the refs, ports, project name and UID/GID, and no secrets. Compose reads it, so plain `docker compose` commands in the folder use the same settings, unless your shell exports `COMPOSE_*`, `OLLAMA_BASE_URL` or a port variable: an exported variable overrides `.env`, so unset it first.
 - **Data:** the Docker volumes (the project is `mindstone-stack` unless `MINDSTONE_PROJECT` says otherwise) `<project>_gateway-runtime` (config, memory, transcripts), `<project>_pi-agent` and `<project>_pi-sessions` (Pi's isolated state), and `<project>_console-data`; the Console's database, uploads and logs are in `data/`.
 
 Networks: the gateway, the Console and the optional Ollama share the `app` network; MongoDB is on an internal `db` network with the Console only, so the gateway and Ollama can't reach it.
