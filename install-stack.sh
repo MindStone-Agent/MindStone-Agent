@@ -378,7 +378,10 @@ MSG
   fi
   local compose_version
   compose_version="$(docker compose version --short 2>/dev/null || true)"
-  [[ "${compose_version#v}" =~ ^2\. ]] || fail "Docker Compose v2 is required ('docker compose version'); found: ${compose_version:-none}."
+  # Compose v2 or newer: Docker Desktop ships 5.x today (#182).
+  if ! [[ "${compose_version#v}" =~ ^([0-9]+)\. ]] || (( BASH_REMATCH[1] < 2 )); then
+    fail "Docker Compose v2 or newer is required ('docker compose version'); found: ${compose_version:-none}."
+  fi
   if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
     fail "sha256sum or shasum is required."
   fi

@@ -117,7 +117,7 @@ echo "$*" >>"${CALLS}"
 arg() { printf '%s' "$*" | sed -n "s/.*$1: '\([^']*\)'.*/\1/p"; }
 case "$*" in
   info*) exit 0 ;;
-  "compose version --short") echo "2.33.1" ;;
+  "compose version --short") echo "${STUB_COMPOSE_VERSION:-2.33.1}" ;;
   ps\ *) exit 0 ;;
   *mongosh*"findOne({ email:"*)
     role="$(awk -v e="$(arg email "$*")" '$1 == e { print $3 }' "${USERS_DB}")"
@@ -310,6 +310,11 @@ check "a taken port stops the install with its name" '[[ "${out}" == *"Port 2799
 head -n "$(( $(wc -l <install-stack.sh) - 1 ))" install-stack.sh >"${TMP_DIR}/truncated.sh"
 PATH="${STUB}:${PATH}" bash "${TMP_DIR}/truncated.sh" --dir "${TMP_DIR}/cut" --admin-email owner@example.com >/dev/null 2>&1 || true
 check "a download cut before its last line runs nothing" '[[ ! -e "${TMP_DIR}/cut" ]]'
+# Docker Desktop ships Compose 5.x (#182): any major version from 2 up passes the check; 1.x doesn't.
+out="$(STUB_COMPOSE_VERSION=5.3.1 PATH="${STUB}:${PATH}" CONSOLE_PORT=27990 MINDSTONE_GATEWAY_PORT=27991 bash ./install-stack.sh --dir "${TMP_DIR}/c5" --admin-email owner@example.com 2>&1 || true)"
+check "Compose 5.3.1 passes the version check" '[[ "${out}" != *"Docker Compose v2 or newer is required"* && "${out}" == *"Open http://localhost:27990"* ]]'
+out="$(STUB_COMPOSE_VERSION=1.29.2 PATH="${STUB}:${PATH}" bash ./install-stack.sh --dir "${TMP_DIR}/c1" --admin-email owner@example.com 2>&1 || true)"
+check "Compose 1.29.2 is refused, and nothing is made" '[[ "${out}" == *"Docker Compose v2 or newer is required"*"found: 1.29.2"* && ! -e "${TMP_DIR}/c1" ]]'
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   echo "== compose file =="
