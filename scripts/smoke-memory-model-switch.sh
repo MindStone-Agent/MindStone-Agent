@@ -460,5 +460,42 @@ late_c="$(reembed_chunks $((off_at + 250)) model-c)"
 c_run="$(reembed_chunks 0 model-c)"
 (( c_run < 128 )) || { echo "control: the model-c run had already finished (${c_run} chunks) before recall was turned off" >&2; exit 1; }
 echo "a run stopped when recall was turned off after ${c_run} chunks"
+# A registered endpoint whose key changes under the same model name stops a run too (#157 review
+# round 3): the run's embedder is the one resolved when it started, address and key included.
+STUB_PORT="${STUB_PORT}" python3 - <<'PY'
+import json, os, pathlib
+agent = pathlib.Path(os.environ["PI_CODING_AGENT_DIR"])
+agent.mkdir(parents=True, exist_ok=True)
+models = agent / "models.json"
+m = json.loads(models.read_text()) if models.exists() else {}
+m.setdefault("providers", {})["enterprise-openai"] = {"baseUrl": "http://127.0.0.1:" + os.environ["STUB_PORT"] + "/v1"}
+models.write_text(json.dumps(m, indent=2) + "\n")
+auth = agent / "auth.json"
+a = json.loads(auth.read_text()) if auth.exists() else {}
+a["enterprise-openai"] = {"type": "api_key", "key": "synthetic-endpoint-key-a"}
+auth.write_text(json.dumps(a, indent=2) + "\n")
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+c["memory"]["embeddingProvider"] = "enterprise-openai:model-e"
+c["memory"].pop("autoRecall", None)
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+chat "a switch question once the model is model-e" >/dev/null
+for _ in $(seq 1 20); do [[ "$(reembed_chunks 0 model-e)" -gt 0 ]] && break; sleep 0.5; done
+[[ "$(reembed_chunks 0 model-e)" -gt 0 ]] || { echo "control: no run started for the registered endpoint, so a key change can't be measured" >&2; exit 1; }
+python3 - <<'PY'
+import json, os, pathlib
+auth = pathlib.Path(os.environ["PI_CODING_AGENT_DIR"]) / "auth.json"
+a = json.loads(auth.read_text())
+a["enterprise-openai"]["key"] = "synthetic-endpoint-key-b"
+auth.write_text(json.dumps(a, indent=2) + "\n")
+PY
+key_at=$(node -e 'console.log(Date.now())')
+sleep 3
+late_e="$(reembed_chunks $((key_at + 250)) model-e)"
+[[ "${late_e}" == 0 ]] || { echo "the run sent ${late_e} chunks with the old key after the key changed" >&2; exit 1; }
+e_run="$(reembed_chunks 0 model-e)"
+(( e_run < 128 )) || { echo "control: the model-e run had already finished (${e_run} chunks) before the key changed" >&2; exit 1; }
+echo "a run stopped when the endpoint key changed after ${e_run} chunks"
 
 echo "Memory embedding model switch smoke test passed."
