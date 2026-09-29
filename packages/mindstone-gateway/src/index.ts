@@ -800,11 +800,12 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
         vectors: done.vectors.state,
         ...(done.vectors.state === "missing" ? { reason: done.vectors.reason } : {}),
         ...(done.gaveUp ? { gaveUp: true } : {}),
+        ...(done.vectors.state === "missing" && done.vectors.superseded ? { superseded: true } : {}),
       });
       // One line an outcome: a give-up isn't retried, and a newer ingest's vectors are in place.
       if (done.vectors.state === "ready") console.info(`[mindstone] knowledge base ${where} embedded again for ${spec}`);
       else if (done.gaveUp) console.warn(`[mindstone] stopped embedding knowledge base ${where} again for ${spec} after ${KB_REEMBED_LIMITS.maxFailures} failures; it uses word match until \`kb ingest\``);
-      else if (done.vectors.superseded) console.info(`[mindstone] knowledge base ${where} was ingested while it was embedded again; the ingest's vectors are kept`);
+      else if (done.vectors.superseded) console.info(`[mindstone] knowledge base ${where} was ingested while it was embedded again; any vectors the ingest wrote are kept`);
       else console.warn(`[mindstone] knowledge base ${where} not embedded again for ${spec} (word match meanwhile; retried later): ${done.vectors.reason}`);
     } else if (result.deferred === 0) {
       kbReembedClean = { spec, at: Date.now() };

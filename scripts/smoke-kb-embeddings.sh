@@ -892,6 +892,11 @@ node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
   const batched = library.filter((l)=>l.input.length > 1).length;
   if (batched) { console.error(`the re-embed sent ${batched} requests of more than one entry`); process.exit(1); }
   if (queries.length !== 3) { console.error(`expected 3 owner query embeddings, saw ${queries.length}`); process.exit(1); }
+  // The re-embed was running throughout: an entry before the first query and between each two.
+  const bounds = [0, ...queries.map((q)=>q.t)];
+  for (let i = 1; i < bounds.length; i += 1) {
+    if (!library.some((l)=>l.t > bounds[i - 1] && l.t < bounds[i])) { console.error(`the re-embed sent nothing before owner query ${i}: nothing was measured`); process.exit(1); }
+  }
   for (const q of queries) {
     if (!(q.done >= q.t)) { console.error("an owner query embedding was never answered"); process.exit(1); }
     const sent = library.filter((l)=>l.t > q.t && l.t < q.done).length;
