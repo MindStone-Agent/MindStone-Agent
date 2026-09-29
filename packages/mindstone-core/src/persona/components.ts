@@ -54,13 +54,14 @@ export type MindStoneTurnComponents = {
   skills?: string[];
   /** Global KB collections searched. Absent: every global collection. */
   globalKnowledgebases?: string[];
+  /**
+   * A workflow step's `knowledgebases`: they narrow global and private KBs
+   * separately (see `discoverKnowledgebaseRecallDocuments`), so naming a
+   * private KB never switches global recall off.
+   */
+  stepKnowledgebases?: string[];
   /** The persona's private KBs searched on this turn; absent when none are. */
-  privateKnowledgebases?: {
-    personaId: string;
-    dir: string;
-    /** Only these private KB ids (a workflow step narrowed them). Absent: all of them. */
-    only?: string[];
-  };
+  privateKnowledgebases?: { personaId: string; dir: string };
 };
 
 function unique(ids: string[]): string[] {
@@ -73,13 +74,28 @@ function narrow(base: string[] | undefined, step: string[] | undefined): string[
   return base ? base.filter((id) => step.includes(id)) : unique(step);
 }
 
+/** A real directory, not a link (checked on the last path part). */
+function isRealDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /**
- * The components in play for one turn.
+ * The components in play for one turn. Nothing changes when no persona
+ * answers: every skill and every global KB, and a workflow step's lists are
+ * only logged, as before.
  * - Skills: the persona's list, or every installed skill when it lists none.
  * - Global KBs: the persona's list, or every collection when it lists none.
  *   Private KBs never switch global recall off.
- * - Private KBs: the persona's own, on the turns `privateKnowledgebasesAllowed` names.
- * - A workflow step's `skills` and `knowledgebases` narrow those sets.
+ * - Private KBs: the persona's own, on the turns `privateKnowledgebasesAllowed`
+ *   names, when its id is one folder name and neither its folder nor its
+ *   `knowledgebases` folder is a link.
+ * - `decision` is the workflow step that applies to this persona (the caller
+ *   drops one that routed to a different persona); its `skills` narrow the
+ *   skill set and its `knowledgebases` narrow the KBs.
  */
 export function resolveTurnComponents(params: {
   persona?: MindStonePersona;
@@ -87,26 +103,33 @@ export function resolveTurnComponents(params: {
   privateAllowed: boolean;
 }): MindStoneTurnComponents {
   const { persona, decision } = params;
-  const skills = narrow(persona?.skills.length ? unique(persona.skills) : undefined, decision?.skills);
-  const globalKnowledgebases = narrow(
-    persona?.knowledgebases.length ? unique(persona.knowledgebases) : undefined,
-    decision?.knowledgebases,
-  );
-  const privateDir = persona && params.privateAllowed ? readablePersonaKnowledgebasesDir(persona.dir) : undefined;
+  if (!persona) return {};
+  const skills = narrow(persona.skills.length ? unique(persona.skills) : undefined, decision?.skills);
+  const globalKnowledgebases = persona.knowledgebases.length ? unique(persona.knowledgebases) : undefined;
+  const privateDir = params.privateAllowed && isSafeComponentId(persona.id) && isRealDirectory(persona.dir)
+    ? readablePersonaKnowledgebasesDir(persona.dir)
+    : undefined;
   return {
-    ...(persona ? { personaId: persona.id } : {}),
+    personaId: persona.id,
     ...(skills ? { skills } : {}),
     ...(globalKnowledgebases ? { globalKnowledgebases } : {}),
-    ...(persona && privateDir
-      ? {
-          privateKnowledgebases: {
-            personaId: persona.id,
-            dir: privateDir,
-            ...(decision?.knowledgebases.length ? { only: unique(decision.knowledgebases) } : {}),
-          },
-        }
-      : {}),
+    ...(decision?.knowledgebases.length ? { stepKnowledgebases: unique(decision.knowledgebases) } : {}),
+    ...(privateDir ? { privateKnowledgebases: { personaId: persona.id, dir: privateDir } } : {}),
   };
+}
+
+/**
+ * The workflow decision that applies to the answering persona. A persona
+ * named by the request answers even when a workflow step routed elsewhere;
+ * that step's lists belong to the other persona, so they don't narrow this one.
+ */
+export function decisionForAnsweringPersona<T extends { personaId?: string }>(
+  decision: T | undefined,
+  forcedPersonaId: string | undefined,
+): T | undefined {
+  if (!decision) return undefined;
+  if (forcedPersonaId && decision.personaId && decision.personaId !== forcedPersonaId) return undefined;
+  return decision;
 }
 
 /**
@@ -124,6 +147,7 @@ export function personaComponentsSummary(
     ...(skills ? { skillsInPrompt: skills.inPrompt } : {}),
     ...(skills?.missing?.length ? { skillsMissing: skills.missing } : {}),
     globalKnowledgebases: components.globalKnowledgebases ?? "all",
-    privateKnowledgebases: components.privateKnowledgebases ? components.privateKnowledgebases.only ?? "all" : "none",
+    ...(components.stepKnowledgebases ? { stepKnowledgebases: components.stepKnowledgebases } : {}),
+    privateKnowledgebases: components.privateKnowledgebases ? "own" : "none",
   };
 }

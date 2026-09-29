@@ -102,8 +102,10 @@ they feed the SAME deterministic ingest/index/search/recall pipeline:
   persona's private KBs: `kb list --persona <id>`, `kb ingest --persona <id>
   <kb-id>`, `kb search --persona <id> <kb-id> "<query>"`, `kb status --persona
   <id> [kb-id]`. The persona id and the KB id must each be one folder name
-  (letters, digits, `.`, `_`, `-`), the persona must exist, and a
-  `knowledgebases` folder that is a link is refused.
+  (letters, digits, `.`, `_`, `-`), the persona must exist, and a linked
+  `knowledgebases` folder, KB folder, `kb.json`, `index.json` or `sources` is
+  refused. `kb ingest --persona` also refuses linked source files and folder
+  sources; a private KB holds its own files.
 - See [PERSONAS.md](PERSONAS.md#components-at-run-time-125) for the full rule.
 
 ### Follow-on source targets (documented plan, not implemented)

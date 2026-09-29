@@ -12,6 +12,9 @@ import type {
   MindStoneWorkflowSummary,
 } from "./types.js";
 
+/** Attempts a gate gets at most, however many `retry.maxAttempts` asks for (#125). */
+export const MAX_WORKFLOW_GATE_ATTEMPTS = 5;
+
 export function workflowsDirFromConfig(config: MindStoneConfig | undefined, paths?: MindStoneRuntimePaths): string {
   const resolved = paths ?? runtimePathsFromEnv();
   return resolve(config?.workflows?.dir ?? join(resolved.dataDir, "workflows"));
@@ -187,6 +190,8 @@ export function resolveMindStoneWorkflowCandidates(params: {
   config: MindStoneConfig | undefined;
   paths?: MindStoneRuntimePaths;
   turn: WorkflowTurnInput;
+  /** A persona the request names (App Engine): its workflows are the candidates, not the configured persona's. */
+  personaId?: string;
 }): Array<{ workflowId: string; reason: string }> {
   const workflows = params.config?.workflows;
   for (const rule of workflows?.routes ?? []) {
@@ -196,12 +201,14 @@ export function resolveMindStoneWorkflowCandidates(params: {
   }
   if (workflows?.active?.trim()) return [{ workflowId: workflows.active, reason: "config.active" }];
 
-  const personaResolution = resolveMindStonePersona({
-    config: params.config,
-    sessionKey: params.turn.sessionKey,
-    sourceChannel: params.turn.sourceChannel,
-    sourceSubstrate: params.turn.sourceSubstrate,
-  });
+  const personaResolution = params.personaId
+    ? { personaId: params.personaId }
+    : resolveMindStonePersona({
+        config: params.config,
+        sessionKey: params.turn.sessionKey,
+        sourceChannel: params.turn.sourceChannel,
+        sourceSubstrate: params.turn.sourceSubstrate,
+      });
   if (personaResolution) {
     const persona = loadMindStonePersona(personasDirFromConfig(params.config, params.paths), personaResolution.personaId);
     if (persona.ok) {
@@ -216,6 +223,7 @@ export function resolveMindStoneWorkflowId(params: {
   config: MindStoneConfig | undefined;
   paths?: MindStoneRuntimePaths;
   turn: WorkflowTurnInput;
+  personaId?: string;
 }): { workflowId: string; reason: string } | undefined {
   return resolveMindStoneWorkflowCandidates(params)[0];
 }
@@ -232,27 +240,34 @@ export function runMindStoneWorkflow(params: {
   turn: WorkflowTurnInput;
   /** Deterministically force this workflow (App Engine request routing) — bypasses selection. */
   workflowId?: string;
+  /** The persona the request names (App Engine): its workflows are the candidates. */
+  personaId?: string;
 }): MindStoneWorkflowOutcome | undefined {
   const candidates = params.workflowId
     ? [{ workflowId: params.workflowId, reason: "forced:request" }]
-    : resolveMindStoneWorkflowCandidates({ config: params.config, paths: params.paths, turn: params.turn });
+    : resolveMindStoneWorkflowCandidates({ config: params.config, paths: params.paths, turn: params.turn, personaId: params.personaId });
   // A persona's workflows are tried in order (#125): the first to reach a
-  // decision wins. The events of every workflow tried are kept, so the
+  // decision wins. One with no matching route step, or that doesn't load,
+  // passes to the next; a gate with onFail "stop" ends the selection, as it
+  // ends its workflow. The events of every workflow tried are kept, so the
   // transcript shows why the earlier ones didn't decide.
   const events: MindStoneWorkflowEvent[] = [];
+  const tried: string[] = [];
   let outcome: MindStoneWorkflowOutcome | undefined;
   for (const selected of candidates) {
-    outcome = runSelectedWorkflow(params, selected);
+    const run = runSelectedWorkflow(params, selected);
+    outcome = run.outcome;
+    tried.push(outcome.workflowId);
     events.push(...outcome.events);
-    if (outcome.decision) break;
+    if (outcome.decision || run.stoppedAtGate) break;
   }
-  return outcome ? { ...outcome, events } : undefined;
+  return outcome ? { ...outcome, events, ...(tried.length > 1 ? { tried } : {}) } : undefined;
 }
 
 function runSelectedWorkflow(
   params: { config: MindStoneConfig | undefined; paths?: MindStoneRuntimePaths; turn: WorkflowTurnInput },
   selected: { workflowId: string; reason: string },
-): MindStoneWorkflowOutcome {
+): { outcome: MindStoneWorkflowOutcome; stoppedAtGate?: boolean } {
   const workflowsDir = workflowsDirFromConfig(params.config, params.paths);
   const events: MindStoneWorkflowEvent[] = [];
   const loaded = loadMindStoneWorkflow(workflowsDir, selected.workflowId);
@@ -262,7 +277,7 @@ function runSelectedWorkflow(
       text: `Workflow ${selected.workflowId} failed to load: ${loaded.error}`,
       metadata: { event: "workflow_failed", workflowId: selected.workflowId, reason: selected.reason, error: loaded.error },
     });
-    return { workflowId: selected.workflowId, reason: selected.reason, failed: true, events };
+    return { outcome: { workflowId: selected.workflowId, reason: selected.reason, failed: true, events } };
   }
   const workflow = loaded.workflow;
   events.push({
@@ -273,7 +288,7 @@ function runSelectedWorkflow(
 
   for (const step of workflow.steps) {
     if (step.kind === "gate") {
-      const maxAttempts = Math.max(1, Math.floor(step.retry?.maxAttempts ?? 1));
+      const maxAttempts = Math.min(MAX_WORKFLOW_GATE_ATTEMPTS, Math.max(1, Math.floor(step.retry?.maxAttempts ?? 1)));
       let passed = false;
       let detail = "";
       let attempts = 0;
@@ -303,7 +318,7 @@ function runSelectedWorkflow(
           text: `Workflow ${workflow.id} stopped at gate ${step.id}.`,
           metadata: { event: "workflow_failed", workflowId: workflow.id, stepId: step.id },
         });
-        return { workflowId: workflow.id, reason: selected.reason, failed: true, events };
+        return { outcome: { workflowId: workflow.id, reason: selected.reason, failed: true, events }, stoppedAtGate: true };
       }
       continue;
     }
@@ -328,7 +343,7 @@ function runSelectedWorkflow(
       text: `Workflow ${workflow.id} finished: step ${step.id} routes persona=${decision.personaId ?? "none"} skills=${decision.skills.length} kbs=${decision.knowledgebases.length}.`,
       metadata: { event: "workflow_finished", workflowId: workflow.id, stepId: step.id, personaId: decision.personaId, skills: decision.skills, knowledgebases: decision.knowledgebases },
     });
-    return { workflowId: workflow.id, reason: selected.reason, decision, failed: false, events };
+    return { outcome: { workflowId: workflow.id, reason: selected.reason, decision, failed: false, events } };
   }
 
   events.push({
@@ -336,5 +351,5 @@ function runSelectedWorkflow(
     text: `Workflow ${workflow.id} finished with no matching route step.`,
     metadata: { event: "workflow_finished", workflowId: workflow.id, decision: null },
   });
-  return { workflowId: workflow.id, reason: selected.reason, failed: false, events };
+  return { outcome: { workflowId: workflow.id, reason: selected.reason, failed: false, events } };
 }

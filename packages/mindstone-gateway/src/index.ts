@@ -114,7 +114,9 @@ import "./connectors/discord.js";
 import "./connectors/email.js";
 import "./connectors/calendar.js";
 import {
+  loadMindStonePersona,
   loadRoutePersonaContextById,
+  decisionForAnsweringPersona,
   personaComponentsSummary,
   privateKnowledgebasesAllowed,
   resolveTurnComponents,
@@ -793,8 +795,10 @@ function consoleTurnCaller(req: IncomingMessage, input: Record<string, unknown>,
  * disk keeps it (#105 review).
  */
 function entryForAudience(entry: TranscriptEntry | undefined, audience: RouteAudience): TranscriptEntry | undefined {
-  if (!entry || audience === "owner" || !entry.metadata || !("personaContext" in entry.metadata)) return entry;
-  const { personaContext: _hidden, ...metadata } = entry.metadata;
+  if (!entry || audience === "owner" || !entry.metadata) return entry;
+  if (!("personaContext" in entry.metadata) && !("personaComponents" in entry.metadata)) return entry;
+  // Nor its skills and knowledge bases (#125).
+  const { personaContext: _hidden, personaComponents: _components, ...metadata } = entry.metadata;
   return { ...entry, metadata };
 }
 
@@ -1163,6 +1167,7 @@ async function runConfiguredRoute(input: {
   const workflowOutcome = runMindStoneWorkflow({
     config: input.config,
     workflowId: input.route?.workflowId,
+    personaId: input.route?.personaId,
     turn: {
       sessionKey: input.sessionKey,
       sourceChannel: source?.channel,
@@ -1214,7 +1219,7 @@ async function runConfiguredRoute(input: {
     // The answering persona's skills and knowledge bases (#125).
     const turnComponents = resolveTurnComponents({
       persona: personaResult.persona,
-      decision: workflowOutcome?.decision,
+      decision: decisionForAnsweringPersona(workflowOutcome?.decision, input.route?.personaId),
       privateAllowed: privateKnowledgebasesAllowed(input.audience),
     });
     const { route, streamEvents } = await runGatewayRunner({
@@ -1245,6 +1250,7 @@ async function runConfiguredRoute(input: {
             knowledgebases: discoverKnowledgebaseRecallDocuments({
               config: input.config,
               only: turnComponents.globalKnowledgebases,
+              step: turnComponents.stepKnowledgebases,
               private: turnComponents.privateKnowledgebases,
             }),
           }),
@@ -1502,7 +1508,7 @@ async function runConfiguredRoute(input: {
         personaContext: route.personaContext,
         ...(turnComponents.personaId ? { personaComponents: personaComponentsSummary(turnComponents, route.skills) } : {}),
         workflow: workflowOutcome
-          ? { workflowId: workflowOutcome.workflowId, reason: workflowOutcome.reason, failed: workflowOutcome.failed, decision: workflowOutcome.decision }
+          ? { workflowId: workflowOutcome.workflowId, reason: workflowOutcome.reason, failed: workflowOutcome.failed, decision: workflowOutcome.decision, ...(workflowOutcome.tried ? { tried: workflowOutcome.tried } : {}) }
           : undefined,
         promptWindow: {
           mode: route.promptWindow.policy.mode,
@@ -2037,8 +2043,12 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     // The Skill Builder (#104): built-in, installed and draft skills. Errors
     // name paths relative to the skills directory, never the host's.
     const skillsDir = skillsDirFromConfig(gateConfig.config, paths);
-    // Which installed skills the owner's prompt holds in full; the rest are over the budget.
-    const inPrompt = new Set(buildMindStoneSkillsPrompt(skillsDir).inPrompt);
+    // Which installed skills the owner's prompt holds in full; the rest are
+    // over the budget, or left out by the active persona's list (#125).
+    const activePersonaId = gateConfig.config?.personas?.active;
+    const activePersona = activePersonaId ? loadMindStonePersona(personasDirFromConfig(gateConfig.config, paths), activePersonaId) : undefined;
+    const personaSkills = activePersona?.ok && activePersona.persona.skills.length ? activePersona.persona.skills : undefined;
+    const inPrompt = new Set(buildMindStoneSkillsPrompt(skillsDir, { only: personaSkills }).inPrompt);
     const skills = discoverMindStoneSkills(skillsDir).map((skill) => ({
       id: skill.id,
       label: skill.label,

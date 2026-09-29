@@ -67,6 +67,7 @@ import {
   type MindStoneRuntimePaths,
   isSafeComponentId,
   personaKnowledgebasesDir,
+  privateKnowledgebaseLinkError,
   readablePersonaKnowledgebasesDir,
   type MindStoneDoctorReport,
   type MindStoneModelInfo,
@@ -1339,8 +1340,10 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
   const kbDir = scoped.kbDir ?? knowledgebasesDirFromConfig(config, paths);
   // A private KB id is one folder name under the persona's folder.
   const kbArg = argv[4];
-  if (scoped.personaId && kbArg && !kbArg.startsWith("--") && !isSafeComponentId(kbArg)) {
-    throw new Error(`Not a knowledge base id: ${kbArg}`);
+  if (scoped.personaId && kbArg && !kbArg.startsWith("--")) {
+    if (!isSafeComponentId(kbArg)) throw new Error(`Not a knowledge base id: ${kbArg}`);
+    const linkError = privateKnowledgebaseLinkError(kbDir, kbArg);
+    if (linkError) throw new Error(linkError);
   }
 
   if (sub === "list") {
@@ -1366,7 +1369,7 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
   if (sub === "ingest") {
     const kbId = argv[4];
     if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id>");
-    const result = await ingestMindStoneKnowledgebase(kbDir, kbId, { now: new Date().toISOString() });
+    const result = await ingestMindStoneKnowledgebase(kbDir, kbId, { now: new Date().toISOString(), noLinks: Boolean(scoped.personaId) });
     if (!result.ok) throw new Error(result.error);
     if (json) {
       output.write(`${JSON.stringify(result, null, 2)}\n`);

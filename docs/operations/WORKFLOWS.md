@@ -44,17 +44,24 @@ own process.
   `messagePrefix` (fields AND together).
 - `skills`/`knowledgebases` on a route step narrow the answering persona's
   components for that turn (#125): only the listed skills stay in the prompt,
-  and only the listed KB ids (global or the persona's private ones) are
-  searched. See [PERSONAS.md](PERSONAS.md#components-at-run-time-125).
+  and the listed KB ids narrow global collections and the persona's private
+  KBs, each kind only if the step names one of its KBs. With no persona
+  active they are only logged. See
+  [PERSONAS.md](PERSONAS.md#components-at-run-time-125).
+- `retry.maxAttempts` is capped at 5 (#125).
 
 ## Which workflow runs (deterministic selection order)
 
 1. First matching `workflows.routes` rule in config
    (`{ "workflowId", "sessionKeyPrefix"|"sourceChannel"|"sourceSubstrate"|"messagePrefix" }`).
 2. `workflows.active` in config.
-3. The active persona's `workflows.json`: every listed workflow, in order
-   (#125). The first one that reaches a decision is used; the events of the
-   ones tried before it stay in the transcript.
+3. The answering persona's `workflows.json` (one named by an App Engine
+   request, or else the active one): every listed workflow, in order (#125).
+   The first one that reaches a decision is used. One with no matching route
+   step, or that doesn't load, passes to the next; a gate with
+   `onFail: "stop"` ends the selection with no decision. The events of every
+   workflow tried stay in the transcript, and the response's `workflow`
+   lists them in `tried`.
 
 No match → no workflow; persona resolution proceeds as in PERSONAS.md.
 

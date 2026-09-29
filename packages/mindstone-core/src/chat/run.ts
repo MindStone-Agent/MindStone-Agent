@@ -15,6 +15,7 @@ import { runMindStoneRoute } from "../routing/run.js";
 import {
   loadRoutePersonaContextById,
   PERSONA_PROPOSAL_INSTRUCTIONS,
+  decisionForAnsweringPersona,
   personaComponentsSummary,
   privateKnowledgebasesAllowed,
   resolveRoutePersonaContext,
@@ -472,6 +473,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   const workflowOutcome = runMindStoneWorkflow({
     config: input.config,
     workflowId: input.route?.workflowId,
+    personaId: input.route?.personaId,
     turn: {
       sessionKey: input.sessionKey,
       sourceChannel: input.source?.channel,
@@ -503,7 +505,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   // the owner's context here is an App Engine tenant run.
   const turnComponents = resolveTurnComponents({
     persona: personaResolution.persona,
-    decision: workflowOutcome?.decision,
+    decision: decisionForAnsweringPersona(workflowOutcome?.decision, input.route?.personaId),
     privateAllowed: privateKnowledgebasesAllowed(ownerContext ? "owner" : "tenant"),
   });
 
@@ -541,6 +543,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
           knowledgebases: discoverKnowledgebaseRecallDocuments({
             config: input.config,
             only: turnComponents.globalKnowledgebases,
+            step: turnComponents.stepKnowledgebases,
             private: turnComponents.privateKnowledgebases,
           }),
         }),
@@ -771,7 +774,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     identityContext: route.identityContext,
     personaContext: route.personaContext,
     workflow: workflowOutcome
-      ? { workflowId: workflowOutcome.workflowId, reason: workflowOutcome.reason, failed: workflowOutcome.failed, decision: workflowOutcome.decision }
+      ? { workflowId: workflowOutcome.workflowId, reason: workflowOutcome.reason, failed: workflowOutcome.failed, decision: workflowOutcome.decision, ...(workflowOutcome.tried ? { tried: workflowOutcome.tried } : {}) }
       : undefined,
     promptWindow: {
       mode: route.promptWindow.policy.mode,

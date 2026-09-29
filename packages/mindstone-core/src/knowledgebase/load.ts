@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { MindStoneConfig } from "../config/types.js";
 import type { MemoryDocument } from "../memory/types.js";
@@ -75,15 +75,16 @@ export function loadMindStoneKnowledgebase(kbDir: string, kbId: string): LoadKno
   };
 }
 
-function walkMarkdownFiles(dir: string): string[] {
+function walkMarkdownFiles(dir: string, noLinks = false): string[] {
   if (!existsSync(dir) || !statSync(dir).isDirectory()) return [];
   const output: string[] = [];
   for (const name of readdirSync(dir).sort()) {
     if (name.startsWith(".")) continue;
     const path = join(dir, name);
+    if (noLinks && lstatSync(path).isSymbolicLink()) throw new Error(`${path} is a link; a persona's knowledge base must be its own files`);
     const stats = statSync(path);
     if (stats.isDirectory()) {
-      output.push(...walkMarkdownFiles(path));
+      output.push(...walkMarkdownFiles(path, noLinks));
       continue;
     }
     if (stats.isFile() && name.toLowerCase().endsWith(".md")) output.push(path);
@@ -152,6 +153,22 @@ function sectionSlug(heading: string | undefined, ordinal: number): string {
     .replace(/^-+|-+$/g, "") || String(ordinal);
 }
 
+/**
+ * Why a persona's private KB can't be used as its own files (#125): its
+ * folder, kb.json or index.json is a link. Undefined when none is. Missing
+ * files aren't an error here; the loader reports those.
+ */
+export function privateKnowledgebaseLinkError(kbDir: string, kbId: string): string | undefined {
+  for (const path of [join(kbDir, kbId), join(kbDir, kbId, "kb.json"), join(kbDir, kbId, "index.json"), join(kbDir, kbId, "sources")]) {
+    try {
+      if (lstatSync(path).isSymbolicLink()) return `${relative(kbDir, path)} is a link; a persona's knowledge base must be its own files`;
+    } catch {
+      // not there
+    }
+  }
+  return undefined;
+}
+
 export type IngestKnowledgebaseResult =
   | { ok: true; kbId: string; indexPath: string; entryCount: number; sourceCount: number }
   | { ok: false; kbId: string; error: string };
@@ -197,11 +214,29 @@ function entriesFromParsedSource(params: {
  * A failing external source fails the ingest LOUDLY rather than silently
  * indexing a partial KB.
  */
-export async function ingestMindStoneKnowledgebase(kbDir: string, kbId: string, options: { now?: string; maxSummaryChars?: number } = {}): Promise<IngestKnowledgebaseResult> {
+export async function ingestMindStoneKnowledgebase(
+  kbDir: string,
+  kbId: string,
+  options: { now?: string; maxSummaryChars?: number; noLinks?: boolean } = {},
+): Promise<IngestKnowledgebaseResult> {
+  // A persona's private KB (#125, `noLinks`) is its own files: no links
+  // anywhere in it, and no folder sources outside it.
+  if (options.noLinks) {
+    const linkError = privateKnowledgebaseLinkError(kbDir, kbId);
+    if (linkError) return { ok: false, kbId, error: linkError };
+  }
   const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
   if (!loaded.ok) return { ok: false, kbId, error: loaded.error };
   const kb = loaded.kb;
-  const sourcePaths = walkMarkdownFiles(kb.sourcesDir);
+  if (options.noLinks && kb.externalSources.some((source) => source.type === "folder")) {
+    return { ok: false, kbId, error: "a persona's private knowledge base can't read folders outside it; use sources/ or a URL source" };
+  }
+  let sourcePaths: string[];
+  try {
+    sourcePaths = walkMarkdownFiles(kb.sourcesDir, options.noLinks);
+  } catch (error) {
+    return { ok: false, kbId, error: error instanceof Error ? error.message : String(error) };
+  }
 
   const externalDocuments: ExternalSourceDocument[] = [];
   for (const source of kb.externalSources) {
@@ -441,11 +476,18 @@ export function discoverKnowledgebaseRecallDocuments(options: {
   config?: MindStoneConfig;
   paths?: MindStoneRuntimePaths;
   only?: string[];
-  private?: { personaId: string; dir: string; only?: string[] };
+  /**
+   * A workflow step's KB ids. They narrow each kind on its own: global
+   * collections only if the step names one of them, private KBs only if it
+   * names one of those. Naming only private KBs leaves global recall as it was.
+   */
+  step?: string[];
+  private?: { personaId: string; dir: string };
 } = {}): MemoryDocument[] {
   if (options.config?.knowledgebases?.recall?.enabled === false) return [];
   const documents = knowledgebaseRecallDocuments(knowledgebasesDirFromConfig(options.config, options.paths), {
     only: options.only,
+    step: options.step,
     idPrefix: "kb:",
     label: "Knowledgebase",
     titleTag: "KB",
@@ -453,7 +495,8 @@ export function discoverKnowledgebaseRecallDocuments(options: {
   });
   if (options.private) {
     documents.push(...knowledgebaseRecallDocuments(options.private.dir, {
-      only: options.private.only,
+      step: options.step,
+      noLinks: true,
       idPrefix: `pkb:${options.private.personaId}:`,
       label: `Persona ${options.private.personaId} private knowledgebase`,
       titleTag: `Persona KB`,
@@ -466,6 +509,9 @@ export function discoverKnowledgebaseRecallDocuments(options: {
 
 function knowledgebaseRecallDocuments(kbDir: string, options: {
   only?: string[];
+  step?: string[];
+  /** Private KBs: a KB whose kb.json or index.json is a link is left out. */
+  noLinks?: boolean;
   idPrefix: string;
   label: string;
   titleTag: string;
@@ -473,10 +519,14 @@ function knowledgebaseRecallDocuments(kbDir: string, options: {
   personaId?: string;
 }): MemoryDocument[] {
   const documents: MemoryDocument[] = [];
-  const only = options.only ? new Set(options.only) : undefined;
-  for (const summary of discoverMindStoneKnowledgebases(kbDir)) {
+  const summaries = discoverMindStoneKnowledgebases(kbDir);
+  let only = options.only ? new Set(options.only) : undefined;
+  const named = (options.step ?? []).filter((id) => summaries.some((summary) => summary.id === id));
+  if (named.length) only = new Set(only ? named.filter((id) => only!.has(id)) : named);
+  for (const summary of summaries) {
     if (summary.error || !summary.indexed) continue;
     if (only && !only.has(summary.id)) continue;
+    if (options.noLinks && privateKnowledgebaseLinkError(kbDir, summary.id)) continue;
     const loaded = loadMindStoneKnowledgebase(kbDir, summary.id);
     if (!loaded.ok) continue;
     const index = readMindStoneKbIndex(loaded.kb);
