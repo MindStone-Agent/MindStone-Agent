@@ -1246,6 +1246,8 @@ SPEC="${SPEC}" node -e 'require("fs").writeFileSync(process.argv[1], JSON.string
 ln -s "${TEMP_RUNTIME}/state-elsewhere.json" "${BEDS}/reembed.json"
 [[ "$(call GET /admin/personas/grower/knowledgebases)" == 200 ]] || { echo "private KB list: $(cat "${BODY}")" >&2; exit 1; }
 node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if ((b.knowledgebases??[]).some((k)=>k.reembed)) { console.error("a linked reembed.json was read for a persona KB: " + JSON.stringify(b.knowledgebases)); process.exit(1); }' "${BODY}"
+[[ "$(call GET /admin/personas/grower)" == 200 ]] || { echo "persona detail: $(cat "${BODY}")" >&2; exit 1; }
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if ((b.persona?.privateKnowledgebases??[]).some((k)=>k.reembed)) { console.error("a linked reembed.json was read for the persona detail: " + JSON.stringify(b.persona?.privateKnowledgebases)); process.exit(1); }' "${BODY}"
 rm "${BEDS}/reembed.json" && cp "${TEMP_RUNTIME}/state-elsewhere.json" "${BEDS}/reembed.json"
 [[ "$(call GET /admin/personas/grower/knowledgebases)" == 200 ]] || exit 1
 node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const p=(b.knowledgebases??[]).find((k)=>k.id==="beds"); if (!p?.reembed?.gaveUp) { console.error("control: a real reembed.json should show: " + JSON.stringify(b.knowledgebases)); process.exit(1); }' "${BODY}"
