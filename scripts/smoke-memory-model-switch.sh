@@ -202,10 +202,12 @@ for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sle
 BODY="${TEMP_RUNTIME}/body.json"
 ADMIN=(-H "Authorization: Bearer ${MS_TOKEN}" -H "x-mindstone-admin-token: ${MS_ADMIN_TOKEN}" -H 'x-mindstone-user-role: admin' -H 'x-mindstone-user-id: smoke-admin' -H 'content-type: application/json')
 post() { curl -s -o "${BODY}" -w '%{http_code}' -X POST "${ADMIN[@]}" -d "$2" "${BASE}$1"; }
-field() { node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); let v=b; for (const k of process.argv[2].split(".")) v=v?.[k]; console.log(typeof v==="object"?JSON.stringify(v):String(v))' "${BODY}" "$1"; }
 [[ "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" == 200 ]] || { echo "granting advanced settings failed" >&2; exit 1; }
-[[ "$(post /admin/memory/check '{"embeddingProvider":"ollama:model-b"}')" == 200 && "$(field ok)" == true ]] || { echo "checking model-b failed: $(cat "${BODY}")" >&2; exit 1; }
-[[ "$(field index.embedded)" -ge 2 && "$(field index.otherModel)" == "$(field index.embedded)" ]] || { echo "the check for model-b should count every memory as another model's: $(cat "${BODY}")" >&2; exit 1; }
-[[ "$(post /admin/memory/check '{"embeddingProvider":"ollama:model-a"}')" == 200 && "$(field index.otherModel)" == 0 ]] || { echo "the check for the model that embedded them should count none: $(cat "${BODY}")" >&2; exit 1; }
+# judge <label> <js condition on b>: the answer in BODY, judged in node, so a missing field fails (never a shell error).
+judge() { node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!(new Function("b", "return " + process.argv[2]))(b)) { console.error(process.argv[3] + ": " + JSON.stringify(b)); process.exit(1); }' "${BODY}" "$2" "$1"; }
+[[ "$(post /admin/memory/check '{"embeddingProvider":"ollama:model-b"}')" == 200 ]] || { echo "checking model-b failed: $(cat "${BODY}")" >&2; exit 1; }
+judge "the check for model-b should count every memory as another model's" 'b.ok === true && Number.isInteger(b.index?.embedded) && b.index.embedded >= 2 && b.index.otherModel === b.index.embedded'
+[[ "$(post /admin/memory/check '{"embeddingProvider":"ollama:model-a"}')" == 200 ]] || { echo "checking model-a failed: $(cat "${BODY}")" >&2; exit 1; }
+judge "the check for the model that embedded them should count none" 'b.ok === true && Number.isInteger(b.index?.embedded) && b.index.embedded >= 2 && b.index.otherModel === 0'
 
 echo "Memory embedding model switch smoke test passed."

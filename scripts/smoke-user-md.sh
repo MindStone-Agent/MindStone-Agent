@@ -96,6 +96,7 @@ expect "$(put_user "${ETAG}" "${NEW}")" 403 "a write without the permission"
 expect "$(post /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}')" 200 "granting advanced settings"
 expect "$(put_user none "${NEW}")" 428 "a write without If-Match"
 expect "$(put_user '*' "${NEW}")" 428 "a write with If-Match: *"
+expect "$(put_user "W/${ETAG}" "${NEW}")" 428 "a write with a weak etag"
 expect "$(put_user '"0000"' "${NEW}")" 412 "a write with a wrong etag"
 grep -q 'SYNTH-OLD-140' "${USER_MD}" || { echo "a refused write changed USER.md" >&2; exit 1; }
 
@@ -103,6 +104,8 @@ grep -q 'SYNTH-OLD-140' "${USER_MD}" || { echo "a refused write changed USER.md"
 BAD="${TEMP_RUNTIME}/bad.json"
 body_file "${BAD}" '{"markdown":"bell \u0007 here"}'
 expect "$(put_user "${ETAG}" "${BAD}")" 400 "a control character"
+body_file "${BAD}" '{"markdown":"a C1 control \u0085 here"}'
+expect "$(put_user "${ETAG}" "${BAD}")" 400 "a C1 control character"
 body_file "${BAD}" '{"markdown":"x","path":"/etc/passwd"}'
 expect "$(put_user "${ETAG}" "${BAD}")" 400 "an unknown field"
 body_file "${BAD}" '{"markdown":42}'
@@ -192,6 +195,21 @@ ln -s "${DATA}/agents/default" "${DATA}/agents/alias"
 expect "$(patch_config agents '{"default":{"userPath":"agents/alias/USER.md"}}')" 200 "userPath through a link between agent folders"
 expect "$(get /admin/user)" 409 "reading through a link between agent folders"
 rm "${DATA}/agents/alias" "${USER_MD}"
+# Over the read limit: refused without reading it.
+expect "$(patch_config agents '{"default":{"userPath":"agents/default/USER.md"}}')" 200 "userPath back for the size limit"
+head -c $((8 * 1024 * 1024 + 1)) /dev/zero | tr '\0' 'a' > "${USER_MD}"
+expect "$(get /admin/user)" 409 "reading a USER.md over 8 MiB"
+rm "${USER_MD}"
+# A hard link to a stored secret as USER.md: refused, read or write.
+printf 'SYNTH-HARDLINK-140\n' > "${DATA}/secrets/hard.token"
+expect "$(patch_config agents '{"default":{"userPath":"agents/default/USER.md"}}')" 200 "userPath back for the hard link"
+rm -f "${USER_MD}"
+ln "${DATA}/secrets/hard.token" "${USER_MD}"
+expect "$(get /admin/user)" 409 "reading a USER.md hard-linked to a secret"
+grep -q 'SYNTH-HARDLINK-140' "${BODY}" && { echo "GET read a secret through a hard link" >&2; exit 1; }
+expect "$(put_user "${GOOD_ETAG}" "${NEW}")" 409 "writing a USER.md hard-linked to a secret"
+grep -q 'SYNTH-HARDLINK-140' "${DATA}/secrets/hard.token" || { echo "a write changed the hard-linked secret" >&2; exit 1; }
+rm "${USER_MD}"
 # No userPath: the agent reads none, so there is none to show or write.
 expect "$(patch_config agents '{"default":{"userPath":null}}')" 200 "removing userPath"
 expect "$(get /admin/user)" 409 "reading with no userPath"

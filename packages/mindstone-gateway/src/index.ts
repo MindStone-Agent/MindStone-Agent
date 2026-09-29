@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync, readSync, fstatSync } from "node:fs";
+import { appendFileSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, openSync, closeSync, fsyncSync, readSync, fstatSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve as resolvePath, sep } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -2286,15 +2286,19 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       sendJson(res, file.status, { ok: false, error: file.error });
       return;
     }
-    const text = file.exists ? readFileSync(file.path, "utf-8") : undefined;
-    const bytes = text === undefined ? 0 : Buffer.byteLength(text, "utf-8");
+    const read = file.exists ? readAdminUserFile(file.path) : undefined;
+    if (read && !read.ok) {
+      sendJson(res, 409, { ok: false, error: read.error });
+      return;
+    }
+    const bytes = read?.content.length ?? 0;
     const tooLarge = bytes > USER_MD_MAX_BYTES;
     sendJson(res, 200, {
       ok: true,
       exists: file.exists,
       bytes,
-      etag: userMarkdownEtag(text),
-      ...(text !== undefined && !tooLarge ? { markdown: text } : {}),
+      etag: userMarkdownEtag(read?.content),
+      ...(read && !tooLarge ? { markdown: read.content.toString("utf-8") } : {}),
       ...(tooLarge ? { tooLarge: true, maxBytes: USER_MD_MAX_BYTES } : {}),
     });
     return;
@@ -2320,7 +2324,8 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const body = await readAdminBody(req, res);
     if (!body) return;
     const ifMatch = typeof req.headers["if-match"] === "string" ? req.headers["if-match"].trim() : "";
-    if (!ifMatch || ifMatch === "*") {
+    // The one etag read with it: no "*", and no weak etag (If-Match compares strongly).
+    if (!ifMatch || ifMatch === "*" || /(^|,)\s*W\//i.test(ifMatch)) {
       refuse(428, { error: "send the etag read with USER.md (If-Match)" }, { reason: "etag_required", target: "user_md" });
       return;
     }
@@ -2335,7 +2340,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       return;
     }
     if (USER_MD_CONTROL.test(markdown)) {
-      refuse(400, { error: "USER.md can't hold control characters other than newlines and tabs" }, { reason: "control_characters", target: "user_md" });
+      refuse(400, { error: "USER.md can't hold control characters other than newline, carriage return and tab" }, { reason: "control_characters", target: "user_md" });
       return;
     }
     await withAdminWriteLock(() => {
@@ -2354,15 +2359,19 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         refuse(file.status, { error: file.error }, { reason: "user_md_unavailable", target: "user_md" });
         return;
       }
-      const current = file.exists ? readFileSync(file.path, "utf-8") : undefined;
-      if (!ifMatchSatisfied(ifMatch, userMarkdownEtag(current))) {
+      const current = file.exists ? readAdminUserFile(file.path) : undefined;
+      if (current && !current.ok) {
+        refuse(409, { error: current.error }, { reason: "user_md_unavailable", target: "user_md" });
+        return;
+      }
+      if (!ifMatchSatisfied(ifMatch, userMarkdownEtag(current?.content))) {
         refuse(412, { error: "USER.md changed since you read it (the agent may have updated it); reload and try again" }, { reason: "etag", target: "user_md" });
         return;
       }
       const mode = file.exists ? statSync(file.path).mode & 0o777 : 0o600;
       writeFileAtomic(file.path, markdown, mode);
       appendAdminAudit(paths.dataDir, { userId, action: "user_md_replaced", bytes: Buffer.byteLength(markdown, "utf-8") });
-      sendJson(res, 200, { ok: true, bytes: Buffer.byteLength(markdown, "utf-8"), etag: userMarkdownEtag(markdown) });
+      sendJson(res, 200, { ok: true, bytes: Buffer.byteLength(markdown, "utf-8"), etag: userMarkdownEtag(Buffer.from(markdown, "utf-8")) });
     });
     return;
   }
@@ -4311,11 +4320,41 @@ function removeOrEmpty(path: string): boolean {
 
 /** USER.md through the admin API (#140): at most this many bytes, and no control characters but newline, CR and tab. */
 const USER_MD_MAX_BYTES = 64 * 1024;
-const USER_MD_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const USER_MD_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/;
+/** Larger than this, USER.md isn't read at all (#140 review): not shown, and not replaced here. */
+const USER_MD_READ_LIMIT = 8 * 1024 * 1024;
 
 /** The etag of USER.md as read (a missing file has its own), keyed per gateway process like the config's. */
-function userMarkdownEtag(text: string | undefined): string {
-  return configEtag(text === undefined ? "\u0000USER.md missing" : `\u0000USER.md\n${text}`);
+function userMarkdownEtag(content: Buffer | undefined): string {
+  return configEtag(content === undefined ? "\u0000USER.md missing" : `\u0000USER.md\n${content.toString("base64")}`);
+}
+
+/**
+ * USER.md's bytes, read without following a link and only from a regular
+ * file with one name (#140 review: a hard link to a stored secret passed an
+ * lstat check). The size is checked on the open file before reading.
+ */
+function readAdminUserFile(path: string): { ok: true; content: Buffer } | { ok: false; error: string } {
+  const refused = { ok: false as const, error: "USER.md isn't a plain file with one name, so it can't be read or changed here" };
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1) return refused;
+    if (stat.size > USER_MD_READ_LIMIT) return { ok: false, error: `USER.md is larger than ${USER_MD_READ_LIMIT / 1024 / 1024} MiB, so it can't be read or changed here` };
+    const content = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < stat.size) {
+      const read = readSync(fd, content, offset, stat.size - offset, offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    return { ok: true, content: content.subarray(0, offset) };
+  } catch {
+    return refused;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 /**
