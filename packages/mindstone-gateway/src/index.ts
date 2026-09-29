@@ -2734,8 +2734,8 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
             // the approval has happened by then. It counts as that KB's
             // ingest, so an admin ingest of it can't overlap (#125 review).
             const ingestKey = `${result.personaId}/${result.kbId}`;
-            const ingested = PRIVATE_KB_INGESTS.has(ingestKey)
-              ? { ok: false as const, error: "another ingest of it is running; ingest it again from the persona editor when it finishes" }
+            const ingested = PRIVATE_KB_INGESTS.has(ingestKey) || PRIVATE_KB_INGESTS.size >= MAX_PRIVATE_KB_INGESTS
+              ? { ok: false as const, error: "other ingests are running; ingest it from the persona editor when they finish" }
               : await (async () => {
                   PRIVATE_KB_INGESTS.add(ingestKey);
                   try {

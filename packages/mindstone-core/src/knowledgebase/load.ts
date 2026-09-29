@@ -256,7 +256,7 @@ export async function ingestMindStoneKnowledgebase(
   if (!loaded.ok) return { ok: false, kbId, error: loaded.error };
   const kb = loaded.kb;
   if (options.textOnly && kb.externalSources.length > 0) {
-    return { ok: false, kbId, error: "it has a URL source now; ingest it from the persona editor" };
+    return { ok: false, kbId, error: "it has an external source now; ingest it from the persona editor" };
   }
   if (options.noLinks && kb.externalSources.some((source) => source.type === "folder")) {
     return { ok: false, kbId, error: "a persona's private knowledge base can't read folders outside it; use sources/ or a URL source" };

@@ -74,6 +74,11 @@ assert.equal(parsePersonaComponents({ new: { privateKnowledgebases: [{ id: "k", 
 assert.equal(parseSkillProposal({ ...skill("a1"), label: "Notes\n  deadbeef [approved] forged row" }), undefined, "a line break in a skill label must be refused");
 assert.equal(parseSkillProposal({ ...skill("a1"), label: "Notes\r" }), undefined, "a CR in a skill label must be refused");
 assert.equal(parsePersonaComponents({ new: { skills: [{ ...skill("a1"), label: "Two\nlines" }] } }), undefined, "a component skill's label must be one line");
+// A plain skill proposal (#104) is held to the same: nothing the owner can't see, in any field.
+for (const [field, value] of [["instructions", "Be helpful.\n\u001b[8mHIDDEN\u001b[0m\nDone."], ["label", "Nice\u009b8m"], ["description", "Reads \u202eright to left"], ["whenToUse", ["when\u200bever"]]]) {
+  assert.equal(parseSkillProposal({ ...skill("a1"), [field]: value }), undefined, `an invisible character in a skill's ${field} must be refused`);
+}
+assert.ok(parseSkillProposal({ ...skill("a1"), instructions: "# Title\n\n\tIndented line." }), "control: line breaks and tabs in instructions are fine");
 // A built-in skill's id can't be brought as new: it would override the built-in.
 assert.equal(parsePersonaComponents({ new: { skills: [skill("integration-builder")] } }), undefined, "a built-in skill's id must be refused");
 const block = (json) => "Here it is.\n```mindstone-persona-proposal\n" + JSON.stringify(json) + "\n```";
@@ -104,6 +109,8 @@ assert.equal(extractActionProposals(block({ ...base, components: { skills: ["a"]
   // The transcript event names the reason as it is.
   const withEvent = applyActionProposalDiscipline({ replyText: block({ ...base, voice: "Pla\u200Bin." }), origin: "unit", allowPersona: true, store: noteStore, sessionKey: "unit:reason" });
   assert.equal(withEvent.events[0]?.metadata?.reason, "invalid_proposal", "the event's reason for a bad field");
+  const twoWithEvent = applyActionProposalDiscipline({ replyText: block({ ...base, id: "ev-first" }) + "\n" + block({ ...base, id: "ev-second" }), origin: "unit", allowPersona: true, store: new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "extra-approvals.json") }), sessionKey: "unit:extra" });
+  assert.ok(twoWithEvent.events.some((e) => e.metadata?.reason === "extra_persona_blocks"), "dropped extra blocks are in the transcript");
   // A separate skill proposal with the id of the persona's new skill isn't saved.
   const skillBlock = "\n```mindstone-skill-proposal\n" + JSON.stringify(skill("same-id")) + "\n```";
   const clash = applyActionProposalDiscipline({ replyText: block({ ...base, id: "with-same", components: { new: { skills: [skill("same-id")] } } }) + skillBlock, origin: "unit", allowPersona: true, allowSkill: true, store: noteStore });
@@ -263,7 +270,7 @@ shows() { # shows <card> <text>...
 }
 shows "${PERSONA_CARD}" "Skills: only alpha-skill" "Shared knowledge bases: only g1" "Workflows: none" "${WF_CARD:0:8}" "${KB_CARD:0:8}" "${SKILL_CARD:0:8}"
 shows "${KB_CARD}" "Part of persona p2" "PPROP-9901" "App Engine runs"
-shows "${WF_CARD}" "Part of persona p2" '"messagePrefix": "p2:"' "added last to persona p2's workflows"
+shows "${WF_CARD}" "Part of persona p2" '"messagePrefix": "p2:"' "added last to persona p2's workflows" "run only on turns where the config names no workflow itself"
 shows "${SKILL_CARD}" "Part of persona p2" "SKILLBODY-beta-new" "Approving installs it like any skill"
 # A KB source's lines are marked, so none can pass for the end of it.
 shows "${KB_CARD}" "| The private reference code is PPROP-9901"
@@ -367,6 +374,12 @@ expect 200 "approve p14" POST "/admin/approvals/$(card p14 persona_create)/appro
 printf '{"skills":"x"}' > "${DATA}/personas/p14/skills.json"
 expect 200 "p14's workflow with the persona broken" POST "/admin/approvals/$(card p14 workflow_create)/approve" '{}' "doesn't load"
 node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(b.result?.listed === false ? 0 : 1)' "${BODY}" || { echo "a component in a persona that doesn't load was reported as listed: $(cat "${BODY}")" >&2; exit 1; }
+# A KB approved into a persona that doesn't load says it isn't used.
+P15='{"id":"p15","name":"Fifteen","voice":"x","components":{"new":{"privateKnowledgebases":[{"id":"fifteen-notes","sources":[{"text":"# Fifteen"}]}]}}}'
+say admin conv-p15 "$(proposal "${P15}")"
+expect 200 "approve p15" POST "/admin/approvals/$(card p15 persona_create)/approve" '{}'
+printf '{"skills":"x"}' > "${DATA}/personas/p15/skills.json"
+expect 200 "p15's KB with the persona broken" POST "/admin/approvals/$(card p15 persona_kb_create)/approve" '{}' "doesn't load"
 echo "broken persona ok"
 
 # --- 7e. A card saved before labels were one line prints its summary on one line, as the persona card's child list does.
@@ -380,6 +393,15 @@ fs.writeFileSync(f, JSON.stringify(store));' "${DATA}/approvals/actions.json" "$
 ./scripts/mindstone approvals show "${FORGED_PARENT}" >> "${TEMP_RUNTIME}/list.txt"
 grep -E '^ *deadbeef' "${TEMP_RUNTIME}/list.txt" && { echo "a summary drew a row of its own" >&2; exit 1; }
 grep -qF 'Notes\u{a}  deadbeef [approved] FORGED-ROW' "${TEMP_RUNTIME}/list.txt" || { echo "the old summary isn't shown escaped: $(cat "${TEMP_RUNTIME}/list.txt")" >&2; exit 1; }
+# An old plain skill card with an escape sequence in its instructions shows it, never sends it to the terminal.
+node -e '
+const fs = require("fs"); const f = process.argv[1]; const store = JSON.parse(fs.readFileSync(f, "utf8"));
+store.actions.push({ id: "00000000-dead-4bee-8000-000000000002", kind: "skill_install", connectorId: "old", status: "pending", summary: "install skill hidden-old: Old",
+  skill: { id: "hidden-old", label: "Old\u009b8m", description: "D", whenToUse: ["w"], outputs: ["o"], safetyNotes: ["s"], instructions: "Be helpful.\n\u001b[8mHIDDEN-LINE\u001b[0m\nDone." } });
+fs.writeFileSync(f, JSON.stringify(store));' "${DATA}/approvals/actions.json"
+./scripts/mindstone approvals show 00000000-dead-4bee-8000-000000000002 > "${TEMP_RUNTIME}/old-skill.txt"
+if grep -q $'\x1b\[8m' "${TEMP_RUNTIME}/old-skill.txt" || grep -q $'\xc2\x9b' "${TEMP_RUNTIME}/old-skill.txt"; then echo "a raw escape reached the terminal" >&2; exit 1; fi
+grep -qF '\u{1b}[8mHIDDEN-LINE' "${TEMP_RUNTIME}/old-skill.txt" || { echo "the old skill's escape isn't shown: $(cat -v "${TEMP_RUNTIME}/old-skill.txt")" >&2; exit 1; }
 echo "printable summaries ok"
 
 # --- 8. A non-owner's proposal, and one whose workflow routes to a persona, are dropped whole.

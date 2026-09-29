@@ -1732,7 +1732,16 @@ function appendApprovalAuditEvent(action: { id: string; kind: string; connectorI
 
 /** A summary or line as one printable line: control characters (tabs aside) shown as \u{..}, never acted on by the terminal. */
 function printable(text: string): string {
-  return text.replace(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/g, (char) => `\\u{${char.codePointAt(0)!.toString(16)}}`);
+  return text.replace(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g, (char) => `\\u{${char.codePointAt(0)!.toString(16)}}`);
+}
+
+/**
+ * Text as the terminal will show it, line breaks and tabs kept: any other
+ * control character (an escape sequence could hide a line), bidi control or
+ * zero-width character is shown as \u{..} (#125 review).
+ */
+function printableText(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, (char) => `\\u{${char.codePointAt(0)!.toString(16)}}`);
 }
 
 /** One workflow step in a line, for the approval review (#125): what it routes to or checks. */
@@ -1778,7 +1787,7 @@ function personaComponentReview(action: ProposedAction, store: ApprovalStore, wo
     for (const child of children) lines.push(`  ${child.id.slice(0, 8)} [${child.status}] ${printable(child.summary)}`);
   }
   if (action.kind === "workflow_create" && action.workflow) {
-    lines.push(`Workflow ${action.workflow.id}, added last to persona ${action.workflow.personaId}'s workflows: it runs when that persona answers, if the config's own workflow (workflows.active or a route rule) and the persona's earlier workflows don't decide the turn first.`);
+    lines.push(`Workflow ${action.workflow.id}, added last to persona ${action.workflow.personaId}'s workflows. A persona's workflows run only on turns where the config names no workflow itself (no workflows.active, no matching route rule); then they are tried in order, and the first that decides, or a gate that stops, ends it, so this one runs only if the earlier ones don't.`);
     lines.push(`--- workflow.json ---\n${JSON.stringify(action.workflow.definition, null, 2)}\n--- end workflow.json ---`);
   }
   if (action.kind === "persona_kb_create" && action.knowledgebase) {
@@ -1849,19 +1858,19 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
     output.write(`Summary: ${printable(action.summary)}\n`);
     if (action.send) {
       output.write(`Reply to: message ${action.send.inReplyToMessageId ?? "?"} in chat ${action.send.chatId ?? "?"}\n`);
-      output.write(`--- draft ---\n${action.send.text}\n--- end draft ---\n`);
+      output.write(`--- draft ---\n${printableText(action.send.text)}\n--- end draft ---\n`);
     }
     if (action.memory) {
       output.write(`Memory path: ${action.memory.path}\n`);
-      output.write(`--- content ---\n${action.memory.content}\n--- end content ---\n`);
+      output.write(`--- content ---\n${printableText(action.memory.content)}\n--- end content ---\n`);
     }
     if (action.skill) {
       // Exactly what the agent reads once it is installed (#104).
       const composed = composeMindStoneSkillDraft({ ...action.skill, skillMarkdown: action.skill.instructions });
-      output.write(`Skill: ${action.skill.id} (${action.skill.label})\n`);
+      output.write(`Skill: ${action.skill.id} (${printable(action.skill.label)})\n`);
       output.write(
         composed.ok
-          ? `--- what the agent reads ---\n${renderMindStoneSkillForPrompt(composed.artifact, composed.skillMarkdown)}\n--- end ---\n`
+          ? `--- what the agent reads ---\n${printableText(renderMindStoneSkillForPrompt(composed.artifact, composed.skillMarkdown))}\n--- end ---\n`
           : `This proposal is not a valid skill: ${composed.error}\n`,
       );
     }
@@ -1897,7 +1906,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
         // A skill is shown exactly as the agent will read it (#104).
         const composedSkill = action.skill ? composeMindStoneSkillDraft({ ...action.skill, skillMarkdown: action.skill.instructions }) : undefined;
         const skillPreview = composedSkill?.ok
-          ? `${renderMindStoneSkillForPrompt(composedSkill.artifact, composedSkill.skillMarkdown)}\nApproving installs it: the agent reads it on your turns from the next message.`
+          ? `${printableText(renderMindStoneSkillForPrompt(composedSkill.artifact, composedSkill.skillMarkdown))}\nApproving installs it: the agent reads it on your turns from the next message.`
           : "";
         const shown = action.persona
           ? personaPreview
@@ -1957,6 +1966,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(ingested.ok
         ? `${gold("Approved")} — private knowledge base ${result.kbId} written and ingested for persona ${result.personaId} (${ingested.entryCount} entries).\n`
         : `${gold("Approved")} — private knowledge base ${result.kbId} written for persona ${result.personaId}, but the ingest failed: ${ingested.error}. Run: mindstone kb ingest --persona ${result.personaId} ${result.kbId}\n`);
+      if (result.note) output.write(`Warning: ${result.note}.\n`);
     } else {
       output.write(`${gold("Approved")} — memory file written: ${result.memoryFile}\n`);
     }

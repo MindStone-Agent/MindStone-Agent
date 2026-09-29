@@ -168,7 +168,7 @@ export type ApproveResult =
   | { outcome: "approved"; kind: "skill_install"; skillId: string; persona?: { id: string; listed: boolean; note: string } }
   | { outcome: "approved"; kind: "workflow_create"; workflowId: string; personaId: string; listed: boolean; note: string }
   /** The KB is written; the caller ingests it (`kbRoot`, `kbId`), since ingest is async. */
-  | { outcome: "approved"; kind: "persona_kb_create"; personaId: string; kbId: string; kbRoot: string }
+  | { outcome: "approved"; kind: "persona_kb_create"; personaId: string; kbId: string; kbRoot: string; listed?: false; note?: string }
   | { outcome: "requeued"; kind: "connector_send" | "connector_mutation"; connectorId: string }
   | { outcome: "already_queued"; kind: "connector_send" | "connector_mutation"; connectorId: string };
 
@@ -422,8 +422,11 @@ export function approveProposedAction(
         exists ? 409 : 422,
       );
     }
-    options.onDecision?.(action, "approved", `private knowledge base written: ${kb.id} (persona ${kb.personaId}); ingest follows`);
-    return { outcome: "approved", kind: "persona_kb_create", personaId: kb.personaId, kbId: kb.id, kbRoot };
+    // Written, but a persona that doesn't load uses none of it (#125 review).
+    const personaLoads = loadMindStonePersona(dirname(parentPersonaDir), basename(parentPersonaDir)).ok;
+    const unused = personaLoads ? undefined : "the persona doesn't load, so this knowledge base isn't used until the persona is fixed";
+    options.onDecision?.(action, "approved", `private knowledge base written: ${kb.id} (persona ${kb.personaId}); ingest follows${unused ? ` (${unused})` : ""}`);
+    return { outcome: "approved", kind: "persona_kb_create", personaId: kb.personaId, kbId: kb.id, kbRoot, ...(unused ? { listed: false, note: unused } : {}) };
   }
   if (action.kind === "persona_create" && action.persona) {
     // Written before the decision, so a refused decision leaves nothing

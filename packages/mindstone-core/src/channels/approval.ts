@@ -353,6 +353,11 @@ function boundedList(value: unknown): string[] | undefined {
 export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undefined {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
+  // What the owner reviews is all the agent reads: no characters that can't be
+  // seen (controls, escapes, bidi, zero-width) and no stacked marks in any
+  // field, as for a persona's own fields (#125 review; older than #125).
+  const fields = ["id", "label", "description", "goal", "whenToUse", "outputs", "safetyNotes", "instructions"].map((key) => record[key]);
+  if (hasInvisibleText(fields)) return undefined;
   const id = typeof record.id === "string" && SKILL_PROPOSAL_ID.test(record.id) && record.id !== "drafts" ? record.id : undefined;
   // One line: the label goes into the card's summary, which list views print
   // as it is, so a line break could draw rows of its own (#125 review).
@@ -758,16 +763,23 @@ export function applyActionProposalDiscipline(params: {
     extraBlocks > 0 ? `(Only one persona proposal per reply is put up for approval; ${extraBlocks} other persona block(s) in this reply were dropped.)` : "",
     skillClash && params.allowSkill ? "(The separate skill proposal wasn't saved: the persona brings a skill with the same id, on its own card.)" : "",
   ].filter(Boolean).map((note) => `\n\n${note}`).join("");
-  const cappedEvents = (capped || refused) && params.sessionKey
-    ? [appendTranscriptEntry({
-        sessionKey: params.sessionKey,
+  // Every drop is in the transcript too, not only in the reply (#125 review).
+  const drops: Array<{ reason: string; text: string }> = [
+    ...(capped ? [{ reason: "too_many_pending", text: "persona proposal dropped: too many proposals already pending" }] : []),
+    ...(!capped && refused ? [{ reason: "invalid_proposal", text: `persona proposal dropped: ${refused}` }] : []),
+    ...(extraBlocks > 0 ? [{ reason: "extra_persona_blocks", text: `${extraBlocks} other persona block(s) dropped: one per reply` }] : []),
+    ...(skillClash && params.allowSkill ? [{ reason: "skill_id_clash", text: "skill proposal dropped: the persona brings a skill with the same id" }] : []),
+  ];
+  const cappedEvents = params.sessionKey
+    ? drops.map((drop) => appendTranscriptEntry({
+        sessionKey: params.sessionKey!,
         agentId: params.agentId ?? "default",
         role: "event",
-        text: capped ? "persona proposal dropped: too many proposals already pending" : `persona proposal dropped: ${refused}`,
+        text: drop.text,
         source: params.source,
         runId: params.runId,
-        metadata: { event: "persona_proposal_dropped", reason: capped ? "too_many_pending" : "invalid_proposal", origin: params.origin },
-      })]
+        metadata: { event: drop.reason === "skill_id_clash" ? "skill_proposal_dropped" : "persona_proposal_dropped", reason: drop.reason, origin: params.origin },
+      }))
     : [];
   if (!extracted.memory && !extracted.mutations.length && !persona && !skill) {
     return { text: `${extracted.text}${cappedNote}`, content, events: cappedEvents, proposals: [] };
