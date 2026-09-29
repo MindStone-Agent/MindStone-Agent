@@ -351,9 +351,20 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   other.prepare("UPDATE memory_chunks SET embedding_spec = 'stub:a' WHERE chunk_id IN (SELECT chunk_id FROM memory_chunks WHERE chunk_id != 'refused#0' ORDER BY updated_at DESC LIMIT 4)").run();
   const rejectionsBefore = (other.prepare("SELECT count(*) AS n FROM memory_embed_rejections").get() as { n: number }).n;
   other.close();
-  const down = { id: "stub", model: "p", async embedTexts() { throw Object.assign(new Error("service unavailable"), { status: 503 }); } };
+  let downCalls = 0;
+  const down = { id: "stub", model: "p", async embedTexts() { downCalls += 1; throw Object.assign(new Error("service unavailable"), { status: 503 }); } };
   const outage = await backfillSqliteMemoryEmbeddings({ paths, provider: down }).then(() => undefined, (error: unknown) => error);
   if (!(outage instanceof Error)) fail("an embedder that is down should still stop the run");
+  // Stopped at the first request: no chunk is tried alone during an outage.
+  if (downCalls !== 1) fail(`an outage should cost one request, not a retry of each chunk: ${downCalls}`);
+  // And a request of one chunk that meets an outage isn't recorded as a refusal either.
+  const lone = new DatabaseSync(dbPath);
+  lone.prepare("UPDATE memory_chunks SET embedding_spec = 'stub:p' WHERE embedding_spec = 'stub:a' AND chunk_id != (SELECT chunk_id FROM memory_chunks WHERE embedding_spec = 'stub:a' AND chunk_id != 'refused#0' ORDER BY updated_at DESC LIMIT 1) AND chunk_id != 'refused#0'").run();
+  const others = (lone.prepare("SELECT count(*) AS n FROM memory_chunks WHERE embedding_json IS NOT NULL AND (embedding_spec IS NULL OR embedding_spec != 'stub:p') AND chunk_id != 'refused#0'").get() as { n: number }).n;
+  lone.close();
+  if (others !== 1) fail(`control: one chunk should be left for the one-chunk outage: ${others}`);
+  const loneOutage = await backfillSqliteMemoryEmbeddings({ paths, provider: down }).then(() => undefined, (error: unknown) => error);
+  if (!(loneOutage instanceof Error)) fail("an outage on a one-chunk request should still stop the run");
   const count = new DatabaseSync(dbPath);
   const rejectionsAfter = (count.prepare("SELECT count(*) AS n FROM memory_embed_rejections").get() as { n: number }).n;
   count.prepare("DELETE FROM memory_chunks WHERE chunk_id = 'refused#0'").run();
