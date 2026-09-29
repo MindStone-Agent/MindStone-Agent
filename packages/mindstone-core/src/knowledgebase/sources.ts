@@ -6,7 +6,8 @@ import { isIP, type LookupFunction } from "node:net";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { Readable } from "node:stream";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
-import { isNonPublicHost } from "../provider/enterprise.js";
+import { networkInterfaces } from "node:os";
+import { bareHost, ipv4Of, isNonPublicHost } from "../provider/enterprise.js";
 
 /**
  * External KB source providers (issue #23): feed OUTSIDE content into the #13
@@ -213,7 +214,9 @@ const HTML_BLOCKS = new Set(["p", "div", "li", "br", "tr"]);
  * it is known to find nothing.
  */
 export function extractHtmlText(html: string): { title?: string; markdown: string } {
-  const lower = html.toLowerCase();
+  // ASCII only, so every position in it is the same position in the page:
+  // "İ".toLowerCase() is two characters long (#142 review).
+  const lower = html.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
   const tagName = (at: number): string => {
     let end = at;
     while (end < html.length && end - at < 16 && /[a-z0-9]/.test(lower[end]!)) end += 1;
@@ -292,13 +295,36 @@ export function extractHtmlText(html: string): { title?: string; markdown: strin
   return { title, markdown };
 }
 
+/** This machine's own addresses, every interface: a service on it listening on all of them is reachable at each (#142 review). */
+function ownAddresses(): Set<string> {
+  const own = new Set<string>();
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) own.add(bareHost(entry.address));
+  }
+  return own;
+}
+
+/** This machine or a link-local network (the cloud metadata addresses live there). */
+function isThisMachineOrLinkLocal(host: string): boolean {
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::" || host === "::1" || /^fe[89ab][0-9a-f]?:/.test(host)) return true;
+  const v4 = ipv4Of(host);
+  return v4 !== undefined && (v4[0] === 127 || v4[0] === 0 || (v4[0] === 169 && v4[1] === 254) || (v4[0] === 168 && v4[1] === 63 && v4[2] === 129 && v4[3] === 16));
+}
+
 /**
- * Set only in the gateway host's own environment (a test stub, an intranet
- * wiki), never from the Console: a persona's private KB URLs may then reach
- * this machine and the private network (#142 review).
+ * Whether a private KB's URL may not reach this host (#142 review). Set only
+ * by the gateway host's own environment, never from the Console:
+ * - default: public hosts only, never one of this machine's own addresses;
+ * - `MINDSTONE_KB_PRIVATE_HOSTS=1`: private networks too (an intranet wiki),
+ *   still never this machine, link-local or metadata addresses;
+ * - `MINDSTONE_KB_PRIVATE_HOSTS=any`: everything, for a test stub on this machine.
  */
-export function kbPrivateHostsAllowed(): boolean {
-  return process.env.MINDSTONE_KB_PRIVATE_HOSTS === "1";
+export function kbUrlHostRefused(hostname: string): boolean {
+  const mode = process.env.MINDSTONE_KB_PRIVATE_HOSTS;
+  if (mode === "any") return false;
+  const host = bareHost(hostname);
+  if (ownAddresses().has(host) || isThisMachineOrLinkLocal(host)) return true;
+  return mode === "1" ? false : isNonPublicHost(host);
 }
 
 /** Bounds on a private KB's URL fetch (#125, #142 review). */
@@ -311,17 +337,23 @@ class UrlHostRefused extends Error {}
 class UrlBodyTooLarge extends Error {}
 
 /**
- * The addresses to connect to: the host must not be this machine or a
- * private network, by name and by every address it resolves to (#142 review).
+ * The addresses to connect to: the host must not be refused by name, nor by
+ * any address it resolves to (#142 review). A name refused for what it
+ * resolves to fails like one that can't be fetched, so the errors don't say
+ * which internal names exist. The lookup counts toward the time limit.
  */
-async function checkedAddresses(hostname: string, refused: ((host: string) => boolean) | undefined): Promise<Array<{ address: string; family: number }>> {
+async function checkedAddresses(hostname: string, refused: (host: string) => boolean, signal: AbortSignal): Promise<Array<{ address: string; family: number }>> {
   const host = hostname.replace(/^\[|\]$/g, "");
-  if (refused?.(host)) throw new UrlHostRefused();
+  if (refused(host)) throw new UrlHostRefused();
   const literal = isIP(host);
   if (literal) return [{ address: host, family: literal }];
-  const resolved = await lookup(host, { all: true, verbatim: true });
-  if (!resolved.length) throw new Error("no address");
-  if (refused && resolved.some((entry) => refused(entry.address))) throw new UrlHostRefused();
+  const resolved = await new Promise<Array<{ address: string; family: number }>>((resolveLookup, reject) => {
+    const aborted = () => reject(new Error("timed out"));
+    if (signal.aborted) return aborted();
+    signal.addEventListener("abort", aborted, { once: true });
+    lookup(host, { all: true, verbatim: true }).then(resolveLookup, reject).finally(() => signal.removeEventListener("abort", aborted));
+  });
+  if (!resolved.length || resolved.some((entry) => refused(entry.address))) throw new Error("not fetched");
   return resolved;
 }
 
@@ -340,7 +372,7 @@ export function requestPinned(url: URL, pinned: Array<{ address: string; family:
     const send = url.protocol === "https:" ? httpsRequest : httpRequest;
     const options: RequestOptions & { autoSelectFamily: boolean } = {
       method: "GET",
-      headers: { Accept: "text/html, text/markdown, text/plain", "Accept-Encoding": "gzip, deflate, br" },
+      headers: { Accept: "text/html, text/markdown, text/plain", "Accept-Encoding": "gzip, br" },
       signal,
       lookup: pinnedLookup,
       // Try each checked address in turn (the lookup is asked for all of them).
@@ -402,9 +434,9 @@ async function readCappedBody(response: IncomingMessage, maxBytes: number): Prom
 async function fetchPrivateKbUrl(
   start: string,
   sourceId: string,
-  options: { allowPrivateHosts: boolean; refusedHost?: (host: string) => boolean; timeoutMs: number; maxBytes: number },
+  options: { refusedHost?: (host: string) => boolean; timeoutMs: number; maxBytes: number },
 ): Promise<{ contentType: string; raw: string }> {
-  const refused = options.allowPrivateHosts ? undefined : options.refusedHost ?? isNonPublicHost;
+  const refused = options.refusedHost ?? kbUrlHostRefused;
   const shown = publicAddress(start);
   const fail = (why: string) => new Error(`url source "${sourceId}" ${why}: ${shown}`);
   const signal = AbortSignal.timeout(options.timeoutMs);
@@ -420,7 +452,7 @@ async function fetchPrivateKbUrl(
     }
     let response: IncomingMessage;
     try {
-      response = await requestPinned(url, await checkedAddresses(url.hostname, refused), signal);
+      response = await requestPinned(url, await checkedAddresses(url.hostname, refused, signal), signal);
     } catch (error) {
       if (error instanceof UrlHostRefused) {
         throw fail(hop ? "redirected to this machine or a private network, which isn't fetched" : "is on this machine or a private network, which isn't fetched");
@@ -473,19 +505,20 @@ export async function loadUrlSourceDocument(
     now?: string;
     timeoutMs?: number;
     maxBytes?: number;
-    /** `refusedHost` replaces `isNonPublicHost`, for tests on this machine only. */
-    privateKb?: { allowPrivateHosts: boolean; refusedHost?: (host: string) => boolean };
+    /** `refusedHost` replaces `kbUrlHostRefused`, for tests on this machine only. */
+    privateKb?: { refusedHost?: (host: string) => boolean };
   } = {},
 ): Promise<ExternalSourceDocument> {
   const url = source.url ?? "";
   if (options.privateKb) {
     const fetched = await fetchPrivateKbUrl(url, source.id, {
-      allowPrivateHosts: options.privateKb.allowPrivateHosts,
       refusedHost: options.privateKb.refusedHost,
       timeoutMs: options.timeoutMs ?? KB_URL_FETCH_LIMITS.timeoutMs,
       maxBytes: options.maxBytes ?? KB_URL_FETCH_LIMITS.maxBytes,
     });
-    return urlDocument(source, url, fetched.contentType, fetched.raw, options.now);
+    // Read as HTML only when it says it is HTML, or says nothing and starts
+    // like HTML: a markdown page is kept as it is (#142 review).
+    return urlDocument(source, url, fetched.contentType, fetched.raw, options.now, true);
   }
   // Errors name the address without its user name, password or query, which can hold a token (#125).
   const shown = publicAddress(url);
@@ -512,11 +545,14 @@ export async function loadUrlSourceDocument(
   return urlDocument(source, url, contentType, raw, options.now);
 }
 
-function urlDocument(source: MindStoneKbExternalSource, url: string, contentType: string, raw: string, at?: string): ExternalSourceDocument {
+function urlDocument(source: MindStoneKbExternalSource, url: string, contentType: string, raw: string, at?: string, byType = false): ExternalSourceDocument {
   const now = at ?? new Date().toISOString();
   let markdown = raw;
   let titleHint: string | undefined;
-  if (contentType.includes("text/html") || /^\s*</.test(raw)) {
+  const html = byType
+    ? contentType.includes("html") || (!contentType && /^\s*</.test(raw))
+    : contentType.includes("text/html") || /^\s*</.test(raw);
+  if (html) {
     const extracted = extractHtmlText(raw);
     markdown = extracted.markdown;
     titleHint = extracted.title;

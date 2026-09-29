@@ -613,6 +613,8 @@ persona_kb_pack_refused() { # <label> <files as JSON [[path, text], ...]> <expec
 persona_kb_pack_refused extsrc '[["personas/pkbp/knowledgebases/evil/kb.json","{\"name\":\"ok\",\"externalSources\":[{\"id\":\"x\",\"type\":\"url\",\"url\":\"http://evil.example/x\"}]}"]]' "personas/pkbp/knowledgebases/evil/kb.json declares externalSources"
 persona_kb_pack_refused index '[["personas/pkbp/knowledgebases/evil/kb.json","{\"name\":\"ok\"}"],["personas/pkbp/knowledgebases/evil/index.json","{\"kbId\":\"evil\",\"entries\":[]}"]]' "knowledgebase pack file not allowed: personas/pkbp/knowledgebases/evil/index.json"
 persona_kb_pack_refused casing '[["personas/pkbp/knowledgebases/evil/KB.JSON","{\"name\":\"ok\",\"externalSources\":[{\"id\":\"x\",\"type\":\"url\",\"url\":\"http://evil.example/x\"}]}"]]' "personas/pkbp/knowledgebases/evil/KB.JSON"
+# A list file the persona loader would refuse is refused at install (#142 review).
+persona_kb_pack_refused badlist '[["personas/pkbp/skills.json","{\"skills\":\"x\"}"]]' "persona pkbp: skills.json must be a list of ids"
 # A safe self-contained kb.json (plain name, no externalSources) must INSTALL.
 SAFE_KB="${WORK}/safe-kb"
 mkdir -p "${SAFE_KB}/knowledgebases/good/sources"

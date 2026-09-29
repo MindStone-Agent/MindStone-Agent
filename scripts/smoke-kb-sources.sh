@@ -82,6 +82,11 @@ assert.ok(!extracted.markdown.includes("menu"));
 // An element with no closing tag is read as text, and a heading keeps its own line.
 assert.ok(extractHtmlText("<body><script>kept text<p>after</p></body>").markdown.includes("kept text"));
 assert.deepEqual(extractHtmlText("<p>a</p><h1>Big <b>one</b></h1>tail").markdown.split("\n"), ["a", "# Big one", "tail"]);
+// A letter whose lowercase is longer ("İ" is two characters lowercased) shifts nothing (#142 review).
+const turkish = extractHtmlText("<title>İstanbul Rehberi</title><body><p>İİİİİİİİ İzmir</p><script>var hidden='SCRIPTBODY';</script><p>Giriş</p></body>");
+assert.equal(turkish.title, "İstanbul Rehberi");
+assert.ok(turkish.markdown.includes("İİİİİİİİ İzmir") && turkish.markdown.includes("Giriş"), turkish.markdown);
+assert.ok(!turkish.markdown.includes("SCRIPTBODY") && !turkish.markdown.includes("<"), turkish.markdown);
 // A page built to be slow for a backtracking regex is read in linear time (#142 review):
 // each of these, about 5 MB, in well under a second.
 for (const [what, page] of [

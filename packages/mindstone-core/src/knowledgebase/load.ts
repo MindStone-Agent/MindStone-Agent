@@ -237,7 +237,7 @@ export async function ingestMindStoneKnowledgebase(
      * A persona's private KB (#125): its URLs are fetched with the host checks
      * of `loadUrlSourceDocument`'s `privateKb` (#142 review).
      */
-    privateKbUrls?: { allowPrivateHosts: boolean };
+    privateKbUrls?: { refusedHost?: (host: string) => boolean };
   } = {},
 ): Promise<IngestKnowledgebaseResult> {
   // A persona's private KB (#125, `noLinks`) is its own files: no links

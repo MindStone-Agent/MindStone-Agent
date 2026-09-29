@@ -1,8 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { discoverMindStoneKnowledgebases, privateKnowledgebaseLinkError } from "../knowledgebase/load.js";
-import { parseExternalSources } from "../knowledgebase/sources.js";
-import { isNonPublicHost } from "../provider/enterprise.js";
+import { kbUrlHostRefused, parseExternalSources } from "../knowledgebase/sources.js";
 import { discoverMindStoneSkills } from "../skills/artifacts.js";
 import { loadMindStoneWorkflow } from "../workflow/load.js";
 import { isRealWorkflowDir } from "../workflow/validate.js";
@@ -377,8 +376,8 @@ export function addPrivateKnowledgebaseSource(
   personaDir: string,
   kbId: string,
   body: Record<string, unknown>,
-  /** Private network hosts, allowed only by the host's own environment (`kbPrivateHostsAllowed`). */
-  options: { allowPrivateHosts?: boolean } = {},
+  /** Replaces `kbUrlHostRefused` (the host's own environment decides), for tests only. */
+  options: { refusedHost?: (host: string) => boolean } = {},
 ): { kind: "text" | "url"; name: string } {
   const dir = privateKnowledgebaseDir(personaDir, kbId);
   const current = listPrivateKnowledgebaseSources(personaDir, kbId);
@@ -430,7 +429,7 @@ export function addPrivateKnowledgebaseSource(
     }
     // Checked again, by resolved address and on every redirect, when it is
     // fetched (#142 review); refused here so it is never stored.
-    if (!options.allowPrivateHosts && isNonPublicHost(url.hostname)) {
+    if ((options.refusedHost ?? kbUrlHostRefused)(url.hostname)) {
       throw new PersonaComposeError("url must be a public address, not this machine or a private network", "invalid_source", 400);
     }
     if (body.refreshMs !== undefined && (!Number.isInteger(body.refreshMs) || (body.refreshMs as number) < 60_000)) {

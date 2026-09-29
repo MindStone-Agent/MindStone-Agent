@@ -36,6 +36,11 @@ function capabilityIds(path: string, key: string): string[] | { error: string } 
     return { error: `${key}.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
   if (parsed === undefined) return [];
+  return capabilityList(parsed, key);
+}
+
+/** A parsed list file's ids, or why it isn't one; shared with pack install (#142 review). */
+export function capabilityList(parsed: unknown, key: string): string[] | { error: string } {
   const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
   const list = Array.isArray(parsed)
     ? parsed
@@ -51,6 +56,10 @@ export type LoadPersonaResult =
   | { ok: false; personaId: string; error: string };
 
 export function loadMindStonePersona(personasDir: string, personaId: string): LoadPersonaResult {
+  // One folder name, never a path: an id from a request (App Engine) is joined below (#142 review).
+  if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/.test(personaId)) {
+    return { ok: false, personaId, error: "the persona id isn't a folder name" };
+  }
   const dir = join(personasDir, personaId);
   const personaPath = join(dir, "PERSONA.md");
   if (!existsSync(personaPath)) {

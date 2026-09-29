@@ -76,6 +76,14 @@ export function loadMindStoneWorkflow(workflowsDir: string, workflowId: string):
     if (kind === "gate" && !gateRecord) {
       return { ok: false, workflowId, error: `steps[${index}] is a gate but has no gate definition` };
     }
+    // A step's lists narrow a persona's; one of the wrong shape, read as no
+    // list, would narrow nothing, so the workflow fails to load (#142 review).
+    for (const key of ["skills", "knowledgebases"] as const) {
+      const list = stepRecord[key];
+      if (list !== undefined && (!Array.isArray(list) || list.some((entry) => typeof entry !== "string" || !entry.trim()))) {
+        return { ok: false, workflowId, error: `steps[${index}].${key} must be a list of ids` };
+      }
+    }
     const retryRecord = stepRecord.retry && typeof stepRecord.retry === "object" && !Array.isArray(stepRecord.retry)
       ? stepRecord.retry as Record<string, unknown>
       : undefined;

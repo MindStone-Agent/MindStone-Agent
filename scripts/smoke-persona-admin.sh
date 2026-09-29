@@ -87,7 +87,7 @@ PY
 
 # The source stub is on this machine: the host's opt-out lets private KBs
 # reach it. Section 8 restarts the gateway without it (#142 review).
-MINDSTONE_KB_PRIVATE_HOSTS=1 ./scripts/start-gateway.sh >"${TEMP_RUNTIME}/gateway.log" 2>&1 &
+MINDSTONE_KB_PRIVATE_HOSTS=any ./scripts/start-gateway.sh >"${TEMP_RUNTIME}/gateway.log" 2>&1 &
 gateway_pid=$!
 for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sleep 0.5; done
 
@@ -279,7 +279,7 @@ npx tsx <<'TS'
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadMindStonePersona } from "./packages/mindstone-core/src/index.ts";
+import { loadMindStonePersona, loadMindStoneWorkflow } from "./packages/mindstone-core/src/index.ts";
 const dir = join(process.env.MINDSTONE_AGENT_RUNTIME_DIR!, "shapes");
 for (const [index, text] of ['{"skills":"x"}', '{"skilz":["a"]}', "null", "[1,2]", '""', '[""]', "{}", '{"skills":["a"],"extra":1}'].entries()) {
   mkdirSync(join(dir, `p${index}`), { recursive: true });
@@ -293,6 +293,18 @@ for (const [index, text] of ['["a"]', '{"skills":["a"]}', "[]"].entries()) {
   writeFileSync(join(dir, `ok${index}`, "skills.json"), text);
   assert.equal(loadMindStonePersona(dir, `ok${index}`).ok, true, `skills.json ${text} is a list`);
 }
+// A workflow step's lists are held to the same rule (#142 review).
+const wf = join(process.env.MINDSTONE_AGENT_RUNTIME_DIR!, "wf-shapes");
+for (const [index, list] of ['"x"', "[1]", '[""]', "null"].entries()) {
+  mkdirSync(join(wf, `w${index}`), { recursive: true });
+  writeFileSync(join(wf, `w${index}`, "workflow.json"), `{"steps":[{"id":"s","kind":"route","skills":${list}}]}`);
+  assert.equal(loadMindStoneWorkflow(wf, `w${index}`).ok, false, `a step's skills ${list} must make the workflow fail to load`);
+}
+mkdirSync(join(wf, "fine"), { recursive: true });
+writeFileSync(join(wf, "fine", "workflow.json"), '{"steps":[{"id":"s","kind":"route","skills":["a"]}]}');
+assert.equal(loadMindStoneWorkflow(wf, "fine").ok, true, "control: a list of ids loads");
+// A persona id is a folder name, never a path.
+assert.equal(loadMindStonePersona(dir, "../shapes/ok0").ok, false, "a path as a persona id must not load");
 console.log("list shapes ok");
 TS
 # An active persona that doesn't load: the turn has no skills and no KBs, not all of them.
@@ -329,7 +341,7 @@ if ./scripts/mindstone kb ingest --persona built notes > "${TEMP_RUNTIME}/cli-in
   echo "the CLI fetched a private KB's loopback URL: $(cat "${TEMP_RUNTIME}/cli-ingest.txt")" >&2; exit 1
 fi
 grep -qF "this machine or a private network" "${TEMP_RUNTIME}/cli-ingest.txt" || { echo "the CLI ingest failed for another reason: $(cat "${TEMP_RUNTIME}/cli-ingest.txt")" >&2; exit 1; }
-MINDSTONE_KB_PRIVATE_HOSTS=1 ./scripts/mindstone kb ingest --persona built notes > "${TEMP_RUNTIME}/cli-ingest.txt" 2>&1 || { echo "control: the CLI ingest with the host's opt-out failed: $(cat "${TEMP_RUNTIME}/cli-ingest.txt")" >&2; exit 1; }
+MINDSTONE_KB_PRIVATE_HOSTS=any ./scripts/mindstone kb ingest --persona built notes > "${TEMP_RUNTIME}/cli-ingest.txt" 2>&1 || { echo "control: the CLI ingest with the host's opt-out failed: $(cat "${TEMP_RUNTIME}/cli-ingest.txt")" >&2; exit 1; }
 echo "url guard ok"
 
 echo "Persona admin smoke test passed."

@@ -38,7 +38,6 @@ import {
   discoverMindStonePersonas,
   discoverMindStoneSkills,
   ingestMindStoneKnowledgebase,
-  kbPrivateHostsAllowed,
   installMindStoneSkill,
   knowledgebasesDirFromConfig,
   loadMindStoneConfig,
@@ -1379,7 +1378,7 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
     const result = await ingestMindStoneKnowledgebase(kbDir, kbId, {
       now: new Date().toISOString(),
       noLinks: Boolean(scoped.personaId),
-      ...(scoped.personaId ? { privateKbUrls: { allowPrivateHosts: kbPrivateHostsAllowed() } } : {}),
+      ...(scoped.personaId ? { privateKbUrls: {} } : {}),
     });
     if (!result.ok) throw new Error(result.error);
     if (json) {
