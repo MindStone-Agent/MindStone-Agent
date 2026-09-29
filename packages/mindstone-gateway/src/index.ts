@@ -2737,7 +2737,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
             const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, {
               now: new Date().toISOString(),
               noLinks: true,
-              privateKbUrls: { allowPrivateHosts: kbPrivateHostsAllowed() },
+              privateKbUrls: {},
             })
               .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }))
               .finally(() => PRIVATE_KB_INGESTS.delete(ingestKey));
