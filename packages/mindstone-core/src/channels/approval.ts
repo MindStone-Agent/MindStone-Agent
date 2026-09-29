@@ -618,6 +618,8 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
   let skill: SkillInstallPayload | undefined;
   const split = splitProposalBlocks(replyText);
   for (const { kind: fenceKind, body } of split.blocks) {
+    // An empty block is noise, not a proposal: dropped without a word, as before.
+    if (!body.trim()) continue;
     // Counted once each, whatever happens while reading it (#125 review).
     if (fenceKind === "persona") personaBlocks += 1;
     if (fenceKind === "skill") skillBlocks += 1;
