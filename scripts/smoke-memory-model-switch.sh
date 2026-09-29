@@ -573,6 +573,11 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   if (firstCapped.chunksRejected !== MEMORY_EMBED_SINGLES_PER_RUN || firstCapped.chunksEmbedded !== 0) fail(`a run should stop after ${MEMORY_EMBED_SINGLES_PER_RUN} chunks alone: ${JSON.stringify(firstCapped)}`);
   const nextCapped = await reembedSqliteMemoryOtherModel({ paths, provider: capped, limit: MEMORY_EMBED_SINGLES_PER_RUN + 4 * MEMORY_REEMBED_BATCH });
   if (nextCapped.chunksRejected !== 2 * MEMORY_REEMBED_BATCH || nextCapped.chunksEmbedded !== MEMORY_EMBED_SINGLES_PER_RUN + 2 * MEMORY_REEMBED_BATCH) fail(`the next run should go on past them: ${JSON.stringify(nextCapped)}`);
+  // A full backfill (`mindstone memory backfill --embed`) has no such limit: it does them all in one run (#170 review 4).
+  toOther();
+  const uncapped = { id: "stub", model: "u", async embedTexts(texts: string[]) { if (texts.some((text) => bad.has(text))) throw tooLong(); return B.embedTexts(texts); } };
+  const whole = await backfillSqliteMemoryEmbeddings({ paths, provider: uncapped });
+  if (whole.chunksRejected !== bad.size || whole.chunksEmbedded !== whole.chunksConsidered - bad.size) fail(`a full backfill should count all ${bad.size} and embed the rest in one run: ${JSON.stringify(whole)}`);
   toOther();
   // During the single sends: a stop in beforeBatch stops the run, a row gone meanwhile isn't sent,
   // and an outage stops the run without counting a refusal.

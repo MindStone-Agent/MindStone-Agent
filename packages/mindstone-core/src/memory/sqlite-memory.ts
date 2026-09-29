@@ -42,6 +42,12 @@ export type SqliteMemoryEmbeddingBackfillOptions = {
    * After it, a chunk removed or rewritten meanwhile is left out of the request.
    */
   beforeBatch?: () => Promise<void>;
+  /**
+   * At most this many chunks sent alone in this run, after which it ends without an error (#170 review 3):
+   * the turn's update and the paced re-embed pass MEMORY_EMBED_SINGLES_PER_RUN, since another run follows.
+   * Absent: no limit, so `mindstone memory backfill --embed` still does them all in one run.
+   */
+  singlesPerRun?: number;
 };
 
 /** How many of another model's chunks each turn's index update embeds again (#140 review). */
@@ -76,9 +82,10 @@ export const MEMORY_EMBED_REFUSAL_SPACING_MS = 10 * 60 * 1000;
 export const MEMORY_EMBED_SKIP_RETRY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * How many chunks one run sends alone (#170 review 3). A run that reaches it ends there,
- * without an error; what it counted is held back, so the next run gets further. This
- * bounds what a turn's update, or a day's expired skips, can cost.
+ * How many chunks a turn's update or a paced re-embed sends alone (#170 review 3). A run that
+ * reaches it ends there, without an error; what it counted is held back, so the next run gets
+ * further. This bounds what a turn's update, or a day's expired skips, can cost. A full
+ * backfill (`mindstone memory backfill --embed`) has no such limit.
  */
 export const MEMORY_EMBED_SINGLES_PER_RUN = 32;
 
@@ -825,7 +832,7 @@ export async function indexSqliteMemoryTurn(options: {
   // another model's: a model switch is finished over later turns (or at once by
   // `mindstone memory backfill --embed`), never ahead of this turn's chunks (#140 review).
   const embedded = provider
-    ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true, otherModelLimit: options.otherModelLimit ?? MEMORY_REEMBED_PER_TURN })
+    ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true, otherModelLimit: options.otherModelLimit ?? MEMORY_REEMBED_PER_TURN, singlesPerRun: MEMORY_EMBED_SINGLES_PER_RUN })
     : undefined;
   return { databasePath, sourcesIndexed, chunksEmbedded: embedded?.chunksEmbedded ?? 0, chunksRejected: embedded?.chunksRejected ?? 0 };
 }
@@ -851,6 +858,7 @@ export async function reembedSqliteMemoryOtherModel(options: {
     otherModelLimit: options.limit ?? MEMORY_REEMBED_PER_TURN,
     batchSize: MEMORY_REEMBED_BATCH,
     beforeBatch: options.beforeBatch,
+    singlesPerRun: MEMORY_EMBED_SINGLES_PER_RUN,
   });
 }
 
@@ -980,7 +988,7 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
   let singlesSent = 0;
   const refusedEverything = () =>
     Object.assign(
-      new Error(`the embedding model ${spec} refused every chunk it was sent and a short test text; check the model and its endpoint. Nothing was counted as refused.`),
+      new Error(`the embedding model ${spec} refused a request and then a short test text; check the model and its endpoint. Nothing from that request was counted as refused${chunksRejected > 0 ? ` (${chunksRejected} counted earlier in this run)` : ""}.`),
       { refusedEverything: true },
     );
   /**
@@ -1011,7 +1019,7 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
         // too long for a smaller model) doesn't stop the rest for good (#170).
         if (!refusal(error)) throw error;
         // This run has sent as many chunks alone as it may: it ends here, and the next run goes on.
-        if (batch.length > 1 && singlesSent + batch.length > MEMORY_EMBED_SINGLES_PER_RUN) break;
+        if (batch.length > 1 && options.singlesPerRun !== undefined && singlesSent + batch.length > options.singlesPerRun) break;
         // These texts, or everything? The short test text first (#170 review 3): an embedder that refuses
         // everything then costs this request and the test text, not a send of each chunk too.
         if (!(await probeAccepted())) throw refusedEverything();
