@@ -325,6 +325,13 @@ for text in SKILLBODY-alpha GFACT-8800; do
 done
 grep -qF '"loadFailed":true' "${BODY}" || grep -qF '"loadFailed": true' "${BODY}" || { echo "the response doesn't say the persona didn't load: $(head -c 600 "${BODY}")" >&2; exit 1; }
 grep -qF 'persona_load_failed' "${DATA}/transcripts/"*/* 2>/dev/null || grep -rqF 'persona_load_failed' "${DATA}" || { echo "no persona_load_failed event was written" >&2; exit 1; }
+# A tenant's App Engine run under it: its transcript names the persona, never the load error (host paths).
+code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${PADMIN_TOKEN}" -H 'content-type: application/json' -d '{"text":"Which global reference code applies?","tenantId":"t-broken"}' "${BASE}/agents/default/runs")"
+[[ "${code}" == 200 ]] || { echo "the tenant run failed (${code}): $(cat "${BODY}")" >&2; exit 1; }
+tenant_event="$(grep -rhF '"sessionKey"' "${DATA}" 2>/dev/null | grep -F 't-broken' | grep -F 'persona_load_failed' || true)"
+[[ -n "${tenant_event}" ]] || { echo "no persona_load_failed event in the tenant run's transcript" >&2; exit 1; }
+grep -qF 'is not valid JSON' <<<"${tenant_event}" && { echo "a tenant transcript carries the load error: ${tenant_event}" >&2; exit 1; }
+grep -rhF 'persona_load_failed' "${DATA}" | grep -qF 'is not valid JSON' || { echo "control: the owner's transcript should carry the load error" >&2; exit 1; }
 # Control: with the persona fixed, the same question does reach the global KB.
 printf '[]' > "${DATA}/personas/broken/skills.json"
 : > "${CAPTURE}"
