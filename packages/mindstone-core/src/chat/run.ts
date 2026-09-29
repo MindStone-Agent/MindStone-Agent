@@ -16,7 +16,8 @@ import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
 import {
   loadRoutePersonaContextById,
-  PERSONA_PROPOSAL_INSTRUCTIONS,
+  personaProposalInstructions,
+  personaComponentCatalogFromConfig,
   decisionForAnsweringPersona,
   personaComponentsSummary,
   personaKnowledgebasesDir,
@@ -537,7 +538,8 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       reservedTokens: reservedPromptTokens(input.metadata),
       handoffReplay,
       identityFormation,
-      ownerInstructions: ownerContext ? PERSONA_PROPOSAL_INSTRUCTIONS : undefined,
+      // With this install's ids, so a proposal never copies the example's (#160).
+      ownerInstructions: ownerContext ? personaProposalInstructions(personaComponentCatalogFromConfig(input.config)) : undefined,
       memoryRecall: {
         enabled: isAutoRecallEnabled(input.config),
         // One query embedding for memory and KB recall (#125 §5).
@@ -743,6 +745,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
     // Only the owner's turns may propose a persona (#105).
     allowPersona: ownerContext,
     allowSkill: ownerContext,
+    componentCatalog: () => personaComponentCatalogFromConfig(input.config),
   });
   events.push(...extracted.events);
 

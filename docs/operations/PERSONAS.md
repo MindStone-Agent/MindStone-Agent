@@ -56,9 +56,15 @@ path and all Gateway routes.
 ## A persona the agent proposes, with its components (#125)
 
 The agent's `mindstone-persona-proposal` can carry `components`:
-- `skills`, `workflows`, `knowledgebases`: existing ones, by id. Approving the
-  persona checks they exist (`422 unknown_component` otherwise) and writes
-  them as its lists.
+- `skills`, `workflows`, `knowledgebases`: existing ones, by id. The owner's
+  turns tell the agent the ids this install has (installed skills, workflows
+  that load, shared knowledge bases; up to 40 of each, then how many more),
+  and the example in its instructions lists none (#160). A proposal that names
+  an id the install doesn't have, here or in a new workflow's steps (unless
+  the persona brings that skill or knowledge base itself), is dropped in the
+  same turn, and the reply says which id, so the agent can propose again.
+  Approving the persona checks again that they exist (`422 unknown_component`
+  otherwise, for one removed since) and writes them as its lists.
 - `new.skills` (up to 3), `new.workflows` (up to 3), `new.privateKnowledgebases`
   (up to 2, each up to 5 markdown text sources): each becomes **its own
   approval card**, linked to the persona's card.

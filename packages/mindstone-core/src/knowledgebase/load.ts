@@ -715,6 +715,18 @@ export function searchMindStoneKnowledgebase(kbDir: string, kbId: string, query:
   return { ok: true, kbId, query, hits };
 }
 
+/**
+ * The ids of the collections whose kb.json loads: what
+ * `discoverMindStoneKnowledgebases` finds without an error, without reading
+ * any index or source (#160 review: the persona catalog runs every owner turn).
+ */
+export function loadableKnowledgebaseIds(kbDir: string): string[] {
+  if (!existsSync(kbDir)) return [];
+  return readdirSync(kbDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") && loadMindStoneKnowledgebase(kbDir, entry.name).ok)
+    .map((entry) => entry.name);
+}
+
 export function discoverMindStoneKnowledgebases(kbDir: string): MindStoneKnowledgebaseSummary[] {
   if (!existsSync(kbDir)) return [];
   const summaries: MindStoneKnowledgebaseSummary[] = [];

@@ -195,6 +195,11 @@ assert.ok(!lastPrompt.includes("Proposing a persona"), "a non-owner core chat tu
 await runMindStoneChatTurn({ ...chatBase, sessionKey: "unit:owner", message: block("friend") } as never);
 assert.ok(new ApprovalStore().pending().some((a) => a.persona?.id === "friend"), "control: an owner core chat turn proposes");
 assert.ok(lastPrompt.includes("Proposing a persona"), "control: an owner core chat turn gets the persona instruction");
+// The core owner turn is told this install's ids, and a proposal naming another is caught in the turn (#160).
+assert.match(lastPrompt, /On this install, the existing ids are: installed skills: /, "an owner core chat turn must be told this install's ids");
+const ghost = await runMindStoneChatTurn({ ...chatBase, sessionKey: "unit:owner-ids", message: "Here.\n```mindstone-persona-proposal\n" + JSON.stringify({ ...ok, id: "ghostly", components: { knowledgebases: ["shared-kb"] } }) + "\n```" } as never) as { text?: string; reply?: { text?: string } };
+assert.ok(!new ApprovalStore().pending().some((a) => a.persona?.id === "ghostly"), "a core turn put up a persona naming a KB that doesn't exist");
+assert.match(JSON.stringify(ghost), /shared knowledge base \\"shared-kb\\" that doesn't exist/, "the core reply names the id");
 console.log("persona unit assertions passed");
 TS
 
