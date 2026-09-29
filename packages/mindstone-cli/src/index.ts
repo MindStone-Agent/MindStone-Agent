@@ -40,6 +40,8 @@ import {
   ingestMindStoneKnowledgebase,
   installMindStoneSkill,
   knowledgebasesDirFromConfig,
+  workflowIdsInUse,
+  workflowsDirFromConfig,
   loadMindStoneConfig,
   loadMindStonePersona,
   loadMindStoneSkill,
@@ -1838,6 +1840,9 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       onDecision: appendApprovalAuditEvent,
       personasDir: personasDirFromConfig(cliConfig),
       referencedPersonaIds: referencedPersonaIds(cliConfig),
+      workflowsDir: workflowsDirFromConfig(cliConfig),
+      knowledgebasesDir: knowledgebasesDirFromConfig(cliConfig),
+      referencedWorkflowIds: workflowIdsInUse(cliConfig),
     });
     if (result.outcome === "requeued") {
       output.write(`${gold("Queued")} — ${action.id} was approved earlier but never queued; it is queued now.\n`);
@@ -1853,6 +1858,13 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`${gold("Approved")} — persona ${result.personaId} saved. It isn't active until you switch to it: mindstone persona activate ${result.personaId}\n`);
     } else if (result.kind === "skill_install") {
       output.write(`${gold("Approved")} — skill installed: ${result.skillId}. The agent sees it from its next turn.\n`);
+    } else if (result.kind === "workflow_create") {
+      output.write(`${gold("Approved")} — workflow ${result.workflowId} written and listed by persona ${result.personaId}.\n`);
+    } else if (result.kind === "persona_kb_create") {
+      const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true });
+      output.write(ingested.ok
+        ? `${gold("Approved")} — private knowledge base ${result.kbId} written and ingested for persona ${result.personaId} (${ingested.entryCount} entries).\n`
+        : `${gold("Approved")} — private knowledge base ${result.kbId} written for persona ${result.personaId}, but the ingest failed: ${ingested.error}. Run: mindstone kb ingest --persona ${result.personaId} ${result.kbId}\n`);
     } else {
       output.write(`${gold("Approved")} — memory file written: ${result.memoryFile}\n`);
     }

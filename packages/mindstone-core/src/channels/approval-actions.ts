@@ -6,6 +6,10 @@ import { ApprovalStore, sanitizeMemoryProposalPath, type ProposedAction } from "
 import { ConnectorDeliveryQueue } from "./queue.js";
 import { composeMindStoneSkillDraft, validateSkillId, writeInstalledMindStoneSkill } from "../skills/artifacts.js";
 import { PersonaExistsError, writeProposedPersona } from "../persona/create.js";
+import { addPersonaComponentId, checkPersonaComponents, PersonaComposeError, writePrivateKnowledgebase } from "../persona/compose.js";
+import { personaKnowledgebasesDir } from "../persona/components.js";
+import { discoverMindStoneSkills } from "../skills/artifacts.js";
+import { validateWorkflowDefinition, writeWorkflowDefinition, WorkflowWriteError } from "../workflow/validate.js";
 
 /**
  * Approving and rejecting proposed actions, shared by `mindstone approvals`
@@ -24,7 +28,12 @@ import { PersonaExistsError, writeProposedPersona } from "../persona/create.js";
 export class ApprovalActionError extends Error {
   constructor(
     message: string,
-    readonly code: "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued" | "memory_exists" | "unsafe_path" | "no_payload" | "no_personas_dir" | "persona_exists" | "persona_referenced" | "no_persona_references" | "skill_exists" | "invalid_skill" | "install_failed",
+    readonly code:
+      | "not_found" | "already_decided" | "approve_running" | "changed" | "queue_busy" | "already_queued"
+      | "memory_exists" | "unsafe_path" | "no_payload" | "no_personas_dir" | "persona_exists" | "persona_referenced"
+      | "no_persona_references" | "skill_exists" | "invalid_skill" | "install_failed"
+      | "persona_pending" | "unknown_component" | "workflow_exists" | "workflow_referenced" | "invalid_workflow"
+      | "knowledgebase_exists" | "invalid_knowledgebase" | "invalid_persona",
     readonly status: number,
     /** For callers outside this host (the Console): the same refusal without host paths or CLI hints. */
     readonly publicMessage: string = message,
@@ -57,6 +66,22 @@ export function approverStillRunning(by: { pid: number; host: string }): boolean
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Add an approved component's id to its persona's list (#125). The component
+ * is already written; if the list can't be updated, the error says so, so
+ * the owner can attach it from the Console.
+ */
+function addComponentOrExplain(personaDir: string, key: "skills" | "workflows" | "knowledgebases", id: string): string {
+  try {
+    addPersonaComponentId(personaDir, key, id);
+    return " (added to its persona)";
+  } catch (error) {
+    // The component is approved and written; only the list failed. Said in the
+    // decision, not thrown: the approve itself succeeded.
+    return ` (but it couldn't be added to the persona's ${key}.json: ${error instanceof Error ? error.message : String(error)}; attach it in the persona editor)`;
   }
 }
 
@@ -107,6 +132,9 @@ export type ApproveResult =
   | { outcome: "approved"; kind: "memory_write"; memoryFile: string }
   | { outcome: "approved"; kind: "persona_create"; personaId: string }
   | { outcome: "approved"; kind: "skill_install"; skillId: string }
+  | { outcome: "approved"; kind: "workflow_create"; workflowId: string; personaId: string }
+  /** The KB is written; the caller ingests it (`kbRoot`, `kbId`), since ingest is async. */
+  | { outcome: "approved"; kind: "persona_kb_create"; personaId: string; kbId: string; kbRoot: string }
   | { outcome: "requeued"; kind: "connector_send" | "connector_mutation"; connectorId: string }
   | { outcome: "already_queued"; kind: "connector_send" | "connector_mutation"; connectorId: string };
 
@@ -134,10 +162,31 @@ export function approveProposedAction(
     referencedPersonaIds?: ReadonlySet<string>;
     /** Where skills are installed (#104); required to approve a skill_install. */
     skillsDir?: string;
+    /** #125: where workflows and global KBs live, to check a persona's components and write a proposed workflow. */
+    workflowsDir?: string;
+    knowledgebasesDir?: string;
+    /** #125: workflow ids the config runs or a persona lists; creating one of them is refused. */
+    referencedWorkflowIds?: ReadonlySet<string>;
   },
 ): ApproveResult {
   const { action, repair } = check;
   const now = options.now ?? (() => new Date().toISOString());
+  // A component card (#125) waits for its persona's card: approving the
+  // persona writes its folder, so a component never lands in a persona that
+  // doesn't exist.
+  let parentPersonaDir: string | undefined;
+  if (action.parentApprovalId) {
+    const parent = store.get(action.parentApprovalId);
+    if (!parent || parent.status !== "approved" || !parent.persona) {
+      throw new ApprovalActionError(
+        `approve the persona first (approval ${action.parentApprovalId}); this ${action.kind === "skill_install" ? "skill" : action.kind === "workflow_create" ? "workflow" : "knowledge base"} is part of it`,
+        "persona_pending",
+        409,
+      );
+    }
+    if (!options.personasDir) throw new ApprovalActionError("approving a persona's component needs the personas directory", "no_personas_dir", 422);
+    parentPersonaDir = join(options.personasDir, parent.persona.id);
+  }
   const queueTarget = approvalQueueTarget(action);
   if (repair && queueTarget) {
     const { queued, refused } = new ConnectorDeliveryQueue(queueTarget.connectorId).enqueueForApproval(queueTarget.message, action.id, {
@@ -233,7 +282,8 @@ export function approveProposedAction(
     const skill = action.skill;
     const idError = validateSkillId(skill.id);
     if (idError) throw new ApprovalActionError(`proposed skill id is not valid: ${idError}`, "invalid_skill", 422);
-    if (existsSync(join(options.skillsDir, skill.id, "skill.json")) && !options.force) {
+    // A persona's new skill is new: one already installed is refused, with no force (#125).
+    if (existsSync(join(options.skillsDir, skill.id, "skill.json")) && (!options.force || action.parentApprovalId)) {
       throw new ApprovalActionError(
         `skill "${skill.id}" is already installed at ${join(options.skillsDir, skill.id)} (re-run with --force to replace it)`,
         "skill_exists",
@@ -267,8 +317,55 @@ export function approveProposedAction(
         `the skill could not be installed; ${undone ? "the action is pending again" : "check the action"}`,
       );
     }
-    options.onDecision?.(action, "approved", `skill installed: ${skill.id}`);
+    const joined = parentPersonaDir ? addComponentOrExplain(parentPersonaDir, "skills", skill.id) : "";
+    options.onDecision?.(action, "approved", `skill installed: ${skill.id}${joined}`);
     return { outcome: "approved", kind: "skill_install", skillId: skill.id };
+  }
+  if (action.kind === "workflow_create" && action.workflow && parentPersonaDir) {
+    const workflow = action.workflow;
+    if (!options.workflowsDir) throw new ApprovalActionError("approving a workflow needs the workflows directory", "no_payload", 422);
+    const installed = new Set(options.skillsDir ? discoverMindStoneSkills(options.skillsDir).filter((skill) => skill.source === "installed" && !skill.error).map((skill) => skill.id) : []);
+    // Checked again now: the skills it names must be installed by now, and
+    // it still can't name a persona.
+    const checked = validateWorkflowDefinition(workflow.definition, { personaExists: () => false, skillInstalled: (id) => installed.has(id) });
+    if (!checked.ok) throw new ApprovalActionError(`the proposed workflow isn't valid: ${checked.error}`, "invalid_workflow", 422);
+    if (options.referencedWorkflowIds?.has(workflow.id) || options.referencedWorkflowIds?.has(workflow.id.toLowerCase())) {
+      throw new ApprovalActionError(`the config or a persona already names a workflow "${workflow.id}", so creating it would take effect with no switch; reject this card and ask for another id`, "workflow_referenced", 409);
+    }
+    const decided = decideOrRefuse(store, action.id, { status: "approved", decidedBy: options.decidedBy, now: now() });
+    try {
+      writeWorkflowDefinition({ workflowsDir: options.workflowsDir, id: workflow.id, workflow: checked.workflow, mode: "create" });
+    } catch (error) {
+      const undone = store.undoApproval(decided.id, decided.decidedAt);
+      const exists = error instanceof WorkflowWriteError && error.code === "workflow_exists";
+      throw new ApprovalActionError(
+        `${error instanceof Error ? error.message : String(error)}; ${undone ? "the card is pending again" : "the approval could not be undone"}`,
+        exists ? "workflow_exists" : "invalid_workflow",
+        exists ? 409 : 422,
+      );
+    }
+    const joined = addComponentOrExplain(parentPersonaDir, "workflows", workflow.id);
+    options.onDecision?.(action, "approved", `workflow written: ${workflow.id}${joined}`);
+    return { outcome: "approved", kind: "workflow_create", workflowId: workflow.id, personaId: workflow.personaId };
+  }
+  if (action.kind === "persona_kb_create" && action.knowledgebase && parentPersonaDir) {
+    const kb = action.knowledgebase;
+    const decided = decideOrRefuse(store, action.id, { status: "approved", decidedBy: options.decidedBy, now: now() });
+    let kbRoot: string;
+    try {
+      writePrivateKnowledgebase(parentPersonaDir, kb);
+      kbRoot = personaKnowledgebasesDir(parentPersonaDir);
+    } catch (error) {
+      const undone = store.undoApproval(decided.id, decided.decidedAt);
+      const exists = error instanceof PersonaComposeError && error.code === "knowledgebase_exists";
+      throw new ApprovalActionError(
+        `${error instanceof Error ? error.message : String(error)}; ${undone ? "the card is pending again" : "the approval could not be undone"}`,
+        exists ? "knowledgebase_exists" : "invalid_knowledgebase",
+        exists ? 409 : 422,
+      );
+    }
+    options.onDecision?.(action, "approved", `private knowledge base written: ${kb.id} (persona ${kb.personaId}); ingest follows`);
+    return { outcome: "approved", kind: "persona_kb_create", personaId: kb.personaId, kbId: kb.id, kbRoot };
   }
   if (action.kind === "persona_create" && action.persona) {
     // Written before the decision, so a refused decision leaves nothing
@@ -284,6 +381,22 @@ export function approveProposedAction(
         "persona_referenced",
         409,
       );
+    }
+    // The existing components it lists must exist now (#125).
+    const listed = action.components;
+    if (listed && (listed.skills.length || listed.workflows.length || listed.knowledgebases.length)) {
+      if (!options.skillsDir || !options.workflowsDir || !options.knowledgebasesDir) {
+        throw new ApprovalActionError("approving a persona with components needs the skills, workflows and knowledge base directories", "no_personas_dir", 422);
+      }
+      try {
+        checkPersonaComponents(listed, { skillsDir: options.skillsDir, workflowsDir: options.workflowsDir, knowledgebasesDir: options.knowledgebasesDir });
+      } catch (error) {
+        throw new ApprovalActionError(
+          `${error instanceof Error ? error.message : String(error)}; the persona lists it, so it can't be approved as it is: reject it and ask the agent again`,
+          "unknown_component",
+          422,
+        );
+      }
     }
     let dir: string;
     try {
@@ -316,6 +429,11 @@ export function approveProposedAction(
       }
     }
     try {
+      if (listed) {
+        for (const key of ["skills", "workflows", "knowledgebases"] as const) {
+          if (listed[key].length) writeFileSync(join(dir, `${key}.json`), `${JSON.stringify(listed[key], null, 2)}\n`, { flag: "wx" });
+        }
+      }
       decideOrRefuse(store, action.id, { status: "approved", decidedBy: options.decidedBy, now: now() });
     } catch (error) {
       rmSync(dir, { recursive: true, force: true });
@@ -346,7 +464,19 @@ export function rejectProposedAction(
   if (rejectQueue && new ConnectorDeliveryQueue(rejectQueue).hasApprovalEntry(action.id)) {
     throw new ApprovalActionError(`a send for ${action.id} is already queued, so rejecting it wouldn't stop it; check the ${rejectQueue} queue`, "already_queued", 409);
   }
-  const decided = decideOrRefuse(store, action.id, { status: "rejected", decidedBy: options.decidedBy, note: options.note, now: (options.now ?? (() => new Date().toISOString()))() });
+  const at = (options.now ?? (() => new Date().toISOString()))();
+  const decided = decideOrRefuse(store, action.id, { status: "rejected", decidedBy: options.decidedBy, note: options.note, now: at });
   options.onDecision?.(action, "rejected", options.note ?? "no note");
+  // Rejecting a persona rejects its components that are still waiting (#125).
+  if (action.kind === "persona_create") {
+    for (const child of store.pending().filter((entry) => entry.parentApprovalId === action.id)) {
+      try {
+        const rejected = decideOrRefuse(store, child.id, { status: "rejected", decidedBy: options.decidedBy, note: "its persona was rejected", now: at });
+        options.onDecision?.(rejected, "rejected", "its persona was rejected");
+      } catch {
+        // Decided meanwhile: nothing to do.
+      }
+    }
+  }
   return decided;
 }

@@ -259,6 +259,7 @@ import {
   workflowForEditing,
   referencedWorkflowIds,
   PRIVATE_KB_LIMITS,
+  workflowIdsInUse,
 } from "@mindstone-agent/core";
 
 export type GatewayOptions = {
@@ -2079,7 +2080,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       sendJson(res, 404, { ok: false, error: `no proposed action matches id "${approvalMatch[1]}"` });
       return;
     }
-    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation, persona: action.persona, skill: action.skill } });
+    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation, persona: action.persona, skill: action.skill, components: action.components, workflow: action.workflow, knowledgebase: action.knowledgebase } });
     return;
   }
   if (req.method === "GET" && url.pathname === "/admin/skills") {
@@ -2525,12 +2526,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         }
         // An id the config already runs (workflows.active, a route rule), or a
         // persona already lists, would take effect on save.
-        const personasForRefs = personasDirFromConfig(gateConfig.config, paths);
-        const listedByPersonas = discoverMindStonePersonas(personasForRefs).flatMap((summary) => {
-          const persona = summary.error ? undefined : loadMindStonePersona(personasForRefs, summary.id);
-          return persona?.ok ? persona.persona.workflows : [];
-        });
-        if (referencedWorkflowIds(loadMindStoneConfig(configPath).config, listedByPersonas).has(id)) {
+        if (workflowIdsInUse(loadMindStoneConfig(configPath).config, paths).has(id)) {
           throw new WorkflowWriteError(`the config or a persona already names a workflow "${id}", so creating it would take effect with no switch; choose another id`, "workflow_referenced", 409);
         }
         const personasDir = personasDirFromConfig(gateConfig.config, paths);
@@ -2682,7 +2678,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     try {
       if (decision === "approve") {
         // Under the admin write lock, like every config-adjacent write.
-        await withAdminWriteLock(() => {
+        await withAdminWriteLock(async () => {
           const current = loadMindStoneConfig(configPath).config;
           const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
             decidedBy: `console:${userId}`,
@@ -2692,7 +2688,19 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
             onDecision,
             personasDir: personasDirFromConfig(current, paths),
             referencedPersonaIds: referencedPersonaIds(current, paths),
+            workflowsDir: workflowsDirFromConfig(current, paths),
+            knowledgebasesDir: knowledgebasesDirFromConfig(current, paths),
+            referencedWorkflowIds: workflowIdsInUse(current, paths),
           });
+          if (result.kind === "persona_kb_create" && result.outcome === "approved") {
+            // Approving a proposed private KB writes and ingests it (#125). Text
+            // sources only, so nothing is fetched. A failed ingest leaves the KB
+            // written, and says so.
+            const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true });
+            const { kbRoot: _root, ...shown } = result;
+            sendJson(res, 200, { ok: true, result: { ...shown, ingested: ingested.ok ? { entryCount: ingested.entryCount } : { error: publicKbText(ingested.error, result.kbRoot) } } });
+            return;
+          }
           sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
         });
       } else {
@@ -4096,6 +4104,8 @@ function approvalSummary(action: ProposedAction) {
     decidedBy: action.decidedBy,
     decisionNote: action.decisionNote,
     queueState: action.queueState,
+    // A component card's persona card (#125), so the list can group them.
+    ...(action.parentApprovalId ? { parentApprovalId: action.parentApprovalId } : {}),
   };
 }
 

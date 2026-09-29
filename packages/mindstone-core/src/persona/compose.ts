@@ -441,3 +441,38 @@ export function addPrivateKnowledgebaseSource(personaDir: string, kbId: string, 
   }
   throw new PersonaComposeError('kind must be "text" or "url"', "invalid_source", 400);
 }
+
+/**
+ * Add one id to a persona's `skills.json`, `workflows.json` or
+ * `knowledgebases.json` (#125: an approved component card joins its persona).
+ * The file keeps its shape (`[...]` or `{ "<key>": [...] }`) and is replaced
+ * in one rename.
+ */
+export function addPersonaComponentId(personaDir: string, key: "skills" | "workflows" | "knowledgebases", id: string): void {
+  if (!isRealDirectory(personaDir)) throw new PersonaComposeError("the persona folder is missing or a link", "invalid_persona", 422);
+  const path = join(personaDir, `${key}.json`);
+  let data: unknown = [];
+  try {
+    if (lstatSync(path).isSymbolicLink()) throw new PersonaComposeError(`${key}.json is a link; edit it on disk`, "invalid_persona", 422);
+    data = JSON.parse(readFileSync(path, "utf-8"));
+  } catch (error) {
+    if (error instanceof PersonaComposeError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new PersonaComposeError(`${key}.json can't be read`, "invalid_persona", 422);
+  }
+  const list = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray((data as Record<string, unknown>)[key]) ? ((data as Record<string, unknown>)[key] as unknown[]) : [];
+  if (!list.includes(id)) list.push(id);
+  const next = Array.isArray(data) || !data || typeof data !== "object" ? list : { ...(data as Record<string, unknown>), [key]: list };
+  replaceFile(path, `${JSON.stringify(next, null, 2)}\n`);
+}
+
+/** Write a proposed private KB's text sources (#125): the KB must be new, created here. */
+export function writePrivateKnowledgebase(personaDir: string, kb: { id: string; name?: string; sources: Array<{ name: string; text: string }> }): string {
+  const created = createPrivateKnowledgebase(personaDir, { id: kb.id, name: kb.name });
+  try {
+    for (const source of kb.sources) addPrivateKnowledgebaseSource(personaDir, kb.id, { kind: "text", name: source.name, text: source.text });
+  } catch (error) {
+    rmSync(created.dir, { recursive: true, force: true });
+    throw error;
+  }
+  return created.dir;
+}
