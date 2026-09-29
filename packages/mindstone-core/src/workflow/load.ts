@@ -179,21 +179,22 @@ function conditionMatches(condition: MindStoneWorkflowCondition, turn: WorkflowT
 
 /**
  * Deterministic workflow selection: first matching config route rule wins, then
- * workflows.active, then the active persona's packaged workflow references
- * (personas are role-themed packages — their workflows.json participates here).
+ * workflows.active, then the active persona's workflows. A persona's listed
+ * workflows are all candidates, in order (#125): the first one that reaches a
+ * decision is used.
  */
-export function resolveMindStoneWorkflowId(params: {
+export function resolveMindStoneWorkflowCandidates(params: {
   config: MindStoneConfig | undefined;
   paths?: MindStoneRuntimePaths;
   turn: WorkflowTurnInput;
-}): { workflowId: string; reason: string } | undefined {
+}): Array<{ workflowId: string; reason: string }> {
   const workflows = params.config?.workflows;
   for (const rule of workflows?.routes ?? []) {
     if (!rule.workflowId) continue;
     const { matched, fields } = conditionMatches(rule, params.turn);
-    if (matched) return { workflowId: rule.workflowId, reason: `route:${fields.join("+")}` };
+    if (matched) return [{ workflowId: rule.workflowId, reason: `route:${fields.join("+")}` }];
   }
-  if (workflows?.active?.trim()) return { workflowId: workflows.active, reason: "config.active" };
+  if (workflows?.active?.trim()) return [{ workflowId: workflows.active, reason: "config.active" }];
 
   const personaResolution = resolveMindStonePersona({
     config: params.config,
@@ -203,11 +204,20 @@ export function resolveMindStoneWorkflowId(params: {
   });
   if (personaResolution) {
     const persona = loadMindStonePersona(personasDirFromConfig(params.config, params.paths), personaResolution.personaId);
-    if (persona.ok && persona.persona.workflows.length > 0) {
-      return { workflowId: persona.persona.workflows[0], reason: `persona:${personaResolution.personaId}` };
+    if (persona.ok) {
+      return [...new Set(persona.persona.workflows)].map((workflowId) => ({ workflowId, reason: `persona:${personaResolution.personaId}` }));
     }
   }
-  return undefined;
+  return [];
+}
+
+/** The first candidate from `resolveMindStoneWorkflowCandidates`. */
+export function resolveMindStoneWorkflowId(params: {
+  config: MindStoneConfig | undefined;
+  paths?: MindStoneRuntimePaths;
+  turn: WorkflowTurnInput;
+}): { workflowId: string; reason: string } | undefined {
+  return resolveMindStoneWorkflowCandidates(params)[0];
 }
 
 /**
@@ -223,10 +233,26 @@ export function runMindStoneWorkflow(params: {
   /** Deterministically force this workflow (App Engine request routing) — bypasses selection. */
   workflowId?: string;
 }): MindStoneWorkflowOutcome | undefined {
-  const selected = params.workflowId
-    ? { workflowId: params.workflowId, reason: "forced:request" }
-    : resolveMindStoneWorkflowId({ config: params.config, paths: params.paths, turn: params.turn });
-  if (!selected) return undefined;
+  const candidates = params.workflowId
+    ? [{ workflowId: params.workflowId, reason: "forced:request" }]
+    : resolveMindStoneWorkflowCandidates({ config: params.config, paths: params.paths, turn: params.turn });
+  // A persona's workflows are tried in order (#125): the first to reach a
+  // decision wins. The events of every workflow tried are kept, so the
+  // transcript shows why the earlier ones didn't decide.
+  const events: MindStoneWorkflowEvent[] = [];
+  let outcome: MindStoneWorkflowOutcome | undefined;
+  for (const selected of candidates) {
+    outcome = runSelectedWorkflow(params, selected);
+    events.push(...outcome.events);
+    if (outcome.decision) break;
+  }
+  return outcome ? { ...outcome, events } : undefined;
+}
+
+function runSelectedWorkflow(
+  params: { config: MindStoneConfig | undefined; paths?: MindStoneRuntimePaths; turn: WorkflowTurnInput },
+  selected: { workflowId: string; reason: string },
+): MindStoneWorkflowOutcome {
   const workflowsDir = workflowsDirFromConfig(params.config, params.paths);
   const events: MindStoneWorkflowEvent[] = [];
   const loaded = loadMindStoneWorkflow(workflowsDir, selected.workflowId);

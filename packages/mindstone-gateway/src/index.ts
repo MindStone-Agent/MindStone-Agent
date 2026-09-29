@@ -115,6 +115,9 @@ import "./connectors/email.js";
 import "./connectors/calendar.js";
 import {
   loadRoutePersonaContextById,
+  personaComponentsSummary,
+  privateKnowledgebasesAllowed,
+  resolveTurnComponents,
   personasDirFromConfig,
   referencedPersonaIds,
   PERSONA_PROPOSAL_INSTRUCTIONS,
@@ -1189,6 +1192,31 @@ async function runConfiguredRoute(input: {
     const fileMemoryDocuments = discoverFileMemoryDocuments({ config: input.config });
     const runner = resolveRunner(input.config, provider, input.audience);
     const streamOptions = resolveRunnerStreamOptions(input.config);
+    // Deterministic routing authority (App Engine): request > workflow decision > config rules/active.
+    const personaResult = input.route?.personaId
+      ? loadRoutePersonaContextById({
+          config: input.config,
+          personaId: input.route.personaId,
+          reason: "forced:request",
+        })
+      : workflowOutcome?.decision?.personaId
+      ? loadRoutePersonaContextById({
+          config: input.config,
+          personaId: workflowOutcome.decision.personaId,
+          reason: `workflow:${workflowOutcome.workflowId}/step:${workflowOutcome.decision.stepId}`,
+        })
+      : resolveRoutePersonaContext({
+          config: input.config,
+          sessionKey: input.sessionKey,
+          sourceChannel: source?.channel,
+          sourceSubstrate: source?.substrate,
+        });
+    // The answering persona's skills and knowledge bases (#125).
+    const turnComponents = resolveTurnComponents({
+      persona: personaResult.persona,
+      decision: workflowOutcome?.decision,
+      privateAllowed: privateKnowledgebasesAllowed(input.audience),
+    });
     const { route, streamEvents } = await runGatewayRunner({
       runner,
       streamOptions,
@@ -1202,24 +1230,7 @@ async function runConfiguredRoute(input: {
           loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
           input.audience,
         ),
-        personaContext: (input.route?.personaId
-          ? loadRoutePersonaContextById({
-              config: input.config,
-              personaId: input.route.personaId,
-              reason: "forced:request",
-            })
-          : workflowOutcome?.decision?.personaId
-          ? loadRoutePersonaContextById({
-              config: input.config,
-              personaId: workflowOutcome.decision.personaId,
-              reason: `workflow:${workflowOutcome.workflowId}/step:${workflowOutcome.decision.stepId}`,
-            })
-          : resolveRoutePersonaContext({
-              config: input.config,
-              sessionKey: input.sessionKey,
-              sourceChannel: source?.channel,
-              sourceSubstrate: source?.substrate,
-            })).context,
+        personaContext: personaResult.context,
         contextManagement: input.config?.contextManagement,
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
@@ -1231,7 +1242,11 @@ async function runConfiguredRoute(input: {
             sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config }) : undefined,
             localDocuments: input.config?.memory?.localDocuments,
             fileMemory: fileMemoryDocuments,
-            knowledgebases: discoverKnowledgebaseRecallDocuments({ config: input.config }),
+            knowledgebases: discoverKnowledgebaseRecallDocuments({
+              config: input.config,
+              only: turnComponents.globalKnowledgebases,
+              private: turnComponents.privateKnowledgebases,
+            }),
           }),
           config: input.config?.memory?.recall,
           scope: input.recallScope ?? input.scope,
@@ -1253,7 +1268,7 @@ async function runConfiguredRoute(input: {
           maxPromptTokens: input.config?.memory?.index?.maxPromptTokens,
         },
         // Installed skills, and how to propose one (#104): the owner's turns only.
-        skills: { enabled: input.audience === "owner", skillsDir: skillsDirFromConfig(input.config) },
+        skills: { enabled: input.audience === "owner", skillsDir: skillsDirFromConfig(input.config), only: turnComponents.skills },
         signal: run.abortController.signal,
         metadata: input.metadata,
         runContext: {
@@ -1454,6 +1469,8 @@ async function runConfiguredRoute(input: {
         runner: route.runner,
         // Which persona answered (#105): the Console's transcripts say so per turn.
         ...(route.personaContext ? { personaContext: route.personaContext } : {}),
+        // Which of its components were in play (#125).
+        ...(turnComponents.personaId ? { personaComponents: personaComponentsSummary(turnComponents, route.skills) } : {}),
         // What recall put in this turn's prompt (#106); the chunks are on the memory_recall_injected event.
         ...(route.memoryRecall
           ? {
@@ -1483,6 +1500,7 @@ async function runConfiguredRoute(input: {
         runner: route.runner,
         identityContext: route.identityContext,
         personaContext: route.personaContext,
+        ...(turnComponents.personaId ? { personaComponents: personaComponentsSummary(turnComponents, route.skills) } : {}),
         workflow: workflowOutcome
           ? { workflowId: workflowOutcome.workflowId, reason: workflowOutcome.reason, failed: workflowOutcome.failed, decision: workflowOutcome.decision }
           : undefined,

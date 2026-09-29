@@ -95,6 +95,8 @@ export type MindStoneRouteInput = {
   skills?: {
     enabled?: boolean;
     skillsDir?: string;
+    /** The active persona's skills (#125); absent: every installed skill. */
+    only?: string[];
   };
   signal?: AbortSignal;
   metadata?: Record<string, unknown>;
@@ -185,7 +187,7 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     : buildMemoryIndexPromptFromDocuments(input.memoryIndex.documents, {
         maxPromptTokens: input.memoryIndex.maxPromptTokens ?? defaultMemoryIndexBudgetTokens(contextWindowTokens),
       });
-  const skills = input.skills?.enabled && input.skills.skillsDir ? buildMindStoneSkillsPrompt(input.skills.skillsDir) : undefined;
+  const skills = input.skills?.enabled && input.skills.skillsDir ? buildMindStoneSkillsPrompt(input.skills.skillsDir, { only: input.skills.only }) : undefined;
   const promptWindow = buildPromptWindow({
     entries: input.entries,
     contextWindowTokens,
@@ -242,7 +244,16 @@ export function buildMindStoneRoutePlan(input: Omit<MindStoneRouteInput, "provid
     memoryRecall: input.memoryRecall,
     invariants,
     memoryIndex,
-    skills: skills ? { tokens: skills.tokens, installed: skills.installed, inPrompt: skills.inPrompt, listedOnly: skills.listedOnly } : undefined,
+    skills: skills
+      ? {
+          tokens: skills.tokens,
+          installed: skills.installed,
+          inPrompt: skills.inPrompt,
+          listedOnly: skills.listedOnly,
+          ...(skills.only ? { only: skills.only } : {}),
+          ...(skills.missing ? { missing: skills.missing } : {}),
+        }
+      : undefined,
     handoffReplay: input.handoffReplay,
   };
 }

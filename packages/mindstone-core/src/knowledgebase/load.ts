@@ -431,13 +431,52 @@ export function discoverMindStoneKnowledgebases(kbDir: string): MindStoneKnowled
 /**
  * KB participation in Auto Recall: one summary+pointer MemoryDocument per indexed source
  * (kind "kb"). Summaries and citations only — full content stays behind `mindstone kb search`.
+ *
+ * #125: `only` limits the global collections to the active persona's list
+ * (absent: all of them), and `private` adds that persona's own KBs. Their ids
+ * are `pkb:<personaId>:<kbId>:<source>`, never `kb:`, so a private KB can't be
+ * mistaken for a global one with the same id.
  */
-export function discoverKnowledgebaseRecallDocuments(options: { config?: MindStoneConfig; paths?: MindStoneRuntimePaths } = {}): MemoryDocument[] {
+export function discoverKnowledgebaseRecallDocuments(options: {
+  config?: MindStoneConfig;
+  paths?: MindStoneRuntimePaths;
+  only?: string[];
+  private?: { personaId: string; dir: string; only?: string[] };
+} = {}): MemoryDocument[] {
   if (options.config?.knowledgebases?.recall?.enabled === false) return [];
-  const kbDir = knowledgebasesDirFromConfig(options.config, options.paths);
+  const documents = knowledgebaseRecallDocuments(knowledgebasesDirFromConfig(options.config, options.paths), {
+    only: options.only,
+    idPrefix: "kb:",
+    label: "Knowledgebase",
+    titleTag: "KB",
+    searchCommand: "mindstone kb search",
+  });
+  if (options.private) {
+    documents.push(...knowledgebaseRecallDocuments(options.private.dir, {
+      only: options.private.only,
+      idPrefix: `pkb:${options.private.personaId}:`,
+      label: `Persona ${options.private.personaId} private knowledgebase`,
+      titleTag: `Persona KB`,
+      searchCommand: `mindstone kb search --persona ${options.private.personaId}`,
+      personaId: options.private.personaId,
+    }));
+  }
+  return documents;
+}
+
+function knowledgebaseRecallDocuments(kbDir: string, options: {
+  only?: string[];
+  idPrefix: string;
+  label: string;
+  titleTag: string;
+  searchCommand: string;
+  personaId?: string;
+}): MemoryDocument[] {
   const documents: MemoryDocument[] = [];
+  const only = options.only ? new Set(options.only) : undefined;
   for (const summary of discoverMindStoneKnowledgebases(kbDir)) {
     if (summary.error || !summary.indexed) continue;
+    if (only && !only.has(summary.id)) continue;
     const loaded = loadMindStoneKnowledgebase(kbDir, summary.id);
     if (!loaded.ok) continue;
     const index = readMindStoneKbIndex(loaded.kb);
@@ -456,22 +495,23 @@ export function discoverKnowledgebaseRecallDocuments(options: { config?: MindSto
       const origin = entries[0].origin;
       const sensitivity = entries[0].sensitivity;
       documents.push({
-        id: `kb:${summary.id}:${sourcePath}`,
+        id: `${options.idPrefix}${summary.id}:${sourcePath}`,
         kind: "kb",
-        title: `[KB ${summary.name}] ${title}`,
+        title: `[${options.titleTag} ${summary.name}] ${title}`,
         // External sources live at their origin (real folder path / URL);
         // KB-local sources under sources/.
         path: origin ?? join(loaded.kb.sourcesDir, sourcePath),
         text: [
-          `Knowledgebase "${summary.name}" (${summary.id}) — source: ${sourcePath}`,
+          `${options.label} "${summary.name}" (${summary.id}) — source: ${sourcePath}`,
           // AC3 (#23): KB hits are REFERENCE MATERIAL, not memory — stated in
           // the injected text itself so the model treats it accordingly.
           `Reference material (not memory): cite sources when used.${sensitivity ? ` Sensitivity: ${sensitivity}.` : ""}`,
           sections,
-          `Full content: mindstone kb search ${summary.id} "<query>"`,
+          `Full content: ${options.searchCommand} ${summary.id} "<query>"`,
         ].join("\n"),
         metadata: {
           kbId: summary.id,
+          ...(options.personaId ? { personaId: options.personaId, privateKnowledgebase: true } : {}),
           sourcePath,
           citations: entries.map((entry) => entry.citation),
           ...(origin ? { origin } : {}),

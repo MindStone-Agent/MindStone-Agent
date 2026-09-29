@@ -12,7 +12,14 @@ import { discoverKnowledgebaseRecallDocuments } from "../knowledgebase/index.js"
 import { providerDiagnosticsFromChatResult, type MindStoneModelInfo, type MindStoneModelProvider } from "../provider/index.js";
 import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
-import { loadRoutePersonaContextById, PERSONA_PROPOSAL_INSTRUCTIONS, resolveRoutePersonaContext } from "../persona/index.js";
+import {
+  loadRoutePersonaContextById,
+  PERSONA_PROPOSAL_INSTRUCTIONS,
+  personaComponentsSummary,
+  privateKnowledgebasesAllowed,
+  resolveRoutePersonaContext,
+  resolveTurnComponents,
+} from "../persona/index.js";
 import { runMindStoneWorkflow } from "../workflow/index.js";
 import {
   createProviderRouteAgentRunner,
@@ -492,6 +499,14 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
         sourceSubstrate: input.source?.substrate,
       });
 
+  // The answering persona's skills and knowledge bases (#125). A run without
+  // the owner's context here is an App Engine tenant run.
+  const turnComponents = resolveTurnComponents({
+    persona: personaResolution.persona,
+    decision: workflowOutcome?.decision,
+    privateAllowed: privateKnowledgebasesAllowed(ownerContext ? "owner" : "tenant"),
+  });
+
   // Walked once and shared: the recall provider and the invariant tier both read
   // the same files, and the tier must not depend on the vector store being up.
   const fileMemoryDocuments = discoverFileMemoryDocuments({ config: input.config });
@@ -523,7 +538,11 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
           sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config }) : undefined,
           localDocuments: input.config?.memory?.localDocuments,
           fileMemory: fileMemoryDocuments,
-          knowledgebases: discoverKnowledgebaseRecallDocuments({ config: input.config }),
+          knowledgebases: discoverKnowledgebaseRecallDocuments({
+            config: input.config,
+            only: turnComponents.globalKnowledgebases,
+            private: turnComponents.privateKnowledgebases,
+          }),
         }),
         config: input.config?.memory?.recall,
         scope: input.recallScope ?? input.scope,
@@ -544,7 +563,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
         maxPromptTokens: input.config?.memory?.index?.maxPromptTokens,
       },
       // Installed skills, and how to propose one (#104): the owner's turns only.
-      skills: { enabled: ownerContext, skillsDir: skillsDirFromConfig(input.config) },
+      skills: { enabled: ownerContext, skillsDir: skillsDirFromConfig(input.config), only: turnComponents.skills },
       signal: input.signal,
       metadata: input.metadata,
       runContext: {
@@ -733,6 +752,8 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       usage: route.result.usage,
       runner: route.runner,
       providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
+      // Which of the answering persona's components were in play (#125).
+      ...(turnComponents.personaId ? { personaComponents: personaComponentsSummary(turnComponents, route.skills) } : {}),
       ...(input.scope ? { scope: input.scope } : {}),
     },
   });
