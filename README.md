@@ -120,7 +120,7 @@ Bounds and what remains untested for these three: `docs/operations/LOCAL_MODELS.
 
 ### Install everything (Docker)
 
-The gateway, the web Console and its database, all in Docker. You need only Docker with Compose v2 (Docker Desktop on macOS or Windows; Docker Engine on Linux):
+The gateway, the web Console and its database, all in Docker. You need only Docker with Compose v2 or newer (Docker Desktop on macOS or Windows; Docker Engine on Linux):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | bash
@@ -184,7 +184,7 @@ The commands below assume the default install folder `~/.mindstone-stack` and th
 #### A0. Requirements
 
 - macOS or Linux (arm64 or x86_64), with `curl`.
-- Docker with Compose v2: Docker Desktop on macOS, or Docker Engine with the Compose plugin on Linux. Docker must be running.
+- Docker with Compose v2 or newer: Docker Desktop on macOS, or Docker Engine with the Compose plugin on Linux. Docker must be running.
 - About 10 GB of free disk space for the images. The first build takes 10 to 20 minutes.
 - Your user can run Docker. On Linux, that means being in the `docker` group (`sudo usermod -aG docker $USER`, then log in again). Don't run the installer with `sudo`: it would install into root's home, with root's ids.
 - Optional: [Ollama](https://ollama.com) on this machine, for local models and embeddings.
@@ -231,7 +231,7 @@ curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/mai
 If you change them, use your ports in place of 3080 and 19789 in the checks below. The installer saves them in `~/.mindstone-stack/.env`, so later runs and `docker compose` commands use them too.
 
 What it does:
-- checks Docker and Compose v2;
+- checks Docker and Compose v2 or newer;
 - downloads the compose file and the Console's config, pinned to the refs;
 - generates every secret into two 600 files, `gateway.env` and `console.env`. The admin credential's plaintext is only in `console.env`; the gateway gets its sha256;
 - builds and starts the stack (`docker compose up -d --build`) and waits until the gateway and the Console answer;
