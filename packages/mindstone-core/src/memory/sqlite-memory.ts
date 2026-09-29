@@ -330,11 +330,13 @@ export function sqliteMemoryEmbeddingMix(
   const db = openDatabase(databasePath);
   try {
     initializeSchema(db);
+    // otherModel: another model's chunks still to be embedded again with this one, so not the ones
+    // this model refused MEMORY_EMBED_SKIP_AFTER times (skipped, below) (#170 review).
     const row = db.prepare(`
       SELECT count(*) AS embedded,
-             sum(CASE WHEN embedding_spec IS NULL OR embedding_spec != ? THEN 1 ELSE 0 END) AS otherModel
+             sum(CASE WHEN (embedding_spec IS NULL OR embedding_spec != ?) AND NOT ${SKIPPED_FOR_SPEC} THEN 1 ELSE 0 END) AS otherModel
       FROM memory_chunks WHERE embedding_json IS NOT NULL
-    `).get(spec) as { embedded: number; otherModel: number | null };
+    `).get(spec, spec) as { embedded: number; otherModel: number | null };
     // Chunks this model refused MEMORY_EMBED_SKIP_AFTER times: found by their words only (#170).
     const skipped = db.prepare(`SELECT count(*) AS n FROM memory_chunks WHERE ${SKIPPED_FOR_SPEC}`).get(spec) as { n: number };
     return { embedded: Number(row.embedded ?? 0), otherModel: Number(row.otherModel ?? 0), skipped: Number(skipped.n ?? 0) };
@@ -709,6 +711,8 @@ export type SqliteMemoryTurnIndexResult = {
   databasePath: string;
   sourcesIndexed: number;
   chunksEmbedded: number;
+  /** The turn's own chunks the embedder refused on their own (#170). */
+  chunksRejected: number;
 };
 
 /**
@@ -769,7 +773,7 @@ export async function indexSqliteMemoryTurn(options: {
   const embedded = provider
     ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true, otherModelLimit: options.otherModelLimit ?? MEMORY_REEMBED_PER_TURN })
     : undefined;
-  return { databasePath, sourcesIndexed, chunksEmbedded: embedded?.chunksEmbedded ?? 0 };
+  return { databasePath, sourcesIndexed, chunksEmbedded: embedded?.chunksEmbedded ?? 0, chunksRejected: embedded?.chunksRejected ?? 0 };
 }
 
 /**
@@ -805,6 +809,8 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
   const spec = memoryEmbeddingSpec(provider);
   const db = openDatabase(databasePath);
   initializeSchema(db);
+  // A refusal whose chunk is gone (pruned, re-indexed under another id) is dropped, text and all (#170 review).
+  db.exec("DELETE FROM memory_embed_rejections WHERE chunk_id NOT IN (SELECT chunk_id FROM memory_chunks)");
   // A chunk this model refused before goes last, and one it refused MEMORY_EMBED_SKIP_AFTER times isn't
   // sent again while its text is the same (#170); --force sends everything.
   const order = `ORDER BY ${REFUSED_BEFORE} ASC, updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC`;
@@ -852,6 +858,29 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
       updated_at = excluded.updated_at
   `);
   let chunksRejected = 0;
+  /**
+   * Refusals of single chunks, recorded at the end of the run only if the embedder has shown it
+   * works for this model (it embedded a chunk in this run, or has embedded chunks before): an
+   * embedder that refuses every request (a chat model behind the embeddings route, a proxy's 400
+   * while its upstream is down) must not have every chunk it touches marked as skipped (#170 review).
+   */
+  const pending: Array<{ row: { chunk_id: string; text: string }; reason: string }> = [];
+  /** Requests in a row whose every chunk was refused, with nothing embedded yet in this run. */
+  let refusedInARow = 0;
+  /** This model has embedded chunks in this index before: a refusal is then about the text. */
+  const workedBefore = db.prepare("SELECT 1 AS present FROM memory_chunks WHERE embedding_spec = ? LIMIT 1").get(spec) !== undefined;
+  const commitPending = () => {
+    const now = new Date().toISOString();
+    for (const { row, reason } of pending) refused.run(row.chunk_id, spec, row.text, reason, now);
+    pending.length = 0;
+  };
+  const refusedEverything = (marked: boolean) =>
+    Object.assign(
+      new Error(
+        `the embedding model ${spec} refused every chunk it was sent (${chunksRejected}); check the model and its endpoint. ${marked ? "The refused chunks were counted." : "Nothing was marked as skipped."}`,
+      ),
+      { refusedEverything: true },
+    );
 
   /** Waits in beforeBatch, then leaves out a chunk removed or rewritten meanwhile (#157 review). */
   const ready = async (batch: Array<{ chunk_id: string; text: string }>) => {
@@ -890,27 +919,49 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
         // the text gets the request's chunks one at a time, so a chunk it can't take (an old one
         // too long for a smaller model) doesn't stop the rest for good (#170).
         if (embeddingFailureCause(error) !== "rejected") throw error;
+        let refusedHere = 0;
         const refuse = (row: { chunk_id: string; text: string }, reasonError: unknown) => {
           chunksRejected += 1;
+          refusedHere += 1;
           const reason = (reasonError instanceof Error ? reasonError.message : String(reasonError)).replace(/\p{C}/gu, " ").slice(0, 300);
-          refused.run(row.chunk_id, spec, row.text, reason, new Date().toISOString());
+          pending.push({ row, reason });
         };
+        let tried = 0;
         // A request of one chunk was that chunk alone already.
         if (batch.length === 1) {
+          tried = 1;
           refuse(batch[0]!, error);
-          continue;
-        }
-        for (const row of batch) {
-          const [single] = await ready([row]);
-          if (!single) continue;
-          try {
-            await embedAndStore([single]);
-          } catch (alone) {
-            if (embeddingFailureCause(alone) !== "rejected") throw alone;
-            refuse(single, alone);
+        } else {
+          for (const row of batch) {
+            const [single] = await ready([row]);
+            if (!single) continue;
+            tried += 1;
+            try {
+              await embedAndStore([single]);
+            } catch (alone) {
+              if (embeddingFailureCause(alone) !== "rejected") throw alone;
+              refuse(single, alone);
+            }
           }
         }
+        // Two requests in a row refused whole, and nothing embedded yet: the embedder refuses
+        // everything, not these texts. Stop, as for an outage, and mark nothing.
+        if (tried > 0 && refusedHere === tried && chunksEmbedded === 0) {
+          refusedInARow += 1;
+          if (refusedInARow >= 2) {
+            // A model that has embedded here before is refusing these texts: count them, so they go
+            // last next time and the run gets past them. One that never has is refusing everything.
+            if (workedBefore) commitPending();
+            throw refusedEverything(workedBefore);
+          }
+        } else {
+          refusedInARow = 0;
+        }
       }
+    }
+    if (pending.length > 0) {
+      if (chunksEmbedded === 0 && !workedBefore) throw refusedEverything(false);
+      commitPending();
     }
   } finally {
     db.close();

@@ -145,6 +145,7 @@ import {
   KB_REEMBED_LIMITS,
   indexSqliteMemoryTurn,
   reembedSqliteMemoryOtherModel,
+  MEMORY_EMBED_SKIP_AFTER,
   memoryEmbeddingSpec,
   sqliteMemoryEmbeddingMix,
   isAutoRecallEnabled,
@@ -741,7 +742,10 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
   recallIndexTail = recallIndexTail
     .then(async () => {
       // Only the turn's own chunks here: this is what the next turn waits for (#157).
-      await indexSqliteMemoryTurn({ transcriptFile, config, otherModelLimit: 0 });
+      const indexed = await indexSqliteMemoryTurn({ transcriptFile, config, otherModelLimit: 0 });
+      if (indexed.chunksRejected > 0) {
+        console.warn(`[mindstone] the embedding model refused ${indexed.chunksRejected} of this turn's memory chunks; they are found by their words (#170)`);
+      }
       recallIndexFailedAt = 0;
       queueMemoryReembed(config);
     })
@@ -778,7 +782,7 @@ function queueMemoryReembed(config: MindStoneConfig | undefined): void {
     // The embedder as resolved, address and key included: a registered endpoint
     // moved or removed under the same model name stops the run too (#157 review).
     const embedderAtStart = JSON.stringify(resolveMemoryEmbeddingProviderConfig(config) ?? null);
-    await reembedSqliteMemoryOtherModel({
+    const result = await reembedSqliteMemoryOtherModel({
       config,
       provider,
       beforeBatch: async () => {
@@ -793,6 +797,9 @@ function queueMemoryReembed(config: MindStoneConfig | undefined): void {
         }
       },
     });
+    if (result.chunksRejected > 0) {
+      console.warn(`[mindstone] the embedding model refused ${result.chunksRejected} memory chunks while embedding them again; after ${MEMORY_EMBED_SKIP_AFTER} refusals a chunk is left to word match (see mindstone memory status) (#170)`);
+    }
     memoryReembedFailedAt = 0;
   })()
     .catch((error: unknown) => {

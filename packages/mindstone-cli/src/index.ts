@@ -269,9 +269,14 @@ function printMemoryStatus(options: { json?: boolean } = {}): void {
   // and are found by their words only (#170). Left out when no model is configured.
   const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
   const provider = loaded.error ? undefined : createMemoryEmbeddingProvider(loaded.config);
-  const embeddingModel = provider && stats.present && !stats.error
-    ? { spec: memoryEmbeddingSpec(provider), skippedChunks: sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(provider), paths).skipped }
-    : undefined;
+  let embeddingModel: { spec: string; skippedChunks: number } | undefined;
+  if (provider && stats.present && !stats.error) {
+    try {
+      embeddingModel = { spec: memoryEmbeddingSpec(provider), skippedChunks: sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(provider), paths).skipped };
+    } catch {
+      // A database busy past its timeout: the rest of the status still prints.
+    }
+  }
   if (options.json) {
     printJson(embeddingModel ? { ...stats, embeddingModel } : stats);
     return;

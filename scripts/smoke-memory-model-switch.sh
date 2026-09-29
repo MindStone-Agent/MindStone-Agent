@@ -48,6 +48,7 @@ import { join } from "node:path";
 import {
   MEMORY_EMBED_SKIP_AFTER,
   MEMORY_REEMBED_BATCH,
+  embeddingFailureCause,
   MEMORY_REEMBED_PER_TURN,
   indexSqliteMemoryTurn,
   reembedSqliteMemoryOtherModel,
@@ -328,7 +329,7 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   }
   if (rejection()?.failures !== MEMORY_EMBED_SKIP_AFTER) fail(`refusals should reach ${MEMORY_EMBED_SKIP_AFTER}: ${JSON.stringify(rejection())}`);
   const mix = sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(P), paths);
-  if (mix.skipped !== 1 || mix.otherModel !== 1) fail(`the refused chunk should count as skipped (and still another model's): ${JSON.stringify(mix)}`);
+  if (mix.skipped !== 1 || mix.otherModel !== 0) fail(`the refused chunk should count as skipped, not as waiting to be embedded again: ${JSON.stringify(mix)}`);
   sent.length = 0;
   const after = await backfillSqliteMemoryEmbeddings({ paths, provider: P });
   if (refusedSends() !== 0 || after.chunksConsidered !== 0) fail(`a skipped chunk shouldn't be sent again: ${JSON.stringify(after)}, ${refusedSends()} sends`);
@@ -371,6 +372,101 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   count.prepare("DELETE FROM memory_sources WHERE id = 'refused'").run();
   count.close();
   if (rejectionsAfter !== rejectionsBefore) fail(`an outage shouldn't be recorded as a refusal: ${rejectionsBefore} -> ${rejectionsAfter}`);
+}
+// #170 review: an embedder that refuses everything isn't a text it can't take.
+{
+  // The classification, every branch.
+  const abort = new Error("aborted"); abort.name = "AbortError";
+  const timeout = new Error("timed out"); timeout.name = "TimeoutError";
+  const cases: Array<[unknown, string]> = [
+    [Object.assign(new Error("x"), { status: 429 }), "rate-limited"],
+    [Object.assign(new Error("x"), { status: 503 }), "unavailable"],
+    ...[401, 403, 404, 408].map((status) => [Object.assign(new Error("x"), { status }), "unavailable"] as [unknown, string]),
+    [Object.assign(new Error("x"), { status: 400 }), "rejected"],
+    [Object.assign(new Error("x"), { status: 413 }), "rejected"],
+    [Object.assign(new TypeError("fetch failed"), { unavailable: true }), "unavailable"],
+    [abort, "unavailable"],
+    [timeout, "unavailable"],
+    [new SyntaxError("Unexpected token <"), "rejected"],
+  ];
+  for (const [error, cause] of cases) {
+    if (embeddingFailureCause(error) !== cause) fail(`${(error as Error).name} ${(error as { status?: number }).status ?? ""}: ${embeddingFailureCause(error)}, not ${cause}`);
+  }
+  const rejections = (spec: string) => {
+    const db = new DatabaseSync(dbPath);
+    const row = db.prepare("SELECT count(*) AS n FROM memory_embed_rejections WHERE spec = ?").get(spec) as { n: number };
+    db.close();
+    return Number(row.n);
+  };
+  const toOther = () => {
+    const db = new DatabaseSync(dbPath);
+    db.prepare("UPDATE memory_chunks SET embedding_spec = 'stub:a' WHERE embedding_json IS NOT NULL").run();
+    db.close();
+  };
+  toOther();
+  // A model that has never embedded here and refuses every request: the run stops after two whole
+  // requests (and their single sends) and marks nothing.
+  let calls = 0;
+  const everything = { id: "stub", model: "q", async embedTexts() { calls += 1; throw Object.assign(new Error("model does not support embeddings"), { status: 400 }); } };
+  const refusedAll = await reembedSqliteMemoryOtherModel({ paths, provider: everything, limit: 16 }).then(() => undefined, (error: unknown) => error);
+  if (!(refusedAll instanceof Error) || !(refusedAll as { refusedEverything?: boolean }).refusedEverything) fail(`an embedder refusing everything should stop the run: ${String(refusedAll)}`);
+  if (calls !== 2 + 2 * MEMORY_REEMBED_BATCH) fail(`two whole requests and their single sends, then stop: ${calls} requests`);
+  if (rejections("stub:q") !== 0) fail(`an embedder refusing everything marked ${rejections("stub:q")} chunks`);
+  calls = 0;
+  const wholeBackfill = await backfillSqliteMemoryEmbeddings({ paths, provider: everything }).then(() => undefined, (error: unknown) => error);
+  if (!(wholeBackfill instanceof Error) || rejections("stub:q") !== 0) fail(`a whole backfill against it should stop and mark nothing: ${String(wholeBackfill)}, ${rejections("stub:q")}`);
+  // A model that has embedded here before and now refuses everything: the run stops, and only the
+  // chunks of those two requests are counted (so a real run of bad texts at the head is got past).
+  const worked = { id: "stub", model: "w", embedTexts: (texts: string[]) => B.embedTexts(texts) };
+  await reembedSqliteMemoryOtherModel({ paths, provider: worked, limit: 4 });
+  const nowRefusing = { id: "stub", model: "w", async embedTexts() { throw Object.assign(new Error("input too long"), { status: 400 }); } };
+  const stopped = await reembedSqliteMemoryOtherModel({ paths, provider: nowRefusing, limit: 64 }).then(() => undefined, (error: unknown) => error);
+  if (!(stopped instanceof Error) || rejections("stub:w") !== 2 * MEMORY_REEMBED_BATCH) fail(`it should stop after two requests, counting their ${2 * MEMORY_REEMBED_BATCH} chunks: ${String(stopped)}, ${rejections("stub:w")}`);
+  // A success clears a chunk's record for that model (a whole backfill reaches them: they go last).
+  toOther();
+  await backfillSqliteMemoryEmbeddings({ paths, provider: worked });
+  if (rejections("stub:w") !== 0) fail(`a chunk embedded after a refusal should lose its record: ${rejections("stub:w")} left`);
+  toOther();
+  // During the single sends: a stop in beforeBatch stops the run, a row gone meanwhile isn't sent,
+  // and an outage stops the run without counting a refusal.
+  const newest = (() => {
+    const db = new DatabaseSync(dbPath);
+    const rows = db.prepare("SELECT chunk_id AS id, text FROM memory_chunks WHERE embedding_json IS NOT NULL ORDER BY updated_at DESC, chunk_id ASC LIMIT ?").all(MEMORY_REEMBED_BATCH) as Array<{ id: string; text: string }>;
+    db.close();
+    return rows;
+  })();
+  const batchRefused = (single: (text: string) => number[] | Error) => ({ id: "stub", model: "s", sent: [] as string[][], async embedTexts(texts: string[]) {
+    this.sent.push(texts);
+    if (texts.length > 1) throw Object.assign(new Error("input too long"), { status: 400 });
+    const out = single(texts[0]!);
+    if (out instanceof Error) throw out;
+    return [out];
+  } });
+  class Stop extends Error {}
+  let gate = 0;
+  const stopMidway = batchRefused(() => [0, 1, 0, 0]);
+  const stopResult = await reembedSqliteMemoryOtherModel({ paths, provider: stopMidway, limit: MEMORY_REEMBED_BATCH, beforeBatch: async () => { gate += 1; if (gate === 3) throw new Stop("config changed"); } }).then(() => undefined, (error: unknown) => error);
+  if (!(stopResult instanceof Stop)) fail(`a stop during the single sends should stop the run: ${String(stopResult)}`);
+  if (stopMidway.sent.length !== 2) fail(`nothing after the stop: ${stopMidway.sent.length} requests`);
+  toOther();
+  gate = 0;
+  const gone = batchRefused(() => [0, 1, 0, 0]);
+  await reembedSqliteMemoryOtherModel({ paths, provider: gone, limit: MEMORY_REEMBED_BATCH, beforeBatch: async () => {
+    gate += 1;
+    if (gate === 2) {
+      const db = new DatabaseSync(dbPath);
+      db.prepare("UPDATE memory_chunks SET text = text || ' (rewritten)' WHERE chunk_id = ?").run(newest[2]!.id);
+      db.close();
+    }
+  } });
+  if (gone.sent.some((texts) => texts.length === 1 && texts[0] === newest[2]!.text)) fail("a chunk rewritten during the single sends was sent");
+  if (gone.sent.filter((texts) => texts.length === 1).length !== MEMORY_REEMBED_BATCH - 1) fail(`the other chunks should be sent alone: ${JSON.stringify(gone.sent.map((texts) => texts.length))}`);
+  toOther();
+  const outageAlone = batchRefused(() => Object.assign(new Error("service unavailable"), { status: 503 }));
+  const before = rejections("stub:s");
+  const outageResult = await reembedSqliteMemoryOtherModel({ paths, provider: outageAlone, limit: MEMORY_REEMBED_BATCH }).then(() => undefined, (error: unknown) => error);
+  if (!(outageResult instanceof Error) || rejections("stub:s") !== before) fail(`an outage during the single sends should stop the run and count nothing: ${String(outageResult)}, ${before} -> ${rejections("stub:s")}`);
+  if (outageAlone.sent.length !== 2) fail(`it should stop at the first single send: ${outageAlone.sent.length} requests`);
 }
 console.log(`recall index: ${total} chunks, switching models checked`);
 TS
@@ -696,7 +792,7 @@ sleep 2
 curl -s -X POST -d '{"mode":"ok"}' "${STUB}/_test/mode" >/dev/null
 echo "a failed run wasn't retried by the turns right after it"
 # The count of chunks a model can't embed is reported (#170): the memory check and memory status.
-# The refused chunk has 2 refusals so far; make it the last one of MEMORY_EMBED_SKIP_AFTER.
+# The refused chunk has 1 refusal so far (the paced run's); make it the last one of MEMORY_EMBED_SKIP_AFTER.
 npx tsx - <<'TS'
 import { DatabaseSync } from "node:sqlite";
 import { MEMORY_EMBED_SKIP_AFTER, runtimePathsFromEnv, sqliteMemoryDatabasePath } from "./packages/mindstone-core/src/index.ts";
