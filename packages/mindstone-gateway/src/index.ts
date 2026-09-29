@@ -138,6 +138,7 @@ import {
   sharedQueryEmbedder,
   createMemoryEmbeddingProvider,
   KB_EMBED_LIMITS,
+  KB_REEMBED_LIMITS,
   indexSqliteMemoryTurn,
   memoryEmbeddingSpec,
   sqliteMemoryEmbeddingMix,
@@ -749,11 +750,12 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
  * are by the backfill (#140). One KB at a time, off the turn (nothing here can
  * fail or slow the reply); a private KB being ingested is left for later. A KB
  * over KB_REEMBED_LIMITS.maxEntries keeps word match until `kb ingest`. Once a
- * scan finds nothing stale or waiting for this model, scans stop until the
- * model changes.
+ * scan finds nothing stale or waiting for this model, scans pause for
+ * KB_REEMBED_LIMITS.retryAfterMs or until the model changes: a KB made stale
+ * later (a CLI ingest with another embedder, a restored file) is still found.
  */
 let kbReembedRunning = false;
-let kbReembedCleanSpec: string | undefined;
+let kbReembedClean: { spec: string; at: number } | undefined;
 
 function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
   if (kbReembedRunning) return;
@@ -764,7 +766,7 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
     const embedder = createMemoryEmbeddingProvider(config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs });
     if (!embedder) return;
     const spec = memoryEmbeddingSpec(embedder);
-    if (kbReembedCleanSpec === spec) return;
+    if (kbReembedClean?.spec === spec && Date.now() - kbReembedClean.at < KB_REEMBED_LIMITS.retryAfterMs) return;
     const paths = runtimePathsFromEnv();
     const personasDir = personasDirFromConfig(config, paths);
     const kbDirs = [
@@ -792,7 +794,7 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
       if (done.vectors.state === "ready") console.info(`[mindstone] knowledge base ${where} embedded again for ${spec}`);
       else console.warn(`[mindstone] knowledge base ${where} not embedded again for ${spec} (word match meanwhile; retried later): ${done.vectors.reason}`);
     } else if (result.deferred === 0) {
-      kbReembedCleanSpec = spec;
+      kbReembedClean = { spec, at: Date.now() };
     }
   })()
     .catch((error: unknown) => {

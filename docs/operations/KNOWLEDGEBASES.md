@@ -111,8 +111,10 @@ alike.
   that moment waits for the next chat. A failed attempt keeps the old vectors
   (word match meanwhile) and is tried again after 30 minutes; an ingest that
   finishes while a re-embed runs keeps its own vectors. Once nothing is left
-  to embed again for the model, the gateway stops looking until the model
-  changes. Until a KB is embedded again, recall finds it by its words. KB word-match hits are marked
+  to embed again for the model, the gateway looks again only after 30 minutes
+  or when the model changes, so a KB made stale later (for example by a CLI
+  `kb ingest` whose environment names another embedder) is picked up within
+  half an hour of chats. Until a KB is embedded again, recall finds it by its words. KB word-match hits are marked
   `recallMode: "lexical"` in the recall event, as memory's are, and KB
   vectors are matched to the install's model by the same `<provider>:<model>`
   spec memory records.
