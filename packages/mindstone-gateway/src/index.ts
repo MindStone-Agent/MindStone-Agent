@@ -134,12 +134,15 @@ import {
   buildPromptWindow,
   createSqliteMemoryRecallProvider,
   selectMemoryRecallProvider,
+  sharedQueryEmbedder,
+  createMemoryEmbeddingProvider,
+  KB_EMBED_LIMITS,
   indexSqliteMemoryTurn,
   isAutoRecallEnabled,
   transcriptPathForSession,
   decideGatewayAuth,
   discoverFileMemoryDocuments,
-  discoverKnowledgebaseRecallDocuments,
+  createKnowledgebaseRecallProvider,
   recallScopeForMemoryScope,
   scopeFromRequest,
   scopedSessionKey,
@@ -1274,17 +1277,19 @@ async function runConfiguredRoute(input: {
         ownerInstructions: input.audience === "owner" && !input.scope ? PERSONA_PROPOSAL_INSTRUCTIONS : undefined,
         memoryRecall: {
           enabled: (input.audience === "owner" || input.audience === "tenant") && isAutoRecallEnabled(input.config),
-          provider: selectMemoryRecallProvider({
-            sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config }) : undefined,
+          // One query embedding for memory and KB recall (#125 §5).
+          provider: ((embedder) => selectMemoryRecallProvider({
+            sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config, embeddingProvider: embedder }) : undefined,
             localDocuments: input.config?.memory?.localDocuments,
             fileMemory: fileMemoryDocuments,
-            knowledgebases: discoverKnowledgebaseRecallDocuments({
+            knowledgebases: createKnowledgebaseRecallProvider({
               config: input.config,
               only: turnComponents.globalKnowledgebases,
               step: turnComponents.stepKnowledgebases,
               private: turnComponents.privateKnowledgebases,
+              embedder,
             }),
-          }),
+          }))(sharedQueryEmbedder(createMemoryEmbeddingProvider(input.config))),
           config: input.config?.memory?.recall,
           scope: input.recallScope ?? input.scope,
           // A tenant run never gets the owner's chats, whatever its scope holds (#106 review).
@@ -2667,10 +2672,22 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         maxFetchBytes: KB_URL_FETCH_LIMITS.maxBytes,
         // Public hosts only, each redirect checked, as this host's environment allows (#142 review).
         privateKbUrls: {},
+        // Each entry embedded with the install's embedder (#125 §5); its reasons are fixed text.
+        embedder: createMemoryEmbeddingProvider(gateConfig.config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs }),
       });
       if (!result.ok) throw new PersonaComposeError(publicKbText(result.error, root), "ingest_failed", 422);
-      appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_ingested", persona: id, knowledgebase: kbId, entries: result.entryCount });
-      sendJson(res, 200, { ok: true, knowledgebase: { id: kbId, entryCount: result.entryCount, sourceCount: result.sourceCount } });
+      appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_ingested", persona: id, knowledgebase: kbId, entries: result.entryCount, vectors: result.vectors.state });
+      sendJson(res, 200, {
+        ok: true,
+        knowledgebase: {
+          id: kbId,
+          entryCount: result.entryCount,
+          sourceCount: result.sourceCount,
+          vectors: result.vectors.state === "ready"
+            ? { state: "ready", dimension: result.vectors.dimension, count: result.vectors.count }
+            : { state: result.vectors.state, reason: result.vectors.reason },
+        },
+      });
     } catch (error) {
       if (!composeRefusal(error, { persona: id, knowledgebase: kbId })) throw error;
     } finally {
@@ -2713,8 +2730,11 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     }
     try {
       if (decision === "approve") {
-        // Under the admin write lock, like every config-adjacent write.
-        await withAdminWriteLock(async () => {
+        // Under the admin write lock, like every config-adjacent write. A
+        // proposed private KB's ingest runs after it (#125 §5 review): it
+        // embeds, which can take minutes, and must not hold up other writes.
+        // Its key is taken under the lock, so no admin ingest of it overlaps.
+        const approved = await withAdminWriteLock(async () => {
           const current = loadMindStoneConfig(configPath).config;
           const result = approveProposedAction(store, checkApprovable(store, approvalMatch[1]!), {
             decidedBy: `console:${userId}`,
@@ -2728,31 +2748,39 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
             knowledgebasesDir: knowledgebasesDirFromConfig(current, paths),
             referencedWorkflowIds: workflowIdsInUse(current, paths),
           });
-          if (result.kind === "persona_kb_create" && result.outcome === "approved") {
-            // Approving a proposed private KB writes and ingests it (#125). Text
-            // sources only, so nothing is fetched. A failed ingest leaves the KB
-            // written, and says so, even when the ingest throws (#125 review):
-            // the approval has happened by then. It counts as that KB's
-            // ingest, so an admin ingest of it can't overlap (#125 review).
-            const ingestKey = `${result.personaId}/${result.kbId}`;
-            const ingested = PRIVATE_KB_INGESTS.has(ingestKey) || PRIVATE_KB_INGESTS.size >= MAX_PRIVATE_KB_INGESTS
-              ? { ok: false as const, error: "other ingests are running; ingest it from the persona editor when they finish" }
-              : await (async () => {
-                  PRIVATE_KB_INGESTS.add(ingestKey);
-                  try {
-                    return await ingestApprovedPrivateKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString() });
-                  } catch (error) {
-                    return { ok: false as const, error: error instanceof Error ? error.message : String(error) };
-                  } finally {
-                    PRIVATE_KB_INGESTS.delete(ingestKey);
-                  }
-                })();
-            const { kbRoot: _root, ...shown } = result;
-            sendJson(res, 200, { ok: true, result: { ...shown, ingested: ingested.ok ? { entryCount: ingested.entryCount } : { error: publicKbText(ingested.error, result.kbRoot) } } });
-            return;
-          }
-          sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
+          if (result.kind !== "persona_kb_create" || result.outcome !== "approved") return { result, ingestKey: undefined, config: current };
+          const ingestKey = `${result.personaId}/${result.kbId}`;
+          if (PRIVATE_KB_INGESTS.has(ingestKey) || PRIVATE_KB_INGESTS.size >= MAX_PRIVATE_KB_INGESTS) return { result, ingestKey: undefined, config: current, busy: true };
+          PRIVATE_KB_INGESTS.add(ingestKey);
+          return { result, ingestKey, config: current };
         });
+        const { result } = approved;
+        if (result.kind === "persona_kb_create" && result.outcome === "approved") {
+          // Approving a proposed private KB writes and ingests it (#125). Text
+          // sources only, so nothing is fetched. A failed ingest leaves the KB
+          // written, and says so, even when the ingest throws (#125 review):
+          // the approval has happened by then.
+          const ingested = !approved.ingestKey
+            ? { ok: false as const, error: "other ingests are running; ingest it from the persona editor when they finish" }
+            : await (async () => {
+                try {
+                  return await ingestApprovedPrivateKnowledgebase(result.kbRoot, result.kbId, {
+                    now: new Date().toISOString(),
+                    embedder: createMemoryEmbeddingProvider(approved.config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs }),
+                  });
+                } catch (error) {
+                  return { ok: false as const, error: error instanceof Error ? error.message : String(error) };
+                } finally {
+                  PRIVATE_KB_INGESTS.delete(approved.ingestKey!);
+                }
+              })();
+          const { kbRoot: _root, ...shown } = result;
+          sendJson(res, 200, { ok: true, result: { ...shown, ingested: ingested.ok
+            ? { entryCount: ingested.entryCount, vectors: ingested.vectors.state === "ready" ? { state: "ready" } : { state: ingested.vectors.state, reason: ingested.vectors.reason } }
+            : { error: publicKbText(ingested.error, result.kbRoot) } } });
+        } else {
+          sendJson(res, 200, { ok: true, result: result.kind === "memory_write" ? { outcome: result.outcome, kind: result.kind } : result });
+        }
       } else {
         const rejected = rejectProposedAction(store, approvalMatch[1]!, {
           decidedBy: `console:${userId}`,
@@ -3569,9 +3597,9 @@ const CONFIG_UNREADABLE = "the config file doesn't load; run mindstone doctor on
 
 /** Admin writes run one at a time, so each reads the config and permission it writes against. */
 let adminWriteChain: Promise<void> = Promise.resolve();
-function withAdminWriteLock(work: () => void | Promise<void>): Promise<void> {
+function withAdminWriteLock<T>(work: () => T | Promise<T>): Promise<T> {
   const run = adminWriteChain.then(work);
-  adminWriteChain = run.catch(() => undefined);
+  adminWriteChain = run.then(() => undefined, () => undefined);
   return run;
 }
 

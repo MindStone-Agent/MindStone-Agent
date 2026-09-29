@@ -57,6 +57,19 @@ export type MindStoneKbSourceStatus = {
   entryCount: number;
 };
 
+/**
+ * The KB's embedded vectors (#125 §5). ready: recall ranks this KB by meaning.
+ * missing, stale or unused: recall uses word match for it; `reason` says why.
+ */
+export type MindStoneKbVectorsStatus = {
+  state: "ready" | "missing" | "stale" | "unused";
+  reason?: string;
+  provider?: string;
+  model?: string;
+  dimension?: number;
+  count?: number;
+};
+
 export type MindStoneKbStatus = {
   kbId: string;
   dir: string;
@@ -66,6 +79,7 @@ export type MindStoneKbStatus = {
   sourceCount: number;
   staleCount: number;
   sources: MindStoneKbSourceStatus[];
+  vectors: MindStoneKbVectorsStatus;
 };
 
 export type MindStoneKbSearchHit = {
