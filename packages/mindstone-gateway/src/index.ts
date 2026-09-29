@@ -256,6 +256,9 @@ import {
   ingestMindStoneKnowledgebase,
   isSafeComponentId,
   discoverMindStoneKnowledgebases,
+  workflowForEditing,
+  referencedWorkflowIds,
+  PRIVATE_KB_LIMITS,
 } from "@mindstone-agent/core";
 
 export type GatewayOptions = {
@@ -2178,8 +2181,8 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       sendJson(res, 404, { ok: false, error: `no workflow named "${id}" that loads` });
       return;
     }
-    const { dir: _dir, ...workflow } = loaded.workflow;
-    sendJson(res, 200, { ok: true, workflow });
+    // In the shape PATCH takes, so the editor can send back what it read.
+    sendJson(res, 200, { ok: true, id, workflow: workflowForEditing(loaded.workflow, id) });
     return;
   }
   if (req.method === "GET" && url.pathname === "/admin/knowledgebases") {
@@ -2516,8 +2519,12 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       try {
         const { id, ...definition } = body;
         if (typeof id !== "string" || !WORKFLOW_ID.test(id)) throw new WorkflowWriteError("id must be 1 to 40 lowercase letters, digits and hyphens", "invalid_workflow", 400);
+        // An id the config already runs (workflows.active, a route rule) would take effect on save.
+        if (referencedWorkflowIds(loadMindStoneConfig(configPath).config).has(id)) {
+          throw new WorkflowWriteError(`the config already runs a workflow named "${id}", so creating it would take effect with no switch; choose another id`, "workflow_referenced", 409);
+        }
         const personasDir = personasDirFromConfig(gateConfig.config, paths);
-        const checked = validateWorkflowDefinition(definition, { personaExists: (personaId) => adminPersonaLoads(personasDir, personaId) });
+        const checked = validateWorkflowDefinition(definition, adminWorkflowContext(personasDir, skillsDirFromConfig(gateConfig.config, paths)));
         if (!checked.ok) throw new WorkflowWriteError(checked.error, "invalid_workflow", 400);
         writeWorkflowDefinition({ workflowsDir: workflowsDirFromConfig(gateConfig.config, paths), id, workflow: checked.workflow, mode: "create" });
         appendAdminAudit(paths.dataDir, { userId, action: "workflow_created", workflow: id });
@@ -2537,7 +2544,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       try {
         // The body is the whole new definition (name, description, version, steps).
         const personasDir = personasDirFromConfig(gateConfig.config, paths);
-        const checked = validateWorkflowDefinition(body, { personaExists: (personaId) => adminPersonaLoads(personasDir, personaId) });
+        const checked = validateWorkflowDefinition(body, adminWorkflowContext(personasDir, skillsDirFromConfig(gateConfig.config, paths)));
         if (!checked.ok) throw new WorkflowWriteError(checked.error, "invalid_workflow", 400);
         writeWorkflowDefinition({ workflowsDir: workflowsDirFromConfig(gateConfig.config, paths), id, workflow: checked.workflow, mode: "replace" });
         appendAdminAudit(paths.dataDir, { userId, action: "workflow_edited", workflow: id });
@@ -2595,18 +2602,34 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       });
       return;
     }
-    // Ingest: indexes the private KB, fetching its URL sources now.
-    await withAdminWriteLock(async () => {
-      try {
-        const root = ensurePersonaKnowledgebasesDir(join(personasDir, id));
-        const result = await ingestMindStoneKnowledgebase(root, kbId, { now: new Date().toISOString(), noLinks: true, fetchTimeoutMs: 20_000, maxFetchBytes: 5 * 1024 * 1024 });
-        if (!result.ok) throw new PersonaComposeError(publicKbText(result.error, root), "ingest_failed", 422);
-        appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_ingested", persona: id, knowledgebase: kbId, entries: result.entryCount });
-        sendJson(res, 200, { ok: true, knowledgebase: { id: kbId, entryCount: result.entryCount, sourceCount: result.sourceCount } });
-      } catch (error) {
-        if (!composeRefusal(error, { persona: id, knowledgebase: kbId })) throw error;
+    // Ingest: indexes the private KB, fetching its URL sources now. It runs
+    // outside the admin write lock, which it could hold for minutes; one
+    // ingest per KB at a time.
+    const ingestKey = `${id}/${kbId}`;
+    if (PRIVATE_KB_INGESTS.has(ingestKey)) {
+      refuse(409, { error: "this knowledge base is being ingested already", code: "ingest_running" }, { reason: "ingest_running", persona: id, knowledgebase: kbId });
+      return;
+    }
+    PRIVATE_KB_INGESTS.add(ingestKey);
+    try {
+      const sources = listPrivateKnowledgebaseSources(join(personasDir, id), kbId);
+      // Fetching is what needs the permission, whatever put the URL there (a pack, an edit on disk).
+      if (sources.urls.length > 0 && !readAdminPermissions(paths.dataDir).advancedSettings) {
+        throw new PersonaComposeError("this knowledge base has URL sources; fetching them needs the advanced-settings permission", "advanced", 403);
       }
-    });
+      if (sources.urls.length > PRIVATE_KB_LIMITS.urlSources) {
+        throw new PersonaComposeError(`a private knowledge base is ingested with at most ${PRIVATE_KB_LIMITS.urlSources} URL sources; it has ${sources.urls.length}`, "too_many_sources", 422);
+      }
+      const root = ensurePersonaKnowledgebasesDir(join(personasDir, id));
+      const result = await ingestMindStoneKnowledgebase(root, kbId, { now: new Date().toISOString(), noLinks: true, fetchTimeoutMs: 20_000, maxFetchBytes: 5 * 1024 * 1024 });
+      if (!result.ok) throw new PersonaComposeError(publicKbText(result.error, root), "ingest_failed", 422);
+      appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_ingested", persona: id, knowledgebase: kbId, entries: result.entryCount });
+      sendJson(res, 200, { ok: true, knowledgebase: { id: kbId, entryCount: result.entryCount, sourceCount: result.sourceCount } });
+    } catch (error) {
+      if (!composeRefusal(error, { persona: id, knowledgebase: kbId })) throw error;
+    } finally {
+      PRIVATE_KB_INGESTS.delete(ingestKey);
+    }
     return;
   }
 
@@ -4060,6 +4083,15 @@ function approvalSummary(action: ProposedAction) {
     decisionNote: action.decisionNote,
     queueState: action.queueState,
   };
+}
+
+/** Private KBs being ingested now, as "<persona>/<kb>" (#125). */
+const PRIVATE_KB_INGESTS = new Set<string>();
+
+/** What a workflow written through the admin API may name: personas on disk by exact id, installed skills. */
+function adminWorkflowContext(personasDir: string, skillsDir: string): Parameters<typeof validateWorkflowDefinition>[1] {
+  const installed = new Set(discoverMindStoneSkills(skillsDir).filter((skill) => skill.source === "installed" && !skill.error).map((skill) => skill.id));
+  return { personaExists: (personaId) => adminPersonaLoads(personasDir, personaId), skillInstalled: (skillId) => installed.has(skillId) };
 }
 
 /** A persona folder named exactly this (case included) that is a real folder, not a link (#125). */

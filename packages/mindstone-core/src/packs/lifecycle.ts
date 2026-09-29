@@ -338,7 +338,8 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
     return true;
   };
   for (const file of files) {
-    if (!/^knowledgebases\/[^/]+\/kb\.json$/.test(file.path)) continue;
+    // A persona's private KB (#125) is a knowledgebase too.
+    if (!/^(knowledgebases|personas\/[^/]+\/knowledgebases)\/[^/]+\/kb\.json$/.test(file.path)) continue;
     let catalog: { name?: unknown; description?: unknown; externalSources?: unknown };
     try {
       catalog = JSON.parse(file.data.toString("utf-8")) as typeof catalog;

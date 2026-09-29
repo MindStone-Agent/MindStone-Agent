@@ -4,7 +4,8 @@ import { discoverMindStoneKnowledgebases, privateKnowledgebaseLinkError } from "
 import { parseExternalSources } from "../knowledgebase/sources.js";
 import { discoverMindStoneSkills } from "../skills/artifacts.js";
 import { loadMindStoneWorkflow } from "../workflow/load.js";
-import { isRealDirectory, isSafeComponentId, personaKnowledgebasesDir } from "./components.js";
+import { isRealWorkflowDir } from "../workflow/validate.js";
+import { isRealDirectory, isSafeComponentId, personaKnowledgebasesDir, readablePersonaKnowledgebasesDir } from "./components.js";
 import { PERSONA_PROPOSAL_ID } from "./create.js";
 import { loadMindStonePersona } from "./load.js";
 
@@ -85,8 +86,9 @@ export function checkPersonaComponents(lists: PersonaComponentLists, dirs: Omit<
     if (missing) throw new PersonaComposeError(`no installed skill named "${missing}"`, "unknown_component", 422);
   }
   for (const id of lists.workflows ?? []) {
-    const loaded = loadMindStoneWorkflow(dirs.workflowsDir, id);
-    if (!loaded.ok || !isRealDirectory(join(dirs.workflowsDir, id))) throw new PersonaComposeError(`no workflow named "${id}" that loads`, "unknown_component", 422);
+    // Exactly this id: a case-insensitive filesystem would find "WF-A" for "wf-a".
+    const loaded = isRealWorkflowDir(dirs.workflowsDir, id) ? loadMindStoneWorkflow(dirs.workflowsDir, id) : undefined;
+    if (!loaded?.ok) throw new PersonaComposeError(`no workflow named "${id}" that loads`, "unknown_component", 422);
   }
   if (lists.knowledgebases?.length) {
     const kbs = new Set(discoverMindStoneKnowledgebases(dirs.knowledgebasesDir).filter((kb) => !kb.error).map((kb) => kb.id));
@@ -212,37 +214,53 @@ export function updateOwnerPersona(params: Dirs & { id: string; input: OwnerPers
   const loaded = loadMindStonePersona(params.personasDir, params.id);
   if (!loaded.ok) throw new PersonaComposeError(`persona "${params.id}" can't be loaded, so it can't be edited here`, "invalid_persona", 422);
   checkPersonaComponents(params.input, params);
-  const replace = (name: string, text: string) => {
-    const path = join(dir, name);
-    try {
-      if (lstatSync(path).isSymbolicLink()) throw new PersonaComposeError(`${name} is a link; edit it on disk`, "invalid_persona", 422);
-    } catch (error) {
-      if (error instanceof PersonaComposeError) throw error;
-    }
-    const temp = `${path}.${process.pid}.tmp`;
-    writeFileSync(temp, text, { flag: "wx" });
-    renameSync(temp, path);
-  };
-  const removeList = (name: string) => {
-    const path = join(dir, name);
-    if (existsSync(path)) rmSync(path);
-  };
-  if (params.input.personaMarkdown !== undefined) replace("PERSONA.md", params.input.personaMarkdown);
+  // Every file this edit writes is checked first, so an edit is refused
+  // whole, never half-applied: none may be a link or anything but a file.
+  const writes: Array<[string, string | null]> = [];
+  if (params.input.personaMarkdown !== undefined) writes.push(["PERSONA.md", params.input.personaMarkdown]);
   if (params.input.name !== undefined || params.input.description !== undefined) {
+    // The metadata keeps what it holds (who created or approved it, pack
+    // fields); only the name and description change.
+    let existing: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(readFileSync(join(dir, "metadata.json"), "utf-8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+    } catch {
+      existing = {};
+    }
+    const description = params.input.description ?? loaded.persona.description;
     const metadata = {
+      ...existing,
       name: params.input.name ?? loaded.persona.name,
-      ...(loaded.persona.version ? { version: loaded.persona.version } : {}),
-      ...((params.input.description ?? loaded.persona.description) ? { description: params.input.description ?? loaded.persona.description } : {}),
+      ...(description ? { description } : {}),
       updatedBy: params.updatedBy,
       updatedAt: params.now,
     };
-    replace("metadata.json", `${JSON.stringify(metadata, null, 2)}\n`);
+    writes.push(["metadata.json", `${JSON.stringify(metadata, null, 2)}\n`]);
   }
   for (const [key, file] of [["skills", "skills.json"], ["workflows", "workflows.json"], ["knowledgebases", "knowledgebases.json"]] as const) {
     const list = params.input[key];
     if (list === undefined) continue;
-    if (list.length === 0) removeList(file);
-    else replace(file, `${JSON.stringify(list, null, 2)}\n`);
+    writes.push([file, list.length === 0 ? null : `${JSON.stringify(list, null, 2)}\n`]);
+  }
+  for (const [name] of writes) {
+    let stats;
+    try {
+      stats = lstatSync(join(dir, name));
+    } catch {
+      continue;
+    }
+    if (!stats.isFile()) throw new PersonaComposeError(`${name} isn't a plain file; edit it on disk`, "invalid_persona", 422);
+  }
+  for (const [name, text] of writes) {
+    const path = join(dir, name);
+    if (text === null) {
+      rmSync(path, { force: true });
+      continue;
+    }
+    const temp = join(dir, `.${name}.${process.pid}.${Date.now().toString(36)}.tmp`);
+    writeFileSync(temp, text, { flag: "wx" });
+    renameSync(temp, path);
   }
   return { id: params.id, dir };
 }
@@ -263,12 +281,13 @@ export function ensurePersonaKnowledgebasesDir(personaDir: string): string {
 /** A private KB id, and a text source's name: one lowercase folder or file name. */
 export const PRIVATE_KB_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const SOURCE_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
-export const PRIVATE_KB_LIMITS = { name: 80, description: 300, text: 100_000, url: 2000, sources: 100, urlSources: 10 };
+export const PRIVATE_KB_LIMITS = { name: 80, description: 300, text: 60_000, url: 2000, sources: 100, urlSources: 10 };
 
 /** The persona's private KB folder `<kbId>`, when it and everything above it is its own (no links). */
 function privateKnowledgebaseDir(personaDir: string, kbId: string): string {
   if (!PRIVATE_KB_ID.test(kbId)) throw new PersonaComposeError(`no private knowledge base named "${kbId}"`, "not_found", 404);
-  const root = ensurePersonaKnowledgebasesDir(personaDir);
+  const root = isRealDirectory(personaDir) ? readablePersonaKnowledgebasesDir(personaDir) : undefined;
+  if (!root) throw new PersonaComposeError(`no private knowledge base named "${kbId}"`, "not_found", 404);
   if (!existsSync(root) || !readdirSync(root).includes(kbId)) throw new PersonaComposeError(`no private knowledge base named "${kbId}"`, "not_found", 404);
   const linkError = privateKnowledgebaseLinkError(root, kbId);
   if (linkError) throw new PersonaComposeError(linkError, "invalid_knowledgebase", 422);
@@ -383,8 +402,14 @@ export function addPrivateKnowledgebaseSource(personaDir: string, kbId: string, 
     } catch {
       throw new PersonaComposeError("url must be an http or https address", "invalid_source", 400);
     }
-    if ((url.protocol !== "https:" && url.protocol !== "http:") || String(body.url).length > PRIVATE_KB_LIMITS.url) {
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.href.length > PRIVATE_KB_LIMITS.url) {
       throw new PersonaComposeError("url must be an http or https address", "invalid_source", 400);
+    }
+    // A user name or password in the address can never be sent (fetch refuses
+    // it), and it would sit in kb.json: refused. Put a token in a header-free
+    // URL only if the site takes one in its query, which reads back masked.
+    if (url.username || url.password) {
+      throw new PersonaComposeError("url can't hold a user name or password", "invalid_source", 400);
     }
     if (body.refreshMs !== undefined && (!Number.isInteger(body.refreshMs) || (body.refreshMs as number) < 60_000)) {
       throw new PersonaComposeError("refreshMs must be a whole number of milliseconds, at least 60000", "invalid_source", 400);
@@ -398,7 +423,9 @@ export function addPrivateKnowledgebaseSource(personaDir: string, kbId: string, 
     }
     const catalog = readCatalog(dir);
     const existing = Array.isArray(catalog.externalSources) ? catalog.externalSources : [];
-    catalog.externalSources = [...existing, { id: body.name, type: "url", url: String(body.url), ...(body.refreshMs ? { refreshMs: body.refreshMs } : {}) }];
+    // Stored as parsed: scheme and host lowercased, stray whitespace gone, so
+    // what is listed, masked and fetched is the same string.
+    catalog.externalSources = [...existing, { id: body.name, type: "url", url: url.href, ...(body.refreshMs ? { refreshMs: body.refreshMs } : {}) }];
     replaceFile(join(dir, "kb.json"), `${JSON.stringify(catalog, null, 2)}\n`);
     return { kind: "url", name: body.name };
   }

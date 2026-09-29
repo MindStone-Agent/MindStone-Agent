@@ -63,6 +63,8 @@ c["routing"] = {"mode": "mock", "defaultAgentId": "default", "defaultModel": "mi
 c["memory"] = {"autoRecall": True}
 # "reserved" is used by a route rule: creating it would make it answer with no switch.
 c["personas"] = {"active": "existing", "routes": [{"personaId": "reserved", "sourceChannel": "nowhere"}]}
+# "wf-live" is the config's active workflow, though none exists yet: creating it would take effect at once.
+c["workflows"] = {"active": "wf-live"}
 p.write_text(json.dumps(c, indent=2) + "\n")
 def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True); path.write_text(text)
@@ -72,6 +74,8 @@ write(data / "knowledgebases" / "g1" / "kb.json", json.dumps({"name": "g1"}))
 write(data / "knowledgebases" / "g1" / "sources" / "notes.md", "# Notes\n\nThe global reference code is GFACT-8800 for this collection.\n")
 write(data / "personas" / "existing" / "PERSONA.md", "# Existing\n\nPersona sentinel EXISTING.\n")
 (data / "outside").mkdir()
+# A leftover staging folder, as a crash mid-create would leave: never listed.
+write(data / "personas" / ".staging-leftover" / "PERSONA.md", "# Leftover\n\nSTAGING-LEFTOVER\n")
 os.symlink(data / "personas" / "existing", data / "personas" / "linked")
 PY
 ./scripts/mindstone kb ingest g1 --json >/dev/null
@@ -114,6 +118,9 @@ expect 422 "a workflow that doesn't exist" POST /admin/personas "{\"id\":\"p2\",
 expect 400 "an unknown field" POST /admin/personas "{\"id\":\"p2\",\"name\":\"B\",\"personaMarkdown\":\"x\",\"active\":true}"
 expect 400 "no PERSONA.md text" POST /admin/personas "{\"id\":\"p2\",\"name\":\"B\"}"
 expect 400 "a name over two lines" POST /admin/personas "{\"id\":\"p2\",\"name\":\"B\\nC\",\"personaMarkdown\":\"x\"}"
+expect 404 "an id in another case" GET /admin/personas/BUILT
+expect 200 "the list" GET /admin/personas
+grep -q 'staging' "${BODY}" && { echo "a staging folder was listed as a persona: $(cat "${BODY}")" >&2; exit 1; }
 [[ ! -e "${DATA}/personas/p2" ]] || { echo "a refused create left a persona behind" >&2; exit 1; }
 echo "persona create ok"
 
@@ -131,10 +138,16 @@ expect 400 "an unknown persona" POST /admin/workflows '{"id":"wf-b","steps":[{"i
 expect 400 "a persona in another case" POST /admin/workflows '{"id":"wf-b","steps":[{"id":"s","kind":"route","personaId":"BUILT"}]}' 'no persona named \"BUILT\"'
 expect 400 "a linked persona" POST /admin/workflows '{"id":"wf-b","steps":[{"id":"s","kind":"route","personaId":"linked"}]}' 'no persona named \"linked\"'
 expect 400 "a duplicate step id" POST /admin/workflows '{"id":"wf-b","steps":[{"id":"s","kind":"route"},{"id":"s","kind":"route"}]}'
+expect 400 "a step skill not installed" POST /admin/workflows '{"id":"wf-b","steps":[{"id":"s","kind":"route","skills":["ghost"]}]}' 'no installed skill named'
+expect 409 "an id the config runs" POST /admin/workflows '{"id":"wf-live","steps":[{"id":"s","kind":"route","personaId":"built"}]}' workflow_referenced
+[[ ! -e "${DATA}/workflows/wf-live" ]] || { echo "a workflow the config runs was created" >&2; exit 1; }
 [[ ! -e "${DATA}/workflows/wf-b" ]] || { echo "a refused workflow was written" >&2; exit 1; }
 expect 200 "replace a workflow" PATCH /admin/workflows/wf-a '{"name":"A2","steps":[{"id":"gate-1","kind":"gate","gate":{"condition":{"messagePrefix":"go"}},"retry":{"maxAttempts":5},"onFail":"continue"},{"id":"to-built","kind":"route","personaId":"built","skills":["alpha-skill"]}]}'
 expect 200 "read the workflow" GET /admin/workflows/wf-a
-body_check "workflow read" 'b.workflow.name === "A2" && b.workflow.steps.length === 2 && b.workflow.steps[0].retry.maxAttempts === 5 && !("dir" in b.workflow)'
+body_check "workflow read" 'b.workflow.name === "A2" && b.workflow.steps.length === 2 && b.workflow.steps[0].retry.maxAttempts === 5 && !("dir" in b.workflow) && !("id" in b.workflow) && !("skills" in b.workflow.steps[0])'
+# What GET returns, PATCH takes back.
+ROUND="$(node -e 'process.stdout.write(JSON.stringify(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).workflow))' "${BODY}")"
+expect 200 "send a read workflow back" PATCH /admin/workflows/wf-a "${ROUND}"
 expect 404 "replace a workflow that doesn't exist" PATCH /admin/workflows/wf-none '{"steps":[{"id":"s","kind":"route"}]}'
 expect 200 "list workflows" GET /admin/workflows
 body_check "workflow list" 'b.workflows.some((w) => w.id === "wf-a" && w.stepCount === 2)'
@@ -149,9 +162,11 @@ expect 400 "an edit that renames the id" PATCH /admin/personas/built '{"id":"oth
 expect 422 "an edit to a skill not installed" PATCH /admin/personas/built '{"skills":["ghost"]}' unknown_component
 expect 404 "an edit to a persona that doesn't exist" PATCH /admin/personas/nobody '{"name":"N"}'
 expect 404 "an edit to a linked persona" PATCH /admin/personas/linked '{"name":"N"}'
+expect 422 "a workflow in another case" PATCH /admin/personas/built '{"workflows":["WF-A"]}' unknown_component
 expect 200 "rename the persona" PATCH /admin/personas/built '{"name":"Built Two"}'
 expect 200 "read it back" GET /admin/personas/built
 body_check "edit read" 'b.persona.name === "Built Two" && b.persona.description === "Made in the Console" && b.persona.skills.length === 0 && JSON.stringify(b.persona.workflows) === JSON.stringify(["wf-a"])'
+grep -q '"createdBy": "owner"' "${DATA}/personas/built/metadata.json" || { echo "an edit dropped the metadata's provenance" >&2; exit 1; }
 echo "persona edit ok"
 
 # --- 5. Private knowledge bases.
@@ -165,13 +180,26 @@ expect 403 "a URL source without the advanced permission" POST /admin/personas/b
 expect 200 "grant advanced settings" POST /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}'
 expect 201 "add a URL source" POST /admin/personas/built/knowledgebases/notes/sources "{\"kind\":\"url\",\"name\":\"web\",\"url\":\"http://127.0.0.1:${STUB_PORT}/doc.md\"}"
 expect 400 "a file URL" POST /admin/personas/built/knowledgebases/notes/sources '{"kind":"url","name":"local","url":"file:///etc/hosts"}'
-# A URL with credentials in it is masked when read back.
+# A user name or password in a URL is refused; a token in its query reads back masked.
 expect 201 "a second KB for the masking check" POST /admin/personas/built/knowledgebases '{"id":"masked"}'
-expect 201 "a URL with credentials" POST /admin/personas/built/knowledgebases/masked/sources '{"kind":"url","name":"secret","url":"https://smoke-user:smoke-pass-8899@example.invalid/doc"}'
+expect 400 "a URL with credentials" POST /admin/personas/built/knowledgebases/masked/sources '{"kind":"url","name":"secret","url":"https://smoke-user:smoke-pass-8899@example.invalid/doc"}'
+expect 201 "a URL with a token" POST /admin/personas/built/knowledgebases/masked/sources "{\"kind\":\"url\",\"name\":\"tokened\",\"url\":\"HTTP://127.0.0.1:${STUB_PORT}/missing?token=smoke-tok-7777\"}"
 expect 200 "read the sources" GET /admin/personas/built/knowledgebases/masked/sources
-grep -q 'smoke-pass-8899' "${BODY}" && { echo "a source URL's password was returned: $(cat "${BODY}")" >&2; exit 1; }
+grep -q 'smoke-tok-7777' "${BODY}" && { echo "a source URL's token was returned: $(cat "${BODY}")" >&2; exit 1; }
+body_check "the URL is listed, masked" 'b.sources.urls.length === 1 && b.sources.urls[0].id === "tokened" && b.sources.urls[0].url.startsWith("http://127.0.0.1") && b.sources.urls[0].url.includes("***")'
+# Its fetch fails (404); the error names the address without the token.
+expect 422 "ingest a failing URL" POST /admin/personas/built/knowledgebases/masked/ingest '{}' "HTTP 404"
+grep -q 'smoke-tok-7777' "${BODY}" && { echo "an ingest error returned the token: $(cat "${BODY}")" >&2; exit 1; }
+# At most 10 URL sources.
+expect 201 "a KB for the URL cap" POST /admin/personas/built/knowledgebases '{"id":"many"}'
+for i in 1 2 3 4 5 6 7 8 9 10; do expect 201 "URL ${i}" POST /admin/personas/built/knowledgebases/many/sources "{\"kind\":\"url\",\"name\":\"u${i}\",\"url\":\"http://127.0.0.1:${STUB_PORT}/doc.md?n=${i}\"}"; done
+expect 409 "an eleventh URL" POST /admin/personas/built/knowledgebases/many/sources "{\"kind\":\"url\",\"name\":\"u11\",\"url\":\"http://127.0.0.1:${STUB_PORT}/doc.md\"}" too_many_sources
 expect 200 "read the notes sources" GET /admin/personas/built/knowledgebases/notes/sources
 body_check "sources" 'JSON.stringify(b.sources.text) === JSON.stringify(["facts"]) && b.sources.urls.length === 1 && b.sources.urls[0].id === "web"'
+# Fetching needs the advanced permission, whoever added the URL.
+expect 200 "revoke advanced settings" POST /admin/permissions/advanced '{"enabled":false}'
+expect 403 "ingest URL sources without the advanced permission" POST /admin/personas/built/knowledgebases/notes/ingest '{}'
+expect 200 "grant advanced settings again" POST /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}'
 expect 200 "ingest" POST /admin/personas/built/knowledgebases/notes/ingest '{}'
 body_check "ingest" 'b.knowledgebase.entryCount >= 2 && b.knowledgebase.sourceCount === 2'
 grep -q 'URLFACT-8802' "${DATA}/personas/built/knowledgebases/notes/index.json" || { echo "the URL source was not fetched at ingest" >&2; exit 1; }
@@ -200,7 +228,7 @@ for text in BUILT-8810 PADMIN-8801 GFACT-8800; do grep -qF "${text}" "${TEMP_RUN
 echo "chat ok"
 
 # --- 7. Housekeeping: no staging folders left; writes audited; a non-admin can't write.
-if find "${DATA}/personas" "${DATA}/workflows" -name '.staging-*' | grep -q .; then echo "a staging folder was left behind" >&2; exit 1; fi
+if find "${DATA}/personas" "${DATA}/workflows" -name '.staging-*' ! -name '.staging-leftover' | grep -q .; then echo "a staging folder was left behind" >&2; exit 1; fi
 for action in persona_created persona_edited workflow_created workflow_edited persona_kb_created persona_kb_source_added persona_kb_ingested; do
   grep -q "\"action\":\"${action}\"" "${DATA}/admin/audit.jsonl" || { echo "no audit entry for ${action}" >&2; exit 1; }
 done

@@ -58,6 +58,16 @@ export function parseExternalSources(raw: unknown): MindStoneKbExternalSource[] 
   return sources;
 }
 
+/** An address for an error message: scheme, host and path only. */
+export function addressForErrors(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return "(an address that doesn't parse)";
+  }
+}
+
 /** A response body as text, refused past `maxBytes` (read in chunks, never all at once first). */
 async function readTextCapped(response: Response, maxBytes: number, sourceId: string): Promise<string> {
   if (!response.body) return "";
@@ -178,12 +188,20 @@ export async function loadUrlSourceDocument(
   options: { now?: string; timeoutMs?: number; maxBytes?: number } = {},
 ): Promise<ExternalSourceDocument> {
   const url = source.url ?? "";
-  const response = await fetch(url, {
-    headers: { Accept: "text/html, text/markdown, text/plain" },
-    ...(options.timeoutMs ? { signal: AbortSignal.timeout(options.timeoutMs) } : {}),
-  });
+  // Errors name the address without its user name, password or query, which can hold a token (#125).
+  const shown = addressForErrors(url);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { Accept: "text/html, text/markdown, text/plain" },
+      ...(options.timeoutMs ? { signal: AbortSignal.timeout(options.timeoutMs) } : {}),
+    });
+  } catch (error) {
+    const reason = error instanceof Error && error.name === "TimeoutError" ? "timed out" : "could not be fetched";
+    throw new Error(`url source "${source.id}" ${reason}: ${shown}`);
+  }
   if (!response.ok) {
-    throw new Error(`url source "${source.id}" fetch failed: HTTP ${response.status} for ${url}`);
+    throw new Error(`url source "${source.id}" fetch failed: HTTP ${response.status} for ${shown}`);
   }
   const contentType = response.headers.get("content-type") ?? "";
   const raw = options.maxBytes ? await readTextCapped(response, options.maxBytes, source.id) : await response.text();

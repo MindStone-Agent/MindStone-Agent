@@ -35,6 +35,8 @@ export type ValidateWorkflowResult =
 type Context = {
   /** True when a persona exists under exactly this id (case included). */
   personaExists: (id: string) => boolean;
+  /** True when a skill is installed under this id. A route step's skills must be, or the step would leave the persona none. */
+  skillInstalled?: (id: string) => boolean;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -107,6 +109,10 @@ export function validateWorkflowDefinition(value: unknown, context: Context): Va
       const when = raw.when === undefined ? undefined : condition(raw.when, `${where}.when`);
       const personaId = persona(raw.personaId, `${where}.personaId`, context);
       const skills = refs(raw.skills, `${where}.skills`);
+      if (Array.isArray(skills) && context.skillInstalled) {
+        const missing = skills.find((id) => !context.skillInstalled!(id));
+        if (missing) return { ok: false, error: `${where}.skills: no installed skill named "${missing}"` };
+      }
       const knowledgebases = refs(raw.knowledgebases, `${where}.knowledgebases`);
       for (const field of [when, personaId, skills, knowledgebases]) {
         if (field && typeof field === "object" && "error" in field) return { ok: false, error: (field as { error: string }).error };
@@ -212,7 +218,7 @@ export function writeWorkflowDefinition(params: {
   }
   if (!isRealWorkflowDir(params.workflowsDir, params.id)) throw new WorkflowWriteError(`no workflow named "${params.id}"`, "not_found", 404);
   const path = join(dir, "workflow.json");
-  const temp = `${path}.${process.pid}.tmp`;
+  const temp = join(dir, `.workflow.json.${process.pid}.${Date.now().toString(36)}.tmp`);
   writeFileSync(temp, text, { flag: "wx" });
   renameSync(temp, path);
   return dir;
@@ -226,4 +232,52 @@ export function isRealWorkflowDir(workflowsDir: string, id: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * A loaded workflow in the shape a PATCH takes (#125): only the fields each
+ * step's kind allows, and no empty lists, so the editor can send back what it
+ * read.
+ */
+export function workflowForEditing(workflow: { name?: string; description?: string; version?: string; steps: MindStoneWorkflowStep[] }, id: string): WorkflowDefinitionInput {
+  const steps = workflow.steps.map((step): MindStoneWorkflowStep => {
+    if (step.kind === "gate") {
+      return {
+        id: step.id,
+        kind: "gate",
+        ...(step.gate ? { gate: step.gate.personaLoadable ? { personaLoadable: step.gate.personaLoadable } : { condition: step.gate.condition } } : {}),
+        ...(step.retry?.maxAttempts !== undefined ? { retry: { maxAttempts: step.retry.maxAttempts } } : {}),
+        ...(step.onFail ? { onFail: step.onFail } : {}),
+      };
+    }
+    return {
+      id: step.id,
+      kind: "route",
+      ...(step.when ? { when: step.when } : {}),
+      ...(step.personaId ? { personaId: step.personaId } : {}),
+      ...(step.skills?.length ? { skills: step.skills } : {}),
+      ...(step.knowledgebases?.length ? { knowledgebases: step.knowledgebases } : {}),
+    };
+  });
+  return {
+    ...(workflow.name && workflow.name !== id ? { name: workflow.name } : {}),
+    ...(workflow.description ? { description: workflow.description } : {}),
+    ...(workflow.version ? { version: workflow.version } : {}),
+    steps,
+  };
+}
+
+/**
+ * Workflow ids the config already runs: `workflows.active` and route rules.
+ * Creating one of them would take effect with no step of its own (#125, the
+ * workflow form of #105's rule), so a create under one is refused.
+ */
+export function referencedWorkflowIds(config: { workflows?: { active?: unknown; routes?: unknown } } | undefined): Set<string> {
+  const ids = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value === "string" && value.trim()) ids.add(value.trim()).add(value.trim().toLowerCase());
+  };
+  add(config?.workflows?.active);
+  for (const rule of Array.isArray(config?.workflows?.routes) ? config.workflows.routes : []) add((rule as { workflowId?: unknown })?.workflowId);
+  return ids;
 }

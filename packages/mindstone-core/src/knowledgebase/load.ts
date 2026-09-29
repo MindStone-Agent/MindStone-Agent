@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { MindStoneConfig } from "../config/types.js";
 import type { MemoryDocument } from "../memory/types.js";
@@ -294,7 +294,10 @@ export async function ingestMindStoneKnowledgebase(
   }
 
   const index: MindStoneKbIndex = { kbId, ingestedAt: options.now, entries };
-  writeFileSync(kb.indexPath, `${JSON.stringify(index, null, 2)}\n`);
+  // Written whole and moved into place, so a turn reading it meanwhile never sees half a file.
+  const temp = `${kb.indexPath}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(index, null, 2)}\n`, { flag: "wx" });
+  renameSync(temp, kb.indexPath);
   return { ok: true, kbId, indexPath: kb.indexPath, entryCount: entries.length, sourceCount: sourcePaths.length + externalDocuments.length };
 }
 
