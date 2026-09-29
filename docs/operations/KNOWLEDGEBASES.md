@@ -73,7 +73,8 @@ alike.
   in the environment.
 - **At ingest**, after `index.json` is written, each entry is embedded: its
   source title and heading, then the start of its text (6,000 characters at
-  most), 8 entries a request, each request given 60 s. A request that times
+  most), 8 entries a request, each request given 60 s (or
+  `EMBEDDER_TIMEOUT_MS` if that is longer). A request that times
   out is tried again an entry at a time. The vectors go to `vectors.json`
   beside the index, with the provider, the model, the dimension and a sha256
   of the index they were made from. The file is written whole and moved into
@@ -101,7 +102,8 @@ alike.
   `ready`. Re-ingest after changing the embedder's server.
 - **At recall**, the question is embedded once per turn, shared with memory
   recall. `vectors.json` is read only on a turn that ranks by meaning, and
-  kept in memory while it doesn't change. Each entry of a KB with `ready`
+  its vectors are kept in memory while the file stays the same (512 MB across
+  all KBs, least recently used first out). Each entry of a KB with `ready`
   vectors is scored by cosine similarity; a source's score is its best
   entry's. Sources at or above `knowledgebases.recall.minSimilarity` (default
   0.5; memory's `minScore` doesn't apply to them) are recalled, the best
@@ -111,9 +113,10 @@ alike.
 - **Their own quota.** Cosine and word-match scores aren't on one scale, so
   sources found by meaning don't compete with memory on score: they take up to
   `knowledgebases.recall.maxResults` of the turn's `memory.recall.maxResults`
-  slots (a KB quota at or above it leaves memory no slot), and they take the
-  prompt's recall token budget (`memory.recall.maxPromptTokens`) first; memory
-  and word-match hits fill what is left, in their order.
+  slots (a KB quota at or above it leaves memory no slot). They also take the
+  prompt's recall token budget (`memory.recall.maxPromptTokens`) first, up to
+  half of it; the best memory hit always goes in, and memory and word-match
+  hits fill what is left, in their order.
 - **Word match still runs** for every KB source, so an exact term (an error
   code, a part number) is found as before. A source found both ways is shown
   once, as its meaning copy when that takes a quota slot.

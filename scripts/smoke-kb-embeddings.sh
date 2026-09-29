@@ -272,7 +272,8 @@ assert.deepEqual(selectRecallHits(merged, 2).map((h) => h.id), ["k1", "m1"]);
   const prompt = buildMemoryRecallPrompt([long, kbHit], 2500);
   assert.deepEqual(prompt.hits.map((h) => h.id), ["long", "k1"], "the quota hit fits before the long memory hit, and the best memory hit still goes in");
   // Quota hits take at most half the budget: three large KB sources leave room for memory.
-  const kbBig = (id: string) => ({ ...hit(id, 0.5, true, "kb"), text: "section ".repeat(700) });
+  // Each about 600 tokens: all three would fit the whole budget, two fit half of it.
+  const kbBig = (id: string) => ({ ...hit(id, 0.5, true, "kb"), text: "section ".repeat(300) });
   const memory = { ...hit("m-top", 0.9), text: "memory ".repeat(600) };
   const crowded = buildMemoryRecallPrompt([memory, kbBig("k1"), kbBig("k2"), kbBig("k3"), hit("m2", 0.4)], 2500);
   assert.ok(crowded.hits.some((h) => h.id === "m-top"), "the best memory hit must stay in");
@@ -314,15 +315,18 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
 {
   const cdir = mkdtempSync(join(tmpdir(), "kbvec-cache-"));
   await writeKbVectors({ kbDir: cdir, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }) });
-  assert.equal(readKbVectors(cdir, indexText, { id: "stub", model: "m1" }).state, "ready");
   const path = join(cdir, KB_VECTORS_FILE);
+  // A whole-second mtime, as a coarse clock gives, so the new file can match it exactly.
+  utimesSync(path, 1_700_000_000, 1_700_000_000);
+  assert.equal(readKbVectors(cdir, indexText, { id: "stub", model: "m1" }).state, "ready");
   const before = statSync(path);
   const other = JSON.parse(readFileSync(path, "utf8"));
   other.indexSha256 = other.indexSha256.replace(/./, (c: string) => (c === "0" ? "1" : "0"));
   writeFileSync(join(cdir, "next.json"), `${JSON.stringify(other)}\n`);
   renameSync(join(cdir, "next.json"), path);
-  utimesSync(path, before.atime, before.mtime);
+  utimesSync(path, 1_700_000_000, 1_700_000_000);
   assert.equal(statSync(path).size, before.size, "fixture: same size");
+  assert.equal(statSync(path).mtimeMs, before.mtimeMs, "fixture: same mtime");
   assert.match((readKbVectors(cdir, indexText, { id: "stub", model: "m1" }) as any).reason ?? "", /index changed/, "a new file with the same size and mtime must be read again");
 }
 // Sections whose headings slug alike get their own ids, and so their own vectors.
