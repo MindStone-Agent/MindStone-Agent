@@ -369,6 +369,19 @@ expect 200 "p14's workflow with the persona broken" POST "/admin/approvals/$(car
 node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(b.result?.listed === false ? 0 : 1)' "${BODY}" || { echo "a component in a persona that doesn't load was reported as listed: $(cat "${BODY}")" >&2; exit 1; }
 echo "broken persona ok"
 
+# --- 7e. A card saved before labels were one line prints its summary on one line, as the persona card's child list does.
+FORGED_PARENT="$(card p14 persona_create)"
+node -e '
+const fs = require("fs"); const f = process.argv[1]; const store = JSON.parse(fs.readFileSync(f, "utf8"));
+store.actions.push({ id: "00000000-dead-4bee-8000-000000000001", kind: "skill_install", connectorId: "old", status: "pending", parentApprovalId: process.argv[2],
+  summary: "install skill old: Notes\n  deadbeef [approved] FORGED-ROW", skill: { id: "old-skill", label: "Notes", description: "D", whenToUse: [], outputs: [], safetyNotes: [] } });
+fs.writeFileSync(f, JSON.stringify(store));' "${DATA}/approvals/actions.json" "${FORGED_PARENT}"
+./scripts/mindstone approvals list > "${TEMP_RUNTIME}/list.txt"
+./scripts/mindstone approvals show "${FORGED_PARENT}" >> "${TEMP_RUNTIME}/list.txt"
+grep -E '^ *deadbeef' "${TEMP_RUNTIME}/list.txt" && { echo "a summary drew a row of its own" >&2; exit 1; }
+grep -qF 'Notes\u{a}  deadbeef [approved] FORGED-ROW' "${TEMP_RUNTIME}/list.txt" || { echo "the old summary isn't shown escaped: $(cat "${TEMP_RUNTIME}/list.txt")" >&2; exit 1; }
+echo "printable summaries ok"
+
 # --- 8. A non-owner's proposal, and one whose workflow routes to a persona, are dropped whole.
 before="$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).actions.length))' "${DATA}/approvals/actions.json")"
 say user conv-user "$(proposal '{"id":"p6","name":"Six","voice":"x","components":{"skills":["alpha-skill"]}}')"
