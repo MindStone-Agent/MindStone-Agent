@@ -275,7 +275,7 @@ cd ~/.mindstone && docker compose exec gateway curl -s -o /dev/null -w '%{http_c
 
 **Check:**
 - that prints `200` (only if you use Ollama on this machine);
-- before setup, `docker compose exec gateway ./scripts/mindstone doctor` ends with `Result: ok`, and its `routing.mode` line is a warning showing `placeholder`;
+- before setup, `docker compose exec gateway ./scripts/mindstone doctor` ends with `Result: ok`. Its two warnings are expected until setup finishes: `routing.mode` shows `placeholder`, and `memory.sqlite` has no index yet;
 - once setup is finished, the banner is gone, `routing.mode` shows `pi-session`, and a chat message gets a real answer.
 
 The `mindstone` CLI runs inside the gateway container as `docker compose exec gateway ./scripts/mindstone <command>`, for example `status`, `doctor` or `config`. Interactive commands (`onboard`, `auth login`) need `docker compose exec -it`.
