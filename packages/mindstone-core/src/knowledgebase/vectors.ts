@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { MemoryEmbeddingProvider } from "../memory/embedding.js";
+import { memoryEmbeddingSpec, type MemoryEmbeddingProvider } from "../memory/embedding.js";
 import type { MindStoneKbIndexEntry, MindStoneKbVectorsStatus } from "./types.js";
 
 /**
@@ -42,7 +42,7 @@ type KbVectorsFile = {
 
 export type KbVectorsWriteResult =
   | { state: "ready"; provider: string; model: string; dimension: number; count: number }
-  | { state: "missing"; reason: string };
+  | { state: "missing"; reason: string; superseded?: true };
 
 export type LoadedKbVectors = {
   provider: string;
@@ -116,10 +116,35 @@ export async function writeKbVectors(params: {
   now?: string;
   timeoutMs?: number;
   batchSize?: number;
+  /**
+   * The index these entries came from: checked again before the vectors are
+   * written, so an ingest that finished meanwhile keeps its own (#151 review).
+   */
+  indexPath?: string;
+  /** A background re-embed (#151): on failure the old vectors stay, rather than being removed. */
+  keepOnFailure?: boolean;
+  /**
+   * Awaited before each request (#156 review): a background re-embed waits
+   * while a turn is being answered. Time spent waiting doesn't count against
+   * the budget.
+   */
+  beforeBatch?: () => Promise<void>;
 }): Promise<KbVectorsWriteResult> {
   const { embedder } = params;
+  const indexStillCurrent = () => {
+    if (!params.indexPath) return true;
+    try {
+      return kbIndexDigest(readFileSync(params.indexPath, "utf-8")) === kbIndexDigest(params.indexText);
+    } catch {
+      return false;
+    }
+  };
+  // Old vectors are removed only by the run whose index is the current one.
+  const dropOld = () => {
+    if (!params.keepOnFailure && indexStillCurrent()) removeKbVectors(params.kbDir);
+  };
   if (!embedder) {
-    removeKbVectors(params.kbDir);
+    dropOld();
     return { state: "missing", reason: "no embedder is configured" };
   }
   const started = Date.now();
@@ -127,11 +152,12 @@ export async function writeKbVectors(params: {
   const batchSize = Math.max(1, params.batchSize ?? KB_EMBED_LIMITS.batchSize);
   const encoded: Record<string, string> = {};
   let dimension = 0;
+  let paused = 0;
   const embedBatch = async (batch: MindStoneKbIndexEntry[]) => {
     const texts = batch.map((entry) => kbEntryEmbeddingText(entry));
     // The embedder drops blank inputs, which would shift every vector after one.
     if (texts.some((text) => !text)) throw new Error("blank entry");
-    const vectors = await withTimeout(embedder.embedTexts(texts), budget - (Date.now() - started));
+    const vectors = await withTimeout(embedder.embedTexts(texts), budget - (Date.now() - started - paused));
     if (vectors.length !== batch.length) throw new Error("vector count");
     batch.forEach((entry, index) => {
       const vector = vectors[index];
@@ -146,6 +172,11 @@ export async function writeKbVectors(params: {
   };
   try {
     for (let offset = 0; offset < params.entries.length; offset += batchSize) {
+      if (params.beforeBatch) {
+        const waitStarted = Date.now();
+        await params.beforeBatch();
+        paused += Date.now() - waitStarted;
+      }
       const batch = params.entries.slice(offset, offset + batchSize);
       try {
         await embedBatch(batch);
@@ -156,7 +187,7 @@ export async function writeKbVectors(params: {
       }
     }
   } catch (error) {
-    removeKbVectors(params.kbDir);
+    dropOld();
     return {
       state: "missing",
       reason: error instanceof KbZeroVector
@@ -169,9 +200,10 @@ export async function writeKbVectors(params: {
     };
   }
   if (dimension === 0) {
-    removeKbVectors(params.kbDir);
+    dropOld();
     return { state: "missing", reason: "the index has no entries" };
   }
+  if (!indexStillCurrent()) return { state: "missing", reason: "the index changed while these were embedded; the newer ingest's vectors are kept", superseded: true };
   const file: KbVectorsFile = {
     version: 1,
     kbId: params.kbId,
@@ -188,7 +220,7 @@ export async function writeKbVectors(params: {
     writeFileSync(temp, `${JSON.stringify(file)}\n`, { flag: "wx" });
     renameSync(temp, path);
   } catch {
-    removeKbVectors(params.kbDir);
+    dropOld();
     return { state: "missing", reason: "the vectors file could not be written" };
   } finally {
     rmSync(temp, { force: true });
@@ -198,7 +230,7 @@ export async function writeKbVectors(params: {
 
 type ReadKbVectors =
   | { state: "ready"; loaded: LoadedKbVectors; count: number }
-  | { state: "missing" | "stale" | "unused"; reason: string; provider?: string; model?: string; dimension?: number };
+  | { state: "missing" | "stale" | "unused"; reason: string; provider?: string; model?: string; dimension?: number; cause?: "model" };
 
 /**
  * The vectors beside an index, if they can be used with `embedder` (the
@@ -210,7 +242,8 @@ export function readKbVectors(
   kbDir: string,
   indexText: string,
   embedder: { id: string; model: string } | undefined,
-  options: { noLinks?: boolean } = {},
+  /** `decode: false`: the header checks only (a background scan, #151 review); a ready result then holds no vectors. */
+  options: { noLinks?: boolean; decode?: boolean } = {},
 ): ReadKbVectors {
   const path = join(kbDir, KB_VECTORS_FILE);
   let parsed: ParsedVectorsFile;
@@ -237,12 +270,19 @@ export function readKbVectors(
   }
   const described = { provider: file.provider, model: file.model, dimension };
   if (!embedder) return { state: "unused", reason: "no embedder is configured", ...described };
-  if (file.provider !== embedder.id || file.model !== embedder.model) {
-    return { state: "stale", reason: `made with ${file.provider}:${file.model}, the install now uses ${embedder.id}:${embedder.model}; re-ingest`, ...described };
+  // The same model identity memory records with each chunk (#140, #151).
+  if (memoryEmbeddingSpec({ id: file.provider, model: file.model }) !== memoryEmbeddingSpec(embedder)) {
+    return {
+      state: "stale",
+      reason: `made with ${memoryEmbeddingSpec({ id: file.provider, model: file.model })}, the install now uses ${memoryEmbeddingSpec(embedder)}; re-ingest (a KB of at most 512 entries is also embedded again after an owner's chat through the gateway)`,
+      ...described,
+      cause: "model",
+    };
   }
   if (file.indexSha256 !== kbIndexDigest(indexText)) {
     return { state: "stale", reason: "the index changed after these vectors were made; re-ingest", ...described };
   }
+  if (options.decode === false) return { state: "ready", loaded: { provider: file.provider, model: file.model, dimension, vectors: new Map() }, count: 0 };
   const vectors = parsed.decoded();
   if (!vectors) return { state: "stale", reason: "vectors.json can't be read; re-ingest", ...described };
   return { state: "ready", loaded: { provider: file.provider, model: file.model, dimension, vectors }, count: vectors.size };

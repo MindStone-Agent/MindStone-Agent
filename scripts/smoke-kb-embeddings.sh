@@ -87,7 +87,8 @@ createServer((req, res) => {
     if (req.method !== "POST" || req.url !== "/v1/embeddings") { res.writeHead(404); res.end("{}"); return; }
     const body = JSON.parse(raw);
     const input = Array.isArray(body.input) ? body.input : [body.input];
-    state.requests.push({ model: body.model, input });
+    const request = { model: body.model, input, t: Date.now() };
+    state.requests.push(request);
     if (state.mode === "fail") {
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "stub embedder is down" } }));
@@ -95,10 +96,14 @@ createServer((req, res) => {
     }
     const dims = state.mode === "dim5" ? 5 : 6;
     const answer = () => {
+      request.done = Date.now();
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ object: "list", model: body.model, data: input.map((text, index) => ({ object: "embedding", index, embedding: vectorFor(text, dims) })) }));
     };
-    if (state.mode === "slow") setTimeout(answer, 6000); else answer();
+    if (state.mode === "slow") setTimeout(answer, 6000);
+    // One request at a time, 150 ms an entry, like Ollama's default (#156 review).
+    else if (state.mode === "serial") state.queue = (state.queue ?? Promise.resolve()).then(() => new Promise((resolve) => setTimeout(() => { answer(); resolve(); }, 150 * input.length)));
+    else answer();
   });
 }).listen(Number(process.env.EMBED_PORT), "127.0.0.1", () => console.log("stub embedder up"));
 NODE
@@ -126,7 +131,7 @@ import { join } from "node:path";
 import {
   KB_EMBED_LIMITS, KB_VECTORS_FILE, cosineSimilarity, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbVectors, writeKbVectors,
 } from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
-import { ingestMindStoneKnowledgebase } from "./packages/mindstone-core/src/knowledgebase/load.ts";
+import { ingestMindStoneKnowledgebase, reembedStaleKnowledgebase } from "./packages/mindstone-core/src/knowledgebase/load.ts";
 import { KnowledgebaseRecallProvider, knowledgebaseRecallSettings } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
 import { buildMemoryRecallPrompt, CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, recallMindStoneMemory, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
 import { sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
@@ -227,6 +232,7 @@ assert.equal(semantic[0].score, 1);
 assert.equal(semantic[0].text, "header\n- a1\n- a0\nfooter", "closest section first");
 assert.equal(semantic[0].metadata?.bestCitation, "a1");
 assert.ok(hits.some((h) => h.id === "kb:c" && !isQuotaHit(h)), "word match still runs");
+assert.equal(hits.find((h) => h.id === "kb:c")?.metadata?.recallMode, "lexical", "a KB word-match hit says so (#151)");
 assert.equal(queryEmbedder.calls, 1);
 // A source found by meaning and by words comes back twice; the selection keeps one copy.
 hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), minSimilarity: 0.5 }).search({ text: "question header", limit: 8 });
@@ -425,6 +431,93 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   execFileSync("mkfifo", [join(d, KB_VECTORS_FILE)]);
   assert.equal(readKbVectors(d, indexText, { id: "stub", model: "m1" }).state, "missing");
 }
+// After a model switch, a KB is embedded again from its index, one a call (#151): only one another
+// model made, not one whose index changed or that is too large; a claimed-out KB is left for later.
+{
+  const kb = async (root: string, id: string, text: string, model: string) => {
+    mkdirSync(join(root, id, "sources"), { recursive: true });
+    writeFileSync(join(root, id, "kb.json"), JSON.stringify({ name: id }));
+    writeFileSync(join(root, id, "sources", "a.md"), text);
+    await ingestMindStoneKnowledgebase(root, id, { embedder: { ...fixed({ alpha: [1, 0, 0] }), model } as any });
+  };
+  const modelOf = (root: string, id: string) => JSON.parse(readFileSync(join(root, id, KB_VECTORS_FILE), "utf8")).model;
+  const now = { ...fixed({ alpha: [1, 0, 0] }), model: "m1" } as any;
+  // The rules: a-big (2 entries) over a limit of 1; b-index (this model) changed after its vectors; c-old another model.
+  const rules = mkdtempSync(join(tmpdir(), "kbvec-reembed-"));
+  await kb(rules, "a-big", "# A\n\n## One\n\nalpha one\n\n## Two\n\nalpha two\n", "old");
+  await kb(rules, "b-index", "# B\n\nalpha b\n", "m1");
+  writeFileSync(join(rules, "b-index", "index.json"), readFileSync(join(rules, "b-index", "index.json"), "utf8") + " ");
+  await kb(rules, "c-old", "# C\n\nalpha c\n", "old");
+  let result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: rules }], embedder: now, maxEntries: 1, claim: ({ kbId }) => (kbId === "c-old" ? undefined : () => undefined) });
+  assert.deepEqual(result, { deferred: 1 }, "a claimed-out KB is left for later, and nothing else qualifies");
+  result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: rules }], embedder: now, maxEntries: 1 });
+  assert.equal(result.reembedded?.kbId, "c-old");
+  assert.equal(modelOf(rules, "c-old"), "m1");
+  assert.deepEqual(await reembedStaleKnowledgebase({ kbDirs: [{ dir: rules }], embedder: now, maxEntries: 1 }), { deferred: 0 }, "nothing left under the limit");
+  assert.equal((await reembedStaleKnowledgebase({ kbDirs: [{ dir: rules }], embedder: now })).reembedded?.kbId, "a-big", "a-big within the default limit");
+  assert.deepEqual(await reembedStaleKnowledgebase({ kbDirs: [{ dir: rules }], embedder: now }), { deferred: 0 }, "a KB whose index changed under this model is left for kb ingest");
+  // A failed attempt keeps the stale vectors and waits before trying again (#151 review).
+  const failing2 = mkdtempSync(join(tmpdir(), "kbvec-reembed-fail-"));
+  await kb(failing2, "f-kb", "# F\n\nalpha f\n", "old");
+  const down = { id: "stub", model: "m1", async embedTexts() { throw new Error("down"); } } as any;
+  result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: failing2 }], embedder: down });
+  assert.equal(result.reembedded?.vectors.state, "missing");
+  assert.equal(modelOf(failing2, "f-kb"), "old", "a failed re-embed keeps the old vectors");
+  assert.deepEqual(await reembedStaleKnowledgebase({ kbDirs: [{ dir: failing2 }], embedder: now }), { deferred: 1 }, "not tried again at once");
+  // Retries double, and after five failures the KB is given up on for that model: not deferred any more (#156 review).
+  const realNow = Date.now;
+  try {
+    let clock = realNow();
+    Date.now = () => clock;
+    let last: any;
+    for (let attempt = 2; attempt <= 5; attempt += 1) {
+      clock += 24 * 3600_000;
+      last = await reembedStaleKnowledgebase({ kbDirs: [{ dir: failing2 }], embedder: down });
+      assert.equal(last.reembedded?.vectors.state, "missing", `attempt ${attempt} must run`);
+    }
+    assert.equal(last.reembedded?.gaveUp, true, "the fifth failure gives up");
+    clock += 365 * 24 * 3600_000;
+    assert.deepEqual(await reembedStaleKnowledgebase({ kbDirs: [{ dir: failing2 }], embedder: now }), { deferred: 0 }, "a given-up KB is neither tried nor counted as waiting");
+  } finally {
+    Date.now = realNow;
+  }
+  // An ingest that finishes while a re-embed runs keeps its own vectors.
+  const race = mkdtempSync(join(tmpdir(), "kbvec-reembed-race-"));
+  await kb(race, "e-race", "# E\n\nalpha e\n", "old");
+  const racing = {
+    ...fixed({ alpha: [1, 0, 0] }), model: "m1",
+    async embedTexts(texts: string[]) {
+      writeFileSync(join(race, "e-race", "index.json"), readFileSync(join(race, "e-race", "index.json"), "utf8") + "\n");
+      return texts.map(() => [1, 0, 0]);
+    },
+  } as any;
+  const beforeRace = readFileSync(join(race, "e-race", KB_VECTORS_FILE), "utf8");
+  result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: race }], embedder: racing });
+  assert.match((result.reembedded?.vectors as any).reason ?? "", /index changed while/);
+  assert.equal(readFileSync(join(race, "e-race", KB_VECTORS_FILE), "utf8"), beforeRace, "vectors made from an index replaced meanwhile are not written");
+  assert.equal((result.reembedded?.vectors as any).superseded, true);
+  assert.equal((await reembedStaleKnowledgebase({ kbDirs: [{ dir: race }], embedder: now })).reembedded?.kbId, "e-race", "an overtaken attempt isn't a failure: tried again at once");
+}
+// Two ingests of one KB: the one whose index was replaced meanwhile keeps nothing and removes nothing (#156 review).
+{
+  const root = mkdtempSync(join(tmpdir(), "kbvec-ingest-race-"));
+  mkdirSync(join(root, "r", "sources"), { recursive: true });
+  writeFileSync(join(root, "r", "kb.json"), JSON.stringify({ name: "r" }));
+  writeFileSync(join(root, "r", "sources", "a.md"), "# R\n\nalpha r\n");
+  await ingestMindStoneKnowledgebase(root, "r", { embedder: fixed({ alpha: [1, 0, 0] }) });
+  const kept = readFileSync(join(root, "r", KB_VECTORS_FILE), "utf8");
+  const overlapping = {
+    ...fixed({ alpha: [0, 1, 0] }),
+    async embedTexts(texts: string[]) {
+      // Another ingest writes a newer index while this one embeds.
+      writeFileSync(join(root, "r", "index.json"), readFileSync(join(root, "r", "index.json"), "utf8") + "\n");
+      return texts.map(() => [0, 1, 0]);
+    },
+  };
+  const raced = await ingestMindStoneKnowledgebase(root, "r", { embedder: overlapping as any });
+  assert.match((raced as any).vectors.reason ?? "", /index changed while/);
+  assert.equal(readFileSync(join(root, "r", KB_VECTORS_FILE), "utf8"), kept, "the ingest overtaken by a newer index writes and removes nothing");
+}
 // Sections whose headings slug alike get their own ids, and so their own vectors.
 {
   const kbRoot = mkdtempSync(join(tmpdir(), "kbvec-dup-"));
@@ -476,6 +569,7 @@ config["session"] = {"mode": "single", "defaultSessionKey": "agent:default:main"
 config["memory"] = {"autoRecall": True}
 config.setdefault("gateway", {})["auth"] = {"mode": "token", "tokenEnv": "KBE_TOKEN"}
 config["gateway"]["admin"] = {"tokenEnv": "KBE_ADMIN_TOKEN"}
+config["gateway"]["http"] = {"chatCompletions": {"enabled": True}}
 config_path.write_text(json.dumps(config, indent=2) + "\n")
 PY
 
@@ -730,5 +824,92 @@ ${MS} approvals approve "${cli_persona}" --yes >/dev/null
 ${MS} approvals approve "${cli_kb}" --yes > "${TEMP_RUNTIME}/cli-approve.txt"
 grep -q "vectors: ready" "${TEMP_RUNTIME}/cli-approve.txt" || { echo "CLI approve-path ingest: $(cat "${TEMP_RUNTIME}/cli-approve.txt")" >&2; exit 1; }
 [[ -f "${DATA}/personas/pa-cli/knowledgebases/beds/vectors.json" ]] || { echo "the CLI's approved KB has no vectors.json" >&2; exit 1; }
+
+# After a switch of embedding model, an owner's chat through the gateway has a stale KB embedded again (#151).
+set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-b"'
+stub_mode ok
+${MS} kb status pantry --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="stale") { console.error("pantry before the chat:", JSON.stringify(s.vectors)); process.exit(1); }})'
+# 20 s at most: a turn never waits for the re-embed (#156 review).
+code="$(curl -s --max-time 20 -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H 'content-type: application/json' -d '{"text":"anything new about the garden?"}' "${BASE}/chat/send")" || true
+[[ "${code}" == "200" ]] || { echo "gateway chat after the switch ${code} (000: no answer in 20 s): $(cat "${BODY}")" >&2; exit 1; }
+for _ in $(seq 1 40); do
+  grep -q '"model":"kbstub-b"' "${DATA}/knowledgebases/pantry/vectors.json" 2>/dev/null && break
+  sleep 0.5
+done
+grep -q '"model":"kbstub-b"' "${DATA}/knowledgebases/pantry/vectors.json" || { echo "the stale KB was not embedded again after the owner's chat" >&2; exit 1; }
+${MS} kb status pantry --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="ready") { console.error("pantry after the chat:", JSON.stringify(s.vectors)); process.exit(1); }})'
+
+# A background re-embed never slows the owner's turns, even with a one-at-a-time embedder (#156 review),
+# and only an owner's chat starts one.
+python3 - <<'PY'
+import json, os, pathlib
+root = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "knowledgebases" / "library"
+(root / "sources").mkdir(parents=True, exist_ok=True)
+(root / "kb.json").write_text(json.dumps({"name": "Library", "version": "0.1.0"}))
+(root / "sources" / "shelves.md").write_text("# Shelves\n\n" + "".join(f"## Shelf {i}\n\nBook row {i} holds bound volumes.\n\n" for i in range(40)))
+PY
+stub_mode ok
+${MS} kb ingest library --json >/dev/null
+chat_ms() { # chat_ms <text> [role]: prints "<start ms> <end ms>" of one gateway chat
+  local started ended role="${2:-}"
+  : > "${BODY}" # a check on the body never reads an earlier chat's
+  started=$(node -e 'console.log(Date.now())')
+  if [[ -n "${role}" ]]; then
+    # A Console user's turn, as the Console sends it: the OpenAI endpoint with the user's role.
+    curl -s --max-time 20 -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H "x-mindstone-user-role: ${role}" -H "x-mindstone-user-id: smoke-${role}" -H 'content-type: application/json' -d "{\"model\":\"mindstone/default\",\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}]}" "${BASE}/v1/chat/completions" || { echo "chat \"$1\" failed or got no answer in 20 s" >&2; exit 1; }
+  else
+    curl -s --max-time 20 -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H 'content-type: application/json' -d "{\"text\":\"$1\"}" "${BASE}/chat/send" || { echo "chat \"$1\" failed or got no answer in 20 s" >&2; exit 1; }
+  fi
+  ended=$(node -e 'console.log(Date.now())')
+  echo "${started} ${ended}"
+}
+# library_requests_between <from ms> <to ms>: how many library entries the stub was sent in that window.
+library_requests_between() { node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>console.log(s.requests.filter((q)=>q.input.some((t)=>t.includes("Book row")) && q.t > Number(process.argv[2]) && q.t < Number(process.argv[3])).length))' "${STUB}/_test/state" "$1" "$2"; }
+# Memory's own backfill after a model switch (#140) isn't this PR's: without the sqlite-vec index only the KB re-embed runs.
+set_config 'c["memory"].pop("vectorStore", None)'
+stub_mode serial
+set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-c"'
+# A KB already embedded with the new model, so each turn embeds its question as a real install does.
+python3 - <<'PY2'
+import json, os, pathlib
+root = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "knowledgebases" / "atlas"
+(root / "sources").mkdir(parents=True, exist_ok=True)
+(root / "kb.json").write_text(json.dumps({"name": "Atlas", "version": "0.1.0"}))
+(root / "sources" / "maps.md").write_text("# Maps\n\n## Coast\n\nCoastal charts of the bay.\n")
+PY2
+${MS} kb ingest atlas --json >/dev/null
+read -r member_start member_end <<<"$(chat_ms "a member's question after the switch" member)"
+grep -q '"choices"' "${BODY}" || { echo "the member's chat didn't run: $(cat "${BODY}")" >&2; exit 1; }
+sleep 3
+[[ "$(library_requests_between "${member_start}" "$(node -e 'console.log(Date.now())')")" == "0" ]] || { echo "a non-owner chat started a re-embed" >&2; exit 1; }
+chat_ms "the owner's first question after the switch" >/dev/null
+sleep 1
+for i in 1 2 3; do chat_ms "owner question ${i} during the re-embed" >/dev/null; sleep 0.5; done
+grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" && { echo "the re-embed finished before the timed chats: nothing was measured" >&2; exit 1; }
+# Each owner turn's query embedding, as the stub saw it: no library entry is sent while it waits,
+# and it waits behind one entry at most (150 ms here, so 300 ms with its own), not a batch.
+node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
+  const library = s.requests.filter((q)=>q.input.some((t)=>t.includes("Book row")));
+  const queries = s.requests.filter((q)=>q.input.some((t)=>t.includes("during the re-embed")));
+  const batched = library.filter((l)=>l.input.length > 1).length;
+  if (batched) { console.error(`the re-embed sent ${batched} requests of more than one entry`); process.exit(1); }
+  if (queries.length !== 3) { console.error(`expected 3 owner query embeddings, saw ${queries.length}`); process.exit(1); }
+  // The re-embed was running throughout: an entry before the first query and between each two.
+  const bounds = [0, ...queries.map((q)=>q.t)];
+  for (let i = 1; i < bounds.length; i += 1) {
+    if (!library.some((l)=>l.t > bounds[i - 1] && l.t < bounds[i])) { console.error(`the re-embed sent nothing before owner query ${i}: nothing was measured`); process.exit(1); }
+  }
+  for (const q of queries) {
+    if (!(q.done >= q.t)) { console.error("an owner query embedding was never answered"); process.exit(1); }
+    const sent = library.filter((l)=>l.t > q.t && l.t < q.done).length;
+    if (sent) { console.error(`the re-embed sent ${sent} entries while an owner turn waited on the embedder`); process.exit(1); }
+    if (q.done - q.t > 450) { console.error(`an owner turn waited ${q.done - q.t} ms behind the re-embed`); process.exit(1); }
+  }
+})' "${STUB}/_test/state" || exit 1
+[[ "$(library_requests_between 0 "$(node -e 'console.log(Date.now())')")" -gt 0 ]] || { echo "no re-embed request was seen at all" >&2; exit 1; }
+for _ in $(seq 1 120); do grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" && break; sleep 0.5; done
+grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" || { echo "the library KB was never embedded again" >&2; exit 1; }
+grep -q '"action":"kb_reembedded"' "${DATA}/admin-audit.jsonl" 2>/dev/null || grep -rq 'kb_reembedded' "${DATA}" || { echo "the re-embed left no audit entry" >&2; exit 1; }
+stub_mode ok
 
 echo "KB embeddings smoke test passed."

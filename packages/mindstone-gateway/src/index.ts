@@ -119,6 +119,7 @@ import {
   unknownKnowledgebaseIds,
   knowledgebasesDirFromConfig,
   personaKnowledgebasesDir,
+  reembedStaleKnowledgebase,
   decisionForAnsweringPersona,
   personaComponentsSummary,
   privateKnowledgebasesAllowed,
@@ -137,6 +138,7 @@ import {
   sharedQueryEmbedder,
   createMemoryEmbeddingProvider,
   KB_EMBED_LIMITS,
+  KB_REEMBED_LIMITS,
   indexSqliteMemoryTurn,
   memoryEmbeddingSpec,
   sqliteMemoryEmbeddingMix,
@@ -743,6 +745,81 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
 }
 
 /**
+ * After an owner's turn, a KB whose vectors another embedding model made is
+ * embedded again in the background from its index (#151), as memory's chunks
+ * are by the backfill (#140). One KB at a time, off the turn (nothing here can
+ * fail or slow the reply); a private KB being ingested is left for later. A KB
+ * over KB_REEMBED_LIMITS.maxEntries keeps word match until `kb ingest`. Once a
+ * scan finds nothing stale or waiting for this model, scans pause for
+ * KB_REEMBED_LIMITS.retryAfterMs or until the model changes: a KB made stale
+ * later (a CLI ingest with another embedder, a restored file) is still found.
+ */
+let kbReembedRunning = false;
+let kbReembedClean: { spec: string; at: number } | undefined;
+
+function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
+  if (kbReembedRunning) return;
+  kbReembedRunning = true;
+  void (async () => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (config?.knowledgebases?.recall?.enabled === false || !isAutoRecallEnabled(config)) return;
+    const embedder = createMemoryEmbeddingProvider(config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs });
+    if (!embedder) return;
+    const spec = memoryEmbeddingSpec(embedder);
+    if (kbReembedClean?.spec === spec && Date.now() - kbReembedClean.at < KB_REEMBED_LIMITS.retryAfterMs) return;
+    const paths = runtimePathsFromEnv();
+    const personasDir = personasDirFromConfig(config, paths);
+    const kbDirs = [
+      { dir: knowledgebasesDirFromConfig(config, paths) },
+      ...discoverMindStonePersonas(personasDir).flatMap((persona) => {
+        const dir = readablePersonaKnowledgebasesDir(persona.dir);
+        return dir ? [{ dir, personaId: persona.id }] : [];
+      }),
+    ];
+    const result = await reembedStaleKnowledgebase({
+      kbDirs,
+      embedder,
+      now: new Date().toISOString(),
+      // A KB being ingested is skipped, never held: the owner's own ingest
+      // always goes ahead, and writeKbVectors keeps the newer ingest's vectors
+      // if they overlap (#156 review).
+      claim: ({ personaId, kbId }) => (personaId && PRIVATE_KB_INGESTS.has(`${personaId}/${kbId}`) ? undefined : () => undefined),
+      beforeBatch: async () => {
+        while (turnsInFlight > 0) await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      },
+    });
+    const done = result.reembedded;
+    if (done) {
+      const where = `${done.personaId ? `${done.personaId}/` : ""}${done.kbId}`;
+      appendAdminAudit(paths.dataDir, {
+        userId: "gateway",
+        action: "kb_reembedded",
+        ...(done.personaId ? { persona: done.personaId } : {}),
+        knowledgebase: done.kbId,
+        embeddingProvider: spec,
+        vectors: done.vectors.state,
+        ...(done.vectors.state === "missing" ? { reason: done.vectors.reason } : {}),
+        ...(done.gaveUp ? { gaveUp: true } : {}),
+        ...(done.vectors.state === "missing" && done.vectors.superseded ? { superseded: true } : {}),
+      });
+      // One line an outcome: a give-up isn't retried, and a newer ingest's vectors are in place.
+      if (done.vectors.state === "ready") console.info(`[mindstone] knowledge base ${where} embedded again for ${spec}`);
+      else if (done.gaveUp) console.warn(`[mindstone] stopped embedding knowledge base ${where} again for ${spec} after ${KB_REEMBED_LIMITS.maxFailures} failures; it uses word match until \`kb ingest\``);
+      else if (done.vectors.superseded) console.info(`[mindstone] knowledge base ${where} was ingested while it was embedded again; any vectors the ingest wrote are kept`);
+      else console.warn(`[mindstone] knowledge base ${where} not embedded again for ${spec} (word match meanwhile; retried later): ${done.vectors.reason}`);
+    } else if (result.deferred === 0) {
+      kbReembedClean = { spec, at: Date.now() };
+    }
+  })()
+    .catch((error: unknown) => {
+      console.warn(`[mindstone] knowledge base re-embed failed: ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(() => {
+      kbReembedRunning = false;
+    });
+}
+
+/**
  * Wait for queued recall index updates, at most `ms`: recall never hangs on a
  * slow embedder. After a failed update in the last minute, don't wait at all:
  * a down embedder would otherwise add the wait to every turn (#106 review).
@@ -1143,7 +1220,19 @@ function releaseIdentityFormation(agentId: string): void {
   }
 }
 
-async function runConfiguredRoute(input: {
+/** Turns being answered now: a background KB re-embed waits while any runs (#156 review). */
+let turnsInFlight = 0;
+
+async function runConfiguredRoute(input: Parameters<typeof runConfiguredRouteUncounted>[0]): ReturnType<typeof runConfiguredRouteUncounted> {
+  turnsInFlight += 1;
+  try {
+    return await runConfiguredRouteUncounted(input);
+  } finally {
+    turnsInFlight -= 1;
+  }
+}
+
+async function runConfiguredRouteUncounted(input: {
   sessionKey: string;
   agentId: string;
   /**
@@ -1563,6 +1652,7 @@ async function runConfiguredRoute(input: {
     });
     runManager.complete(run.id);
     queueRecallIndex(input.config, input.sessionKey);
+    if (input.audience === "owner") queueKnowledgebaseReembed(input.config);
 
     return {
       routed: true,

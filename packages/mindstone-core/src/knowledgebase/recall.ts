@@ -71,7 +71,9 @@ export class KnowledgebaseRecallProvider implements MemoryRecallProvider {
    */
   async search(query: MemoryQuery): Promise<MemoryHit[]> {
     const semantic = await this.#semanticSearch(query.text);
-    return [...semantic, ...this.#lexical.search(query)];
+    // Word-match hits say so, as memory's do (#140, #151).
+    const lexical = this.#lexical.search(query).map((hit) => ({ ...hit, metadata: { ...(hit.metadata ?? {}), recallMode: "lexical" } }));
+    return [...semantic, ...lexical];
   }
 
   async #semanticSearch(text: string): Promise<MemoryHit[]> {
