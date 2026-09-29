@@ -809,7 +809,7 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
       });
       // One line an outcome: a give-up isn't retried, and a newer ingest's vectors are in place.
       if (done.vectors.state === "ready") console.info(`[mindstone] knowledge base ${where} embedded again for ${spec}`);
-      else if (done.gaveUp) console.warn(`[mindstone] stopped embedding knowledge base ${where} again for ${spec} after ${KB_REEMBED_LIMITS.maxFailures} failures; it uses word match until \`kb ingest\``);
+      else if (done.gaveUp) console.warn(`[mindstone] stopped embedding knowledge base ${where} again for ${spec} after ${KB_REEMBED_LIMITS.maxFailures} failures; it uses word match until it is tried again (the Console's Try again, or the reembed route) or ingested again`);
       else if (done.vectors.superseded) console.info(`[mindstone] knowledge base ${where} was ingested while it was embedded again; any vectors the ingest wrote are kept`);
       else console.warn(`[mindstone] knowledge base ${where} not embedded again for ${spec} (word match meanwhile; retried later): ${done.vectors.reason}`);
     } else if (result.deferred === 0) {
@@ -2810,8 +2810,13 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const body = await readAdminBody(req, res);
     if (!body) return;
     const kbId = globalKbReembedMatch[1]!;
-    if (!resetKnowledgebaseReembed(knowledgebasesDirFromConfig(gateConfig.config, paths), kbId)) {
+    const outcome = resetKnowledgebaseReembed(knowledgebasesDirFromConfig(gateConfig.config, paths), kbId);
+    if (outcome === "not_found") {
       refuse(404, { error: `no knowledge base named "${kbId}"`, code: "not_found" }, { reason: "not_found", knowledgebase: kbId });
+      return;
+    }
+    if (outcome === "not_cleared") {
+      refuse(409, { error: "the knowledge base's reembed.json couldn't be removed (is its folder read-only?)", code: "reset_failed" }, { reason: "reset_failed", knowledgebase: kbId });
       return;
     }
     kbReembedClean = undefined;
@@ -2832,8 +2837,13 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     if (action === "reembed") {
       // The private KB's retry after a give-up (#158 review), as for a shared one.
       const privateDir = readablePersonaKnowledgebasesDir(join(personasDir, id));
-      if (!privateDir || !resetKnowledgebaseReembed(privateDir, kbId, { noLinks: true })) {
+      const outcome = privateDir ? resetKnowledgebaseReembed(privateDir, kbId, { noLinks: true }) : "not_found";
+      if (outcome === "not_found") {
         refuse(404, { error: `persona "${id}" has no knowledge base named "${kbId}"`, code: "not_found" }, { reason: "not_found", persona: id, knowledgebase: kbId });
+        return;
+      }
+      if (outcome === "not_cleared") {
+        refuse(409, { error: "the knowledge base's reembed.json couldn't be removed (is its folder read-only?)", code: "reset_failed" }, { reason: "reset_failed", persona: id, knowledgebase: kbId });
         return;
       }
       kbReembedClean = undefined;
