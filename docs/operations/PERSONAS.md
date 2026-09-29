@@ -101,8 +101,9 @@ The agent's `mindstone-persona-proposal` can carry `components`:
   or description, which are one line), bidi overrides, separators or tag
   characters; it may hold zero-width joiners and variation selectors, which
   real writing needs. A memory write's path and a calendar mutation's
-  resource are one line with none of those either; a proposal that breaks
-  this is dropped.
+  resource are one line with none of those either (zero-width joiners stay
+  allowed there, for Persian, Indic and emoji names; a private KB's name,
+  a persona component, refuses them); a proposal that breaks this is dropped.
   The CLI shows invisible characters as `\u{..}` in `approvals show` and the
   approve prompt, for drafts, memory writes and mutations too (stacked
   combining marks are shown as they are). Every drop on an owner's turn,

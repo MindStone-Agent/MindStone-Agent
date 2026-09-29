@@ -313,8 +313,9 @@ export function approveProposedAction(
   if (action.kind === "memory_write" && action.memory) {
     const safePath = sanitizeMemoryProposalPath(action.memory.path);
     // Quoted as JSON: a path from before one-line names can't draw lines of its own.
-    // Shown escaped: a path from before names were checked can't act on a terminal here.
-    if (!safePath) throw new ApprovalActionError(`memory proposal path "${summaryText(action.memory.path)}" is not a safe relative path`, "unsafe_path", 422);
+    // Escaped, then quoted as JSON: a path from before names were checked
+    // can't act on a terminal, and a typed "\u{1b}" can't pass for a real one.
+    if (!safePath) throw new ApprovalActionError(`memory proposal path ${JSON.stringify(summaryText(action.memory.path))} is not a safe relative path`, "unsafe_path", 422);
     const target = join(options.memoryDir, safePath);
     if (existsSync(target) && !options.force) {
       throw new ApprovalActionError(

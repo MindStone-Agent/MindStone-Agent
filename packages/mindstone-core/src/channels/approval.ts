@@ -357,8 +357,12 @@ function boundedList(value: unknown): string[] | undefined {
  */
 const PROPOSAL_UNSAFE_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u2028\u2029\u{E0000}-\u{E007F}]/u;
 /** A name (a memory path, a mutation resource) is one line too: a line break would draw a line of its own (#125 review). */
-// Zero-width joiners (U+200C, U+200D) stay allowed: Persian, Indic scripts and
-// emoji spell with them. U+200B, bidi marks and the rest have no such use.
+// The characters that act on a terminal or reorder or hide text. Zero-width
+// joiners (U+200C, U+200D) and the Mongolian vowel separator stay allowed:
+// Persian, Indic, Mongolian and emoji spell with them. Other invisible
+// characters (variation selectors, fillers) are allowed too and shown as
+// \u{..} by the CLI; a lookalike of an existing name is a new file, never a
+// replacement.
 const PROPOSAL_UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u2069\u2028\u2029\u2800\ufeff\u{E0000}-\u{E007F}]/u;
 
 /** Text for a summary line, with anything unsafe shown as \u{..}: summaries reach logs and the TUI as they are. */
