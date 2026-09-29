@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { MindStoneConfig } from "../config/types.js";
 import type { MemoryDocument } from "../memory/types.js";
@@ -294,10 +294,21 @@ export async function ingestMindStoneKnowledgebase(
   }
 
   const index: MindStoneKbIndex = { kbId, ingestedAt: options.now, entries };
-  // Written whole and moved into place, so a turn reading it meanwhile never sees half a file.
-  const temp = `${kb.indexPath}.${process.pid}.${Date.now().toString(36)}.tmp`;
-  writeFileSync(temp, `${JSON.stringify(index, null, 2)}\n`, { flag: "wx" });
-  renameSync(temp, kb.indexPath);
+  const text = `${JSON.stringify(index, null, 2)}\n`;
+  if (options.noLinks) {
+    // A private KB (#125): written whole and moved into place, so a turn
+    // reading it meanwhile never sees half a file. A global KB's index is
+    // written in place as before (it may be a link an operator set up).
+    const temp = join(kb.dir, `.index.json.${process.pid}.${Date.now().toString(36)}.tmp`);
+    try {
+      writeFileSync(temp, text, { flag: "wx" });
+      renameSync(temp, kb.indexPath);
+    } finally {
+      rmSync(temp, { force: true });
+    }
+  } else {
+    writeFileSync(kb.indexPath, text);
+  }
   return { ok: true, kbId, indexPath: kb.indexPath, entryCount: entries.length, sourceCount: sourcePaths.length + externalDocuments.length };
 }
 

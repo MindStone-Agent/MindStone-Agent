@@ -58,11 +58,22 @@ export function parseExternalSources(raw: unknown): MindStoneKbExternalSource[] 
   return sources;
 }
 
-/** An address for an error message: scheme, host and path only. */
-export function addressForErrors(url: string): string {
+/** Query parameters whose values are credentials, by name. */
+const SECRET_PARAM = /(token|key|secret|sig|signature|auth|password|passwd|pwd|credential|session|code)/i;
+
+/**
+ * An address as it may be shown: in an error, a citation, recall text (#125).
+ * No user name or password, and the value of any query parameter named like
+ * a credential (`token`, `key`, `sig`, …) is `***`. What is fetched is the
+ * stored address; this is only what is written down.
+ */
+export function publicAddress(url: string): string {
   try {
     const parsed = new URL(url);
-    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+    const query = [...parsed.searchParams.entries()]
+      .map(([name, value]) => `${encodeURIComponent(name)}=${SECRET_PARAM.test(name) ? "***" : encodeURIComponent(value)}`)
+      .join("&");
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}${query ? `?${query}` : ""}`;
   } catch {
     return "(an address that doesn't parse)";
   }
@@ -189,7 +200,7 @@ export async function loadUrlSourceDocument(
 ): Promise<ExternalSourceDocument> {
   const url = source.url ?? "";
   // Errors name the address without its user name, password or query, which can hold a token (#125).
-  const shown = addressForErrors(url);
+  const shown = publicAddress(url);
   let response: Response;
   try {
     response = await fetch(url, {
@@ -197,7 +208,12 @@ export async function loadUrlSourceDocument(
       ...(options.timeoutMs ? { signal: AbortSignal.timeout(options.timeoutMs) } : {}),
     });
   } catch (error) {
-    const reason = error instanceof Error && error.name === "TimeoutError" ? "timed out" : "could not be fetched";
+    // The reason by its code (ENOTFOUND, ECONNREFUSED, a TLS code), never
+    // fetch's own message, which can repeat the address.
+    const code = (error as { cause?: { code?: unknown } })?.cause?.code;
+    const reason = error instanceof Error && error.name === "TimeoutError"
+      ? "timed out"
+      : `could not be fetched${typeof code === "string" && /^[A-Z0-9_]{2,40}$/.test(code) ? ` (${code})` : ""}`;
     throw new Error(`url source "${source.id}" ${reason}: ${shown}`);
   }
   if (!response.ok) {
@@ -215,7 +231,9 @@ export async function loadUrlSourceDocument(
   }
   return {
     sourcePath: `url:${source.id}`,
-    origin: url,
+    // The index, citations and recall text carry the public address (#125):
+    // a token in the query stays out of every prompt.
+    origin: publicAddress(url),
     raw: markdown,
     mtimeMs: Date.parse(now),
     fetchedAt: now,

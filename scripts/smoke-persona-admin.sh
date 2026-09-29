@@ -41,11 +41,14 @@ DATA="${TEMP_RUNTIME}/mindstone"
 BASE="http://127.0.0.1:${GATEWAY_PORT}"
 BODY="${TEMP_RUNTIME}/body.json"
 
-# A source server: one small markdown page, one page over the 5 MB cap.
+# A source server: one small markdown page, one page over the 5 MB cap, and
+# one that answers after 3 s (to overlap two ingests).
 node - <<'NODE' &
 require("http").createServer((req, res) => {
-  if (req.url === "/doc.md") { res.writeHead(200, { "content-type": "text/markdown" }); res.end("# URL facts\n\nThe fetched reference code is URLFACT-8802 for this collection.\n"); return; }
-  if (req.url === "/huge.md") { res.writeHead(200, { "content-type": "text/markdown" }); const chunk = "x".repeat(1024 * 1024); for (let i = 0; i < 6; i += 1) res.write(chunk); res.end(); return; }
+  const path = new URL(req.url, "http://x").pathname;
+  if (path === "/slow.md") { setTimeout(() => { res.writeHead(200, { "content-type": "text/markdown" }); res.end("# Slow\n\nSlow page.\n"); }, 3000); return; }
+  if (path === "/doc.md") { res.writeHead(200, { "content-type": "text/markdown" }); res.end("# URL facts\n\nThe fetched reference code is URLFACT-8802 for this collection.\n"); return; }
+  if (path === "/huge.md") { res.writeHead(200, { "content-type": "text/markdown" }); const chunk = "x".repeat(1024 * 1024); for (let i = 0; i < 6; i += 1) res.write(chunk); res.end(); return; }
   res.writeHead(404); res.end();
 }).listen(Number(process.env.STUB_PORT), "127.0.0.1");
 NODE
@@ -73,6 +76,8 @@ write(data / "skills" / "alpha-skill" / "SKILL.md", "# alpha\n\nSkill body SKILL
 write(data / "knowledgebases" / "g1" / "kb.json", json.dumps({"name": "g1"}))
 write(data / "knowledgebases" / "g1" / "sources" / "notes.md", "# Notes\n\nThe global reference code is GFACT-8800 for this collection.\n")
 write(data / "personas" / "existing" / "PERSONA.md", "# Existing\n\nPersona sentinel EXISTING.\n")
+# It lists a workflow that doesn't exist yet (a hand edit): creating it would run on its turns.
+write(data / "personas" / "existing" / "workflows.json", json.dumps(["wf-future"]))
 (data / "outside").mkdir()
 # A leftover staging folder, as a crash mid-create would leave: never listed.
 write(data / "personas" / ".staging-leftover" / "PERSONA.md", "# Leftover\n\nSTAGING-LEFTOVER\n")
@@ -141,6 +146,7 @@ expect 400 "a duplicate step id" POST /admin/workflows '{"id":"wf-b","steps":[{"
 expect 400 "a step skill not installed" POST /admin/workflows '{"id":"wf-b","steps":[{"id":"s","kind":"route","skills":["ghost"]}]}' 'no installed skill named'
 expect 409 "an id the config runs" POST /admin/workflows '{"id":"wf-live","steps":[{"id":"s","kind":"route","personaId":"built"}]}' workflow_referenced
 [[ ! -e "${DATA}/workflows/wf-live" ]] || { echo "a workflow the config runs was created" >&2; exit 1; }
+expect 409 "an id a persona lists" POST /admin/workflows '{"id":"wf-future","steps":[{"id":"s","kind":"route","personaId":"built"}]}' workflow_referenced
 [[ ! -e "${DATA}/workflows/wf-b" ]] || { echo "a refused workflow was written" >&2; exit 1; }
 expect 200 "replace a workflow" PATCH /admin/workflows/wf-a '{"name":"A2","steps":[{"id":"gate-1","kind":"gate","gate":{"condition":{"messagePrefix":"go"}},"retry":{"maxAttempts":5},"onFail":"continue"},{"id":"to-built","kind":"route","personaId":"built","skills":["alpha-skill"]}]}'
 expect 200 "read the workflow" GET /admin/workflows/wf-a
@@ -194,14 +200,30 @@ grep -q 'smoke-tok-7777' "${BODY}" && { echo "an ingest error returned the token
 expect 201 "a KB for the URL cap" POST /admin/personas/built/knowledgebases '{"id":"many"}'
 for i in 1 2 3 4 5 6 7 8 9 10; do expect 201 "URL ${i}" POST /admin/personas/built/knowledgebases/many/sources "{\"kind\":\"url\",\"name\":\"u${i}\",\"url\":\"http://127.0.0.1:${STUB_PORT}/doc.md?n=${i}\"}"; done
 expect 409 "an eleventh URL" POST /admin/personas/built/knowledgebases/many/sources "{\"kind\":\"url\",\"name\":\"u11\",\"url\":\"http://127.0.0.1:${STUB_PORT}/doc.md\"}" too_many_sources
+# An eleventh put in kb.json by hand is refused at ingest.
+node -e 'const f=process.argv[1]; const c=JSON.parse(require("fs").readFileSync(f,"utf8")); c.externalSources.push({id:"u11",type:"url",url:"http://127.0.0.1:1/x"}); require("fs").writeFileSync(f, JSON.stringify(c));' "${DATA}/personas/built/knowledgebases/many/kb.json"
+expect 422 "ingest with eleven URLs" POST /admin/personas/built/knowledgebases/many/ingest '{}' too_many_sources
+# Two ingests of one KB at once: the second is refused while the first runs.
+expect 201 "a KB for the overlap check" POST /admin/personas/built/knowledgebases '{"id":"slow"}'
+expect 201 "a slow URL" POST /admin/personas/built/knowledgebases/slow/sources "{\"kind\":\"url\",\"name\":\"slow\",\"url\":\"http://127.0.0.1:${STUB_PORT}/slow.md\"}"
+curl -s -o "${TEMP_RUNTIME}/first-ingest.json" -X POST "${ADMIN[@]}" -d '{}' "${BASE}/admin/personas/built/knowledgebases/slow/ingest" &
+first_ingest=$!
+sleep 1
+expect 409 "a second ingest while the first runs" POST /admin/personas/built/knowledgebases/slow/ingest '{}' ingest_running
+wait "${first_ingest}"
+grep -q '"entryCount"' "${TEMP_RUNTIME}/first-ingest.json" || { echo "the first ingest failed: $(cat "${TEMP_RUNTIME}/first-ingest.json")" >&2; exit 1; }
 expect 200 "read the notes sources" GET /admin/personas/built/knowledgebases/notes/sources
 body_check "sources" 'JSON.stringify(b.sources.text) === JSON.stringify(["facts"]) && b.sources.urls.length === 1 && b.sources.urls[0].id === "web"'
 # Fetching needs the advanced permission, whoever added the URL.
 expect 200 "revoke advanced settings" POST /admin/permissions/advanced '{"enabled":false}'
 expect 403 "ingest URL sources without the advanced permission" POST /admin/personas/built/knowledgebases/notes/ingest '{}'
 expect 200 "grant advanced settings again" POST /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}'
+# A token in a URL's query is fetched but never written down: not in the index, not in recall.
+expect 201 "a URL with a token that answers" POST /admin/personas/built/knowledgebases/notes/sources "{\"kind\":\"url\",\"name\":\"tokdoc\",\"url\":\"http://127.0.0.1:${STUB_PORT}/doc.md?token=smoke-tok-5555\"}"
 expect 200 "ingest" POST /admin/personas/built/knowledgebases/notes/ingest '{}'
-body_check "ingest" 'b.knowledgebase.entryCount >= 2 && b.knowledgebase.sourceCount === 2'
+grep -q 'smoke-tok-5555' "${DATA}/personas/built/knowledgebases/notes/index.json" && { echo "a URL token was written into the index" >&2; exit 1; }
+grep -q 'token=\*\*\*' "${DATA}/personas/built/knowledgebases/notes/index.json" || { echo "the tokened source was not indexed under its public address" >&2; exit 1; }
+body_check "ingest" 'b.knowledgebase.entryCount >= 3 && b.knowledgebase.sourceCount === 3'
 grep -q 'URLFACT-8802' "${DATA}/personas/built/knowledgebases/notes/index.json" || { echo "the URL source was not fetched at ingest" >&2; exit 1; }
 # Over the size cap: the ingest fails and says why.
 expect 201 "a KB for the size check" POST /admin/personas/built/knowledgebases '{"id":"big"}'
@@ -224,7 +246,8 @@ expect 200 "switch to it" PATCH /admin/config/personas '{"active":"built"}'
 code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${PADMIN_TOKEN}" -H 'content-type: application/json' -H 'x-mindstone-user-role: admin' -H 'x-mindstone-user-id: smoke-admin' -H 'x-mindstone-conversation-id: conv-built' -d '{"model":"mindstone/default","messages":[{"role":"user","content":"Which private reference code applies for this collection?"}]}' "${BASE}/v1/chat/completions")"
 [[ "${code}" == 200 ]] || { echo "the chat failed (${code}): $(cat "${BODY}")" >&2; exit 1; }
 node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").filter(Boolean); process.stdout.write(JSON.parse(l.pop()).messages.map((m)=>m.text??"").join("\n"))' "${CAPTURE}" > "${TEMP_RUNTIME}/built.prompt"
-for text in BUILT-8810 PADMIN-8801 GFACT-8800; do grep -qF "${text}" "${TEMP_RUNTIME}/built.prompt" || { echo "chat: '${text}' is missing from the prompt" >&2; exit 1; }; done
+for text in BUILT-8810 PADMIN-8801 GFACT-8800 URLFACT-8802; do grep -qF "${text}" "${TEMP_RUNTIME}/built.prompt" || { echo "chat: '${text}' is missing from the prompt" >&2; exit 1; }; done
+grep -q 'smoke-tok-5555' "${TEMP_RUNTIME}/built.prompt" && { echo "a URL token reached the prompt" >&2; exit 1; }
 echo "chat ok"
 
 # --- 7. Housekeeping: no staging folders left; writes audited; a non-admin can't write.

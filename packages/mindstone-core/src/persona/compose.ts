@@ -259,8 +259,12 @@ export function updateOwnerPersona(params: Dirs & { id: string; input: OwnerPers
       continue;
     }
     const temp = join(dir, `.${name}.${process.pid}.${Date.now().toString(36)}.tmp`);
-    writeFileSync(temp, text, { flag: "wx" });
-    renameSync(temp, path);
+    try {
+      writeFileSync(temp, text, { flag: "wx" });
+      renameSync(temp, path);
+    } finally {
+      rmSync(temp, { force: true });
+    }
   }
   return { id: params.id, dir };
 }
@@ -305,9 +309,13 @@ function readCatalog(kbDir: string): Record<string, unknown> {
 }
 
 function replaceFile(path: string, text: string): void {
-  const temp = `${path}.${process.pid}.tmp`;
-  writeFileSync(temp, text, { flag: "wx" });
-  renameSync(temp, path);
+  const temp = `${path}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  try {
+    writeFileSync(temp, text, { flag: "wx" });
+    renameSync(temp, path);
+  } finally {
+    rmSync(temp, { force: true });
+  }
 }
 
 /** Create a private KB under the persona: `kb.json` and an empty `sources/`, staged and moved in. */

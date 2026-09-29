@@ -2520,7 +2520,12 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         const { id, ...definition } = body;
         if (typeof id !== "string" || !WORKFLOW_ID.test(id)) throw new WorkflowWriteError("id must be 1 to 40 lowercase letters, digits and hyphens", "invalid_workflow", 400);
         // An id the config already runs (workflows.active, a route rule) would take effect on save.
-        if (referencedWorkflowIds(loadMindStoneConfig(configPath).config).has(id)) {
+        const personasForRefs = personasDirFromConfig(gateConfig.config, paths);
+        const listedByPersonas = discoverMindStonePersonas(personasForRefs).flatMap((summary) => {
+          const persona = summary.error ? undefined : loadMindStonePersona(personasForRefs, summary.id);
+          return persona?.ok ? persona.persona.workflows : [];
+        });
+        if (referencedWorkflowIds(loadMindStoneConfig(configPath).config, listedByPersonas).has(id)) {
           throw new WorkflowWriteError(`the config already runs a workflow named "${id}", so creating it would take effect with no switch; choose another id`, "workflow_referenced", 409);
         }
         const personasDir = personasDirFromConfig(gateConfig.config, paths);
@@ -2608,6 +2613,10 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     const ingestKey = `${id}/${kbId}`;
     if (PRIVATE_KB_INGESTS.has(ingestKey)) {
       refuse(409, { error: "this knowledge base is being ingested already", code: "ingest_running" }, { reason: "ingest_running", persona: id, knowledgebase: kbId });
+      return;
+    }
+    if (PRIVATE_KB_INGESTS.size >= MAX_PRIVATE_KB_INGESTS) {
+      refuse(409, { error: `${MAX_PRIVATE_KB_INGESTS} knowledge bases are being ingested already; try again when one finishes`, code: "ingest_busy" }, { reason: "ingest_busy", persona: id, knowledgebase: kbId });
       return;
     }
     PRIVATE_KB_INGESTS.add(ingestKey);
@@ -4085,8 +4094,9 @@ function approvalSummary(action: ProposedAction) {
   };
 }
 
-/** Private KBs being ingested now, as "<persona>/<kb>" (#125). */
+/** Private KBs being ingested now, as "<persona>/<kb>" (#125); at most two at once. */
 const PRIVATE_KB_INGESTS = new Set<string>();
+const MAX_PRIVATE_KB_INGESTS = 2;
 
 /** What a workflow written through the admin API may name: personas on disk by exact id, installed skills. */
 function adminWorkflowContext(personasDir: string, skillsDir: string): Parameters<typeof validateWorkflowDefinition>[1] {

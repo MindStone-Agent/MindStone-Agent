@@ -35,7 +35,7 @@ export type ValidateWorkflowResult =
 type Context = {
   /** True when a persona exists under exactly this id (case included). */
   personaExists: (id: string) => boolean;
-  /** True when a skill is installed under this id. A route step's skills must be, or the step would leave the persona none. */
+  /** True when a skill is installed under this id. A route step's skills must be: a typo would narrow the skill set to nothing. */
   skillInstalled?: (id: string) => boolean;
 };
 
@@ -219,8 +219,12 @@ export function writeWorkflowDefinition(params: {
   if (!isRealWorkflowDir(params.workflowsDir, params.id)) throw new WorkflowWriteError(`no workflow named "${params.id}"`, "not_found", 404);
   const path = join(dir, "workflow.json");
   const temp = join(dir, `.workflow.json.${process.pid}.${Date.now().toString(36)}.tmp`);
-  writeFileSync(temp, text, { flag: "wx" });
-  renameSync(temp, path);
+  try {
+    writeFileSync(temp, text, { flag: "wx" });
+    renameSync(temp, path);
+  } finally {
+    rmSync(temp, { force: true });
+  }
   return dir;
 }
 
@@ -272,12 +276,17 @@ export function workflowForEditing(workflow: { name?: string; description?: stri
  * Creating one of them would take effect with no step of its own (#125, the
  * workflow form of #105's rule), so a create under one is refused.
  */
-export function referencedWorkflowIds(config: { workflows?: { active?: unknown; routes?: unknown } } | undefined): Set<string> {
+export function referencedWorkflowIds(
+  config: { workflows?: { active?: unknown; routes?: unknown } } | undefined,
+  /** Workflow ids personas list. A persona can only list one that exists (the admin API checks), so a listed id with no workflow was put there by hand or a pack, and creating it would run on that persona's turns. */
+  personaListed: string[] = [],
+): Set<string> {
   const ids = new Set<string>();
   const add = (value: unknown) => {
     if (typeof value === "string" && value.trim()) ids.add(value.trim()).add(value.trim().toLowerCase());
   };
   add(config?.workflows?.active);
   for (const rule of Array.isArray(config?.workflows?.routes) ? config.workflows.routes : []) add((rule as { workflowId?: unknown })?.workflowId);
+  for (const id of personaListed) add(id);
   return ids;
 }

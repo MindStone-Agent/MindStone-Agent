@@ -308,7 +308,9 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
   // (`mindstone kb ingest`), so all KB content reaching the model derives from
   // reviewed sources. A whitelist is casing-robust where a denylist regex was not.
   for (const file of files) {
-    const kbMatch = /^knowledgebases\/[^/]+\/(.+)$/.exec(file.path);
+    // A persona's private KB (#125) too, and in any casing of the folders
+    // above it, which a case-insensitive filesystem would resolve the same.
+    const kbMatch = /^(?:knowledgebases|personas\/[^/]+\/knowledgebases)\/[^/]+\/(.+)$/i.exec(file.path);
     if (!kbMatch) continue;
     const withinKb = kbMatch[1];
     if (withinKb !== "kb.json" && !withinKb.startsWith("sources/")) {
@@ -339,7 +341,7 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
   };
   for (const file of files) {
     // A persona's private KB (#125) is a knowledgebase too.
-    if (!/^(knowledgebases|personas\/[^/]+\/knowledgebases)\/[^/]+\/kb\.json$/.test(file.path)) continue;
+    if (!/^(knowledgebases|personas\/[^/]+\/knowledgebases)\/[^/]+\/kb\.json$/i.test(file.path)) continue;
     let catalog: { name?: unknown; description?: unknown; externalSources?: unknown };
     try {
       catalog = JSON.parse(file.data.toString("utf-8")) as typeof catalog;
