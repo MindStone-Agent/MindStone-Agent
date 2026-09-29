@@ -1737,8 +1737,8 @@ function appendApprovalAuditEvent(action: { id: string; kind: string; connectorI
  * \u{..}, so what the owner reads is all there is. `printable` is one line
  * (line breaks and tabs shown too); `printableText` keeps them.
  */
-const NOT_VISIBLE_TEXT = /[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029]/gu;
-const NOT_VISIBLE_LINE = /\p{C}|\p{Default_Ignorable_Code_Point}|[\u2028\u2029]/gu;
+const NOT_VISIBLE_TEXT = /[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u2800\u3164\uffa0\u115f\u1160]/gu;
+const NOT_VISIBLE_LINE = /\p{C}|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u2800\u3164\uffa0\u115f\u1160]/gu;
 const showCodePoint = (char: string) => `\\u{${char.codePointAt(0)!.toString(16)}}`;
 function printable(text: string): string {
   return text.replace(NOT_VISIBLE_LINE, showCodePoint);

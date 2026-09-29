@@ -80,6 +80,18 @@ assert.equal(parseSkillProposal({ ...skill("a1"), label: "Nice\u009b8m" }), unde
 for (const text of ["⚠️ Check twice.", "Family 👨‍👩‍👧 note.", "می‌خواهم", "မြို့", "# Title\n\n\tIndented line."]) {
   assert.ok(parseSkillProposal({ ...skill("a1"), instructions: text, description: text.split("\n")[0] }), `real text must parse: ${JSON.stringify(text)}`);
 }
+// What acts on a terminal or hides text is refused in any field: it is printed long after approval
+// (`skill list`, the TUI, logs), not only on the approval screens.
+for (const [field, value] of [["description", "Desc \u001b]0;TITLE\u0007"], ["instructions", "a\u009b8m"], ["goal", "Reads \u202eright to left"], ["outputs", ["tag\u{E0041}\u{E0042}"]], ["instructions", "one\u2028two"]]) {
+  assert.equal(parseSkillProposal({ ...skill("a1"), [field]: value }), undefined, `unsafe text in a skill's ${field} must be refused`);
+}
+// A memory path or a mutation resource is a name, printed and used as it is: no such characters either.
+{
+  const memoryFence = "```mindstone-memory-proposal\n" + JSON.stringify({ path: "notes/m\u001b[8m.md", content: "x" }) + "\n```";
+  assert.equal(extractActionProposals(memoryFence).memory, undefined, "a memory path with an escape must be dropped");
+  const calendarFence = "```mindstone-calendar-proposal\n" + JSON.stringify({ operation: "create", resource: "event\u001b[2K", data: { title: "t" } }) + "\n```";
+  assert.equal(extractActionProposals(calendarFence).mutations[0]?.resource, "event", "a resource with an escape falls back to event");
+}
 // A plain skill proposal that is dropped says why, in the reply and the transcript; so does a second one.
 {
   const skillStore = new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "skill-drop-approvals.json") });
@@ -91,6 +103,9 @@ for (const text of ["⚠️ Check twice.", "Family 👨‍👩‍👧 note.", "�
   const twoSkills = applyActionProposalDiscipline({ replyText: skillFence(skill("s-one")) + "\n" + skillFence(skill("s-two")), origin: "unit", allowSkill: true, store: skillStore });
   assert.equal(twoSkills.proposals.length, 1);
   assert.match(twoSkills.text, /1 other skill block\(s\) were dropped/, "a second skill block must be said");
+  // A reply that was only the block is only the note: no blank lines before it.
+  const onlyBlock = applyActionProposalDiscipline({ replyText: skillFence({ id: "x" }), origin: "unit", allowSkill: true, store: skillStore });
+  assert.match(onlyBlock.text, /^\(The skill proposal wasn't saved/, "the note starts the reply");
 }
 // A built-in skill's id can't be brought as new: it would override the built-in.
 assert.equal(parsePersonaComponents({ new: { skills: [skill("integration-builder")] } }), undefined, "a built-in skill's id must be refused");
@@ -130,6 +145,11 @@ assert.equal(extractActionProposals(block({ ...base, components: { skills: ["a"]
   assert.equal(clash.proposals.filter((a) => a.kind === "skill_install").length, 1, "only the persona's own skill card");
   assert.ok(clash.proposals.every((a) => a.kind !== "skill_install" || a.parentApprovalId), "the plain skill proposal must be dropped");
   assert.match(clash.text, /separate skill proposal wasn't saved/);
+  // The clashing block first, then another: neither is put up, and the note doesn't say one was.
+  const clashThenOther = applyActionProposalDiscipline({ replyText: block({ ...base, id: "with-same-2", components: { new: { skills: [skill("same-id-2")] } } }) + "\n```mindstone-skill-proposal\n" + JSON.stringify(skill("same-id-2")) + "\n```\n```mindstone-skill-proposal\n" + JSON.stringify(skill("other-id")) + "\n```", origin: "unit", allowPersona: true, allowSkill: true, store: new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "clash2-approvals.json") }) });
+  assert.ok(clashThenOther.proposals.every((a) => a.kind !== "skill_install" || a.parentApprovalId), "no plain skill card");
+  assert.match(clashThenOther.text, /other skill block\(s\) in this reply weren't saved either/);
+  assert.doesNotMatch(clashThenOther.text, /Only one skill proposal per reply is put up/, "no note saying one was put up");
   const notOwner = applyActionProposalDiscipline({ replyText: block({ ...base, components: { bogus: 1 } }), origin: "unit", allowPersona: false, store: noteStore });
   assert.doesNotMatch(notOwner.text, /wasn't saved/, "a turn that can't propose a persona gets no note");
 }

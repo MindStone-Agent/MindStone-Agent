@@ -96,11 +96,14 @@ The agent's `mindstone-persona-proposal` can carry `components`:
   how many other persona blocks were dropped. A separate skill proposal with
   the id of a skill the persona brings isn't saved. A skill's label is one
   line. A persona's new components may not hold characters that can't be
-  seen; a plain skill proposal may (real writing needs zero-width joiners and
-  variation selectors), and the CLI shows every such character as `\u{..}`
-  in `approvals show` and the approve prompt, as it does for drafts, memory
-  writes and mutations. Every drop, persona or skill, is said in the reply
-  and is a transcript event.
+  seen. A plain skill proposal, a memory write's path and a calendar
+  mutation's resource may not hold escape sequences, C1 or other control
+  characters, bidi overrides, separators or tag characters; a plain skill may
+  hold zero-width joiners and variation selectors, which real writing needs.
+  The CLI shows invisible characters as `\u{..}` in `approvals show` and the
+  approve prompt, for drafts, memory writes and mutations too (stacked
+  combining marks are shown as they are). Every drop on an owner's turn,
+  persona or skill, is said in the reply and is a transcript event.
   Approving a proposed KB ingests its text sources only; if a URL
   source was added to it in between, ingest it from the persona editor. A
   component approved into a persona that no longer loads is added to its

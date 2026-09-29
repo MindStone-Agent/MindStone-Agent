@@ -349,10 +349,29 @@ function boundedList(value: unknown): string[] | undefined {
   return items.every((item): item is string => item !== undefined) ? items : undefined;
 }
 
+/**
+ * Characters no proposal text needs and a terminal or reader could be fooled
+ * by: C0 controls but line breaks and tabs, DEL and C1 (escape sequences),
+ * bidi embeddings, overrides and isolates, line and paragraph separators,
+ * and tag characters (#125 review).
+ */
+const PROPOSAL_UNSAFE_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u2028\u2029\u{E0000}-\u{E007F}]/u;
+function hasUnsafeText(value: unknown): boolean {
+  if (typeof value === "string") return PROPOSAL_UNSAFE_TEXT.test(value.replace(/\r\n/g, "\n"));
+  if (Array.isArray(value)) return value.some(hasUnsafeText);
+  return false;
+}
+
 /** A proposed skill (#104), or undefined when any field is missing, malformed or too large. */
 export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undefined {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
+  // Nothing that acts on a terminal or hides text (escape sequences, C1,
+  // bidi overrides, tag characters) in any field: the text is printed in
+  // `skill list`, the TUI and logs long after it is approved. Zero-width
+  // joiners and variation selectors stay: real writing needs them (#125 review).
+  const fields = ["id", "label", "description", "goal", "whenToUse", "outputs", "safetyNotes", "instructions"].map((key) => record[key]);
+  if (fields.some((field) => hasUnsafeText(field))) return undefined;
   const id = typeof record.id === "string" && SKILL_PROPOSAL_ID.test(record.id) && record.id !== "drafts" ? record.id : undefined;
   // One line: the label goes into the card's summary, which list views print
   // as it is, so a line break could draw rows of its own (#125 review).
@@ -599,14 +618,18 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
   let skill: SkillInstallPayload | undefined;
   const split = splitProposalBlocks(replyText);
   for (const { kind: fenceKind, body } of split.blocks) {
+    // Counted once each, whatever happens while reading it (#125 review).
+    if (fenceKind === "persona") personaBlocks += 1;
+    if (fenceKind === "skill") skillBlocks += 1;
     try {
       const parsed = JSON.parse(body);
       if (fenceKind === "memory") {
         const path = typeof parsed?.path === "string" ? parsed.path.trim() : "";
         const content = typeof parsed?.content === "string" ? parsed.content : "";
-        if (path && content && !memory) memory = { path, content };
+        // A path is a file name: no control, bidi or tag characters, which
+        // would reach terminals and file names as they are (#125 review).
+        if (path && content && !memory && !PROPOSAL_UNSAFE_TEXT.test(path)) memory = { path, content };
       } else if (fenceKind === "persona") {
-        personaBlocks += 1;
         if (!persona) {
           const base = parsePersonaProposal(parsed);
           const components = base ? checkPersonaComponentsProposal((parsed as Record<string, unknown>).components) : undefined;
@@ -620,14 +643,13 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
           }
         }
       } else if (fenceKind === "skill") {
-        skillBlocks += 1;
         if (!skill) {
           skill = parseSkillProposal(parsed);
           if (!skill) skillProposalError ??= "its fields don't hold up (an id, a one-line label and a description are needed, within their limits)";
         }
       } else {
         const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
-        const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
+        const resource = typeof parsed?.resource === "string" && parsed.resource.trim() && !PROPOSAL_UNSAFE_TEXT.test(parsed.resource) ? parsed.resource.trim() : "event";
         const data = parsed?.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? (parsed.data as Record<string, unknown>) : undefined;
         if (operation && data) {
           mutations.push({ connectorId: "calendar", operation, resource, data });
@@ -636,14 +658,8 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
     } catch {
       // malformed proposal blocks are dropped from the reply, never applied;
       // a persona's is said in the reply (#125 review)
-      if (fenceKind === "persona") {
-        personaBlocks += 1;
-        if (!persona) personaProposalError ??= "its block isn't valid JSON, or couldn't be read";
-      }
-      if (fenceKind === "skill") {
-        skillBlocks += 1;
-        if (!skill) skillProposalError ??= "its block isn't valid JSON, or couldn't be read";
-      }
+      if (fenceKind === "persona" && !persona) personaProposalError ??= "its block isn't valid JSON, or couldn't be read";
+      if (fenceKind === "skill" && !skill) skillProposalError ??= "its block isn't valid JSON, or couldn't be read";
     }
   }
   return {
@@ -656,6 +672,11 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
     skill,
     ...(skill ? { skillBlocksDropped: skillBlocks - 1 } : skillBlocks ? { skillProposalError } : {}),
   };
+}
+
+/** The reply, then any notes about dropped proposals, apart from it by a blank line. */
+function withNotes(text: string, notes: string): string {
+  return notes ? (text ? `${text}\n\n${notes}` : notes) : text;
 }
 
 /** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
@@ -770,10 +791,12 @@ export function applyActionProposalDiscipline(params: {
         ? `(The persona proposal wasn't saved, and nothing was put up for approval: ${refused}.)`
         : "",
     extraBlocks > 0 ? `(Only one persona proposal per reply is put up for approval; ${extraBlocks} other persona block(s) in this reply were dropped.)` : "",
-    skillClash && params.allowSkill ? "(The separate skill proposal wasn't saved: the persona brings a skill with the same id, on its own card.)" : "",
+    skillClash && params.allowSkill
+      ? `(The separate skill proposal wasn't saved: the persona brings a skill with the same id, on its own card.${(extracted.skillBlocksDropped ?? 0) > 0 ? ` The other skill block(s) in this reply weren't saved either: one skill proposal per reply is read.` : ""})`
+      : "",
     params.allowSkill && extracted.skillProposalError ? `(The skill proposal wasn't saved, and nothing was put up for approval: ${extracted.skillProposalError}.)` : "",
-    params.allowSkill && (extracted.skillBlocksDropped ?? 0) > 0 ? `(Only one skill proposal per reply is put up for approval; ${extracted.skillBlocksDropped} other skill block(s) were dropped.)` : "",
-  ].filter(Boolean).map((note) => `\n\n${note}`).join("");
+    params.allowSkill && !skillClash && (extracted.skillBlocksDropped ?? 0) > 0 ? `(Only one skill proposal per reply is put up for approval; ${extracted.skillBlocksDropped} other skill block(s) were dropped.)` : "",
+  ].filter(Boolean).join("\n\n");
   // Every drop is in the transcript too, not only in the reply (#125 review).
   const drops: Array<{ reason: string; text: string }> = [
     ...(capped ? [{ reason: "too_many_pending", text: "persona proposal dropped: too many proposals already pending" }] : []),
@@ -795,7 +818,7 @@ export function applyActionProposalDiscipline(params: {
       }))
     : [];
   if (!extracted.memory && !extracted.mutations.length && !persona && !skill) {
-    return { text: `${extracted.text}${cappedNote}`, content, events: cappedEvents, proposals: [] };
+    return { text: withNotes(extracted.text, cappedNote), content, events: cappedEvents, proposals: [] };
   }
   const approvals = store;
   const personaCard = persona
@@ -894,7 +917,7 @@ export function applyActionProposalDiscipline(params: {
         }),
       )
     : [];
-  return { text: `${extracted.text}${cappedNote}`, content, events: [...cappedEvents, ...events], proposals };
+  return { text: withNotes(extracted.text, cappedNote), content, events: [...cappedEvents, ...events], proposals };
 }
 
 /**

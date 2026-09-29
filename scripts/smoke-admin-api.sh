@@ -929,7 +929,8 @@ const r = core.applyActionProposalDiscipline({ replyText: "Here you go.\n" + blo
 if (r.proposals.length !== 1 || r.proposals[0].kind !== "skill_install" || r.text !== "Here you go." || !r.proposals[0].skill.instructions.includes("Then report.")) { console.error("a skill block should become one proposal: " + JSON.stringify(r)); process.exit(1); }
 for (const bad of [{ ...ok, id: "Bad Id" }, { ...ok, instructions: "x".repeat(16001) }, { ...ok, whenToUse: "x" }, { ...ok, label: "" }]) {
   const b = core.applyActionProposalDiscipline({ replyText: block(bad), origin: "chat", allowSkill: true });
-  if (b.proposals.length !== 0 || b.text !== "") { console.error("a malformed skill block should be dropped: " + JSON.stringify(bad).slice(0, 80)); process.exit(1); }
+  // Dropped, and the reply says so (#125): only that note is left of it.
+  if (b.proposals.length !== 0 || !/^\(The skill proposal wasn.t saved, and nothing was put up for approval: [^)]*\)$/.test(b.text)) { console.error("a malformed skill block should be dropped, with a note: " + JSON.stringify(bad).slice(0, 80) + " -> " + JSON.stringify(b.text)); process.exit(1); }
 }
 // The shapes a model writes: each proposes exactly its skill, leaks no block, and keeps the text around it.
 {
