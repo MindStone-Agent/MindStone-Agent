@@ -50,6 +50,15 @@ own process.
   [PERSONAS.md](PERSONAS.md#components-at-run-time-125).
 - `retry.maxAttempts` is capped at 5 (#125).
 
+## Creating and editing workflows (#125)
+
+`POST /admin/workflows` and `PATCH /admin/workflows/<id>` write
+`workflow.json` after strict checks: unknown keys, an empty `when`, an empty
+condition field or an empty gate (each of which the loader treats as "always")
+are refused, `retry.maxAttempts` is 1 to 5, and a step may name only a persona
+that exists under exactly that id and loads. Workflows written by hand stay
+loadable as before. See [API_REFERENCE.md](../gateway/API_REFERENCE.md).
+
 ## Which workflow runs (deterministic selection order)
 
 1. First matching `workflows.routes` rule in config
@@ -62,6 +71,10 @@ own process.
    `onFail: "stop"` ends the selection with no decision. The events of every
    workflow tried stay in the transcript, and the response's `workflow`
    lists them in `tried`.
+
+A step whose `skills` or `knowledgebases` isn't a list of ids makes its
+workflow fail to load (#142 review), so it is skipped as above: that turn
+uses the persona's own lists, without the step's narrowing.
 
 No match → no workflow; persona resolution proceeds as in PERSONAS.md.
 

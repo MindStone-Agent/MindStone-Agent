@@ -53,6 +53,22 @@ Rule fields (`sessionKeyPrefix`, `sourceChannel`, `sourceSubstrate`) AND
 together within a rule. Resolution runs per turn in both the native chat/TUI
 path and all Gateway routes.
 
+## Building a persona in the Console (#125)
+
+The admin API creates and edits personas, workflows and private knowledge
+bases ([API_REFERENCE.md](../gateway/API_REFERENCE.md), "Admin API"). The
+rules:
+- Saving never activates a persona; switching to it is a separate step.
+- A new persona id is lowercase; an id already on disk in any case, or one
+  the config uses, is refused, as for an approved proposal (#105).
+- Every component a persona lists must exist: installed skills, workflows
+  that load, global collections. A new skill goes through the Skill Builder
+  and the advanced-settings install gate first.
+- Private KBs take markdown text sources, and URL sources with the
+  advanced-settings permission (the gateway host fetches them at ingest).
+- Creates are staged in a dot folder and moved into place; nothing
+  half-written is ever listed.
+
 ## Components at run time (#125)
 
 While a persona is active, its components are the ones in play. The active
@@ -107,9 +123,16 @@ With no persona active, nothing changes.
 
 ## Behavior notes
 
-- A resolved-but-unloadable persona (missing `PERSONA.md`, bad `metadata.json`)
-  never blocks the turn: the turn runs without the overlay and a
-  `persona_load_failed` event is appended to the transcript.
+- A resolved-but-unloadable persona (missing `PERSONA.md`, bad `metadata.json`,
+  a list file that isn't a list) never blocks the turn: the turn runs without
+  the overlay and a `persona_load_failed` event is appended to the transcript.
+  It runs with **no skills and no knowledge bases** (#142 review), not with
+  every skill and every collection, and its `personaComponents` say
+  `loadFailed: true`.
+- `skills.json`, `workflows.json` and `knowledgebases.json` are `["id", …]` or
+  `{"<name>": ["id", …]}` with only that key; ids are non-empty strings. Any
+  other shape (`{}`, `null`, a misspelt key, `[1]`, `[""]`) makes the persona
+  fail to load, since reading it as "no list" would mean everything.
 - Route/chat responses report the injected persona in `personaContext`
   (`personaId`, `reason`, `tokenEstimate`), mirroring `identityContext`.
 - Visibility: `mindstone status` (Personas/Persona active lines),

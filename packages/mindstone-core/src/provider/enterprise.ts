@@ -160,33 +160,57 @@ function secretName(value: unknown, field: string): { error: string } | string |
  * the private network is registered with the local presets instead.
  */
 export function isNonPublicHost(hostname: string): boolean {
-  const host = hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+  const host = bareHost(hostname);
   if (!host) return true;
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
-  if (v4) return isNonPublicV4(v4.slice(1).map(Number));
+  // IPv4-compatible and other "::"-prefixed addresses (not IPv4-mapped) are never public, as before.
+  if (/^::(?!ffff:)/.test(host)) return true;
+  const v4 = ipv4Of(host);
+  if (v4) return isNonPublicV4(v4);
   if (host.includes(":")) {
-    // IPv6: loopback, unspecified, unique-local, link-local, multicast, and IPv4-mapped or -translated addresses.
-    if (host === "::" || host === "::1" || /^f[cd][0-9a-f]{0,2}:/.test(host) || /^fe[89ab][0-9a-f]?:/.test(host) || /^ff/.test(host)) return true;
-    const mapped = /^(?:::ffff:|64:ff9b::)(?:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(host);
-    if (mapped) {
-      const octets = mapped[1] !== undefined
-        ? mapped.slice(1, 5).map(Number)
-        : [parseInt(mapped[5]!, 16) >> 8, parseInt(mapped[5]!, 16) & 255, parseInt(mapped[6]!, 16) >> 8, parseInt(mapped[6]!, 16) & 255];
-      return isNonPublicV4(octets);
-    }
+    // IPv6: loopback, unspecified, unique-local, link-local, site-local,
+    // multicast, NAT64 local-use and Teredo; IPv4-mapped, -translated and
+    // 6to4 addresses are judged by the IPv4 address inside (ipv4Of).
+    if (host === "::" || host === "::1" || /^f[cd][0-9a-f]{0,2}:/.test(host) || /^fe[89abcdef][0-9a-f]?:/.test(host) || /^ff/.test(host)) return true;
+    if (/^64:ff9b:1:/.test(host) || /^2001:0?:/.test(host)) return true;
     return /^::/.test(host);
   }
   if (!host.includes(".")) return true;
   return /(^|\.)(localhost|local|internal|localdomain|home\.arpa|intranet|lan|corp|svc|consul|cluster|default)$/.test(host) || host === "host.docker.internal";
 }
 
-function isNonPublicV4([a, b]: number[]): boolean {
+/** A host as compared: no brackets, no trailing dot, no IPv6 zone, lowercase. */
+export function bareHost(hostname: string): string {
+  return hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").replace(/%.*$/, "").toLowerCase();
+}
+
+/**
+ * The IPv4 address a host is or carries: dotted, IPv4-mapped (`::ffff:`),
+ * NAT64-translated (`64:ff9b::`) or 6to4 (`2002:`), else undefined.
+ */
+export function ipv4Of(host: string): number[] | undefined {
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) return v4.slice(1).map(Number);
+  const hex = (high: string, low: string) => [parseInt(high, 16) >> 8, parseInt(high, 16) & 255, parseInt(low, 16) >> 8, parseInt(low, 16) & 255];
+  const mapped = /^(?:::ffff:|64:ff9b::)(?:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(host);
+  if (mapped) return mapped[1] !== undefined ? mapped.slice(1, 5).map(Number) : hex(mapped[5]!, mapped[6]!);
+  // IPv4-compatible (deprecated, "::7f00:1"): the last 32 bits.
+  const compatible = /^::(?:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(host);
+  if (compatible) return compatible[1] !== undefined ? compatible.slice(1, 5).map(Number) : hex(compatible[5]!, compatible[6]!);
+  const sixToFour = /^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})(?::|$)/.exec(host);
+  if (sixToFour) return hex(sixToFour[1]!, sixToFour[2]!);
+  return undefined;
+}
+
+function isNonPublicV4([a, b, c, d]: number[]): boolean {
   return a === 0 || a === 10 || a === 127 || a >= 224 ||
     (a === 100 && b! >= 64 && b! <= 127) ||
     (a === 169 && b === 254) ||
     (a === 172 && b! >= 16 && b! <= 31) ||
     (a === 192 && b === 168) ||
-    (a === 198 && (b === 18 || b === 19));
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    // Azure's host address (WireServer, metadata), which isn't in a private range.
+    (a === 168 && b === 63 && c === 129 && d === 16);
 }
 
 export type EnterpriseHostPolicy = {

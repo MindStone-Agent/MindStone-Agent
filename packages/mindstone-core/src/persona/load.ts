@@ -20,21 +20,35 @@ function readJsonFile(path: string): unknown {
   return JSON.parse(readFileSync(path, "utf-8"));
 }
 
-function stringList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+/**
+ * Reads ids from a capability reference file that is either ["id"] or
+ * {"skills": ["id"]}-shaped; no file is no list. A file that doesn't parse,
+ * or isn't exactly one of those shapes with non-empty string ids, is an
+ * error: read as "no list" it would mean every skill or every global KB
+ * (#125), so the persona fails to load instead, as with a bad metadata.json
+ * (#142 review: `{}`, `null`, a typo'd key, `[1]` and `[""]` all refused).
+ */
+function capabilityIds(path: string, key: string): string[] | { error: string } {
+  let parsed: unknown;
+  try {
+    parsed = readJsonFile(path);
+  } catch (error) {
+    return { error: `${key}.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  if (parsed === undefined) return [];
+  return capabilityList(parsed, key);
 }
 
-/** Reads ids from a capability reference file that is either ["id"] or {"skills": ["id"]}-shaped. */
-function capabilityIds(path: string, key: string): string[] {
-  try {
-    const parsed = readJsonFile(path);
-    if (Array.isArray(parsed)) return stringList(parsed);
-    if (parsed && typeof parsed === "object") return stringList((parsed as Record<string, unknown>)[key]);
-    return [];
-  } catch {
-    return [];
+/** A parsed list file's ids, or why it isn't one; shared with pack install (#142 review). */
+export function capabilityList(parsed: unknown, key: string): string[] | { error: string } {
+  const record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
+  const list = Array.isArray(parsed)
+    ? parsed
+    : record && Object.keys(record).length === 1 && Array.isArray(record[key]) ? (record[key] as unknown[]) : undefined;
+  if (!list || list.some((entry) => typeof entry !== "string" || !entry.trim())) {
+    return { error: `${key}.json must be a list of ids, ["a", "b"], or {"${key}": ["a", "b"]}` };
   }
+  return list as string[];
 }
 
 export type LoadPersonaResult =
@@ -42,6 +56,10 @@ export type LoadPersonaResult =
   | { ok: false; personaId: string; error: string };
 
 export function loadMindStonePersona(personasDir: string, personaId: string): LoadPersonaResult {
+  // One folder name, never a path: an id from a request (App Engine) is joined below (#142 review).
+  if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/.test(personaId)) {
+    return { ok: false, personaId, error: "the persona id isn't a folder name" };
+  }
   const dir = join(personasDir, personaId);
   const personaPath = join(dir, "PERSONA.md");
   if (!existsSync(personaPath)) {
@@ -68,6 +86,15 @@ export function loadMindStonePersona(personasDir: string, personaId: string): Lo
     return { ok: false, personaId, error: `metadata.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
 
+  const lists = {
+    skills: capabilityIds(join(dir, "skills.json"), "skills"),
+    workflows: capabilityIds(join(dir, "workflows.json"), "workflows"),
+    knowledgebases: capabilityIds(join(dir, "knowledgebases.json"), "knowledgebases"),
+  };
+  for (const list of Object.values(lists)) {
+    if (!Array.isArray(list)) return { ok: false, personaId, error: list.error };
+  }
+
   const safetyPath = join(dir, "safety.md");
   const safetyMarkdown = existsSync(safetyPath) ? readFileSync(safetyPath, "utf-8") : undefined;
 
@@ -81,9 +108,9 @@ export function loadMindStonePersona(personasDir: string, personaId: string): Lo
       description: metadata.description,
       personaMarkdown,
       safetyMarkdown: safetyMarkdown?.trim() ? safetyMarkdown : undefined,
-      skills: capabilityIds(join(dir, "skills.json"), "skills"),
-      workflows: capabilityIds(join(dir, "workflows.json"), "workflows"),
-      knowledgebases: capabilityIds(join(dir, "knowledgebases.json"), "knowledgebases"),
+      skills: lists.skills as string[],
+      workflows: lists.workflows as string[],
+      knowledgebases: lists.knowledgebases as string[],
     },
   };
 }
@@ -92,7 +119,8 @@ export function discoverMindStonePersonas(personasDir: string): MindStonePersona
   if (!existsSync(personasDir)) return [];
   const summaries: MindStonePersonaSummary[] = [];
   for (const entry of readdirSync(personasDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    // A dot folder is a staging folder from an admin write (#125), never a real one.
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const loaded = loadMindStonePersona(personasDir, entry.name);
     if (loaded.ok) {
       summaries.push({

@@ -1373,7 +1373,13 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
   if (sub === "ingest") {
     const kbId = argv[4];
     if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id>");
-    const result = await ingestMindStoneKnowledgebase(kbDir, kbId, { now: new Date().toISOString(), noLinks: Boolean(scoped.personaId) });
+    // A persona's private KB: its URLs came through the admin API, so they get
+    // the gateway's host checks and limits (#142 review).
+    const result = await ingestMindStoneKnowledgebase(kbDir, kbId, {
+      now: new Date().toISOString(),
+      noLinks: Boolean(scoped.personaId),
+      ...(scoped.personaId ? { privateKbUrls: {} } : {}),
+    });
     if (!result.ok) throw new Error(result.error);
     if (json) {
       output.write(`${JSON.stringify(result, null, 2)}\n`);

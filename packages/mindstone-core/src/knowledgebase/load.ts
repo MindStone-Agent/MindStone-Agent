@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { MindStoneConfig } from "../config/types.js";
 import type { MemoryDocument } from "../memory/types.js";
@@ -227,7 +227,18 @@ function entriesFromParsedSource(params: {
 export async function ingestMindStoneKnowledgebase(
   kbDir: string,
   kbId: string,
-  options: { now?: string; maxSummaryChars?: number; noLinks?: boolean } = {},
+  options: {
+    now?: string;
+    maxSummaryChars?: number;
+    noLinks?: boolean;
+    fetchTimeoutMs?: number;
+    maxFetchBytes?: number;
+    /**
+     * A persona's private KB (#125): its URLs are fetched with the host checks
+     * of `loadUrlSourceDocument`'s `privateKb` (#142 review).
+     */
+    privateKbUrls?: { refusedHost?: (host: string) => boolean };
+  } = {},
 ): Promise<IngestKnowledgebaseResult> {
   // A persona's private KB (#125, `noLinks`) is its own files: no links
   // anywhere in it, and no folder sources outside it.
@@ -254,7 +265,7 @@ export async function ingestMindStoneKnowledgebase(
       if (source.type === "folder") {
         externalDocuments.push(...loadFolderSourceDocuments(source, kb.dir));
       } else {
-        externalDocuments.push(await loadUrlSourceDocument(source, { now: options.now }));
+        externalDocuments.push(await loadUrlSourceDocument(source, { now: options.now, timeoutMs: options.fetchTimeoutMs, maxBytes: options.maxFetchBytes, privateKb: options.privateKbUrls }));
       }
     } catch (error) {
       return { ok: false, kbId, error: `external source "${source.id}" failed: ${error instanceof Error ? error.message : String(error)}` };
@@ -294,7 +305,21 @@ export async function ingestMindStoneKnowledgebase(
   }
 
   const index: MindStoneKbIndex = { kbId, ingestedAt: options.now, entries };
-  writeFileSync(kb.indexPath, `${JSON.stringify(index, null, 2)}\n`);
+  const text = `${JSON.stringify(index, null, 2)}\n`;
+  if (options.noLinks) {
+    // A private KB (#125): written whole and moved into place, so a turn
+    // reading it meanwhile never sees half a file. A global KB's index is
+    // written in place as before (it may be a link an operator set up).
+    const temp = join(kb.dir, `.index.json.${process.pid}.${Date.now().toString(36)}.tmp`);
+    try {
+      writeFileSync(temp, text, { flag: "wx" });
+      renameSync(temp, kb.indexPath);
+    } finally {
+      rmSync(temp, { force: true });
+    }
+  } else {
+    writeFileSync(kb.indexPath, text);
+  }
   return { ok: true, kbId, indexPath: kb.indexPath, entryCount: entries.length, sourceCount: sourcePaths.length + externalDocuments.length };
 }
 
@@ -434,7 +459,8 @@ export function discoverMindStoneKnowledgebases(kbDir: string): MindStoneKnowled
   if (!existsSync(kbDir)) return [];
   const summaries: MindStoneKnowledgebaseSummary[] = [];
   for (const entry of readdirSync(kbDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    // A dot folder is a staging folder from an admin write (#125), never a real one.
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const loaded = loadMindStoneKnowledgebase(kbDir, entry.name);
     if (loaded.ok) {
       const index = readMindStoneKbIndex(loaded.kb);

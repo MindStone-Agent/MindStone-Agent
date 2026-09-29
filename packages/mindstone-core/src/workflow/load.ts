@@ -76,6 +76,14 @@ export function loadMindStoneWorkflow(workflowsDir: string, workflowId: string):
     if (kind === "gate" && !gateRecord) {
       return { ok: false, workflowId, error: `steps[${index}] is a gate but has no gate definition` };
     }
+    // A step's lists narrow a persona's; one of the wrong shape, read as no
+    // list, would narrow nothing, so the workflow fails to load (#142 review).
+    for (const key of ["skills", "knowledgebases"] as const) {
+      const list = stepRecord[key];
+      if (list !== undefined && (!Array.isArray(list) || list.some((entry) => typeof entry !== "string" || !entry.trim()))) {
+        return { ok: false, workflowId, error: `steps[${index}].${key} must be a list of ids` };
+      }
+    }
     const retryRecord = stepRecord.retry && typeof stepRecord.retry === "object" && !Array.isArray(stepRecord.retry)
       ? stepRecord.retry as Record<string, unknown>
       : undefined;
@@ -144,7 +152,8 @@ export function discoverMindStoneWorkflows(workflowsDir: string): MindStoneWorkf
   if (!existsSync(workflowsDir)) return [];
   const summaries: MindStoneWorkflowSummary[] = [];
   for (const entry of readdirSync(workflowsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    // A dot folder is a staging folder from an admin write (#125), never a real one.
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const loaded = loadMindStoneWorkflow(workflowsDir, entry.name);
     if (loaded.ok) {
       summaries.push({
@@ -307,6 +316,8 @@ function runSelectedWorkflow(
         }
         if (passed) break;
       }
+      // A gate that never passed leaves the loop one past its last try.
+      attempts = Math.min(attempts, maxAttempts);
       events.push({
         event: "workflow_gate",
         text: `Workflow gate ${step.id}: ${passed ? "passed" : "failed"} (${detail}${attempts > 1 ? `, ${attempts} attempt(s)` : ""}).`,

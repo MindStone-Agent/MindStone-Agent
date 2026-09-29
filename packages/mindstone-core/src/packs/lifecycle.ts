@@ -19,6 +19,7 @@ import {
   promptSurfacesMatch,
 } from "./manifest.js";
 import { satisfiesRange } from "./semver.js";
+import { capabilityList } from "../persona/load.js";
 import {
   clearStaging,
   findOwningPack,
@@ -115,15 +116,24 @@ function artifactIdsFromArchive(files: TarFile[], root: string): Set<string> {
   return ids;
 }
 
-function capabilityIdsFromJson(data: Buffer | undefined, key: string): string[] {
+/**
+ * A packed persona's list file, read as the persona loader reads it: one
+ * the loader would refuse is refused at install (#142 review), instead of
+ * installing a persona that won't load.
+ */
+function capabilityIdsFromJson(data: Buffer | undefined, key: string, errors: string[], personaId: string): string[] {
   if (!data) return [];
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(data.toString("utf-8")) as unknown;
-    const list = Array.isArray(parsed) ? parsed : (parsed as Record<string, unknown> | null)?.[key];
-    return Array.isArray(list) ? list.filter((entry): entry is string => typeof entry === "string") : [];
+    parsed = JSON.parse(data.toString("utf-8")) as unknown;
   } catch {
+    errors.push(`persona ${personaId}: ${key}.json is not valid JSON`);
     return [];
   }
+  const list = capabilityList(parsed, key);
+  if (Array.isArray(list)) return list;
+  errors.push(`persona ${personaId}: ${list.error}`);
+  return [];
 }
 
 /**
@@ -259,13 +269,13 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
   const onDisk = (root: string, id: string): boolean => existsSync(join(dataDir, root, id));
   for (const personaId of manifest.artifacts.personas ?? []) {
     const refFile = (name: string) => files.find((file) => file.path === `personas/${personaId}/${name}`)?.data;
-    for (const skillId of capabilityIdsFromJson(refFile("skills.json"), "skills")) {
+    for (const skillId of capabilityIdsFromJson(refFile("skills.json"), "skills", errors, personaId)) {
       if (!packSkillIds.has(skillId) && !onDisk("skills", skillId)) errors.push(`persona ${personaId} references skill "${skillId}" which is neither in this pack nor installed`);
     }
-    for (const kbId of capabilityIdsFromJson(refFile("knowledgebases.json"), "knowledgebases")) {
+    for (const kbId of capabilityIdsFromJson(refFile("knowledgebases.json"), "knowledgebases", errors, personaId)) {
       if (!packKbIds.has(kbId) && !onDisk("knowledgebases", kbId)) errors.push(`persona ${personaId} references knowledgebase "${kbId}" which is neither in this pack nor installed`);
     }
-    for (const workflowId of capabilityIdsFromJson(refFile("workflows.json"), "workflows")) {
+    for (const workflowId of capabilityIdsFromJson(refFile("workflows.json"), "workflows", errors, personaId)) {
       if (!packWorkflowIds.has(workflowId) && !onDisk("workflows", workflowId)) errors.push(`persona ${personaId} references workflow "${workflowId}" which is neither in this pack nor installed`);
     }
   }
@@ -308,7 +318,9 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
   // (`mindstone kb ingest`), so all KB content reaching the model derives from
   // reviewed sources. A whitelist is casing-robust where a denylist regex was not.
   for (const file of files) {
-    const kbMatch = /^knowledgebases\/[^/]+\/(.+)$/.exec(file.path);
+    // A persona's private KB (#125) too, and in any casing of the folders
+    // above it, which a case-insensitive filesystem would resolve the same.
+    const kbMatch = /^(?:knowledgebases|personas\/[^/]+\/knowledgebases)\/[^/]+\/(.+)$/i.exec(file.path);
     if (!kbMatch) continue;
     const withinKb = kbMatch[1];
     if (withinKb !== "kb.json" && !withinKb.startsWith("sources/")) {
@@ -338,7 +350,8 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
     return true;
   };
   for (const file of files) {
-    if (!/^knowledgebases\/[^/]+\/kb\.json$/.test(file.path)) continue;
+    // A persona's private KB (#125) is a knowledgebase too.
+    if (!/^(knowledgebases|personas\/[^/]+\/knowledgebases)\/[^/]+\/kb\.json$/i.test(file.path)) continue;
     let catalog: { name?: unknown; description?: unknown; externalSources?: unknown };
     try {
       catalog = JSON.parse(file.data.toString("utf-8")) as typeof catalog;
