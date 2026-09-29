@@ -679,8 +679,8 @@ leaves the folder, if you added files of your own such as compose.override.yml.)
         }
         if ($status -eq 403) {
             # 403 is a Console setting, not the password: email sign-in turned off
-            # (ALLOW_EMAIL_LOGIN=false) or sign-in through LDAP or SSO. A reset can't help.
-            Write-InstallWarning "The admin account $Email was created with role ADMIN, but the Console's settings refused email sign-in (HTTP 403), so its password couldn't be checked. Email sign-in may be turned off (ALLOW_EMAIL_LOGIN=false), or sign-in may go through LDAP or SSO. Sign in at $OpenUrl the way this Console is set up."
+            # (ALLOW_EMAIL_LOGIN=false). A reset can't help. (LDAP answers 404/422.)
+            Write-InstallWarning "The admin account $Email was created with role ADMIN, but the Console's settings refused email sign-in (HTTP 403), so its password couldn't be checked. Email sign-in may be turned off (ALLOW_EMAIL_LOGIN=false). Sign in at $OpenUrl the way this Console is set up."
             return 'unchecked'
         }
         $what = "HTTP $status"
