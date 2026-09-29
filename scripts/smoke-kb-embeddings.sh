@@ -679,7 +679,8 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     assert.ok(honoured.result.state === "ready" && honoured.ms >= 75, `Retry-After honoured: ${honoured.ms} ms`);
     const capped = await run("capped", once(5000), { minMs: 1, maxMs: 40, maxWaits: 1, maxTotalMs: 5000 });
     assert.ok(capped.result.state === "ready" && capped.ms < 1000, `Retry-After capped at maxMs: ${capped.ms} ms`);
-    const offBudget = await run("budget", once(120), { minMs: 120, maxMs: 1000, maxWaits: 1, maxTotalMs: 5000 }, 60);
+    // Three 20 ms calls fit a 100 ms budget; with the 150 ms wait counted too, they wouldn't.
+    const offBudget = await run("budget", once(150), { minMs: 150, maxMs: 1000, maxWaits: 1, maxTotalMs: 5000 }, 100);
     assert.equal(offBudget.result.state, "ready", "a 429 wait longer than the budget doesn't spend it");
     const twice = await run("twice", (call) => (call <= 2 ? limited() : undefined), { minMs: 1, maxMs: 1, maxWaits: 2, maxTotalMs: 5000 });
     assert.equal(twice.result.state, "ready", "two 429s in a row, within maxWaits");
