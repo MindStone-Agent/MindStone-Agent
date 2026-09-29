@@ -497,5 +497,25 @@ late_e="$(reembed_chunks $((key_at + 250)) model-e)"
 e_run="$(reembed_chunks 0 model-e)"
 (( e_run < 128 )) || { echo "control: the model-e run had already finished (${e_run} chunks) before the key changed" >&2; exit 1; }
 echo "a run stopped when the endpoint key changed after ${e_run} chunks"
+# And when its address changes (#157 review round 4): the same stub under another name, so a run
+# that didn't notice would go on sending.
+before_addr="$(reembed_chunks 0 model-e)"
+chat "a switch question with the new endpoint key" >/dev/null
+for _ in $(seq 1 20); do [[ "$(reembed_chunks 0 model-e)" -gt "${before_addr}" ]] && break; sleep 0.5; done
+[[ "$(reembed_chunks 0 model-e)" -gt "${before_addr}" ]] || { echo "control: no run started with the new key, so an address change can't be measured" >&2; exit 1; }
+STUB_PORT="${STUB_PORT}" python3 - <<'PY'
+import json, os, pathlib
+models = pathlib.Path(os.environ["PI_CODING_AGENT_DIR"]) / "models.json"
+m = json.loads(models.read_text())
+m["providers"]["enterprise-openai"]["baseUrl"] = "http://localhost:" + os.environ["STUB_PORT"] + "/v1"
+models.write_text(json.dumps(m, indent=2) + "\n")
+PY
+addr_at=$(node -e 'console.log(Date.now())')
+sleep 3
+late_addr="$(reembed_chunks $((addr_at + 250)) model-e)"
+[[ "${late_addr}" == 0 ]] || { echo "the run sent ${late_addr} chunks to the old address after it changed" >&2; exit 1; }
+addr_run=$(( $(reembed_chunks 0 model-e) - before_addr ))
+(( addr_run < 128 )) || { echo "control: that run had already finished (${addr_run} chunks) before the address changed" >&2; exit 1; }
+echo "a run stopped when the endpoint address changed after ${addr_run} chunks"
 
 echo "Memory embedding model switch smoke test passed."
