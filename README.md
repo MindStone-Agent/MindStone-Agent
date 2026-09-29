@@ -199,7 +199,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:19789/health
 ```
 
-The first prints `Docker Compose version v2.…`. The other two print `000`: nothing is using port 3080 or port 19789 yet. A native MindStone gateway (path B) uses 19789; stop it, or choose other ports in step A1. The installer checks both ports too, and stops with a clear message if either is taken.
+The first prints `Docker Compose version` and a version of 2 or newer (for example `v2.33.1`, or `5.3.1` on current Docker Desktop); 1.x is too old. The other two print `000`: nothing is using port 3080 or port 19789 yet. A native MindStone gateway (path B) uses 19789; stop it, or choose other ports in step A1. The installer checks both ports too, and stops with a clear message if either is taken.
 
 #### A1. Install
 
