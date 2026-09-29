@@ -94,7 +94,28 @@ export function createLocalMemoryRecallProvider(documents: MemoryDocument[] | un
   return documents?.length ? new LocalMemoryRecallProvider(documents) : undefined;
 }
 
-/** Several providers searched as one: their hits merged by score. */
+/** The quota of KB sources ranked by meaning (#125 §5). */
+export const KB_RECALL_QUOTA = "knowledgebase";
+
+/**
+ * A hit with its own quota (#125 §5: KB sources ranked by meaning). Its score
+ * is on another scale, so it never competes with other hits on score: the
+ * merge keeps it next to the best `limit` others, and the turn's selection
+ * gives it a slot of its own. The provider that marks hits caps how many.
+ */
+export function isQuotaHit(hit: MemoryHit): boolean {
+  return hit.kind === "kb" && hit.metadata?.recallQuota === KB_RECALL_QUOTA;
+}
+
+/** The `limit` hits a turn keeps: quota hits first claim their slots, the rest go to the best others. Order is kept. */
+export function selectRecallHits(hits: MemoryHit[], limit: number): MemoryHit[] {
+  const quota = hits.filter(isQuotaHit).slice(0, limit);
+  const others = hits.filter((hit) => !isQuotaHit(hit)).slice(0, Math.max(0, limit - quota.length));
+  const kept = new Set([...quota, ...others]);
+  return hits.filter((hit) => kept.has(hit));
+}
+
+/** Several providers searched as one: their hits merged by score, quota hits kept beside them. */
 export class CombinedMemoryRecallProvider implements MemoryRecallProvider {
   readonly id: string;
   readonly #providers: MemoryRecallProvider[];
@@ -106,11 +127,12 @@ export class CombinedMemoryRecallProvider implements MemoryRecallProvider {
 
   async search(query: MemoryQuery): Promise<MemoryHit[]> {
     const limit = query.limit ?? DEFAULT_MAX_RESULTS;
-    const results = await Promise.all(this.#providers.map((provider) => provider.search(query)));
-    return results
-      .flat()
-      .sort((a, b) => b.score - a.score || a.chunkId.localeCompare(b.chunkId))
-      .slice(0, limit);
+    const results = (await Promise.all(this.#providers.map((provider) => provider.search(query)))).flat();
+    const byScore = (a: MemoryHit, b: MemoryHit) => b.score - a.score || a.chunkId.localeCompare(b.chunkId);
+    return [
+      ...results.filter((hit) => !isQuotaHit(hit)).sort(byScore).slice(0, limit),
+      ...results.filter(isQuotaHit).sort(byScore),
+    ];
   }
 }
 
@@ -119,18 +141,19 @@ export class CombinedMemoryRecallProvider implements MemoryRecallProvider {
  * memory files and transcripts; knowledge-base documents and configured local
  * documents aren't in it, so they are searched next to it (#106: live
  * indexing creates the index on the first turn, which had dropped them).
- * Without the index, everything is searched locally.
+ * Without the index, memory files are searched locally too. Knowledge bases
+ * have their own provider (#125 §5), which also ranks by meaning.
  */
 export function selectMemoryRecallProvider(options: {
   sqlite?: MemoryRecallProvider;
   localDocuments?: MemoryDocument[];
   fileMemory: MemoryDocument[];
-  knowledgebases: MemoryDocument[];
+  knowledgebases?: MemoryRecallProvider;
 }): MemoryRecallProvider | undefined {
-  const localDocuments = options.localDocuments ?? [];
-  if (!options.sqlite) return createLocalMemoryRecallProvider([...localDocuments, ...options.fileMemory, ...options.knowledgebases]);
-  const extra = createLocalMemoryRecallProvider([...localDocuments, ...options.knowledgebases]);
-  return extra ? new CombinedMemoryRecallProvider([options.sqlite, extra]) : options.sqlite;
+  const local = createLocalMemoryRecallProvider([...(options.localDocuments ?? []), ...(options.sqlite ? [] : options.fileMemory)]);
+  const providers = [options.sqlite, local, options.knowledgebases].filter((provider): provider is MemoryRecallProvider => Boolean(provider));
+  if (providers.length <= 1) return providers[0];
+  return new CombinedMemoryRecallProvider(providers);
 }
 
 function formatHit(hit: MemoryHit, index: number): string {
@@ -219,7 +242,7 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
     dedupAgainstActiveContext: input.config?.dedupAgainstActiveContext,
     maxActiveEntriesForDedup: input.config?.maxActiveEntriesForDedup,
   });
-  const hits = ranked.hits.slice(0, limit);
+  const hits = selectRecallHits(ranked.hits, limit);
   if (hits.length === 0) {
     return {
       query,

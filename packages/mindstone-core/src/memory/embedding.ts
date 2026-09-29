@@ -187,6 +187,30 @@ export function createMemoryEmbeddingProvider(
   return resolved ? new OpenAiCompatibleEmbeddingProvider(resolved) : undefined;
 }
 
+/**
+ * A turn's embedder (#125 §5): a single text is embedded once however many
+ * recall providers ask for it at once, so memory and KB recall share one
+ * query embedding. Several texts pass straight through.
+ */
+export function sharedQueryEmbedder(provider: MemoryEmbeddingProvider | undefined): MemoryEmbeddingProvider | undefined {
+  if (!provider) return undefined;
+  const pending = new Map<string, Promise<number[][]>>();
+  return {
+    id: provider.id,
+    model: provider.model,
+    embedTexts(texts: string[]): Promise<number[][]> {
+      if (texts.length !== 1) return provider.embedTexts(texts);
+      const key = texts[0];
+      let result = pending.get(key);
+      if (!result) {
+        result = provider.embedTexts(texts);
+        pending.set(key, result);
+      }
+      return result;
+    },
+  };
+}
+
 export async function probeMemoryEmbeddingProvider(
   config?: MindStoneConfig,
   env: NodeJS.ProcessEnv = process.env,

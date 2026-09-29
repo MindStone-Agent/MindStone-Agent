@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# KB embeddings smoke (#125 §5): a KB's entries are embedded at ingest with
+# the install's embedder, and recall ranks KB sources by meaning.
+#   1. unit: vectors file (write, read, stale rules, float32 range, time
+#      limit), the KB recall provider (cosine, threshold, dimension, embedder
+#      down, partial vectors, cap), the quota merge and selection, and the
+#      shared query embedder
+#   2. end to end against a stub embedder: no embedder -> no vectors; ingest
+#      writes vectors.json; a question with no shared words recalls the KB
+#      source by meaning; the query is embedded once per turn, with and
+#      without the sqlite-vec index; embedder down, another dimension or
+#      another model -> word match only, status says why; a failed embed
+#      keeps the ingest and removes old vectors; the quota keeps a KB slot
+#      against better-scoring memory; a persona's private KB, and a private
+#      vectors.json that is a link
+#   Binds stub port base+38. No gateway.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-kbembed-smoke.XXXXXX")"
+SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
+EMBED_PORT="$((SMOKE_PORT_BASE + 38))"
+
+cleanup() {
+  if [[ -n "${embed_pid:-}" ]]; then
+    kill "${embed_pid}" >/dev/null 2>&1 || true
+    wait "${embed_pid}" >/dev/null 2>&1 || true
+  fi
+  rm -rf "${TEMP_RUNTIME}"
+}
+trap cleanup EXIT
+
+export MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}"
+export EMBEDDER_BASE_URL="http://127.0.0.1:${EMBED_PORT}/v1"
+export EMBEDDER_TIMEOUT_MS=1500
+export EMBED_PORT
+
+cd "${PROJECT_ROOT}"
+
+echo "== KB embeddings smoke test =="
+
+# A stub embedder: a vector per topic, so meaning can match with no shared words.
+node --input-type=module <<'NODE' >"${TEMP_RUNTIME}/embedder.log" 2>&1 &
+import { createServer } from "node:http";
+const TOPICS = [
+  /\b(car|automobile|sedan|vehicle|tire|tires|wheel|wheels)\b/i,
+  /\b(bread|oven|bake|baking|recipe|kitchen|flour|dough)\b/i,
+  /\b(tomato|tomatoes|garden|soil|seedling|seedlings|loamy)\b/i,
+  /mindstone embedding health check/i,
+];
+const state = { mode: "ok", requests: [] };
+function vectorFor(text, dims) {
+  const vector = new Array(dims).fill(0);
+  TOPICS.forEach((pattern, index) => { if (index < dims && pattern.test(text)) vector[index] = 1; });
+  if (vector.every((value) => value === 0)) vector[dims - 1] = 1;
+  return vector;
+}
+createServer((req, res) => {
+  const chunks = [];
+  req.on("data", (chunk) => chunks.push(chunk));
+  req.on("end", () => {
+    const raw = Buffer.concat(chunks).toString("utf8");
+    if (req.url === "/_test/state") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(state));
+      return;
+    }
+    if (req.url === "/_test/mode") {
+      state.mode = JSON.parse(raw).mode;
+      state.requests = [];
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+      return;
+    }
+    if (req.method !== "POST" || req.url !== "/v1/embeddings") { res.writeHead(404); res.end("{}"); return; }
+    const body = JSON.parse(raw);
+    const input = Array.isArray(body.input) ? body.input : [body.input];
+    state.requests.push({ model: body.model, input });
+    if (state.mode === "fail") {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "stub embedder is down" } }));
+      return;
+    }
+    const dims = state.mode === "dim5" ? 5 : 6;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ object: "list", model: body.model, data: input.map((text, index) => ({ object: "embedding", index, embedding: vectorFor(text, dims) })) }));
+  });
+}).listen(Number(process.env.EMBED_PORT), "127.0.0.1", () => console.log("stub embedder up"));
+NODE
+embed_pid=$!
+
+npm run build:mindstone >/dev/null
+./scripts/init-runtime.sh >"${TEMP_RUNTIME}/init.log"
+
+DATA="${TEMP_RUNTIME}/mindstone"
+MS=./scripts/mindstone
+STUB="http://127.0.0.1:${EMBED_PORT}"
+
+stub_mode() { curl -s -X POST -d "{\"mode\":\"$1\"}" "${STUB}/_test/mode" >/dev/null; }
+# stub_count <text>: requests that embedded exactly this one text.
+stub_count() { STUB_TEXT="$1" node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>console.log(s.requests.filter((q)=>q.input.length===1&&q.input[0]===process.env.STUB_TEXT).length))' "${STUB}/_test/state"; }
+for _ in 1 2 3 4 5 6 7 8 9 10; do curl -s "${STUB}/_test/state" >/dev/null 2>&1 && break; sleep 0.3; done
+
+# --- 1. Unit ---
+MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  KB_VECTORS_FILE, kbEntryEmbeddingText, readKbVectors, writeKbVectors,
+} from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
+import { KnowledgebaseRecallProvider } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
+import { CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
+import { sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
+
+const entry = (id: string, text: string, section?: string) => ({
+  entryId: id, sourceId: "s.md", sourcePath: "s.md", sourceTitle: "Title", section, citation: `s.md § ${section ?? id}`, summary: text.slice(0, 40), text, sourceMtimeMs: 0,
+});
+const fixed = (vectors: Record<string, number[]>, fallback = [0, 0, 1]) => ({
+  id: "stub", model: "m1", calls: 0,
+  async embedTexts(texts: string[]) { this.calls += 1; return texts.map((t) => Object.entries(vectors).find(([k]) => t.includes(k))?.[1] ?? fallback); },
+});
+
+// Embedding text: title and heading first, capped.
+assert.equal(kbEntryEmbeddingText(entry("a", "body", "Head")), "Title — Head\n\nbody");
+assert.equal(kbEntryEmbeddingText(entry("a", "x".repeat(9000))).length, 6000);
+
+const dir = mkdtempSync(join(tmpdir(), "kbvec-"));
+const entries = [entry("e1", "alpha text", "A"), entry("e2", "beta text", "B")];
+const indexText = JSON.stringify({ kbId: "k", entries });
+
+// Written: provider, model, dimension, index digest; every entry.
+let written = await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0], beta: [0, 1, 0] }), batchSize: 1 });
+assert.equal(written.state, "ready");
+const file = JSON.parse(readFileSync(join(dir, KB_VECTORS_FILE), "utf8"));
+assert.equal(file.provider, "stub"); assert.equal(file.model, "m1"); assert.equal(file.dimension, 3);
+assert.match(file.indexSha256, /^[0-9a-f]{64}$/);
+assert.deepEqual(Object.keys(file.vectors).sort(), ["e1", "e2"]);
+let read = readKbVectors(dir, indexText, { id: "stub", model: "m1" });
+assert.equal(read.state, "ready");
+assert.deepEqual([...(read as any).loaded.vectors.get("e1")], [1, 0, 0]);
+
+// Stale: another provider, another model, a changed index. Unused: no embedder.
+assert.equal(readKbVectors(dir, indexText, { id: "other", model: "m1" }).state, "stale");
+const otherModel = readKbVectors(dir, indexText, { id: "stub", model: "m2" });
+assert.equal(otherModel.state, "stale"); assert.match((otherModel as any).reason, /re-ingest/);
+assert.match((readKbVectors(dir, indexText + " ", { id: "stub", model: "m1" }) as any).reason, /index changed/);
+assert.equal(readKbVectors(dir, indexText, undefined).state, "unused");
+// A vector of the wrong length makes the file stale, not half used.
+const broken = { ...file, vectors: { ...file.vectors, e2: Buffer.from(new Float32Array([1, 2]).buffer).toString("base64") } };
+writeFileSync(join(dir, KB_VECTORS_FILE), JSON.stringify(broken));
+assert.equal(readKbVectors(dir, indexText, { id: "stub", model: "m1" }).state, "stale");
+
+// Failures keep nothing: a throwing embedder, a short answer, mixed
+// dimensions, a value past float32, and the time limit all remove the file.
+const failing = [
+  { id: "stub", model: "m1", async embedTexts() { throw new Error("down"); } },
+  { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.slice(1).map(() => [1, 0]); } },
+  { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.map((_, i) => (i ? [1, 0] : [1, 0, 0])); } },
+  { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.map(() => [1e39, 0]); } },
+];
+for (const embedder of failing) {
+  await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }) });
+  assert.ok(existsSync(join(dir, KB_VECTORS_FILE)));
+  written = await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder });
+  assert.equal(written.state, "missing");
+  assert.ok(!existsSync(join(dir, KB_VECTORS_FILE)), "a failed embed must remove the old vectors");
+}
+const slow = { id: "stub", model: "m1", embedTexts: () => new Promise<number[][]>(() => {}) };
+const started = Date.now();
+written = await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder: slow as any, timeoutMs: 300 });
+assert.equal(written.state, "missing"); assert.match((written as any).reason, /longer than/);
+assert.ok(Date.now() - started < 3000, "the time limit must end the embed");
+written = await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder: undefined });
+assert.match((written as any).reason, /no embedder/);
+
+// A private KB's vectors.json that is a link is not read.
+await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }) });
+const linked = mkdtempSync(join(tmpdir(), "kbvec-link-"));
+symlinkSync(join(dir, KB_VECTORS_FILE), join(linked, KB_VECTORS_FILE));
+assert.equal(readKbVectors(linked, indexText, { id: "stub", model: "m1" }, { noLinks: true }).state, "missing");
+assert.equal(readKbVectors(linked, indexText, { id: "stub", model: "m1" }).state, "ready");
+
+// The KB provider.
+const doc = (id: string, text: string) => ({ id, kind: "kb" as const, text, metadata: { kbId: id } });
+const vec = (values: number[]) => new Float32Array(values);
+const recall = {
+  documents: [doc("kb:a", "header\n- a1\nfooter"), doc("kb:b", "header\n- b1\nfooter"), doc("kb:c", "zebra words only"), doc("kb:d", "header\n- d1")],
+  vectors: new Map([
+    ["kb:a", { dimension: 3, header: ["header"], footer: ["footer"], entries: [{ line: "- a0", citation: "a0", vector: vec([0, 1, 0]) }, { line: "- a1", citation: "a1", vector: vec([1, 0, 0]) }] }],
+    ["kb:b", { dimension: 3, header: ["header"], footer: ["footer"], entries: [{ line: "- b1", citation: "b1", vector: vec([0.6, 0.8, 0]) }] }],
+    ["kb:d", { dimension: 2, header: ["header"], footer: [], entries: [{ line: "- d1", citation: "d1", vector: vec([1, 0]) }] }],
+  ]),
+};
+const queryEmbedder = fixed({ question: [1, 0, 0] });
+let hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: queryEmbedder, minSimilarity: 0.5 }).search({ text: "question zebra", limit: 8 });
+const semantic = hits.filter(isQuotaHit);
+assert.deepEqual(semantic.map((h) => h.id), ["kb:a", "kb:b"], "ranked by cosine; kb:d's other dimension ignored");
+assert.equal(semantic[0].score, 1);
+assert.equal(semantic[0].text, "header\n- a1\n- a0\nfooter", "closest section first");
+assert.equal(semantic[0].metadata?.bestCitation, "a1");
+assert.ok(hits.some((h) => h.id === "kb:c" && !isQuotaHit(h)), "word match still runs");
+assert.equal(queryEmbedder.calls, 1);
+// Threshold, cap, embedder down, no embedder.
+hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), minSimilarity: 0.7 }).search({ text: "question", limit: 8 });
+assert.deepEqual(hits.filter(isQuotaHit).map((h) => h.id), ["kb:a"]);
+hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), maxResults: 1, minSimilarity: 0 }).search({ text: "question", limit: 8 });
+assert.equal(hits.filter(isQuotaHit).length, 1);
+hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: failing[0] as any }).search({ text: "question zebra", limit: 8 });
+assert.deepEqual(hits.map((h) => h.id), ["kb:c"], "embedder down: word match only");
+hits = await new KnowledgebaseRecallProvider(recall as any, {}).search({ text: "question zebra", limit: 8 });
+assert.deepEqual(hits.map((h) => h.id), ["kb:c"]);
+hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), maxResults: 0 }).search({ text: "question zebra", limit: 8 });
+assert.equal(hits.filter(isQuotaHit).length, 0, "maxResults 0 turns meaning off");
+
+// Quota: only KB hits with the marker count; they keep slots in the merge and the selection.
+const hit = (id: string, score: number, quota = false, kind = "doc") => ({ id, chunkId: `${id}#0`, sourceId: id, ordinal: 0, kind, text: id, score, metadata: quota ? { recallQuota: KB_RECALL_QUOTA } : {} } as any);
+assert.equal(isQuotaHit(hit("x", 1, true, "doc")), false, "only a kb hit can take a quota slot");
+assert.equal(isQuotaHit(hit("x", 1, true, "kb")), true);
+const merged = await new CombinedMemoryRecallProvider([
+  { id: "m", search: () => [hit("m1", 0.99), hit("m2", 0.98), hit("m3", 0.97)] },
+  { id: "k", search: () => [hit("k1", 0.51, true, "kb")] },
+]).search({ text: "q", limit: 2 });
+assert.deepEqual(merged.map((h) => h.id), ["m1", "m2", "k1"]);
+assert.deepEqual(selectRecallHits(merged, 2).map((h) => h.id), ["m1", "k1"]);
+assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) => h.id), ["m1"]);
+
+// The shared embedder: one request for one text, however many ask at once.
+const base = fixed({});
+const shared = sharedQueryEmbedder(base as any)!;
+await Promise.all([shared.embedTexts(["same"]), shared.embedTexts(["same"]), shared.embedTexts(["other"])]);
+assert.equal(base.calls, 2);
+await shared.embedTexts(["a", "b"]);
+assert.equal(base.calls, 3, "several texts pass straight through");
+console.log("unit assertions passed");
+TS
+
+# --- 2. End to end ---
+python3 - <<'PY'
+import json, os, pathlib
+data = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone"
+def write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+def kb(root, kb_id, name, sources):
+    write(root / kb_id / "kb.json", json.dumps({"name": name, "version": "0.1.0"}))
+    for file, text in sources.items():
+        write(root / kb_id / "sources" / file, text)
+kb(data / "knowledgebases", "garage", "Garage", {
+    "fleet.md": "# Fleet\n\n## Sedan upkeep\n\nSedan tire rotation every 5000 miles.\n",
+})
+kb(data / "knowledgebases", "pantry", "Pantry", {
+    "loaf.md": "# Loaf\n\n## Dough\n\nBake bread in a hot oven.\n",
+})
+p = data / "personas" / "grower"
+write(p / "PERSONA.md", "# grower\n\nA persona for growing things.\n")
+kb(p / "knowledgebases", "plots", "Plots", {"plots.md": "# Plots\n\n## Beds\n\nTomato plants want loamy soil.\n"})
+config_path = data / "config.json"
+config = json.loads(config_path.read_text())
+config["routing"] = {"mode": "mock", "defaultAgentId": "default", "defaultModel": "mindstone/mock", "mock": {"responsePrefix": "kbembed"}}
+config["session"] = {"mode": "single", "defaultSessionKey": "agent:default:main"}
+config["memory"] = {"autoRecall": True}
+config_path.write_text(json.dumps(config, indent=2) + "\n")
+PY
+
+set_config() { # set_config <python statements on c>
+  CFG_EDIT="$1" python3 - <<'PY'
+import json, os, pathlib
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+exec(os.environ["CFG_EDIT"])
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+}
+
+# chat_hits <question>: the KB hits of that turn's recall, as "id|recallMode" lines.
+chat_hits() {
+  ${MS} chat --once "$1" >/dev/null
+  QUESTION="$1" node -e '
+    const fs = require("node:fs"), path = require("node:path");
+    const dir = path.join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "mindstone", "transcripts");
+    const files = [];
+    (function walk(d) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (p.endsWith(".jsonl")) files.push(p); } })(dir);
+    let last;
+    for (const f of files) for (const line of fs.readFileSync(f, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      const entry = JSON.parse(line);
+      if (entry.metadata?.event === "memory_recall_injected" && entry.metadata.query === process.env.QUESTION) last = entry;
+    }
+    for (const h of last?.metadata?.hits ?? []) console.log(`${h.id}|${h.recallMode ?? "lexical"}`);
+  '
+}
+
+SEMANTIC="automobile wheels servicing cadence?"
+LEXICAL="sedan tire rotation"
+
+# No embedder configured: ingest works, no vectors, status says why.
+${MS} kb ingest garage --json > "${TEMP_RUNTIME}/ingest0.json"
+node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!r.ok || r.vectors.state!=="missing" || !/no embedder/.test(r.vectors.reason)) { console.error("no embedder must leave vectors missing", JSON.stringify(r.vectors)); process.exit(1); }' "${TEMP_RUNTIME}/ingest0.json"
+[[ ! -e "${DATA}/knowledgebases/garage/vectors.json" ]] || { echo "vectors.json written with no embedder" >&2; exit 1; }
+if chat_hits "${SEMANTIC}" | grep -q 'kb:garage'; then echo "a KB with no vectors was recalled by meaning" >&2; exit 1; fi
+
+# With the stub embedder: every entry embedded, the file says with what.
+set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-a"'
+stub_mode ok
+${MS} kb ingest garage --json > "${TEMP_RUNTIME}/ingest1.json"
+${MS} kb ingest pantry --json >/dev/null
+node -e '
+const fs = require("fs");
+const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const v = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const index = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+if (r.vectors.state !== "ready" || r.vectors.dimension !== 6 || r.vectors.count !== index.entries.length) { console.error("ingest vectors:", JSON.stringify(r.vectors)); process.exit(1); }
+if (v.provider !== "ollama" || v.model !== "kbstub-a" || v.dimension !== 6) { console.error("vectors.json header:", v.provider, v.model, v.dimension); process.exit(1); }
+if (Object.keys(v.vectors).length !== index.entries.length) { console.error("not every entry embedded"); process.exit(1); }
+' "${TEMP_RUNTIME}/ingest1.json" "${DATA}/knowledgebases/garage/vectors.json" "${DATA}/knowledgebases/garage/index.json"
+${MS} kb status garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="ready") { console.error("status after ingest:", JSON.stringify(s.vectors)); process.exit(1); }})'
+${MS} kb status garage | grep -q "vectors: ready (ollama:kbstub-a, 6 dimensions" || { echo "kb status must show the vectors" >&2; exit 1; }
+
+# A question sharing no words with the KB recalls it by meaning, and only the
+# source that matches; the query is embedded once.
+stub_mode ok
+hits="$(chat_hits "${SEMANTIC}")"
+grep -q '^kb:garage:fleet.md|embedding$' <<<"${hits}" || { echo "semantic question did not recall the KB source: ${hits}" >&2; exit 1; }
+if grep -q 'kb:pantry' <<<"${hits}"; then echo "an unrelated KB source was recalled: ${hits}" >&2; exit 1; fi
+[[ "$(stub_count "${SEMANTIC}")" == "1" ]] || { echo "query embedded $(stub_count "${SEMANTIC}") times" >&2; exit 1; }
+
+# With the sqlite-vec index too: memory and KB recall share one query embedding.
+set_config 'c["memory"]["vectorStore"] = "sqlite-vec"'
+${MS} memory backfill --embed >/dev/null
+stub_mode ok
+Q2="car wheels cadence, again?"
+hits="$(chat_hits "${Q2}")"
+grep -q '^kb:garage:fleet.md|embedding$' <<<"${hits}" || { echo "sqlite-vec on: KB not recalled by meaning: ${hits}" >&2; exit 1; }
+[[ "$(stub_count "${Q2}")" == "1" ]] || { echo "sqlite-vec on: query embedded $(stub_count "${Q2}") times" >&2; exit 1; }
+set_config 'c["memory"].pop("vectorStore", None)'
+
+# Embedder down at recall: word match takes over; the turn still runs.
+stub_mode fail
+hits="$(chat_hits "semantic check while the embedder is down: ${SEMANTIC}")"
+if grep -q 'kb:garage' <<<"${hits}"; then echo "embedder down, yet recalled by meaning: ${hits}" >&2; exit 1; fi
+hits="$(chat_hits "${LEXICAL}")"
+grep -q '^kb:garage:fleet.md|lexical$' <<<"${hits}" || { echo "embedder down: word match must still recall: ${hits}" >&2; exit 1; }
+
+# A query vector of another dimension: the KB's vectors are ignored.
+stub_mode dim5
+hits="$(chat_hits "dimension check: ${SEMANTIC}")"
+if grep -q 'kb:garage' <<<"${hits}"; then echo "vectors of another dimension were used: ${hits}" >&2; exit 1; fi
+
+# Quota: memory that matches every word can't push the KB source out.
+stub_mode ok
+set_config '
+c["memory"]["recall"] = {"maxResults": 2}
+c["memory"]["localDocuments"] = [{"id": f"local-{i}", "kind": "custom", "text": f"automobile wheels servicing cadence note {i}"} for i in range(3)]'
+hits="$(chat_hits "${SEMANTIC}")"
+grep -q '^kb:garage:fleet.md|embedding$' <<<"${hits}" || { echo "quota: KB source pushed out by memory: ${hits}" >&2; exit 1; }
+[[ "$(grep -c . <<<"${hits}")" == "2" ]] || { echo "quota: expected 2 hits, got: ${hits}" >&2; exit 1; }
+set_config 'c["knowledgebases"] = {"recall": {"maxResults": 0}}'
+hits="$(chat_hits "quota off: ${SEMANTIC}")"
+if grep -q 'kb:garage' <<<"${hits}"; then echo "maxResults 0 must turn meaning off: ${hits}" >&2; exit 1; fi
+set_config '
+c.pop("knowledgebases", None)
+c["memory"].pop("recall", None)
+c["memory"].pop("localDocuments", None)'
+
+# Another model: stale, and status says re-ingest; recall ignores the vectors.
+set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-b"'
+${MS} kb status garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="stale" || !/re-ingest/.test(s.vectors.reason)) { console.error("model change:", JSON.stringify(s.vectors)); process.exit(1); }})'
+hits="$(chat_hits "model check: ${SEMANTIC}")"
+if grep -q 'kb:garage' <<<"${hits}"; then echo "vectors from another model were used: ${hits}" >&2; exit 1; fi
+${MS} kb ingest garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const r=JSON.parse(d); if (r.vectors.state!=="ready") process.exit(1);})'
+grep -q '"model":"kbstub-b"' "${DATA}/knowledgebases/garage/vectors.json" || { echo "re-ingest must re-embed with the new model" >&2; exit 1; }
+
+# An index changed after its vectors: stale.
+printf ' ' >> "${DATA}/knowledgebases/garage/index.json"
+${MS} kb status garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="stale" || !/index changed/.test(s.vectors.reason)) { console.error("index change:", JSON.stringify(s.vectors)); process.exit(1); }})'
+
+# A failed embed at ingest: the index is written, the old vectors removed.
+stub_mode fail
+${MS} kb ingest garage --json > "${TEMP_RUNTIME}/ingest-fail.json"
+node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!r.ok || r.vectors.state!=="missing" || /stub embedder is down/.test(JSON.stringify(r))) { console.error("failed embed:", JSON.stringify(r.vectors)); process.exit(1); }' "${TEMP_RUNTIME}/ingest-fail.json"
+[[ ! -e "${DATA}/knowledgebases/garage/vectors.json" ]] || { echo "old vectors kept after a failed embed" >&2; exit 1; }
+${MS} kb status garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="missing") process.exit(1);})'
+
+# A persona's private KB: embedded at ingest, recalled by meaning under its persona.
+stub_mode ok
+${MS} kb ingest --persona grower plots --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const r=JSON.parse(d); if (r.vectors.state!=="ready") { console.error("private ingest:", JSON.stringify(r.vectors)); process.exit(1); }})'
+[[ -f "${DATA}/personas/grower/knowledgebases/plots/vectors.json" ]] || { echo "private vectors.json missing" >&2; exit 1; }
+set_config 'c["personas"] = {"active": "grower"}'
+hits="$(chat_hits "seedling nurturing?")"
+grep -q '^pkb:grower:plots:plots.md|embedding$' <<<"${hits}" || { echo "private KB not recalled by meaning: ${hits}" >&2; exit 1; }
+${MS} kb status --persona grower plots --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="ready") process.exit(1);})'
+
+# A private vectors.json that is a link: the KB is refused and left out of recall.
+mv "${DATA}/personas/grower/knowledgebases/plots/vectors.json" "${TEMP_RUNTIME}/plots-vectors.json"
+ln -s "${TEMP_RUNTIME}/plots-vectors.json" "${DATA}/personas/grower/knowledgebases/plots/vectors.json"
+if out="$(${MS} kb ingest --persona grower plots 2>&1)"; then echo "ingest through a linked vectors.json must fail" >&2; exit 1; fi
+grep -q "vectors.json is a link" <<<"${out}" || { echo "unexpected refusal: ${out}" >&2; exit 1; }
+hits="$(chat_hits "seedling nurturing, linked?")"
+if grep -q 'pkb:grower' <<<"${hits}"; then echo "a private KB with a linked vectors.json was recalled: ${hits}" >&2; exit 1; fi
+
+echo "KB embeddings smoke test passed."

@@ -244,6 +244,10 @@ export type MindStoneKnowledgebasesConfigSection = {
   recall?: {
     /** Include KB source summaries/pointers as Auto Recall documents. Defaults to true when KBs are indexed. */
     enabled?: boolean;
+    /** Slots a turn keeps for KB sources ranked by meaning (#125 §5). 0 to 20; default 3; 0 turns meaning off. */
+    maxResults?: number;
+    /** Least cosine similarity, query to KB entry, for its source to be recalled by meaning. Default 0.5. */
+    minSimilarity?: number;
   };
 };
 

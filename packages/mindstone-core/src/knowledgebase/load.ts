@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { MindStoneConfig } from "../config/types.js";
+import type { MemoryEmbeddingProvider } from "../memory/embedding.js";
 import type { MemoryDocument } from "../memory/types.js";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import type {
@@ -19,6 +20,7 @@ import {
   parseExternalSources,
   type ExternalSourceDocument,
 } from "./sources.js";
+import { KB_VECTORS_FILE, kbVectorsStatus, readKbVectors, writeKbVectors, type KbVectorsWriteResult } from "./vectors.js";
 
 /**
  * Knowledgebase v1 layout (issue #13):
@@ -26,6 +28,7 @@ import {
  *   <kbDir>/<id>/kb.json       — catalog metadata
  *   <kbDir>/<id>/sources/*.md  — source documents (markdown, nested dirs allowed)
  *   <kbDir>/<id>/index.json    — generated index; ingest is deterministic (extractive), never model-driven
+ *   <kbDir>/<id>/vectors.json  — generated: each entry embedded with the install's embedder (#125 §5)
  */
 
 const DEFAULT_SUMMARY_CHARS = 400;
@@ -155,11 +158,11 @@ function sectionSlug(heading: string | undefined, ordinal: number): string {
 
 /**
  * Why a persona's private KB can't be used as its own files (#125): its
- * folder, kb.json or index.json is a link. Undefined when none is. Missing
+ * folder, kb.json, index.json, vectors.json or sources folder is a link. Undefined when none is. Missing
  * files aren't an error here; the loader reports those.
  */
 export function privateKnowledgebaseLinkError(kbDir: string, kbId: string): string | undefined {
-  for (const path of [join(kbDir, kbId), join(kbDir, kbId, "kb.json"), join(kbDir, kbId, "index.json"), join(kbDir, kbId, "sources")]) {
+  for (const path of [join(kbDir, kbId), join(kbDir, kbId, "kb.json"), join(kbDir, kbId, "index.json"), join(kbDir, kbId, KB_VECTORS_FILE), join(kbDir, kbId, "sources")]) {
     try {
       if (lstatSync(path).isSymbolicLink()) return `${relative(kbDir, path)} is a link; a persona's knowledge base must be its own files`;
     } catch {
@@ -180,7 +183,7 @@ export function unknownKnowledgebaseIds(ids: string[] | undefined, kbDirs: Array
 }
 
 export type IngestKnowledgebaseResult =
-  | { ok: true; kbId: string; indexPath: string; entryCount: number; sourceCount: number }
+  | { ok: true; kbId: string; indexPath: string; entryCount: number; sourceCount: number; vectors: KbVectorsWriteResult }
   | { ok: false; kbId: string; error: string };
 
 function entriesFromParsedSource(params: {
@@ -238,6 +241,13 @@ export async function ingestMindStoneKnowledgebase(
      * of `loadUrlSourceDocument`'s `privateKb` (#142 review).
      */
     privateKbUrls?: { refusedHost?: (host: string) => boolean };
+    /**
+     * The install's embedder (#125 §5): each entry is embedded into
+     * vectors.json. Absent or failing, the index is still written and recall
+     * uses word match for this KB.
+     */
+    embedder?: MemoryEmbeddingProvider;
+    embedTimeoutMs?: number;
   } = {},
 ): Promise<IngestKnowledgebaseResult> {
   // A persona's private KB (#125, `noLinks`) is its own files: no links
@@ -320,15 +330,22 @@ export async function ingestMindStoneKnowledgebase(
   } else {
     writeFileSync(kb.indexPath, text);
   }
-  return { ok: true, kbId, indexPath: kb.indexPath, entryCount: entries.length, sourceCount: sourcePaths.length + externalDocuments.length };
+  const vectors = await writeKbVectors({ kbDir: kb.dir, kbId, entries, indexText: text, embedder: options.embedder, now: options.now, timeoutMs: options.embedTimeoutMs });
+  return { ok: true, kbId, indexPath: kb.indexPath, entryCount: entries.length, sourceCount: sourcePaths.length + externalDocuments.length, vectors };
 }
 
 export function readMindStoneKbIndex(kb: MindStoneKnowledgebase): MindStoneKbIndex | undefined {
+  return readKbIndexWithText(kb)?.index;
+}
+
+/** The index and its text as read, which the vectors are checked against (#125 §5). */
+function readKbIndexWithText(kb: MindStoneKnowledgebase): { index: MindStoneKbIndex; text: string } | undefined {
   if (!existsSync(kb.indexPath)) return undefined;
   try {
-    const parsed = JSON.parse(readFileSync(kb.indexPath, "utf-8"));
+    const text = readFileSync(kb.indexPath, "utf-8");
+    const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as MindStoneKbIndex).entries)) return undefined;
-    return parsed as MindStoneKbIndex;
+    return { index: parsed as MindStoneKbIndex, text };
   } catch {
     return undefined;
   }
@@ -340,11 +357,21 @@ export function readMindStoneKbIndex(kb: MindStoneKnowledgebase): MindStoneKbInd
  * their recorded fetchedAt (absent refreshMs = manual refresh, never
  * auto-stale). Re-running `kb ingest` refreshes everything.
  */
-export function mindStoneKbStatus(kbDir: string, kbId: string, options: { now?: number } = {}): MindStoneKbStatus | { kbId: string; error: string } {
+export function mindStoneKbStatus(
+  kbDir: string,
+  kbId: string,
+  options: {
+    now?: number;
+    /** The install's embedder now (provider id and model); absent when none is configured. */
+    embedder?: { id: string; model: string };
+    noLinks?: boolean;
+  } = {},
+): MindStoneKbStatus | { kbId: string; error: string } {
   const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
   if (!loaded.ok) return { kbId, error: loaded.error };
   const kb = loaded.kb;
-  const index = readMindStoneKbIndex(kb);
+  const read = readKbIndexWithText(kb);
+  const index = read?.index;
   const sourcePaths = walkMarkdownFiles(kb.sourcesDir);
   const indexedBySource = new Map<string, MindStoneKbIndexEntry[]>();
   for (const entry of index?.entries ?? []) {
@@ -412,6 +439,9 @@ export function mindStoneKbStatus(kbDir: string, kbId: string, options: { now?: 
     sourceCount: sources.length,
     staleCount: sources.filter((source) => source.state !== "indexed").length,
     sources,
+    vectors: read
+      ? kbVectorsStatus(readKbVectors(kb.dir, read.text, options.embedder, { noLinks: options.noLinks }))
+      : { state: "missing", reason: "not indexed yet" },
   };
 }
 
@@ -500,15 +530,25 @@ export function discoverMindStoneKnowledgebases(kbDir: string): MindStoneKnowled
 }
 
 /**
- * KB participation in Auto Recall: one summary+pointer MemoryDocument per indexed source
- * (kind "kb"). Summaries and citations only — full content stays behind `mindstone kb search`.
- *
- * #125: `only` limits the global collections to the active persona's list
- * (absent: all of them), and `private` adds that persona's own KBs. Their ids
- * are `pkb:<personaId>:<kbId>:<source>`, never `kb:`, so a private KB can't be
- * mistaken for a global one with the same id.
+ * One recall document's entries with their vectors (#125 §5), for ranking the
+ * document by meaning. Kept beside the documents, never in their metadata, so
+ * vectors don't reach recall events or usage logs.
  */
-export function discoverKnowledgebaseRecallDocuments(options: {
+export type KnowledgebaseDocumentVectors = {
+  dimension: number;
+  /** The document's text with its section lines left out, and those lines with each entry's vector. */
+  header: string[];
+  footer: string[];
+  entries: Array<{ line: string; citation: string; vector: Float32Array }>;
+};
+
+export type KnowledgebaseRecall = {
+  documents: MemoryDocument[];
+  /** Recall document id -> its vectors, for KBs whose vectors match the install's embedder. */
+  vectors: Map<string, KnowledgebaseDocumentVectors>;
+};
+
+export type KnowledgebaseRecallOptions = {
   config?: MindStoneConfig;
   paths?: MindStoneRuntimePaths;
   only?: string[];
@@ -519,42 +559,63 @@ export function discoverKnowledgebaseRecallDocuments(options: {
    */
   step?: string[];
   private?: { personaId: string; dir: string };
-} = {}): MemoryDocument[] {
-  if (options.config?.knowledgebases?.recall?.enabled === false) return [];
-  const documents = knowledgebaseRecallDocuments(knowledgebasesDirFromConfig(options.config, options.paths), {
+  /** The install's embedder (provider id and model): vectors made with another are left out. */
+  embedder?: { id: string; model: string };
+};
+
+/**
+ * KB participation in Auto Recall: one summary+pointer MemoryDocument per indexed source
+ * (kind "kb"). Summaries and citations only — full content stays behind `mindstone kb search`.
+ *
+ * #125: `only` limits the global collections to the active persona's list
+ * (absent: all of them), and `private` adds that persona's own KBs. Their ids
+ * are `pkb:<personaId>:<kbId>:<source>`, never `kb:`, so a private KB can't be
+ * mistaken for a global one with the same id.
+ */
+export function discoverKnowledgebaseRecallDocuments(options: KnowledgebaseRecallOptions = {}): MemoryDocument[] {
+  return discoverKnowledgebaseRecall(options).documents;
+}
+
+/** The recall documents, plus each one's entry vectors where the KB has usable ones (#125 §5). */
+export function discoverKnowledgebaseRecall(options: KnowledgebaseRecallOptions = {}): KnowledgebaseRecall {
+  const recall: KnowledgebaseRecall = { documents: [], vectors: new Map() };
+  if (options.config?.knowledgebases?.recall?.enabled === false) return recall;
+  knowledgebaseRecallDocuments(recall, knowledgebasesDirFromConfig(options.config, options.paths), {
     only: options.only,
     step: options.step,
+    embedder: options.embedder,
     idPrefix: "kb:",
     label: "Knowledgebase",
     titleTag: "KB",
     searchCommand: "mindstone kb search",
   });
   if (options.private) {
-    documents.push(...knowledgebaseRecallDocuments(options.private.dir, {
+    knowledgebaseRecallDocuments(recall, options.private.dir, {
       step: options.step,
+      embedder: options.embedder,
       noLinks: true,
       idPrefix: `pkb:${options.private.personaId}:`,
       label: `Persona ${options.private.personaId} private knowledgebase`,
       titleTag: `Persona KB`,
       searchCommand: `mindstone kb search --persona ${options.private.personaId}`,
       personaId: options.private.personaId,
-    }));
+    });
   }
-  return documents;
+  return recall;
 }
 
-function knowledgebaseRecallDocuments(kbDir: string, options: {
+function knowledgebaseRecallDocuments(recall: KnowledgebaseRecall, kbDir: string, options: {
   only?: string[];
   step?: string[];
-  /** Private KBs: a KB whose kb.json or index.json is a link is left out. */
+  embedder?: { id: string; model: string };
+  /** Private KBs: a KB whose kb.json, index.json or vectors.json is a link is left out. */
   noLinks?: boolean;
   idPrefix: string;
   label: string;
   titleTag: string;
   searchCommand: string;
   personaId?: string;
-}): MemoryDocument[] {
-  const documents: MemoryDocument[] = [];
+}): void {
   const summaries = discoverMindStoneKnowledgebases(kbDir);
   let only = options.only ? new Set(options.only) : undefined;
   const named = (options.step ?? []).filter((id) => summaries.some((summary) => summary.id === id));
@@ -565,8 +626,11 @@ function knowledgebaseRecallDocuments(kbDir: string, options: {
     if (options.noLinks && privateKnowledgebaseLinkError(kbDir, summary.id)) continue;
     const loaded = loadMindStoneKnowledgebase(kbDir, summary.id);
     if (!loaded.ok) continue;
-    const index = readMindStoneKbIndex(loaded.kb);
-    if (!index) continue;
+    const read = readKbIndexWithText(loaded.kb);
+    if (!read) continue;
+    const index = read.index;
+    const kbVectors = options.embedder ? readKbVectors(loaded.kb.dir, read.text, options.embedder, { noLinks: options.noLinks }) : undefined;
+    const loadedVectors = kbVectors?.state === "ready" ? kbVectors.loaded : undefined;
     const bySource = new Map<string, MindStoneKbIndexEntry[]>();
     for (const entry of index.entries) {
       const list = bySource.get(entry.sourcePath) ?? [];
@@ -575,26 +639,25 @@ function knowledgebaseRecallDocuments(kbDir: string, options: {
     }
     for (const [sourcePath, entries] of bySource) {
       const title = entries[0].sourceTitle ?? sourcePath;
-      const sections = entries
-        .map((entry) => `- ${entry.citation}: ${entry.summary}`)
-        .join("\n");
+      const lines = entries.map((entry) => `- ${entry.citation}: ${entry.summary}`);
       const origin = entries[0].origin;
       const sensitivity = entries[0].sensitivity;
-      documents.push({
-        id: `${options.idPrefix}${summary.id}:${sourcePath}`,
+      const header = [
+        `${options.label} "${summary.name}" (${summary.id}) — source: ${sourcePath}`,
+        // AC3 (#23): KB hits are REFERENCE MATERIAL, not memory — stated in
+        // the injected text itself so the model treats it accordingly.
+        `Reference material (not memory): cite sources when used.${sensitivity ? ` Sensitivity: ${sensitivity}.` : ""}`,
+      ];
+      const footer = [`Full content: ${options.searchCommand} ${summary.id} "<query>"`];
+      const id = `${options.idPrefix}${summary.id}:${sourcePath}`;
+      recall.documents.push({
+        id,
         kind: "kb",
         title: `[${options.titleTag} ${summary.name}] ${title}`,
         // External sources live at their origin (real folder path / URL);
         // KB-local sources under sources/.
         path: origin ?? join(loaded.kb.sourcesDir, sourcePath),
-        text: [
-          `${options.label} "${summary.name}" (${summary.id}) — source: ${sourcePath}`,
-          // AC3 (#23): KB hits are REFERENCE MATERIAL, not memory — stated in
-          // the injected text itself so the model treats it accordingly.
-          `Reference material (not memory): cite sources when used.${sensitivity ? ` Sensitivity: ${sensitivity}.` : ""}`,
-          sections,
-          `Full content: ${options.searchCommand} ${summary.id} "<query>"`,
-        ].join("\n"),
+        text: [...header, lines.join("\n"), ...footer].join("\n"),
         metadata: {
           kbId: summary.id,
           ...(options.personaId ? { personaId: options.personaId, privateKnowledgebase: true } : {}),
@@ -604,7 +667,17 @@ function knowledgebaseRecallDocuments(kbDir: string, options: {
           ...(sensitivity ? { sensitivity } : {}),
         },
       });
+      if (loadedVectors) {
+        const withVectors = entries.flatMap((entry, ordinal) => {
+          const vector = loadedVectors.vectors.get(entry.entryId);
+          return vector ? [{ line: lines[ordinal], citation: entry.citation, vector }] : [];
+        });
+        // Every entry embedded, or the document stays on word match: a
+        // partly embedded source would be ranked on some of its sections only.
+        if (withVectors.length === entries.length) {
+          recall.vectors.set(id, { dimension: loadedVectors.dimension, header, footer, entries: withVectors });
+        }
+      }
     }
   }
-  return documents;
 }

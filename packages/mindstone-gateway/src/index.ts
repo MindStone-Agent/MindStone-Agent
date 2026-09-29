@@ -134,12 +134,14 @@ import {
   buildPromptWindow,
   createSqliteMemoryRecallProvider,
   selectMemoryRecallProvider,
+  sharedQueryEmbedder,
+  createMemoryEmbeddingProvider,
   indexSqliteMemoryTurn,
   isAutoRecallEnabled,
   transcriptPathForSession,
   decideGatewayAuth,
   discoverFileMemoryDocuments,
-  discoverKnowledgebaseRecallDocuments,
+  createKnowledgebaseRecallProvider,
   recallScopeForMemoryScope,
   scopeFromRequest,
   scopedSessionKey,
@@ -1272,17 +1274,19 @@ async function runConfiguredRoute(input: {
         ownerInstructions: input.audience === "owner" && !input.scope ? PERSONA_PROPOSAL_INSTRUCTIONS : undefined,
         memoryRecall: {
           enabled: (input.audience === "owner" || input.audience === "tenant") && isAutoRecallEnabled(input.config),
-          provider: selectMemoryRecallProvider({
-            sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config }) : undefined,
+          // One query embedding for memory and KB recall (#125 §5).
+          provider: ((embedder) => selectMemoryRecallProvider({
+            sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config, embeddingProvider: embedder }) : undefined,
             localDocuments: input.config?.memory?.localDocuments,
             fileMemory: fileMemoryDocuments,
-            knowledgebases: discoverKnowledgebaseRecallDocuments({
+            knowledgebases: createKnowledgebaseRecallProvider({
               config: input.config,
               only: turnComponents.globalKnowledgebases,
               step: turnComponents.stepKnowledgebases,
               private: turnComponents.privateKnowledgebases,
+              embedder,
             }),
-          }),
+          }))(sharedQueryEmbedder(createMemoryEmbeddingProvider(input.config))),
           config: input.config?.memory?.recall,
           scope: input.recallScope ?? input.scope,
           // A tenant run never gets the owner's chats, whatever its scope holds (#106 review).
@@ -2658,10 +2662,22 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         maxFetchBytes: KB_URL_FETCH_LIMITS.maxBytes,
         // Public hosts only, each redirect checked, as this host's environment allows (#142 review).
         privateKbUrls: {},
+        // Each entry embedded with the install's embedder (#125 §5); its reasons are fixed text.
+        embedder: createMemoryEmbeddingProvider(gateConfig.config),
       });
       if (!result.ok) throw new PersonaComposeError(publicKbText(result.error, root), "ingest_failed", 422);
-      appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_ingested", persona: id, knowledgebase: kbId, entries: result.entryCount });
-      sendJson(res, 200, { ok: true, knowledgebase: { id: kbId, entryCount: result.entryCount, sourceCount: result.sourceCount } });
+      appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_ingested", persona: id, knowledgebase: kbId, entries: result.entryCount, vectors: result.vectors.state });
+      sendJson(res, 200, {
+        ok: true,
+        knowledgebase: {
+          id: kbId,
+          entryCount: result.entryCount,
+          sourceCount: result.sourceCount,
+          vectors: result.vectors.state === "ready"
+            ? { state: "ready", dimension: result.vectors.dimension, count: result.vectors.count }
+            : { state: result.vectors.state, reason: result.vectors.reason },
+        },
+      });
     } catch (error) {
       if (!composeRefusal(error, { persona: id, knowledgebase: kbId })) throw error;
     } finally {

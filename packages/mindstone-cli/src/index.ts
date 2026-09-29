@@ -53,6 +53,8 @@ import {
   skillsDirFromConfig,
   writeMindStoneConfig,
   probeMemoryEmbeddingProvider,
+  createMemoryEmbeddingProvider,
+  resolveMemoryEmbeddingProviderConfig,
   resolveConfigPath,
   resolveConfiguredSessionKey,
   resolveDefaultSessionKey,
@@ -1332,6 +1334,13 @@ function personaKbDir(argv: string[], config: MindStoneConfig, paths: MindStoneR
   return { argv: rest, kbDir, personaId };
 }
 
+/** A KB's vectors in one line (#125 §5): used for recall by meaning, or why not. */
+function kbVectorsLine(vectors: { state: string; reason?: string; provider?: string; model?: string; dimension?: number; count?: number }): string {
+  const made = vectors.provider ? ` (${vectors.provider}:${vectors.model}, ${vectors.dimension} dimensions${vectors.count !== undefined ? `, ${vectors.count} entries` : ""})` : "";
+  if (vectors.state === "ready") return `vectors: ready${made}; recall ranks this KB by meaning`;
+  return `vectors: ${vectors.state}${made}: ${vectors.reason ?? "unknown"}; recall uses word match`;
+}
+
 async function runKbCommand(rawArgv: string[]): Promise<void> {
   const paths = runtimePathsFromEnv();
   const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
@@ -1379,6 +1388,8 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
       now: new Date().toISOString(),
       noLinks: Boolean(scoped.personaId),
       ...(scoped.personaId ? { privateKbUrls: {} } : {}),
+      // Each entry embedded with the install's embedder (#125 §5).
+      embedder: createMemoryEmbeddingProvider(config),
     });
     if (!result.ok) throw new Error(result.error);
     if (json) {
@@ -1386,6 +1397,7 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
       return;
     }
     output.write(`${gold("🔶")} Ingested ${bold(kbId)}: ${result.entryCount} entries from ${result.sourceCount} source(s) → ${result.indexPath}\n`);
+    output.write(`${dim(`  ${kbVectorsLine(result.vectors)}`)}\n`);
     return;
   }
 
@@ -1411,7 +1423,10 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
   if (sub === "status") {
     const kbId = argv[4] && !argv[4].startsWith("--") ? argv[4] : undefined;
     if (kbId) {
-      const status = mindStoneKbStatus(kbDir, kbId);
+      // Only which embedder: its address and key stay out of the status.
+      const resolved = resolveMemoryEmbeddingProviderConfig(config);
+      const embedder = resolved ? { id: resolved.id, model: resolved.model } : undefined;
+      const status = mindStoneKbStatus(kbDir, kbId, { embedder, noLinks: Boolean(scoped.personaId) });
       if ("error" in status) throw new Error(status.error);
       if (json) {
         output.write(`${JSON.stringify(status, null, 2)}\n`);
@@ -1423,6 +1438,7 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
           `  dir: ${status.dir}`,
           `  indexed: ${status.indexed}${status.ingestedAt ? ` (ingested ${status.ingestedAt})` : ""}`,
           `  entries: ${status.entryCount} · sources: ${status.sourceCount} · needing attention: ${status.staleCount}`,
+          `  ${kbVectorsLine(status.vectors)}`,
           ...status.sources.map((source) => `    ${source.sourcePath}: ${source.state} (${source.entryCount} entries)`),
         ].join("\n"),
       );
