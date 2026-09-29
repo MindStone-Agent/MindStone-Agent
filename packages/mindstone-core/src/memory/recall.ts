@@ -113,7 +113,12 @@ export function isQuotaHit(hit: MemoryHit): boolean {
  * again by its other copy. Order is kept.
  */
 export function selectRecallHits(hits: MemoryHit[], limit: number): MemoryHit[] {
-  const quota = hits.filter(isQuotaHit).slice(0, limit);
+  const allQuota = hits.filter(isQuotaHit);
+  // KB slots come out of the same limit: when memory has a hit of its own
+  // (not a KB source's word copy), it keeps at least one slot (#151).
+  const quotaIds = new Set(allQuota.map((hit) => hit.id));
+  const memoryWaiting = hits.some((hit) => !isQuotaHit(hit) && !quotaIds.has(hit.id));
+  const quota = allQuota.slice(0, Math.max(0, memoryWaiting ? limit - 1 : limit));
   const inByQuota = new Set(quota.map((hit) => hit.id));
   const others = hits.filter((hit) => !isQuotaHit(hit) && !inByQuota.has(hit.id)).slice(0, Math.max(0, limit - quota.length));
   const kept = new Set([...quota, ...others]);

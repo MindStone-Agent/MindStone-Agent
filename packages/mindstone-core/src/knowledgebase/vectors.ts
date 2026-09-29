@@ -138,6 +138,8 @@ export async function writeKbVectors(params: {
       if (vector.length !== dimension || dimension === 0) throw new Error("dimension");
       // Stored as float32: a value past its range would read back as infinity.
       if (vector.some((value) => !Number.isFinite(Math.fround(value)))) throw new Error("range");
+      // An all-zero vector matches nothing; an embedder that returns one isn't working (#151).
+      if (vector.every((value) => value === 0)) throw new Error("zero");
       encoded[entry.entryId] = encodeVector(vector);
     });
   };

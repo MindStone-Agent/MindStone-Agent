@@ -56,6 +56,7 @@
     "smoke:skill": "./scripts/smoke-skill.sh",
     "smoke:kb": "./scripts/smoke-kb.sh",
     "smoke:packs": "./scripts/smoke-packs.sh",
+    "smoke:kb-embeddings": "./scripts/smoke-kb-embeddings.sh",
     "smoke:kb-sources": "./scripts/smoke-kb-sources.sh",
     "smoke:kb-url-guard": "./scripts/smoke-kb-url-guard.sh",
     "smoke:persona-components": "./scripts/smoke-persona-components.sh",

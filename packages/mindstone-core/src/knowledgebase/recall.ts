@@ -1,3 +1,4 @@
+import type { MindStoneConfig } from "../config/types.js";
 import type { MemoryEmbeddingProvider } from "../memory/embedding.js";
 import { KB_RECALL_QUOTA, LocalMemoryRecallProvider } from "../memory/recall.js";
 import type { MemoryHit, MemoryQuery, MemoryRecallProvider } from "../memory/types.js";
@@ -24,14 +25,18 @@ export function createKnowledgebaseRecallProvider(
 ): MemoryRecallProvider | undefined {
   const recall = discoverKnowledgebaseRecall(options);
   if (recall.documents.length === 0) return undefined;
-  const settings = options.config?.knowledgebases?.recall;
+  return new KnowledgebaseRecallProvider(recall, { embedder: options.embedder, ...knowledgebaseRecallSettings(options.config) });
+}
+
+/** `knowledgebases.recall` from the config; a value out of range is left to the default. */
+export function knowledgebaseRecallSettings(config: MindStoneConfig | undefined): { maxResults?: number; minSimilarity?: number } {
+  const settings = config?.knowledgebases?.recall;
   const maxResults = settings?.maxResults;
   const minSimilarity = settings?.minSimilarity;
-  return new KnowledgebaseRecallProvider(recall, {
-    embedder: options.embedder,
+  return {
     maxResults: typeof maxResults === "number" && Number.isInteger(maxResults) && maxResults >= 0 && maxResults <= 20 ? maxResults : undefined,
     minSimilarity: typeof minSimilarity === "number" && Number.isFinite(minSimilarity) && minSimilarity >= -1 && minSimilarity <= 1 ? minSimilarity : undefined,
-  });
+  };
 }
 
 /**
