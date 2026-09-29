@@ -130,7 +130,13 @@ The installer asks for the Console admin's email, name and password (the passwor
 
 Don't run it with `sudo`: on Linux, add your user to the `docker` group instead.
 
-On Windows, run the same command in a WSL 2 terminal (Ubuntu, for example) with Docker Desktop's WSL integration turned on for that distribution. Ollama for Windows is reached the same way as on macOS. This path hasn't been tested yet.
+On Windows, run this in PowerShell (Windows PowerShell 5.1 or PowerShell 7), with [Docker Desktop](https://docs.docker.com/desktop/) running and, for local models, [Ollama for Windows](https://ollama.com):
+
+```powershell
+irm https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.ps1 | iex
+```
+
+It does what the bash installer does, into `%USERPROFILE%\.mindstone-stack`, with the Console's database in a Docker volume; it needs no WSL shell. For its options and checks, see [path A6](#a6-windows-powershell). Alternatively, run the bash command above in a WSL 2 terminal (Ubuntu, for example) with Docker Desktop's WSL integration turned on for that distribution; Ollama for Windows is reached the same way as on macOS. Neither Windows path has been tested on Windows yet.
 
 Everything lives in `~/.mindstone-stack`. Running the same command again updates the stack and keeps your secrets and data. For the options, and a step-by-step with a check after each step, see [Install guide for AI agents](#install-guide-for-ai-agents), path A; for what runs where, see [Docker](#docker).
 
@@ -183,7 +189,7 @@ The commands below assume the default install folder `~/.mindstone-stack` and th
 
 #### A0. Requirements
 
-- macOS or Linux (arm64 or x86_64), with `curl`.
+- macOS or Linux (arm64 or x86_64), with `curl`. For Windows, see [A6](#a6-windows-powershell).
 - Docker with Compose v2 or newer: Docker Desktop on macOS, or Docker Engine with the Compose plugin on Linux. Docker must be running.
 - About 10 GB of free disk space for the images. The first build takes 10 to 20 minutes.
 - Your user can run Docker. On Linux, that means being in the `docker` group (`sudo usermod -aG docker $USER`, then log in again). Don't run the installer with `sudo`: it would install into root's home, with root's ids.
@@ -323,6 +329,70 @@ It prints `unchanged`, and `gateway` shows `(healthy)`.
 - print or paste the contents of `gateway.env`, `console.env` or `admin-password`;
 - publish the ports on `0.0.0.0`. For another machine, put the Console behind a reverse proxy with HTTPS (see the Console README);
 - run the native gateway (path B) on the same port as the stack's gateway.
+
+#### A6. Windows (PowerShell)
+
+`install-stack.ps1` is the same installer for Windows, in PowerShell, with no WSL shell. **It is not yet tested on Windows**: it has been checked with PowerShell's own analyzer for Windows PowerShell 5.1 and PowerShell 7, and run end to end with PowerShell 7 on macOS. Steps A2 to A5 apply, with the PowerShell commands below.
+
+Requirements:
+- Windows 10 or 11 (x64 or arm64), with Windows PowerShell 5.1 (built in) or PowerShell 7, in FullLanguage mode (an AppLocker or WDAC policy that constrains PowerShell stops the installer, and it says so).
+- [Docker Desktop](https://docs.docker.com/desktop/) with Compose v2 or newer, running, and set to Linux containers (the default). Your account must be able to use it (the `docker-users` group).
+- About 10 GB of free disk space. The first build takes 10 to 20 minutes.
+- Optional: [Ollama for Windows](https://ollama.com) on this machine. As on macOS, the gateway container reaches it at `http://host.docker.internal:11434/v1`, and nothing needs changing. Or use `-WithOllama` to run Ollama in the stack.
+- With Docker Desktop's Hyper-V backend (not WSL 2), the drive holding the install folder must be shared with Docker (Settings, Resources, File sharing).
+- A normal PowerShell window is enough; don't run it as Administrator.
+- On an older Windows 10 where `irm` fails with a TLS or "could not create SSL/TLS secure channel" error, run `[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 'Tls12'` first, in the same window.
+
+**Install.** `irm | iex` takes no parameters, so set the options as environment variables first, or run the script as a script block, which takes them:
+
+```powershell
+$env:MINDSTONE_ADMIN_EMAIL = '<the person''s email>'
+irm https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.ps1 | iex
+
+# or, the same with parameters:
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.ps1))) -AdminEmail <the person's email>
+```
+
+The parameters match the bash options: `-Dir`, `-Ref`, `-ConsoleRef`, `-AdminEmail`, `-AdminName`, `-WithOllama`, `-WithoutOllama`, `-OllamaUrl`, `-Uninstall` and `-Help`. Their environment variables are `MINDSTONE_DIR`, `MINDSTONE_REF`, `CONSOLE_REF`, `MINDSTONE_ADMIN_EMAIL`, `MINDSTONE_ADMIN_NAME`, `MINDSTONE_WITH_OLLAMA=1`, `MINDSTONE_WITHOUT_OLLAMA=1`, `MINDSTONE_OLLAMA_BASE_URL` and `MINDSTONE_UNINSTALL=1`; ports and the project name are `CONSOLE_PORT`, `MINDSTONE_GATEWAY_PORT` and `MINDSTONE_PROJECT`, as in A1. A `$env:` variable lasts until the PowerShell window closes and applies to every run in it, so remove one you no longer want (`Remove-Item Env:\MINDSTONE_UNINSTALL`). A person at the console can leave out the email and answer the prompts; the password isn't shown.
+
+What differs from the bash installer:
+- The install folder is `%USERPROFILE%\.mindstone-stack` (`$HOME\.mindstone-stack`). The folder, the secrets files and `admin-password` can be read only by you (and SYSTEM): the Windows equivalent of modes 700 and 600, set with `icacls` and checked. The installer refuses a symbolic link or junction as the folder, your home folder, a drive's root, a folder that contains your home folder, and a network folder.
+- The Console's database is in the Docker volume `mindstone-stack_mongo-data`, not in `data\mongo`: MongoDB on a Windows folder shared into Docker is unreliable. `data` holds the Console's uploads and logs.
+- The commands it prints are PowerShell commands.
+- Options are PowerShell parameters (`-WithOllama`, not `--with-ollama`). A bash-style `--option`, or any unnamed argument, stops the installer with the PowerShell spelling; some other misspellings get PowerShell's own "parameter cannot be found" error instead.
+- After creating the admin, it signs in to the Console once with the new password (never shown). If the Console refuses the password, it stops with the reset command; if sign-in can't be checked (no answer, or another error), it warns and finishes the install.
+- Don't run `install-stack.sh --ref <a ref from before #180>` on a folder `install-stack.ps1` made: that older `compose.yml` doesn't know the volume and would start MongoDB on an empty `data/mongo`.
+- Before starting, it also checks that Docker Desktop runs Linux containers and that Windows hasn't reserved either port (`netsh interface ipv4 show excludedportrange protocol=tcp`).
+
+**Check** (in PowerShell; they count and compare, and never show a value):
+
+```powershell
+Set-Location "$HOME\.mindstone-stack"
+docker compose ps --format '{{.Service}} {{.Status}}'
+@(Select-String -CaseSensitive -Path console.env -Pattern '^(CREDS_KEY|CREDS_IV|JWT_SECRET|JWT_REFRESH_SECRET|MINDSTONE_GATEWAY_TOKEN|MINDSTONE_ADMIN_TOKEN)=.+').Count
+icacls gateway.env console.env admin-password
+(Invoke-WebRequest -UseBasicParsing http://127.0.0.1:19789/health).Content
+$login = @{ email = '<the admin''s email>'; password = (Get-Content -TotalCount 1 admin-password) } | ConvertTo-Json
+(Invoke-WebRequest -UseBasicParsing -Method Post -ContentType 'application/json' -Body $login http://127.0.0.1:3080/api/auth/login).StatusCode
+Remove-Variable login
+```
+
+- `gateway` is `Up … (healthy)`, and `console` and `mongodb` are `Up`;
+- the count is `6`, and `icacls` lists only you and `NT AUTHORITY\SYSTEM` for each file;
+- `/health` prints JSON with `"ok":true`, and the sign-in prints `200`.
+
+**Update, check and uninstall:**
+
+```powershell
+Set-Location "$HOME\.mindstone-stack"
+$before = (Get-FileHash gateway.env, console.env).Hash -join ','
+irm https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.ps1 | iex
+if (((Get-FileHash gateway.env, console.env).Hash -join ',') -eq $before) { 'unchanged' }
+
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.ps1))) -Uninstall
+```
+
+The update prints `unchanged` for the secrets. The uninstall stops and removes the containers, keeps the volumes, `data` and the secrets, and prints the PowerShell commands that delete them (this project's volumes by name, and only the files the installer made).
 
 ### B. Native install
 
@@ -949,7 +1019,7 @@ See `docs/operations/CONNECTORS.md`, `EMAIL_CONNECTOR.md`, and
 
 ### The whole stack
 
-`deploy/docker/compose.yml` runs MindStone in Docker: the gateway, the MindStone Console and MongoDB. `install-stack.sh` downloads it, generates the secrets and starts it ([Install everything (Docker)](#install-everything-docker); the steps with checks are path A of the [install guide](#install-guide-for-ai-agents)).
+`deploy/docker/compose.yml` runs MindStone in Docker: the gateway, the MindStone Console and MongoDB. `install-stack.sh` (or `install-stack.ps1` on Windows) downloads it, generates the secrets and starts it ([Install everything (Docker)](#install-everything-docker); the steps with checks are path A of the [install guide](#install-guide-for-ai-agents)).
 
 | Service | What it is | Reached at |
 |---|---|---|
@@ -961,7 +1031,7 @@ See `docs/operations/CONNECTORS.md`, `EMAIL_CONNECTOR.md`, and
 What it keeps, and where (in the install folder, `~/.mindstone-stack` by default):
 - **Secrets:** `gateway.env` (the gateway token and the admin credential's sha256) and `console.env` (the Console's secrets, the gateway token and the admin credential), both mode 600. The gateway's entrypoint writes the token to `secrets/gateway-token` (600) in its runtime and doesn't pass the variable on to the agent's processes.
 - **Settings:** `.env` holds the refs, ports, project name and UID/GID, and no secrets. Compose reads it, so plain `docker compose` commands in the folder use the same settings, unless your shell exports `COMPOSE_*`, `OLLAMA_BASE_URL` or a port variable: an exported variable overrides `.env`, so unset it first.
-- **Data:** the Docker volumes (the project is `mindstone-stack` unless `MINDSTONE_PROJECT` says otherwise) `<project>_gateway-runtime` (config, memory, transcripts), `<project>_pi-agent` and `<project>_pi-sessions` (Pi's isolated state), and `<project>_console-data`; the Console's database, uploads and logs are in `data/`.
+- **Data:** the Docker volumes (the project is `mindstone-stack` unless `MINDSTONE_PROJECT` says otherwise) `<project>_gateway-runtime` (config, memory, transcripts), `<project>_pi-agent` and `<project>_pi-sessions` (Pi's isolated state), and `<project>_console-data`; the Console's database, uploads and logs are in `data/`. With `install-stack.ps1` the database is in the volume `<project>_mongo-data` instead (`MINDSTONE_MONGO_DATA` and `MINDSTONE_MONGO_USER` in `.env`), and `data/` holds the uploads and logs.
 
 Networks: the gateway, the Console and the optional Ollama share the `app` network; MongoDB is on an internal `db` network with the Console only, so the gateway and Ollama can't reach it.
 

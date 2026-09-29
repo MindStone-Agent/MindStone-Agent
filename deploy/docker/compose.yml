@@ -1,9 +1,11 @@
 # MindStone, the whole stack in Docker (#171): the MindStone-Agent gateway, the
-# MindStone Console and MongoDB. install-stack.sh at the repo root downloads this
-# file, generates the secrets and runs it; see README.md, "Install everything (Docker)".
+# MindStone Console and MongoDB. install-stack.sh at the repo root (install-stack.ps1
+# on Windows) downloads this file, generates the secrets and runs it; see README.md,
+# "Install everything (Docker)".
 #
-# Files beside this one (install-stack.sh creates them):
+# Files beside this one (the installer creates them):
 #   .env            compose settings: refs, ports, UID/GID, project name. No secrets.
+#                   From install-stack.ps1 also MINDSTONE_MONGO_DATA and MINDSTONE_MONGO_USER.
 #   gateway.env     600: MINDSTONE_AGENT_GATEWAY_TOKEN and MINDSTONE_ADMIN_TOKEN_SHA256.
 #   console.env     600: the Console's secrets, the gateway token and the admin credential.
 #   librechat.yaml  the Console's config (from mindstone-console/mindstone/).
@@ -13,7 +15,7 @@
 # and CONSOLE_BUILD_CONTEXT to their paths.
 #
 # Don't edit this file: an update replaces it. Put your own changes in
-# compose.override.yml beside it; install-stack.sh uses it and never overwrites it.
+# compose.override.yml beside it; the installers use it and never overwrite it.
 #
 # Networks: `app` joins the gateway, the Console and the optional Ollama; `db`
 # joins only the Console and MongoDB, so nothing else can reach the database.
@@ -94,10 +96,14 @@ services:
   mongodb:
     image: mongo:8.0.20
     restart: unless-stopped
-    user: "${UID:-1000}:${GID:-1000}"
+    # The database is the host folder data/mongo, written as the installing user.
+    # install-stack.ps1 (Windows) sets MINDSTONE_MONGO_DATA=mongo-data in .env
+    # instead: MongoDB on a Windows host folder is unreliable, so it uses the
+    # named volume below, written as the image's own mongodb user (999), who owns it.
+    user: "${MINDSTONE_MONGO_USER:-${UID:-1000}:${GID:-1000}}"
     networks: [db]
     volumes:
-      - ./data/mongo:/data/db
+      - ${MINDSTONE_MONGO_DATA:-./data/mongo}:/data/db
     command: mongod --noauth
 
   # Optional: Ollama in a container, for Linux hosts or a machine without Ollama.
@@ -131,3 +137,5 @@ volumes:
   pi-sessions:
   console-data:
   ollama-models:
+  # Only with MINDSTONE_MONGO_DATA=mongo-data (install-stack.ps1); unused, and not created, otherwise.
+  mongo-data:
