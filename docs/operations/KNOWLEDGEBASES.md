@@ -109,17 +109,32 @@ alike.
   entries needs `kb ingest`; so does one whose index changed after its
   vectors while the model stayed the same. A private KB being ingested at
   that moment waits for the next chat. The re-embed sends one entry a request
-  and starts none while a chat turn is running, so a turn's own question waits
-  behind one entry at most, even with an embedder that answers one request at
-  a time. On a gateway that is always answering, the re-embed waits for a gap;
-  `kb ingest` works meanwhile. A failed attempt keeps the old vectors (word match meanwhile) and is
-  tried again after 30 minutes, then 60, 120 and 240; after the fifth failure
-  that KB isn't tried again for that model until the gateway restarts (use
-  `kb ingest`). An ingest that finishes while a re-embed runs keeps its own
-  vectors, and that doesn't count as a failure. Each attempt is recorded in the
-  admin audit log as `kb_reembedded` (with `reason` when it failed,
-  `gaveUp: true` on the fifth failure, and `superseded: true` when an ingest
-  rewrote the index meanwhile) and in the gateway log. Once nothing is left
+  and starts none while a chat turn is running (a turn running more than 10
+  minutes, which may never end, stops holding it), so a turn's own question
+  waits behind one entry at most, even with an embedder that answers one
+  request at a time. On a gateway that is always answering, the re-embed waits
+  for a gap; `kb ingest` works meanwhile. A failed attempt keeps the old
+  vectors (word match meanwhile) and is tried again later (#158):
+  - A failure that cost something counts: the embedder refused the text (a
+    400, a zero or wrong-size vector), or it stopped after embedding some of
+    it. The wait after each is 30 minutes, then 60, 120 and 240; after the
+    fifth, that KB isn't tried again for that model (use `kb ingest`).
+  - An embedder that can't be reached, is down (a 5xx), has no key or model
+    (401, 403, 404), times out before embedding anything, or limits requests
+    (a 429) costs nothing: the KB is tried again after 30 minutes, however
+    often, and it never counts toward giving up.
+  - The state is kept in the KB's `reembed.json`, so a restart doesn't give it
+    more tries. A state for another model doesn't apply (a switch back to a
+    model starts afresh), and embedding the KB, by the gateway or `kb ingest`,
+    removes it. `kb status` (and the admin API's KB status) shows it as
+    `vectors.reembed` (`failures`, and `nextAttemptAt` or `gaveUp`, and the
+    last `reason`), and a KB given up on says so in its reason.
+  An ingest that finishes while a re-embed runs keeps its own vectors, and
+  that doesn't count as a failure. Each attempt is recorded in the admin audit
+  log as `kb_reembedded` (with `reason` and `cause`, `unavailable`,
+  `rate-limited` or `rejected`, when it failed, `gaveUp: true` on the fifth
+  counted failure, and `superseded: true` when an ingest rewrote the index
+  meanwhile) and in the gateway log. Once nothing is left
   to embed again for the model, the gateway looks again only after 30 minutes
   or when the model changes, so a KB made stale later (for example by a CLI
   `kb ingest` whose environment names another embedder) is picked up within

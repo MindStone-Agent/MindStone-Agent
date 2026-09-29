@@ -78,6 +78,7 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
   - Pi 0.87 ships the Azure OpenAI (Responses), Amazon Bedrock and Google Vertex providers that #126 builds on.
 
 ### Fixed
+- **A KB re-embed no longer gives up because of a cheap outage, and its state survives a restart** (#158). Only a failure that cost something counts toward giving up (the embedder refused the text, or stopped after embedding some of it); an embedder that can't be reached, is down, has no key or model, or answers 429 only waits 30 minutes, however often. The state (failures, next attempt or given up, last reason) is kept in the KB's `reembed.json`, so a restart doesn't grant more tries; a state for another model doesn't apply, and embedding the KB removes it. `kb status` and the admin API show it as `vectors.reembed`, and a given-up KB says so. The audit entry carries `cause`. A turn running more than 10 minutes no longer holds the re-embed back. The embedding provider's errors now carry the HTTP `status`.
 - **Hidden CLI prompts: escape sequences, pasted text and Ctrl-D** (#133).
   - Escape sequences such as arrow keys are skipped whole, even when they arrive split across input chunks, so no `[A` ends up in a key.
   - A bracketed paste keeps its text, with line breaks removed.
