@@ -354,7 +354,9 @@ export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undef
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
   const id = typeof record.id === "string" && SKILL_PROPOSAL_ID.test(record.id) && record.id !== "drafts" ? record.id : undefined;
-  const label = boundedText(record.label, SKILL_PROPOSAL_LIMITS.text);
+  // One line: the label goes into the card's summary, which list views print
+  // as it is, so a line break could draw rows of its own (#125 review).
+  const label = typeof record.label === "string" && /[\u0000-\u001f\u007f\u2028\u2029]/.test(record.label) ? undefined : boundedText(record.label, SKILL_PROPOSAL_LIMITS.text);
   const description = boundedText(record.description, SKILL_PROPOSAL_LIMITS.text);
   const goal = record.goal === undefined ? undefined : boundedText(record.goal, SKILL_PROPOSAL_LIMITS.text);
   const whenToUse = boundedList(record.whenToUse);
@@ -574,6 +576,8 @@ export type ExtractedActionProposals = {
   persona?: PersonaProposalPayload;
   /** Its components (#125); a proposal whose components don't hold up is dropped whole. */
   personaComponents?: ParsedPersonaComponents;
+  /** Persona blocks dropped although another was used: only one per reply is (#125 review). */
+  personaBlocksDropped?: number;
   /** Why a persona proposal was dropped (#125 review), so the reply can say so. */
   personaProposalError?: string;
   /** At most one proposed skill per reply (#104). */
@@ -586,6 +590,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
   let persona: PersonaProposalPayload | undefined;
   let personaComponents: ParsedPersonaComponents | undefined;
   let personaProposalError: string | undefined;
+  let personaBlocks = 0;
   let skill: SkillInstallPayload | undefined;
   const split = splitProposalBlocks(replyText);
   for (const { kind: fenceKind, body } of split.blocks) {
@@ -596,13 +601,13 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
         const content = typeof parsed?.content === "string" ? parsed.content : "";
         if (path && content && !memory) memory = { path, content };
       } else if (fenceKind === "persona") {
+        personaBlocks += 1;
         if (!persona) {
           const base = parsePersonaProposal(parsed);
           const components = base ? checkPersonaComponentsProposal((parsed as Record<string, unknown>).components) : undefined;
           if (base && components?.ok) {
             persona = base;
             personaComponents = components.components;
-            personaProposalError = undefined;
           } else if (components && !components.ok) {
             personaProposalError ??= components.error;
           } else {
@@ -622,10 +627,21 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
     } catch {
       // malformed proposal blocks are dropped from the reply, never applied;
       // a persona's is said in the reply (#125 review)
-      if (fenceKind === "persona" && !persona) personaProposalError ??= "its block isn't valid JSON, or couldn't be read";
+      if (fenceKind === "persona") {
+        personaBlocks += 1;
+        if (!persona) personaProposalError ??= "its block isn't valid JSON, or couldn't be read";
+      }
     }
   }
-  return { text: split.text.trim(), memory, mutations, persona, personaComponents, ...(persona ? {} : { personaProposalError }), skill };
+  return {
+    text: split.text.trim(),
+    memory,
+    mutations,
+    persona,
+    personaComponents,
+    ...(persona ? { personaBlocksDropped: personaBlocks - 1 } : { personaProposalError }),
+    skill,
+  };
 }
 
 /** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
@@ -726,14 +742,22 @@ export function applyActionProposalDiscipline(params: {
     || overCap(components?.knowledgebases.length ?? 0, "persona_kb_create")
   );
   const persona = params.allowPersona && !capped ? extracted.persona : undefined;
-  const skill = params.allowSkill ? extracted.skill : undefined;
+  // A separate skill proposal with the id of a skill the persona brings is
+  // dropped: approving one would replace what was reviewed on the other (#125 review).
+  const skillClash = Boolean(persona && extracted.skill && components?.skills.some((item) => item.id === extracted.skill!.id));
+  const skill = params.allowSkill && !skillClash ? extracted.skill : undefined;
   // A dropped proposal is said, not swallowed: the owner reads why in the reply.
   const refused = params.allowPersona ? extracted.personaProposalError : undefined;
-  const cappedNote = capped
-    ? `\n\n(The persona proposal wasn't saved: too many persona proposals, or proposed skills, workflows or knowledge bases, are already waiting on the Approvals page. Approve or reject those first.)`
-    : refused
-      ? `\n\n(The persona proposal wasn't saved, and nothing was put up for approval: ${refused}.)`
-      : "";
+  const extraBlocks = persona ? extracted.personaBlocksDropped ?? 0 : 0;
+  const cappedNote = [
+    capped
+      ? `(The persona proposal wasn't saved: too many persona proposals, or proposed skills, workflows or knowledge bases, are already waiting on the Approvals page. Approve or reject those first.)`
+      : refused
+        ? `(The persona proposal wasn't saved, and nothing was put up for approval: ${refused}.)`
+        : "",
+    extraBlocks > 0 ? `(Only one persona proposal per reply is put up for approval; ${extraBlocks} other persona block(s) in this reply were dropped.)` : "",
+    skillClash && params.allowSkill ? "(The separate skill proposal wasn't saved: the persona brings a skill with the same id, on its own card.)" : "",
+  ].filter(Boolean).map((note) => `\n\n${note}`).join("");
   const cappedEvents = (capped || refused) && params.sessionKey
     ? [appendTranscriptEntry({
         sessionKey: params.sessionKey,
@@ -742,7 +766,7 @@ export function applyActionProposalDiscipline(params: {
         text: capped ? "persona proposal dropped: too many proposals already pending" : `persona proposal dropped: ${refused}`,
         source: params.source,
         runId: params.runId,
-        metadata: { event: "persona_proposal_dropped", reason: capped ? "too_many_pending" : "invalid_components", origin: params.origin },
+        metadata: { event: "persona_proposal_dropped", reason: capped ? "too_many_pending" : "invalid_proposal", origin: params.origin },
       })]
     : [];
   if (!extracted.memory && !extracted.mutations.length && !persona && !skill) {

@@ -92,6 +92,13 @@ The agent's `mindstone-persona-proposal` can carry `components`:
   components) is dropped whole, and the reply says why. So is one that would
   put a kind it brings over its pending cap (6 component cards of a kind per
   agent whose persona isn't rejected; a plain skill proposal doesn't count).
+  Only one persona proposal per reply is put up for approval; the reply says
+  how many other persona blocks were dropped. A separate skill proposal with
+  the id of a skill the persona brings isn't saved. A skill's label is one
+  line. Approving a proposed KB ingests its text sources only; if a URL
+  source was added to it in between, ingest it from the persona editor. A
+  component approved into a persona that no longer loads is added to its
+  list but reported as not in use (`listed: false`).
   Components are refused for: invisible characters or stacked combining marks
   in any of their text, a skill or workflow id both listed and brought as new
   (a shared KB and a private KB may share an id: they are separate), or a new

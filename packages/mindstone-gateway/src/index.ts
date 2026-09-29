@@ -2102,7 +2102,8 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       ? (() => {
           const workflowsDir = workflowsDirFromConfig(loadMindStoneConfig(configPath).config, paths);
           return action.components!.workflows.map((id) => {
-            const loaded = isSafeComponentId(id) ? loadMindStoneWorkflow(workflowsDir, id) : undefined;
+            // As the approval finds it: that exact folder name only (#125 review).
+            const loaded = isRealWorkflowDir(workflowsDir, id) ? loadMindStoneWorkflow(workflowsDir, id) : undefined;
             return { id, steps: loaded?.ok ? loaded.workflow.steps : null };
           });
         })()
@@ -2733,14 +2734,18 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
             // the approval has happened by then. It counts as that KB's
             // ingest, so an admin ingest of it can't overlap (#125 review).
             const ingestKey = `${result.personaId}/${result.kbId}`;
-            PRIVATE_KB_INGESTS.add(ingestKey);
-            const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, {
-              now: new Date().toISOString(),
-              noLinks: true,
-              privateKbUrls: {},
-            })
-              .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }))
-              .finally(() => PRIVATE_KB_INGESTS.delete(ingestKey));
+            const ingested = PRIVATE_KB_INGESTS.has(ingestKey)
+              ? { ok: false as const, error: "another ingest of it is running; ingest it again from the persona editor when it finishes" }
+              : await (async () => {
+                  PRIVATE_KB_INGESTS.add(ingestKey);
+                  try {
+                    return await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true, textOnly: true });
+                  } catch (error) {
+                    return { ok: false as const, error: error instanceof Error ? error.message : String(error) };
+                  } finally {
+                    PRIVATE_KB_INGESTS.delete(ingestKey);
+                  }
+                })();
             const { kbRoot: _root, ...shown } = result;
             sendJson(res, 200, { ok: true, result: { ...shown, ingested: ingested.ok ? { entryCount: ingested.entryCount } : { error: publicKbText(ingested.error, result.kbRoot) } } });
             return;

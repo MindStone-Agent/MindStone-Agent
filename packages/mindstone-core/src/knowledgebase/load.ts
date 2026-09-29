@@ -238,6 +238,12 @@ export async function ingestMindStoneKnowledgebase(
      * of `loadUrlSourceDocument`'s `privateKb` (#142 review).
      */
     privateKbUrls?: { refusedHost?: (host: string) => boolean };
+    /**
+     * An approved proposal's KB (#125): its text sources only. One that has a
+     * URL source by now (added in between) is left for an admin ingest, with
+     * its permission check and limits (#125 review).
+     */
+    textOnly?: boolean;
   } = {},
 ): Promise<IngestKnowledgebaseResult> {
   // A persona's private KB (#125, `noLinks`) is its own files: no links
@@ -249,6 +255,9 @@ export async function ingestMindStoneKnowledgebase(
   const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
   if (!loaded.ok) return { ok: false, kbId, error: loaded.error };
   const kb = loaded.kb;
+  if (options.textOnly && kb.externalSources.length > 0) {
+    return { ok: false, kbId, error: "it has a URL source now; ingest it from the persona editor" };
+  }
   if (options.noLinks && kb.externalSources.some((source) => source.type === "folder")) {
     return { ok: false, kbId, error: "a persona's private knowledge base can't read folders outside it; use sources/ or a URL source" };
   }

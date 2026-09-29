@@ -69,6 +69,7 @@ import {
   type MindStoneWorkflowStep,
   type ProposedAction,
   loadMindStoneWorkflow,
+  isRealWorkflowDir,
   type MindStoneRuntimePaths,
   isRealDirectory,
   isSafeComponentId,
@@ -1729,6 +1730,11 @@ function appendApprovalAuditEvent(action: { id: string; kind: string; connectorI
   });
 }
 
+/** A summary or line as one printable line: control characters (tabs aside) shown as \u{..}, never acted on by the terminal. */
+function printable(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u2028\u2029]/g, (char) => `\\u{${char.codePointAt(0)!.toString(16)}}`);
+}
+
 /** One workflow step in a line, for the approval review (#125): what it routes to or checks. */
 function describeWorkflowStep(step: MindStoneWorkflowStep): string {
   if (step.kind === "gate") return `${step.id}: gate ${JSON.stringify(step.gate ?? {})}${step.onFail ? `, on fail ${step.onFail}` : ""}`;
@@ -1761,23 +1767,27 @@ function personaComponentReview(action: ProposedAction, store: ApprovalStore, wo
     lines.push(`Shared knowledge bases: ${listed.knowledgebases.length ? `only ${listed.knowledgebases.join(", ")}` : "every one (it lists none)"}`);
     lines.push(`Workflows: ${listed.workflows.length ? "" : "none"}`);
     for (const id of listed.workflows) {
-      const loaded = loadMindStoneWorkflow(workflowsDir, id);
+      // As the approval finds it: that exact folder name only (#125 review).
+      const loaded = isRealWorkflowDir(workflowsDir, id) ? loadMindStoneWorkflow(workflowsDir, id) : { ok: false as const };
       lines.push(loaded.ok
         ? `  ${id}:\n${loaded.workflow.steps.map((step) => `    ${describeWorkflowStep(step)}`).join("\n")}`
         : `  ${id}: not found, so approving the persona is refused`);
     }
     const children = store.list().filter((entry) => entry.parentApprovalId === action.id);
     lines.push(children.length ? "New components, each on its own card, approved after this one:" : "New components: none");
-    for (const child of children) lines.push(`  ${child.id.slice(0, 8)} [${child.status}] ${child.summary}`);
+    for (const child of children) lines.push(`  ${child.id.slice(0, 8)} [${child.status}] ${printable(child.summary)}`);
   }
   if (action.kind === "workflow_create" && action.workflow) {
-    lines.push(`Workflow ${action.workflow.id}, listed by persona ${action.workflow.personaId}: it runs on that persona's turns, unless the config's own workflow (workflows.active or a route rule) applies first.`);
+    lines.push(`Workflow ${action.workflow.id}, added last to persona ${action.workflow.personaId}'s workflows: it runs when that persona answers, if the config's own workflow (workflows.active or a route rule) and the persona's earlier workflows don't decide the turn first.`);
     lines.push(`--- workflow.json ---\n${JSON.stringify(action.workflow.definition, null, 2)}\n--- end workflow.json ---`);
   }
   if (action.kind === "persona_kb_create" && action.knowledgebase) {
     const kb = action.knowledgebase;
     lines.push(`Private knowledge base ${kb.id}${kb.name ? ` (${kb.name})` : ""} for persona ${kb.personaId}: recalled while that persona answers you, and in App Engine runs under it.`);
-    for (const source of kb.sources) lines.push(`--- ${source.name}.md ---\n${source.text}\n--- end ${source.name}.md ---`);
+    // Every line of a source is marked, so a line in it can't pass for the end of it.
+    for (const source of kb.sources) {
+      lines.push(`--- ${source.name}.md (each line marked "| ") ---\n${source.text.split("\n").map((line) => `| ${printable(line)}`).join("\n")}\n--- end ${source.name}.md ---`);
+    }
   }
   return lines.join("\n");
 }
@@ -1820,7 +1830,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       return;
     }
     for (const action of actions) {
-      output.write(`${gold(action.id.slice(0, 8))} [${action.status}] ${action.kind} via ${action.connectorId} — ${action.summary}\n`);
+      output.write(`${gold(action.id.slice(0, 8))} [${action.status}] ${action.kind} via ${action.connectorId} — ${printable(action.summary)}\n`);
     }
     return;
   }
@@ -1836,7 +1846,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
     output.write(`Kind: ${action.kind}\n`);
     output.write(`Connector: ${action.connectorId}\n`);
     output.write(`Created: ${action.createdAt ?? "unknown"}\n`);
-    output.write(`Summary: ${action.summary}\n`);
+    output.write(`Summary: ${printable(action.summary)}\n`);
     if (action.send) {
       output.write(`Reply to: message ${action.send.inReplyToMessageId ?? "?"} in chat ${action.send.chatId ?? "?"}\n`);
       output.write(`--- draft ---\n${action.send.text}\n--- end draft ---\n`);
@@ -1894,7 +1904,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
           : action.kind === "skill_install"
             ? [skillPreview, componentReview].filter(Boolean).join("\n\n")
             : componentReview || preview;
-        await prompter.note(`${action.summary}\n\n${shown}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
+        await prompter.note(`${printable(action.summary)}\n\n${shown}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
         const accepted = await prompter.confirm({ message: repair ? "Queue it now?" : "Approve this action now?", initialValue: false });
         if (!accepted) {
           output.write(repair ? "Cancelled — nothing queued.\n" : "Approval cancelled — the action stays pending.\n");
@@ -1937,11 +1947,11 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`${result.listed ? "" : "Warning: "}${result.note[0]!.toUpperCase()}${result.note.slice(1)}.\n`);
     } else if (result.kind === "persona_kb_create") {
       // The approval has happened by now: an ingest that throws is reported like one that fails.
-      // With the gateway's limits and host checks, in case a URL source was added in between (#125 review).
+      // Its text sources only: one with a URL source by now is left for `kb ingest --persona` (#125 review).
       const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, {
         now: new Date().toISOString(),
         noLinks: true,
-        privateKbUrls: {},
+        textOnly: true,
       })
         .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }));
       output.write(ingested.ok

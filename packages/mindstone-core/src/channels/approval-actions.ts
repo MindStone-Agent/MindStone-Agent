@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ConnectorOutboundMessage } from "./connector.js";
 import { ApprovalStore, sanitizeMemoryProposalPath, type ProposedAction } from "./approval.js";
 import { ConnectorDeliveryQueue } from "./queue.js";
@@ -8,6 +8,7 @@ import { composeMindStoneSkillDraft, validateSkillId, writeInstalledMindStoneSki
 import { PersonaExistsError, writeProposedPersona } from "../persona/create.js";
 import { addPersonaComponentId, checkPersonaComponents, PersonaComposeError, writePrivateKnowledgebase } from "../persona/compose.js";
 import { isRealDirectory, personaKnowledgebasesDir } from "../persona/components.js";
+import { loadMindStonePersona } from "../persona/load.js";
 import { builtinMindStoneSkills, discoverMindStoneSkills } from "../skills/artifacts.js";
 import { validateWorkflowDefinition, writeWorkflowDefinition, WorkflowWriteError } from "../workflow/validate.js";
 
@@ -78,6 +79,11 @@ export function approverStillRunning(by: { pid: number; host: string }): boolean
 function addComponentOrExplain(personaDir: string, key: "skills" | "workflows", id: string): { note: string; listed: boolean } {
   try {
     const added = addPersonaComponentId(personaDir, key, id);
+    // Listed, but in a persona that doesn't load it takes effect nowhere (#125 review).
+    const loads = loadMindStonePersona(dirname(personaDir), basename(personaDir));
+    if (!loads.ok) {
+      return { note: `it was added to the persona's ${key}, but the persona doesn't load, so it isn't used until the persona is fixed`, listed: false };
+    }
     return added === "all"
       ? { note: "the persona lists no skills, so it uses every installed skill, this one included", listed: true }
       : { note: `added to the persona's ${key}`, listed: true };
