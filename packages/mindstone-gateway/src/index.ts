@@ -144,6 +144,7 @@ import {
   KB_EMBED_LIMITS,
   KB_REEMBED_LIMITS,
   indexSqliteMemoryTurn,
+  reembedSqliteMemoryOtherModel,
   memoryEmbeddingSpec,
   sqliteMemoryEmbeddingMix,
   isAutoRecallEnabled,
@@ -739,12 +740,49 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
   const transcriptFile = transcriptPathForSession(sessionKey);
   recallIndexTail = recallIndexTail
     .then(async () => {
-      await indexSqliteMemoryTurn({ transcriptFile, config });
+      // Only the turn's own chunks here: this is what the next turn waits for (#157).
+      await indexSqliteMemoryTurn({ transcriptFile, config, otherModelLimit: 0 });
       recallIndexFailedAt = 0;
+      queueMemoryReembed(config);
     })
     .catch((error: unknown) => {
       recallIndexFailedAt = Date.now();
       console.warn(`[mindstone] recall index update failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+}
+
+/**
+ * After a switch of embedding model, each turn's index update is followed by
+ * up to MEMORY_REEMBED_PER_TURN of another model's chunks, embedded again off
+ * the update the next turn waits for (#157): a few a request, and none sent
+ * while a turn runs, so a turn's query never queues behind them on an
+ * embedder that answers one request at a time. One run at a time; a failed
+ * run is logged and left for a minute (the chunks keep word match meanwhile).
+ */
+let memoryReembedRunning = false;
+let memoryReembedFailedAt = 0;
+
+function queueMemoryReembed(config: MindStoneConfig | undefined): void {
+  if (memoryReembedRunning || (memoryReembedFailedAt && Date.now() - memoryReembedFailedAt < 60_000)) return;
+  memoryReembedRunning = true;
+  void (async () => {
+    const provider = createMemoryEmbeddingProvider(config);
+    if (!provider) return;
+    await reembedSqliteMemoryOtherModel({
+      config,
+      provider,
+      beforeBatch: async () => {
+        await waitWhileTurnsRun(() => turnsInFlight.values());
+      },
+    });
+    memoryReembedFailedAt = 0;
+  })()
+    .catch((error: unknown) => {
+      memoryReembedFailedAt = Date.now();
+      console.warn(`[mindstone] memory re-embed after a model switch failed: ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(() => {
+      memoryReembedRunning = false;
     });
 }
 

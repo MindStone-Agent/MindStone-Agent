@@ -8,6 +8,8 @@
 #   - the next backfill (the per-turn one included) embeds them again and
 #     records the model; re-indexing keeps each vector's model with it
 #   - POST /admin/memory/check says how many memories another model embedded
+#   - the gateway paces that per-turn share: a few chunks a request, none sent
+#     while a turn runs, and off the index update the next turn waits for (#157)
 # Binds gateway port base+39 and an embedding stub on base+40; serialize per
 # smoke protocol. Synthetic text only.
 set -euo pipefail
@@ -44,8 +46,10 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  MEMORY_REEMBED_BATCH,
   MEMORY_REEMBED_PER_TURN,
   indexSqliteMemoryTurn,
+  reembedSqliteMemoryOtherModel,
   backfillSqliteMemoryEmbeddings,
   backfillSqliteMemoryIndex,
   memoryEmbeddingSpec,
@@ -219,6 +223,50 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
     fail(`a fact said while the switch is in progress should be recalled by its vector: ${JSON.stringify(hits.map((h) => [h.metadata?.recallMode, h.text.slice(0, 30)]))}`);
   }
 }
+// The gateway's split (#157): its turn update embeds only the turn's own chunks, and the paced
+// re-embed does another model's, MEMORY_REEMBED_BATCH a request, waiting on beforeBatch before each.
+{
+  const db = new DatabaseSync(dbPath);
+  db.prepare("UPDATE memory_chunks SET embedding_spec = 'stub:a' WHERE embedding_json IS NOT NULL").run();
+  db.close();
+  const file = join(paths.transcriptDir, "paced-turn.jsonl");
+  writeFileSync(file, JSON.stringify({ id: "t2", sessionKey: "agent:console:console:admin:c2", agentId: "default", role: "user", text: "the spare key is under PEBBLE-157", timestamp: "t", source: { substrate: "openai", channel: "openai-chat-completions", chatType: "internal" } }) + "\n");
+  const otherBefore = sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(B), paths).otherModel;
+  if (otherBefore < MEMORY_REEMBED_PER_TURN + 8) fail(`not enough of another model's chunks to measure: ${otherBefore}`);
+  const turn = await indexSqliteMemoryTurn({ transcriptFile: file, config: { memory: { vectorStore: "sqlite-vec" } }, paths, provider: B, otherModelLimit: 0 });
+  if (turn.chunksEmbedded !== 1) fail(`with otherModelLimit 0, the turn should embed only its own chunk: ${JSON.stringify(turn)}`);
+  if (sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(B), paths).otherModel !== otherBefore) fail("with otherModelLimit 0, the turn embedded another model's chunks again");
+  // A chunk with no vector is the turn update's, never the paced re-embed's.
+  const unembedded = new DatabaseSync(dbPath);
+  unembedded.prepare("UPDATE memory_chunks SET embedding_json = NULL, embedding_spec = NULL WHERE chunk_id = 'bulk:0#0'").run();
+  const newest = (unembedded.prepare(`SELECT chunk_id AS id FROM memory_chunks WHERE embedding_json IS NOT NULL AND embedding_spec = 'stub:a' ORDER BY updated_at DESC, chunk_id ASC LIMIT ?`).all(MEMORY_REEMBED_PER_TURN) as Array<{ id: string }>).map((row) => row.id).sort();
+  const bBefore = new Set((unembedded.prepare("SELECT chunk_id AS id FROM memory_chunks WHERE embedding_spec = 'stub:b'").all() as Array<{ id: string }>).map((row) => row.id));
+  unembedded.close();
+  const sizes: number[] = [];
+  const events: string[] = [];
+  const counting = { id: B.id, model: B.model, async embedTexts(texts: string[]) { sizes.push(texts.length); events.push("send"); return B.embedTexts(texts); } };
+  const paced = await reembedSqliteMemoryOtherModel({ paths, provider: counting, beforeBatch: async () => { events.push("gate"); } });
+  if (paced.chunksEmbedded !== MEMORY_REEMBED_PER_TURN) fail(`the paced re-embed should embed ${MEMORY_REEMBED_PER_TURN} chunks: ${JSON.stringify(paced)}`);
+  if (MEMORY_REEMBED_BATCH > 4 || sizes.some((n) => n > MEMORY_REEMBED_BATCH)) fail(`requests of more than ${MEMORY_REEMBED_BATCH} (at most 4) chunks: ${JSON.stringify(sizes)}`);
+  if (sizes.length !== Math.ceil(MEMORY_REEMBED_PER_TURN / MEMORY_REEMBED_BATCH)) fail(`expected ${Math.ceil(MEMORY_REEMBED_PER_TURN / MEMORY_REEMBED_BATCH)} requests: ${sizes.length}`);
+  if (events.join(",") !== Array(sizes.length).fill("gate,send").join(",")) fail(`beforeBatch should run before every request: ${events.slice(0, 6).join(",")}...`);
+  const check = new DatabaseSync(dbPath);
+  const redone = (check.prepare("SELECT chunk_id AS id FROM memory_chunks WHERE embedding_spec = 'stub:b'").all() as Array<{ id: string }>).map((row) => row.id).filter((id) => !bBefore.has(id)).sort();
+  const stillNull = check.prepare("SELECT embedding_json AS e FROM memory_chunks WHERE chunk_id = 'bulk:0#0'").get() as { e: string | null };
+  check.close();
+  if (JSON.stringify(redone) !== JSON.stringify(newest)) fail(`the paced re-embed should do the newest ${MEMORY_REEMBED_PER_TURN}: ${redone.length} redone`);
+  if (stillNull.e !== null) fail("the paced re-embed embedded a chunk with no vector");
+  // Nothing is sent until beforeBatch lets it.
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let sent = 0;
+  const held = reembedSqliteMemoryOtherModel({ paths, limit: MEMORY_REEMBED_BATCH, provider: { id: B.id, model: B.model, async embedTexts(texts: string[]) { sent += 1; return B.embedTexts(texts); } }, beforeBatch: () => gate });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (sent !== 0) fail("the paced re-embed sent a request before beforeBatch returned");
+  release();
+  const heldResult = await held;
+  if (sent !== 1 || heldResult.chunksEmbedded !== MEMORY_REEMBED_BATCH) fail(`after beforeBatch returned, one request of ${MEMORY_REEMBED_BATCH}: ${sent} sent, ${JSON.stringify(heldResult)}`);
+}
 console.log(`recall index: ${total} chunks, switching models checked`);
 TS
 
@@ -226,17 +274,27 @@ TS
 # The stub answers any model; ollama:model-a gives 3 numbers, anything else 4.
 STUB_PORT="${STUB_PORT}" node <<'NODE' >"${TEMP_RUNTIME}/stub.log" 2>&1 &
 const { createServer } = require("node:http");
+// Every embedding request is logged (arrival and answer time) for the pacing check (#157).
+const state = { mode: "ok", requests: [], queue: Promise.resolve() };
 createServer((req, res) => {
   let raw = "";
   req.on("data", (chunk) => (raw += chunk)).on("end", () => {
+    if (req.url === "/_test/state") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ requests: state.requests })); return; }
+    if (req.url === "/_test/mode") { state.mode = JSON.parse(raw).mode; res.writeHead(200); res.end("{}"); return; }
     const body = raw ? JSON.parse(raw) : {};
+    const input = Array.isArray(body.input) ? body.input : [body.input];
+    const request = { model: body.model, input, t: Date.now() };
+    state.requests.push(request);
     const size = body.model === "model-a" ? 3 : 4;
+    const answer = () => {
+      request.done = Date.now();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: input.map((_, index) => ({ index, embedding: Array.from({ length: size }, (_, i) => (i === 0 ? 1 : 0)) })) }));
+    };
+    // One request at a time, 150 ms a chunk, like Ollama's default (#157).
+    if (state.mode === "serial") { state.queue = state.queue.then(() => new Promise((resolve) => setTimeout(() => { answer(); resolve(); }, 150 * input.length))); return; }
     // model-slow answers after 12 s, as a cold model loading would: past the 10 s chat timeout.
-    const delay = body.model === "model-slow" ? 12_000 : 0;
-    setTimeout(() => {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ data: (body.input ?? []).map((_, index) => ({ index, embedding: Array.from({ length: size }, (_, i) => (i === 0 ? 1 : 0)) })) }));
-    }, delay);
+    setTimeout(answer, body.model === "model-slow" ? 12_000 : 0);
   });
 }).listen(Number(process.env.STUB_PORT), "127.0.0.1");
 NODE
@@ -276,5 +334,56 @@ judge "the check for the model that embedded them should count none" 'b.ok === t
 # A model that takes 12 s to answer (loading) still passes the check, which waits 45 s for it.
 [[ "$(post /admin/memory/check '{"embeddingProvider":"ollama:model-slow"}')" == 200 ]] || { echo "checking model-slow failed: $(cat "${BODY}")" >&2; exit 1; }
 judge "the check should wait for a model that takes 12 s to load" 'b.ok === true && b.dimensions === 4'
+
+# --- 3. A switch in progress never slows a turn (#157). The index holds thousands of model-a
+# chunks; on an embedder that answers one request at a time, each turn's query embedding waits
+# behind one small request of them at most, none is sent while it waits, and the next turn
+# never waits for them.
+STUB="http://127.0.0.1:${STUB_PORT}"
+python3 - <<'PY'
+import json, os, pathlib
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+c["memory"]["embeddingProvider"] = "ollama:model-b"
+c["routing"] = {"mode": "mock", "defaultAgentId": "default", "defaultModel": "mindstone/mock", "mock": {"responsePrefix": "switch"}}
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+curl -s -X POST -d '{"mode":"serial"}' "${STUB}/_test/mode" >/dev/null
+chat() { # chat <text>: prints the ms the gateway took to answer
+  local started
+  started=$(node -e 'console.log(Date.now())')
+  curl -s --max-time 30 -o "${BODY}" -X POST -H "Authorization: Bearer ${MS_TOKEN}" -H 'content-type: application/json' -d "{\"text\":\"$1\"}" "${BASE}/chat/send" || { echo "chat \"$1\" failed or got no answer in 30 s" >&2; exit 1; }
+  echo $(( $(node -e 'console.log(Date.now())') - started ))
+}
+chat "the first question after the switch" >/dev/null
+judge "the first chat after the switch should be answered" 'b.ok === true'
+sleep 2
+turn_ms=()
+for i in 1 2 3; do turn_ms+=("$(chat "question ${i} during the switch")"); sleep 0.5; done
+node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
+  const b = s.requests.filter((q)=>q.model === "model-b");
+  const isOld = (t)=>/an older note number|zebraword/.test(t);
+  const reembed = b.filter((q)=>q.input.every(isOld));
+  const queries = b.filter((q)=>q.input.length === 1 && /^question \d during the switch$/.test(q.input[0]));
+  if (queries.length !== 3) { console.error(`expected 3 query embeddings, saw ${queries.length}: ${JSON.stringify(b.filter((q)=>!q.input.every(isOld)).map((q)=>q.input))}`); process.exit(1); }
+  const big = reembed.filter((q)=>q.input.length > 4).length;
+  if (big) { console.error(`the re-embed sent ${big} requests of more than 4 chunks`); process.exit(1); }
+  // The re-embed was running throughout: a request before the first query and between each two.
+  const bounds = [0, ...queries.map((q)=>q.t)];
+  for (let i = 1; i < bounds.length; i += 1) {
+    if (!reembed.some((r)=>r.t > bounds[i - 1] && r.t < bounds[i])) { console.error(`no re-embed request before query ${i}: nothing was measured`); process.exit(1); }
+  }
+  for (const q of queries) {
+    if (!(q.done >= q.t)) { console.error("a query embedding was never answered"); process.exit(1); }
+    const sent = reembed.filter((r)=>r.t > q.t && r.t < q.done).length;
+    if (sent) { console.error(`the re-embed sent ${sent} requests while a turn waited on the embedder`); process.exit(1); }
+    // Behind one request of 4 at most: 600 ms, and its own 150 ms.
+    if (q.done - q.t > 900) { console.error(`a turn waited ${q.done - q.t} ms for its query embedding`); process.exit(1); }
+  }
+  console.log(`query waits ${queries.map((q)=>q.done - q.t).join(", ")} ms; ${reembed.length} re-embed requests so far`);
+})' "${STUB}/_test/state" || exit 1
+# The turn itself: never the 5 s the next turn would wait if the re-embed held up the index update.
+for ms in "${turn_ms[@]}"; do (( ms < 3000 )) || { echo "a turn took ${ms} ms during the switch (turns: ${turn_ms[*]})" >&2; exit 1; }; done
+echo "turns during the switch: ${turn_ms[*]} ms"
 
 echo "Memory embedding model switch smoke test passed."
