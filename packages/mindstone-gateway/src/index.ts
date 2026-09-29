@@ -2389,7 +2389,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         goal: body.goal,
       });
       if (!overrides) {
-        sendJson(res, 400, { ok: false, error: "id must be lowercase letters, digits and hyphens; label, description and goal at most 2000 characters" });
+        sendJson(res, 400, { ok: false, error: "id must be lowercase letters, digits and hyphens; label and description one line; label, description and goal at most 2000 characters; no field may hold control, hidden or direction characters (soft hyphens, zero-width spaces, direction marks)" });
         return;
       }
       draftInput = {

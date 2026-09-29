@@ -382,20 +382,29 @@ export function summaryText(text: string): string {
 const SKILL_PROPOSAL_UNSAFE = /(?![\u200c\u200d\u180e\ufe00-\ufe0f\u{E0100}-\u{E01EF}])(?:[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u2800\u3164\uFFA0\u115F\u1160])/u;
 /**
  * Those four, only where real writing puts them (#146 delta review), since
- * each draws nothing and could carry hidden text: FE0E/FE0F right after an
- * emoji; FE00-FE0D after Han, Myanmar or a math symbol; ideographic
- * selectors after Han; a joiner only between two non-ASCII characters, never
- * two in a row. Eight or more combining marks in a row, counted through
- * joiners, is refused too (Myanmar and Tibetan stack up to five or six).
+ * each draws nothing and could carry hidden text:
+ * - FE0E/FE0F right after an emoji; after a digit, # or *, only FE0F as the
+ *   start of a keycap;
+ * - FE00 after Han, Myanmar or a non-ASCII math symbol; FE01-FE0D and the
+ *   ideographic selectors not at all;
+ * - U+180E between two Mongolian letters;
+ * - a joiner only between two non-ASCII characters, never two in a row.
+ * Eight or more combining marks in a row, counted through joiners and U+180E,
+ * is refused too (Myanmar and Tibetan stack up to five or six). A joiner
+ * between non-ASCII characters can still stand or not: under two bits a gap,
+ * and the CLI shows it as \u{200d}.
  */
 const SKILL_PROPOSAL_HIDDEN = new RegExp([
-  String.raw`(?<!\p{Emoji})[\uFE0E\uFE0F]`,
-  String.raw`(?<![\p{Script=Han}\p{Script=Myanmar}\p{Sm}])[\uFE00-\uFE0D]`,
-  String.raw`(?<!\p{Script=Han})[\u{E0100}-\u{E01EF}]`,
-  String.raw`(?<![^\x00-\x7F])[\u200C\u200D]`,
-  String.raw`[\u200C\u200D](?![^\x00-\x7F])`,
-  String.raw`[\u200C\u200D]{2,}`,
-  String.raw`(?:\p{M}[\u200C\u200D]?){8,}`,
+  String.raw`(?<!\p{Emoji})[︎️]`,
+  String.raw`(?<=[0-9#*])︎`,
+  String.raw`(?<=[0-9#*])️(?!⃣)`,
+  String.raw`[︁-︍\u{E0100}-\u{E01EF}]`,
+  String.raw`(?<!\p{Script=Han}|\p{Script=Myanmar}|(?![\x00-\x7F])\p{Sm})︀`,
+  String.raw`(?<![ᠠ-ᡸᢀ-ᢪ])᠎|᠎(?![ᠠ-ᡸᢀ-ᢪ])`,
+  String.raw`(?<![^\x00-\x7F])[‌‍]`,
+  String.raw`[‌‍](?![^\x00-\x7F])`,
+  String.raw`[‌‍]{2,}`,
+  String.raw`(?:\p{M}[‌‍᠎]?){8,}`,
 ].join("|"), "u");
 
 function hasUnsafeText(value: unknown): boolean {
