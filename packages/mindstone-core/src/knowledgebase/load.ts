@@ -476,7 +476,8 @@ export async function reembedStaleKnowledgebase(options: {
           // limiting requests; anything else, or no cause at all, counts (#158 review).
           const free = (vectors.cause === "unavailable" || vectors.cause === "rate-limited") && !((vectors.embedded ?? 0) > 0);
           const counts = !free;
-          const failures = (state?.failures ?? 0) + (counts ? 1 : 0);
+          // Read again now: a reset during this attempt starts the count afresh (#164).
+          const failures = (reembedState(loaded.kb.dir, spec, noLinks)?.failures ?? 0) + (counts ? 1 : 0);
           const gaveUp = counts && failures >= KB_REEMBED_LIMITS.maxFailures;
           const next: KbReembedState = {
             version: 1,
@@ -531,6 +532,12 @@ export async function waitWhileTurnsRun(starts: () => Iterable<number>, pollMs =
  */
 export function resetKnowledgebaseReembed(kbDir: string, kbId: string, options: { noLinks?: boolean } = {}): boolean {
   if (options.noLinks && privateKnowledgebaseLinkError(kbDir, kbId)) return false;
+  // Exactly its folder's name: a case-folding filesystem would find "GARAGE" for "garage" (#164).
+  try {
+    if (!readdirSync(kbDir).includes(kbId)) return false;
+  } catch {
+    return false;
+  }
   const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
   if (!loaded.ok) return false;
   clearKbReembedState(loaded.kb.dir);
