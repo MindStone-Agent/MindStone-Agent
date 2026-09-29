@@ -353,15 +353,10 @@ function boundedList(value: unknown): string[] | undefined {
 export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undefined {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
-  // What the owner reviews is all the agent reads: no characters that can't be
-  // seen (controls, escapes, bidi, zero-width) and no stacked marks in any
-  // field, as for a persona's own fields (#125 review; older than #125).
-  const fields = ["id", "label", "description", "goal", "whenToUse", "outputs", "safetyNotes", "instructions"].map((key) => record[key]);
-  if (hasInvisibleText(fields)) return undefined;
   const id = typeof record.id === "string" && SKILL_PROPOSAL_ID.test(record.id) && record.id !== "drafts" ? record.id : undefined;
   // One line: the label goes into the card's summary, which list views print
   // as it is, so a line break could draw rows of its own (#125 review).
-  const label = typeof record.label === "string" && /[\u0000-\u001f\u007f\u2028\u2029]/.test(record.label) ? undefined : boundedText(record.label, SKILL_PROPOSAL_LIMITS.text);
+  const label = typeof record.label === "string" && /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(record.label) ? undefined : boundedText(record.label, SKILL_PROPOSAL_LIMITS.text);
   const description = boundedText(record.description, SKILL_PROPOSAL_LIMITS.text);
   const goal = record.goal === undefined ? undefined : boundedText(record.goal, SKILL_PROPOSAL_LIMITS.text);
   const whenToUse = boundedList(record.whenToUse);
@@ -581,6 +576,9 @@ export type ExtractedActionProposals = {
   persona?: PersonaProposalPayload;
   /** Its components (#125); a proposal whose components don't hold up is dropped whole. */
   personaComponents?: ParsedPersonaComponents;
+  /** Skill blocks dropped although another was used, or why the only one was (#125 review). */
+  skillBlocksDropped?: number;
+  skillProposalError?: string;
   /** Persona blocks dropped although another was used: only one per reply is (#125 review). */
   personaBlocksDropped?: number;
   /** Why a persona proposal was dropped (#125 review), so the reply can say so. */
@@ -596,6 +594,8 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
   let personaComponents: ParsedPersonaComponents | undefined;
   let personaProposalError: string | undefined;
   let personaBlocks = 0;
+  let skillBlocks = 0;
+  let skillProposalError: string | undefined;
   let skill: SkillInstallPayload | undefined;
   const split = splitProposalBlocks(replyText);
   for (const { kind: fenceKind, body } of split.blocks) {
@@ -620,7 +620,11 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
           }
         }
       } else if (fenceKind === "skill") {
-        skill ??= parseSkillProposal(parsed);
+        skillBlocks += 1;
+        if (!skill) {
+          skill = parseSkillProposal(parsed);
+          if (!skill) skillProposalError ??= "its fields don't hold up (an id, a one-line label and a description are needed, within their limits)";
+        }
       } else {
         const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
         const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
@@ -636,6 +640,10 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
         personaBlocks += 1;
         if (!persona) personaProposalError ??= "its block isn't valid JSON, or couldn't be read";
       }
+      if (fenceKind === "skill") {
+        skillBlocks += 1;
+        if (!skill) skillProposalError ??= "its block isn't valid JSON, or couldn't be read";
+      }
     }
   }
   return {
@@ -646,6 +654,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
     personaComponents,
     ...(persona ? { personaBlocksDropped: personaBlocks - 1 } : { personaProposalError }),
     skill,
+    ...(skill ? { skillBlocksDropped: skillBlocks - 1 } : skillBlocks ? { skillProposalError } : {}),
   };
 }
 
@@ -762,6 +771,8 @@ export function applyActionProposalDiscipline(params: {
         : "",
     extraBlocks > 0 ? `(Only one persona proposal per reply is put up for approval; ${extraBlocks} other persona block(s) in this reply were dropped.)` : "",
     skillClash && params.allowSkill ? "(The separate skill proposal wasn't saved: the persona brings a skill with the same id, on its own card.)" : "",
+    params.allowSkill && extracted.skillProposalError ? `(The skill proposal wasn't saved, and nothing was put up for approval: ${extracted.skillProposalError}.)` : "",
+    params.allowSkill && (extracted.skillBlocksDropped ?? 0) > 0 ? `(Only one skill proposal per reply is put up for approval; ${extracted.skillBlocksDropped} other skill block(s) were dropped.)` : "",
   ].filter(Boolean).map((note) => `\n\n${note}`).join("");
   // Every drop is in the transcript too, not only in the reply (#125 review).
   const drops: Array<{ reason: string; text: string }> = [
@@ -769,6 +780,8 @@ export function applyActionProposalDiscipline(params: {
     ...(!capped && refused ? [{ reason: "invalid_proposal", text: `persona proposal dropped: ${refused}` }] : []),
     ...(extraBlocks > 0 ? [{ reason: "extra_persona_blocks", text: `${extraBlocks} other persona block(s) dropped: one per reply` }] : []),
     ...(skillClash && params.allowSkill ? [{ reason: "skill_id_clash", text: "skill proposal dropped: the persona brings a skill with the same id" }] : []),
+    ...(params.allowSkill && extracted.skillProposalError ? [{ reason: "invalid_skill_proposal", text: `skill proposal dropped: ${extracted.skillProposalError}` }] : []),
+    ...(params.allowSkill && (extracted.skillBlocksDropped ?? 0) > 0 ? [{ reason: "extra_skill_blocks", text: `${extracted.skillBlocksDropped} other skill block(s) dropped: one per reply` }] : []),
   ];
   const cappedEvents = params.sessionKey
     ? drops.map((drop) => appendTranscriptEntry({
@@ -778,7 +791,7 @@ export function applyActionProposalDiscipline(params: {
         text: drop.text,
         source: params.source,
         runId: params.runId,
-        metadata: { event: drop.reason === "skill_id_clash" ? "skill_proposal_dropped" : "persona_proposal_dropped", reason: drop.reason, origin: params.origin },
+        metadata: { event: /skill/.test(drop.reason) ? "skill_proposal_dropped" : "persona_proposal_dropped", reason: drop.reason, origin: params.origin },
       }))
     : [];
   if (!extracted.memory && !extracted.mutations.length && !persona && !skill) {

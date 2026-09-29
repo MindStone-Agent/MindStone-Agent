@@ -95,8 +95,12 @@ The agent's `mindstone-persona-proposal` can carry `components`:
   Only one persona proposal per reply is put up for approval; the reply says
   how many other persona blocks were dropped. A separate skill proposal with
   the id of a skill the persona brings isn't saved. A skill's label is one
-  line, and no field of any proposed skill (a persona's or a plain one) may
-  hold characters that can't be seen. Every drop is also a transcript event.
+  line. A persona's new components may not hold characters that can't be
+  seen; a plain skill proposal may (real writing needs zero-width joiners and
+  variation selectors), and the CLI shows every such character as `\u{..}`
+  in `approvals show` and the approve prompt, as it does for drafts, memory
+  writes and mutations. Every drop, persona or skill, is said in the reply
+  and is a transcript event.
   Approving a proposed KB ingests its text sources only; if a URL
   source was added to it in between, ingest it from the persona editor. A
   component approved into a persona that no longer loads is added to its

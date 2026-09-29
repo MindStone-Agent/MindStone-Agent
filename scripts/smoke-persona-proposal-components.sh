@@ -74,11 +74,24 @@ assert.equal(parsePersonaComponents({ new: { privateKnowledgebases: [{ id: "k", 
 assert.equal(parseSkillProposal({ ...skill("a1"), label: "Notes\n  deadbeef [approved] forged row" }), undefined, "a line break in a skill label must be refused");
 assert.equal(parseSkillProposal({ ...skill("a1"), label: "Notes\r" }), undefined, "a CR in a skill label must be refused");
 assert.equal(parsePersonaComponents({ new: { skills: [{ ...skill("a1"), label: "Two\nlines" }] } }), undefined, "a component skill's label must be one line");
-// A plain skill proposal (#104) is held to the same: nothing the owner can't see, in any field.
-for (const [field, value] of [["instructions", "Be helpful.\n\u001b[8mHIDDEN\u001b[0m\nDone."], ["label", "Nice\u009b8m"], ["description", "Reads \u202eright to left"], ["whenToUse", ["when\u200bever"]]]) {
-  assert.equal(parseSkillProposal({ ...skill("a1"), [field]: value }), undefined, `an invisible character in a skill's ${field} must be refused`);
+// A plain skill's label is one line (C1 controls too); its other text may hold anything real
+// writing needs, and the CLI shows every character that isn't visible (#125 review).
+assert.equal(parseSkillProposal({ ...skill("a1"), label: "Nice\u009b8m" }), undefined, "a C1 control in a skill label must be refused");
+for (const text of ["⚠️ Check twice.", "Family 👨‍👩‍👧 note.", "می‌خواهم", "မြို့", "# Title\n\n\tIndented line."]) {
+  assert.ok(parseSkillProposal({ ...skill("a1"), instructions: text, description: text.split("\n")[0] }), `real text must parse: ${JSON.stringify(text)}`);
 }
-assert.ok(parseSkillProposal({ ...skill("a1"), instructions: "# Title\n\n\tIndented line." }), "control: line breaks and tabs in instructions are fine");
+// A plain skill proposal that is dropped says why, in the reply and the transcript; so does a second one.
+{
+  const skillStore = new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "skill-drop-approvals.json") });
+  const skillFence = (json) => "```mindstone-skill-proposal\n" + JSON.stringify(json) + "\n```";
+  const bad = applyActionProposalDiscipline({ replyText: "Here.\n" + skillFence({ id: "x" }), origin: "unit", allowSkill: true, store: skillStore, sessionKey: "unit:skill-drop" });
+  assert.equal(bad.proposals.length, 0);
+  assert.match(bad.text, /skill proposal wasn't saved, and nothing was put up for approval/, "a dropped skill proposal must say why");
+  assert.ok(bad.events.some((e) => e.metadata?.event === "skill_proposal_dropped" && e.metadata?.reason === "invalid_skill_proposal"), "and log it");
+  const twoSkills = applyActionProposalDiscipline({ replyText: skillFence(skill("s-one")) + "\n" + skillFence(skill("s-two")), origin: "unit", allowSkill: true, store: skillStore });
+  assert.equal(twoSkills.proposals.length, 1);
+  assert.match(twoSkills.text, /1 other skill block\(s\) were dropped/, "a second skill block must be said");
+}
 // A built-in skill's id can't be brought as new: it would override the built-in.
 assert.equal(parsePersonaComponents({ new: { skills: [skill("integration-builder")] } }), undefined, "a built-in skill's id must be refused");
 const block = (json) => "Here it is.\n```mindstone-persona-proposal\n" + JSON.stringify(json) + "\n```";
@@ -270,7 +283,7 @@ shows() { # shows <card> <text>...
 }
 shows "${PERSONA_CARD}" "Skills: only alpha-skill" "Shared knowledge bases: only g1" "Workflows: none" "${WF_CARD:0:8}" "${KB_CARD:0:8}" "${SKILL_CARD:0:8}"
 shows "${KB_CARD}" "Part of persona p2" "PPROP-9901" "App Engine runs"
-shows "${WF_CARD}" "Part of persona p2" '"messagePrefix": "p2:"' "added last to persona p2's workflows" "run only on turns where the config names no workflow itself"
+shows "${WF_CARD}" "Part of persona p2" '"messagePrefix": "p2:"' "added last to persona p2's workflows" "run only on turns where nothing else names a workflow"
 shows "${SKILL_CARD}" "Part of persona p2" "SKILLBODY-beta-new" "Approving installs it like any skill"
 # A KB source's lines are marked, so none can pass for the end of it.
 shows "${KB_CARD}" "| The private reference code is PPROP-9901"
@@ -402,6 +415,22 @@ fs.writeFileSync(f, JSON.stringify(store));' "${DATA}/approvals/actions.json"
 ./scripts/mindstone approvals show 00000000-dead-4bee-8000-000000000002 > "${TEMP_RUNTIME}/old-skill.txt"
 if grep -q $'\x1b\[8m' "${TEMP_RUNTIME}/old-skill.txt" || grep -q $'\xc2\x9b' "${TEMP_RUNTIME}/old-skill.txt"; then echo "a raw escape reached the terminal" >&2; exit 1; fi
 grep -qF '\u{1b}[8mHIDDEN-LINE' "${TEMP_RUNTIME}/old-skill.txt" || { echo "the old skill's escape isn't shown: $(cat -v "${TEMP_RUNTIME}/old-skill.txt")" >&2; exit 1; }
+# The approve prompt shows a memory write's content as it is: an escape sequence or tag characters
+# in it are shown, never sent to the terminal, at the moment the owner consents (#125 review).
+node -e '
+const fs = require("fs"); const f = process.argv[1]; const store = JSON.parse(fs.readFileSync(f, "utf8"));
+store.actions.push({ id: "00000000-dead-4bee-8000-000000000003", kind: "memory_write", connectorId: "chat", status: "pending", summary: "memory write proposal: notes/x.md",
+  memory: { path: "notes/x\u001b[8m.md", content: "Visible line.\n\u001b[8mHIDDEN-MEM\u001b[0m\nTag:\u{E0041}\u{E0042}\nEnd." } });
+fs.writeFileSync(f, JSON.stringify(store));' "${DATA}/approvals/actions.json"
+(sleep 3; printf '\r') | script -q "${TEMP_RUNTIME}/prompt.rec" ./scripts/mindstone approvals approve 00000000-dead-4bee-8000-000000000003 >/dev/null 2>&1 || true
+grep -q 'u{1b}\[8mHIDDEN-MEM' "${TEMP_RUNTIME}/prompt.rec" || { echo "the approve prompt didn't show the memory content: $(cat -v "${TEMP_RUNTIME}/prompt.rec" | head -40)" >&2; exit 1; }
+if grep -q $'\x1b\[8mHIDDEN' "${TEMP_RUNTIME}/prompt.rec" || grep -q $'\xf3\xa0\x81\x81' "${TEMP_RUNTIME}/prompt.rec"; then echo "the approve prompt sent a raw escape or tag character to the terminal" >&2; exit 1; fi
+[[ "$(status_of 00000000-dead-4bee-8000-000000000003)" == pending ]] || { echo "the cancelled prompt decided the card" >&2; exit 1; }
+./scripts/mindstone approvals show 00000000-dead-4bee-8000-000000000003 > "${TEMP_RUNTIME}/mem-show.txt"
+# (The CLI's own colours are escapes too: only the proposal's own sequence is looked for.)
+if grep -q $'\x1b\[8m' "${TEMP_RUNTIME}/mem-show.txt"; then echo "approvals show sent a raw escape (memory path or content)" >&2; exit 1; fi
+grep -qF 'notes/x\u{1b}[8m.md' "${TEMP_RUNTIME}/mem-show.txt" || { echo "the memory path's escape isn't shown: $(cat -v "${TEMP_RUNTIME}/mem-show.txt")" >&2; exit 1; }
+grep -qF 'u{e0041}' "${TEMP_RUNTIME}/mem-show.txt" || { echo "tag characters aren't shown: $(cat -v "${TEMP_RUNTIME}/mem-show.txt")" >&2; exit 1; }
 echo "printable summaries ok"
 
 # --- 8. A non-owner's proposal, and one whose workflow routes to a persona, are dropped whole.

@@ -1730,18 +1730,21 @@ function appendApprovalAuditEvent(action: { id: string; kind: string; connectorI
   });
 }
 
-/** A summary or line as one printable line: control characters (tabs aside) shown as \u{..}, never acted on by the terminal. */
-function printable(text: string): string {
-  return text.replace(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g, (char) => `\\u{${char.codePointAt(0)!.toString(16)}}`);
-}
-
 /**
- * Text as the terminal will show it, line breaks and tabs kept: any other
- * control character (an escape sequence could hide a line), bidi control or
- * zero-width character is shown as \u{..} (#125 review).
+ * Proposal text as the terminal will show it (#125 review): anything that
+ * isn't visible (control characters, escape sequences, bidi controls,
+ * zero-width and tag characters, line and paragraph separators) is shown as
+ * \u{..}, so what the owner reads is all there is. `printable` is one line
+ * (line breaks and tabs shown too); `printableText` keeps them.
  */
+const NOT_VISIBLE_TEXT = /[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029]/gu;
+const NOT_VISIBLE_LINE = /\p{C}|\p{Default_Ignorable_Code_Point}|[\u2028\u2029]/gu;
+const showCodePoint = (char: string) => `\\u{${char.codePointAt(0)!.toString(16)}}`;
+function printable(text: string): string {
+  return text.replace(NOT_VISIBLE_LINE, showCodePoint);
+}
 function printableText(text: string): string {
-  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, (char) => `\\u{${char.codePointAt(0)!.toString(16)}}`);
+  return text.replace(NOT_VISIBLE_TEXT, showCodePoint);
 }
 
 /** One workflow step in a line, for the approval review (#125): what it routes to or checks. */
@@ -1787,7 +1790,7 @@ function personaComponentReview(action: ProposedAction, store: ApprovalStore, wo
     for (const child of children) lines.push(`  ${child.id.slice(0, 8)} [${child.status}] ${printable(child.summary)}`);
   }
   if (action.kind === "workflow_create" && action.workflow) {
-    lines.push(`Workflow ${action.workflow.id}, added last to persona ${action.workflow.personaId}'s workflows. A persona's workflows run only on turns where the config names no workflow itself (no workflows.active, no matching route rule); then they are tried in order, and the first that decides, or a gate that stops, ends it, so this one runs only if the earlier ones don't.`);
+    lines.push(`Workflow ${action.workflow.id}, added last to persona ${action.workflow.personaId}'s workflows. A persona's workflows run only on turns where nothing else names a workflow (no workflows.active, no matching route rule, no App Engine run naming one); then they are tried in order, and the first that decides, or a gate that stops, ends it, so this one runs only if the earlier ones don't.`);
     lines.push(`--- workflow.json ---\n${JSON.stringify(action.workflow.definition, null, 2)}\n--- end workflow.json ---`);
   }
   if (action.kind === "persona_kb_create" && action.knowledgebase) {
@@ -1861,7 +1864,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`--- draft ---\n${printableText(action.send.text)}\n--- end draft ---\n`);
     }
     if (action.memory) {
-      output.write(`Memory path: ${action.memory.path}\n`);
+      output.write(`Memory path: ${printable(action.memory.path)}\n`);
       output.write(`--- content ---\n${printableText(action.memory.content)}\n--- end content ---\n`);
     }
     if (action.skill) {
@@ -1875,13 +1878,13 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       );
     }
     if (action.mutation) {
-      output.write(`Mutation: ${action.mutation.operation} ${action.mutation.resource} via ${action.mutation.connectorId}\n`);
-      output.write(`--- data ---\n${JSON.stringify(action.mutation.data, null, 2)}\n--- end data ---\n`);
+      output.write(`Mutation: ${action.mutation.operation} ${printable(action.mutation.resource)} via ${printable(action.mutation.connectorId)}\n`);
+      output.write(`--- data ---\n${printableText(JSON.stringify(action.mutation.data, null, 2))}\n--- end data ---\n`);
     }
     if (action.persona) {
       // Everything the persona holds, as it would be written (#105).
       output.write(`Persona: ${action.persona.name} (${action.persona.id}); approving saves it (switching to it is separate)\n`);
-      output.write(`--- PERSONA.md ---\n${renderPersonaMarkdown(action.persona)}--- end PERSONA.md ---\n`);
+      output.write(`--- PERSONA.md ---\n${printableText(renderPersonaMarkdown(action.persona))}--- end PERSONA.md ---\n`);
     }
     const componentReview = personaComponentReview(action, store, workflowsDirFromConfig(loadMindStoneConfig(resolveConfigPath()).config));
     if (componentReview) output.write(`${componentReview}\n`);
@@ -1913,7 +1916,8 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
           : action.kind === "skill_install"
             ? [skillPreview, componentReview].filter(Boolean).join("\n\n")
             : componentReview || preview;
-        await prompter.note(`${printable(action.summary)}\n\n${shown}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
+        // Everything in the prompt is shown as it is: the owner consents to what they see.
+        await prompter.note(printableText(`${printable(action.summary)}\n\n${shown}`), repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
         const accepted = await prompter.confirm({ message: repair ? "Queue it now?" : "Approve this action now?", initialValue: false });
         if (!accepted) {
           output.write(repair ? "Cancelled — nothing queued.\n" : "Approval cancelled — the action stays pending.\n");
