@@ -235,6 +235,27 @@ import {
   skillDraftsDir,
   skillsDirFromConfig,
   validateSkillId,
+  isRealDirectory,
+  readablePersonaKnowledgebasesDir,
+  workflowsDirFromConfig,
+  discoverMindStoneWorkflows,
+  isRealWorkflowDir,
+  loadMindStoneWorkflow,
+  listPrivateKnowledgebaseSources,
+  PersonaComposeError,
+  WorkflowWriteError,
+  parseOwnerPersonaInput,
+  createOwnerPersona,
+  updateOwnerPersona,
+  WORKFLOW_ID,
+  validateWorkflowDefinition,
+  writeWorkflowDefinition,
+  createPrivateKnowledgebase,
+  addPrivateKnowledgebaseSource,
+  ensurePersonaKnowledgebasesDir,
+  ingestMindStoneKnowledgebase,
+  isSafeComponentId,
+  discoverMindStoneKnowledgebases,
 } from "@mindstone-agent/core";
 
 export type GatewayOptions = {
@@ -2112,6 +2133,93 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     sendJson(res, 200, { ok: true, active: gateConfig.config?.personas?.active ?? null, personas });
     return;
   }
+  // Personas with their components, workflows and knowledge bases (#125).
+  const personaReadMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})$/.exec(url.pathname);
+  if (req.method === "GET" && personaReadMatch) {
+    const personasDir = personasDirFromConfig(gateConfig.config, paths);
+    const id = personaReadMatch[1]!;
+    const loaded = adminPersonaOnDisk(personasDir, id) ? loadMindStonePersona(personasDir, id) : undefined;
+    if (!loaded?.ok) {
+      sendJson(res, 404, { ok: false, error: `no persona named "${id}" that loads` });
+      return;
+    }
+    const persona = loaded.persona;
+    const privateDir = isRealDirectory(persona.dir) ? readablePersonaKnowledgebasesDir(persona.dir) : undefined;
+    sendJson(res, 200, {
+      ok: true,
+      persona: {
+        id: persona.id,
+        name: persona.name,
+        description: persona.description,
+        version: persona.version,
+        personaMarkdown: persona.personaMarkdown,
+        ...(persona.safetyMarkdown ? { safetyMarkdown: persona.safetyMarkdown } : {}),
+        skills: persona.skills,
+        workflows: persona.workflows,
+        knowledgebases: persona.knowledgebases,
+        privateKnowledgebases: privateDir ? adminKnowledgebaseList(privateDir) : [],
+        active: gateConfig.config?.personas?.active === persona.id,
+      },
+    });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/admin/workflows") {
+    const workflowsDir = workflowsDirFromConfig(gateConfig.config, paths);
+    const workflows = discoverMindStoneWorkflows(workflowsDir).map(({ id, name, description, version, stepCount, error }) => ({ id, name, description, version, stepCount, ...(error ? { error: "this workflow can't be loaded" } : {}) }));
+    sendJson(res, 200, { ok: true, active: gateConfig.config?.workflows?.active ?? null, workflows });
+    return;
+  }
+  const workflowReadMatch = /^\/admin\/workflows\/([a-z0-9][a-z0-9-]{0,39})$/.exec(url.pathname);
+  if (req.method === "GET" && workflowReadMatch) {
+    const workflowsDir = workflowsDirFromConfig(gateConfig.config, paths);
+    const id = workflowReadMatch[1]!;
+    const loaded = isRealWorkflowDir(workflowsDir, id) ? loadMindStoneWorkflow(workflowsDir, id) : undefined;
+    if (!loaded?.ok) {
+      sendJson(res, 404, { ok: false, error: `no workflow named "${id}" that loads` });
+      return;
+    }
+    const { dir: _dir, ...workflow } = loaded.workflow;
+    sendJson(res, 200, { ok: true, workflow });
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/admin/knowledgebases") {
+    // The global collections, for the persona editor's picker (#125). Creating one is the CLI's job.
+    sendJson(res, 200, { ok: true, knowledgebases: adminKnowledgebaseList(knowledgebasesDirFromConfig(gateConfig.config, paths)) });
+    return;
+  }
+  const privateKbListMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases$/.exec(url.pathname);
+  if (req.method === "GET" && privateKbListMatch) {
+    const personasDir = personasDirFromConfig(gateConfig.config, paths);
+    const id = privateKbListMatch[1]!;
+    if (!adminPersonaOnDisk(personasDir, id)) {
+      sendJson(res, 404, { ok: false, error: `no persona named "${id}"` });
+      return;
+    }
+    const privateDir = readablePersonaKnowledgebasesDir(join(personasDir, id));
+    sendJson(res, 200, { ok: true, knowledgebases: privateDir ? adminKnowledgebaseList(privateDir) : [] });
+    return;
+  }
+  const privateKbSourcesMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases\/([a-z0-9][a-z0-9-]{0,39})\/sources$/.exec(url.pathname);
+  if (req.method === "GET" && privateKbSourcesMatch) {
+    const personasDir = personasDirFromConfig(gateConfig.config, paths);
+    const id = privateKbSourcesMatch[1]!;
+    if (!adminPersonaOnDisk(personasDir, id)) {
+      sendJson(res, 404, { ok: false, error: `no persona named "${id}"` });
+      return;
+    }
+    try {
+      const sources = listPrivateKnowledgebaseSources(join(personasDir, id), privateKbSourcesMatch[2]!);
+      // A URL's credentials are masked, as config reads mask them.
+      sendJson(res, 200, { ok: true, sources: { ...sources, urls: sources.urls.map((source) => ({ ...source, url: maskUrlCredentials(source.url) })) } });
+    } catch (error) {
+      if (error instanceof PersonaComposeError) {
+        sendJson(res, error.status, { ok: false, error: error.message, code: error.code });
+        return;
+      }
+      throw error;
+    }
+    return;
+  }
   if (req.method === "GET" && url.pathname === "/admin/secrets") {
     // The stored secrets by name (#88): never a value. A link is listed as a
     // link and never followed.
@@ -2340,6 +2448,164 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       }
       appendAdminAudit(paths.dataDir, { userId, action: "skill_installed", skill: id });
       sendJson(res, 200, { ok: true, skill: { id, source: "installed" } });
+    });
+    return;
+  }
+
+  // Owner-built personas, workflows and private knowledge bases (#125).
+  // Saving never makes a persona active. Each write is audited.
+  const composeRefusal = (error: unknown, audit: Record<string, unknown>): boolean => {
+    if (error instanceof PersonaComposeError || error instanceof WorkflowWriteError) {
+      refuse(error.status, { error: error.message, code: error.code }, { reason: error.code, ...audit });
+      return true;
+    }
+    return false;
+  };
+  const composeDirs = () => ({
+    personasDir: personasDirFromConfig(gateConfig.config, paths),
+    skillsDir: skillsDirFromConfig(gateConfig.config, paths),
+    workflowsDir: workflowsDirFromConfig(gateConfig.config, paths),
+    knowledgebasesDir: knowledgebasesDirFromConfig(gateConfig.config, paths),
+  });
+  if (req.method === "POST" && url.pathname === "/admin/personas") {
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    await withAdminWriteLock(() => {
+      try {
+        const input = parseOwnerPersonaInput(body, "create");
+        const current = loadMindStoneConfig(configPath).config;
+        const created = createOwnerPersona({
+          ...composeDirs(),
+          input,
+          referencedPersonaIds: referencedPersonaIds(current, paths),
+          createdBy: userId,
+          now: new Date().toISOString(),
+        });
+        appendAdminAudit(paths.dataDir, { userId, action: "persona_created", persona: created.id });
+        sendJson(res, 201, { ok: true, persona: { id: created.id, active: false } });
+      } catch (error) {
+        if (!composeRefusal(error, { persona: typeof body.id === "string" ? body.id.slice(0, 64) : null })) throw error;
+      }
+    });
+    return;
+  }
+  const personaWriteMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})$/.exec(url.pathname);
+  if (req.method === "PATCH" && personaWriteMatch) {
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const id = personaWriteMatch[1]!;
+    await withAdminWriteLock(() => {
+      try {
+        const dirs = composeDirs();
+        if (!adminPersonaOnDisk(dirs.personasDir, id)) throw new PersonaComposeError(`no persona named "${id}"`, "not_found", 404);
+        const input = parseOwnerPersonaInput(body, "edit");
+        updateOwnerPersona({ ...dirs, id, input, updatedBy: userId, now: new Date().toISOString() });
+        appendAdminAudit(paths.dataDir, { userId, action: "persona_edited", persona: id, fields: Object.keys(body).sort() });
+        // An edit to the active persona applies from its next turn.
+        sendJson(res, 200, { ok: true, persona: { id, active: loadMindStoneConfig(configPath).config?.personas?.active === id } });
+      } catch (error) {
+        if (!composeRefusal(error, { persona: id })) throw error;
+      }
+    });
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/admin/workflows") {
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    await withAdminWriteLock(() => {
+      try {
+        const { id, ...definition } = body;
+        if (typeof id !== "string" || !WORKFLOW_ID.test(id)) throw new WorkflowWriteError("id must be 1 to 40 lowercase letters, digits and hyphens", "invalid_workflow", 400);
+        const personasDir = personasDirFromConfig(gateConfig.config, paths);
+        const checked = validateWorkflowDefinition(definition, { personaExists: (personaId) => adminPersonaLoads(personasDir, personaId) });
+        if (!checked.ok) throw new WorkflowWriteError(checked.error, "invalid_workflow", 400);
+        writeWorkflowDefinition({ workflowsDir: workflowsDirFromConfig(gateConfig.config, paths), id, workflow: checked.workflow, mode: "create" });
+        appendAdminAudit(paths.dataDir, { userId, action: "workflow_created", workflow: id });
+        sendJson(res, 201, { ok: true, workflow: { id } });
+      } catch (error) {
+        if (!composeRefusal(error, { workflow: typeof body.id === "string" ? body.id.slice(0, 64) : null })) throw error;
+      }
+    });
+    return;
+  }
+  const workflowWriteMatch = /^\/admin\/workflows\/([a-z0-9][a-z0-9-]{0,39})$/.exec(url.pathname);
+  if (req.method === "PATCH" && workflowWriteMatch) {
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const id = workflowWriteMatch[1]!;
+    await withAdminWriteLock(() => {
+      try {
+        // The body is the whole new definition (name, description, version, steps).
+        const personasDir = personasDirFromConfig(gateConfig.config, paths);
+        const checked = validateWorkflowDefinition(body, { personaExists: (personaId) => adminPersonaLoads(personasDir, personaId) });
+        if (!checked.ok) throw new WorkflowWriteError(checked.error, "invalid_workflow", 400);
+        writeWorkflowDefinition({ workflowsDir: workflowsDirFromConfig(gateConfig.config, paths), id, workflow: checked.workflow, mode: "replace" });
+        appendAdminAudit(paths.dataDir, { userId, action: "workflow_edited", workflow: id });
+        sendJson(res, 200, { ok: true, workflow: { id } });
+      } catch (error) {
+        if (!composeRefusal(error, { workflow: id })) throw error;
+      }
+    });
+    return;
+  }
+  const privateKbCreateMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases$/.exec(url.pathname);
+  if (req.method === "POST" && privateKbCreateMatch) {
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const id = privateKbCreateMatch[1]!;
+    await withAdminWriteLock(() => {
+      try {
+        const personasDir = personasDirFromConfig(gateConfig.config, paths);
+        if (!adminPersonaOnDisk(personasDir, id)) throw new PersonaComposeError(`no persona named "${id}"`, "not_found", 404);
+        const unknown = Object.keys(body).find((key) => !["id", "name", "description"].includes(key));
+        if (unknown) throw new PersonaComposeError(`unknown field: ${unknown}`, "invalid_knowledgebase", 400);
+        const created = createPrivateKnowledgebase(join(personasDir, id), { id: body.id, name: body.name, description: body.description });
+        appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_created", persona: id, knowledgebase: created.id });
+        sendJson(res, 201, { ok: true, knowledgebase: { id: created.id } });
+      } catch (error) {
+        if (!composeRefusal(error, { persona: id })) throw error;
+      }
+    });
+    return;
+  }
+  const privateKbSourceWriteMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases\/([a-z0-9][a-z0-9-]{0,39})\/(sources|ingest)$/.exec(url.pathname);
+  if (req.method === "POST" && privateKbSourceWriteMatch) {
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const [, id, kbId, action] = privateKbSourceWriteMatch as unknown as [string, string, string, "sources" | "ingest"];
+    const personasDir = personasDirFromConfig(gateConfig.config, paths);
+    if (!adminPersonaOnDisk(personasDir, id)) {
+      refuse(404, { error: `no persona named "${id}"`, code: "not_found" }, { reason: "not_found", persona: id });
+      return;
+    }
+    if (action === "sources") {
+      // A URL is fetched from this host at ingest: it needs the advanced-settings permission.
+      if (body.kind === "url" && !readAdminPermissions(paths.dataDir).advancedSettings) {
+        refuse(403, { error: "a URL source needs the advanced-settings permission" }, { reason: "advanced", persona: id, knowledgebase: kbId });
+        return;
+      }
+      await withAdminWriteLock(() => {
+        try {
+          const added = addPrivateKnowledgebaseSource(join(personasDir, id), kbId, body);
+          appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_source_added", persona: id, knowledgebase: kbId, kind: added.kind, source: added.name });
+          sendJson(res, 201, { ok: true, source: added, indexed: false });
+        } catch (error) {
+          if (!composeRefusal(error, { persona: id, knowledgebase: kbId })) throw error;
+        }
+      });
+      return;
+    }
+    // Ingest: indexes the private KB, fetching its URL sources now.
+    await withAdminWriteLock(async () => {
+      try {
+        const root = ensurePersonaKnowledgebasesDir(join(personasDir, id));
+        const result = await ingestMindStoneKnowledgebase(root, kbId, { now: new Date().toISOString(), noLinks: true, fetchTimeoutMs: 20_000, maxFetchBytes: 5 * 1024 * 1024 });
+        if (!result.ok) throw new PersonaComposeError(publicKbText(result.error, root), "ingest_failed", 422);
+        appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_ingested", persona: id, knowledgebase: kbId, entries: result.entryCount });
+        sendJson(res, 200, { ok: true, knowledgebase: { id: kbId, entryCount: result.entryCount, sourceCount: result.sourceCount } });
+      } catch (error) {
+        if (!composeRefusal(error, { persona: id, knowledgebase: kbId })) throw error;
+      }
     });
     return;
   }
@@ -3794,6 +4060,40 @@ function approvalSummary(action: ProposedAction) {
     decisionNote: action.decisionNote,
     queueState: action.queueState,
   };
+}
+
+/** A persona folder named exactly this (case included) that is a real folder, not a link (#125). */
+function adminPersonaOnDisk(personasDir: string, id: string): boolean {
+  if (!isSafeComponentId(id)) return false;
+  try {
+    return readdirSync(personasDir).includes(id) && isRealDirectory(join(personasDir, id));
+  } catch {
+    return false;
+  }
+}
+
+/** A persona a workflow step may name: on disk under exactly this id, and it loads (#125). */
+function adminPersonaLoads(personasDir: string, id: string): boolean {
+  return adminPersonaOnDisk(personasDir, id) && loadMindStonePersona(personasDir, id).ok;
+}
+
+/** Knowledge bases for the Console, without host paths. */
+function adminKnowledgebaseList(kbDir: string): Array<Record<string, unknown>> {
+  return discoverMindStoneKnowledgebases(kbDir).map(({ id, name, description, version, indexed, entryCount, sourceCount, error }) => ({
+    id,
+    name,
+    description,
+    version,
+    indexed,
+    entryCount,
+    sourceCount,
+    ...(error ? { error: "this knowledge base can't be loaded" } : {}),
+  }));
+}
+
+/** An ingest error with the host's KB path replaced by the KB's own name. */
+function publicKbText(text: string, kbRoot: string): string {
+  return text.split(kbRoot).join("<knowledgebases>");
 }
 
 async function readAdminBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | undefined> {

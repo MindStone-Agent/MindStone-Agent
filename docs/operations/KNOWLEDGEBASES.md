@@ -106,6 +106,9 @@ they feed the SAME deterministic ingest/index/search/recall pipeline:
   `knowledgebases` folder, KB folder, `kb.json`, `index.json` or `sources` is
   refused. `kb ingest --persona` also refuses linked source files and folder
   sources; a private KB holds its own files.
+- The admin API creates private KBs, adds text and URL sources, and runs
+  ingest (#125); a URL source needs the advanced-settings permission, and a
+  fetch from the admin API is capped at 20 s and 5 MB.
 - See [PERSONAS.md](PERSONAS.md#components-at-run-time-125) for the full rule.
 
 ### Follow-on source targets (documented plan, not implemented)

@@ -58,6 +58,25 @@ export function parseExternalSources(raw: unknown): MindStoneKbExternalSource[] 
   return sources;
 }
 
+/** A response body as text, refused past `maxBytes` (read in chunks, never all at once first). */
+async function readTextCapped(response: Response, maxBytes: number, sourceId: string): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new Error(`url source "${sourceId}" is larger than ${maxBytes} bytes`);
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
 /** One document yielded by a provider, ready for the deterministic section parser. */
 export type ExternalSourceDocument = {
   /** Virtual source path, namespaced to avoid clashing with KB-local sources (e.g. "folder:notes/a.md"). */
@@ -150,14 +169,24 @@ export function extractHtmlText(html: string): { title?: string; markdown: strin
   return { title, markdown };
 }
 
-export async function loadUrlSourceDocument(source: MindStoneKbExternalSource, options: { now?: string } = {}): Promise<ExternalSourceDocument> {
+/**
+ * `timeoutMs` and `maxBytes` bound a fetch the gateway makes for the admin
+ * API (#125); the CLI's `kb ingest` passes neither, as before.
+ */
+export async function loadUrlSourceDocument(
+  source: MindStoneKbExternalSource,
+  options: { now?: string; timeoutMs?: number; maxBytes?: number } = {},
+): Promise<ExternalSourceDocument> {
   const url = source.url ?? "";
-  const response = await fetch(url, { headers: { Accept: "text/html, text/markdown, text/plain" } });
+  const response = await fetch(url, {
+    headers: { Accept: "text/html, text/markdown, text/plain" },
+    ...(options.timeoutMs ? { signal: AbortSignal.timeout(options.timeoutMs) } : {}),
+  });
   if (!response.ok) {
     throw new Error(`url source "${source.id}" fetch failed: HTTP ${response.status} for ${url}`);
   }
   const contentType = response.headers.get("content-type") ?? "";
-  const raw = await response.text();
+  const raw = options.maxBytes ? await readTextCapped(response, options.maxBytes, source.id) : await response.text();
   const now = options.now ?? new Date().toISOString();
   let markdown = raw;
   let titleHint: string | undefined;

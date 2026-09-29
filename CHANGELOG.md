@@ -7,6 +7,12 @@ Every pull request to `main` adds its entry under **Unreleased**. A release move
 ## [Unreleased]
 
 ### Added
+- **Build personas, workflows and private knowledge bases from the admin API** (#125, part 2). See `docs/gateway/API_REFERENCE.md`.
+  - `GET/POST /admin/personas`, `GET/PATCH /admin/personas/<id>`: a persona's text and its skills, workflows and global KB collections, each checked to exist. Saving never activates it. New ids follow #105's rules (lowercase, not on disk in any case, not used by the config).
+  - `GET/POST /admin/workflows`, `GET/PATCH /admin/workflows/<id>`, with strict checks: unknown keys, empty conditions and empty gates are refused, `retry.maxAttempts` is 1 to 5, and a step's persona must exist under exactly that id.
+  - `GET /admin/knowledgebases` lists the global collections. `GET/POST /admin/personas/<id>/knowledgebases`, `…/<kb>/sources` (markdown text; a URL needs the advanced-settings permission, and its credentials are masked on read) and `…/<kb>/ingest` build a persona's private KBs. A fetch from the admin API is capped at 20 s and 5 MB.
+  - Creates are staged in a dot folder and moved into place; persona, workflow and KB discovery skip dot folders. Links are refused. Every write is audited.
+  - New smoke: `scripts/smoke-persona-admin.sh`.
 - **A persona's components take effect** (#125, part 1). While a persona is active, its skills, workflows and knowledge bases are the ones in play; see `docs/operations/PERSONAS.md`.
   - **Skills:** only the skills in its `skills.json` go into the owner's prompt; with none listed, all installed skills do, as before. A listed skill that isn't installed is skipped and recorded. **A persona pack's existing `skills.json` now restricts the prompt to those skills.**
   - **Global knowledge bases:** only the collections in its `knowledgebases.json` are searched; with none listed, all of them.

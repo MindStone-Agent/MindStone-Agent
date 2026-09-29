@@ -92,7 +92,8 @@ export function discoverMindStonePersonas(personasDir: string): MindStonePersona
   if (!existsSync(personasDir)) return [];
   const summaries: MindStonePersonaSummary[] = [];
   for (const entry of readdirSync(personasDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    // A dot folder is a staging folder from an admin write (#125), never a real one.
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const loaded = loadMindStonePersona(personasDir, entry.name);
     if (loaded.ok) {
       summaries.push({

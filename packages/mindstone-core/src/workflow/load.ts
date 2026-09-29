@@ -144,7 +144,8 @@ export function discoverMindStoneWorkflows(workflowsDir: string): MindStoneWorkf
   if (!existsSync(workflowsDir)) return [];
   const summaries: MindStoneWorkflowSummary[] = [];
   for (const entry of readdirSync(workflowsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    // A dot folder is a staging folder from an admin write (#125), never a real one.
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
     const loaded = loadMindStoneWorkflow(workflowsDir, entry.name);
     if (loaded.ok) {
       summaries.push({
