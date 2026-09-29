@@ -329,8 +329,9 @@ async function checkedAddresses(hostname: string, refused: ((host: string) => bo
  * One GET to the addresses that were checked, never a second lookup, so DNS
  * can't change them in between. All of them, so a host whose first address
  * doesn't answer (IPv6 before IPv4) is still reached on the next.
+ * Exported for the URL guard smoke only.
  */
-function requestPinned(url: URL, pinned: Array<{ address: string; family: number }>, signal: AbortSignal): Promise<IncomingMessage> {
+export function requestPinned(url: URL, pinned: Array<{ address: string; family: number }>, signal: AbortSignal): Promise<IncomingMessage> {
   const pinnedLookup = ((_hostname: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
     if (options?.all) callback(null, pinned);
     else callback(null, pinned[0]!.address, pinned[0]!.family);

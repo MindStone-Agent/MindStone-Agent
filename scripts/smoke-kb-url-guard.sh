@@ -30,7 +30,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { loadUrlSourceDocument } from "./packages/mindstone-core/src/knowledgebase/sources.ts";
+import { loadUrlSourceDocument, requestPinned } from "./packages/mindstone-core/src/knowledgebase/sources.ts";
 import { addPrivateKnowledgebaseSource, createPrivateKnowledgebase, PersonaComposeError } from "./packages/mindstone-core/src/persona/compose.ts";
 
 // --- Add time.
@@ -100,6 +100,11 @@ await refusedWith("a redirect to a private host", fetchWith(`${base}/redir-priva
 const byAddress = { allowPrivateHosts: false, refusedHost: (host: string) => host === "127.0.0.1" || host === "::1" };
 await refusedWith("a name that resolves to a refused address", fetchWith(`http://localhost:${port}/doc.md`, byAddress), /on this machine or a private network/);
 assert.match((await fetchWith(`http://localhost:${port}/doc.md`, { allowPrivateHosts: false, refusedHost: () => false })).raw, /KBGUARD-4242/, "control: the same name with nothing refused is fetched");
+// The connection goes to the checked address, never a second lookup: a name
+// that resolves nowhere still reaches the address it was pinned to.
+const pinned = await requestPinned(new URL(`http://pinned.invalid:${port}/doc.md`), [{ address: "127.0.0.1", family: 4 }], AbortSignal.timeout(3000));
+assert.equal(pinned.statusCode, 200, "a pinned request must connect to the checked address");
+pinned.resume();
 // At most 5 redirects.
 await refusedWith("a redirect loop", fetchWith(`${base}/loop/0`, only127002), /redirected too many times/);
 assert.equal(loopHits, 6, "the first request and 5 redirects, then it stops");
