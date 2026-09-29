@@ -113,9 +113,23 @@ export function isQuotaHit(hit: MemoryHit): boolean {
  * again by its other copy. Order is kept.
  */
 export function selectRecallHits(hits: MemoryHit[], limit: number): MemoryHit[] {
-  const quota = hits.filter(isQuotaHit).slice(0, limit);
+  const allQuota = hits.filter(isQuotaHit);
+  // KB slots come out of the same limit: when memory has a hit of its own
+  // (any hit not from a knowledge base), it keeps at least one slot (#151).
+  // Only when KB sources ranked by meaning take slots; with none, selection
+  // is by rank alone, as before.
+  const memoryWaiting = allQuota.length > 0 && hits.some((hit) => hit.kind !== "kb");
+  const quota = allQuota.slice(0, Math.max(0, memoryWaiting ? limit - 1 : limit));
   const inByQuota = new Set(quota.map((hit) => hit.id));
-  const others = hits.filter((hit) => !isQuotaHit(hit) && !inByQuota.has(hit.id)).slice(0, Math.max(0, limit - quota.length));
+  const candidates = hits.filter((hit) => !isQuotaHit(hit) && !inByQuota.has(hit.id));
+  const room = Math.max(0, limit - quota.length);
+  let others = candidates.slice(0, room);
+  // The slot kept for memory goes to a hit of memory's own, not to a KB
+  // source found by words and ranked above it (#151 review).
+  if (memoryWaiting && room > 0 && !others.some((hit) => hit.kind !== "kb")) {
+    const memory = candidates.find((hit) => hit.kind !== "kb");
+    if (memory) others = [...others.slice(0, room - 1), memory];
+  }
   const kept = new Set([...quota, ...others]);
   return hits.filter((hit) => kept.has(hit));
 }
@@ -191,12 +205,14 @@ export function buildMemoryRecallPrompt(hits: MemoryHit[], maxPromptTokens = DEF
       tokens += cost(hit);
     };
     take(quota[0]!);
-    if (others[0]) take(others[0]);
+    // The best hit of memory's own, not a KB source found by words (#151 review).
+    const bestMemory = others.find((hit) => hit.kind !== "kb") ?? others[0];
+    if (bestMemory) take(bestMemory);
     const quotaBudget = tokens + Math.max(0, Math.floor((maxPromptTokens - tokens) / 2));
     for (const hit of quota.slice(1)) {
       if (tokens + cost(hit) <= quotaBudget) take(hit);
     }
-    for (const hit of others.slice(1)) {
+    for (const hit of others.filter((candidate) => candidate !== bestMemory)) {
       if (tokens + cost(hit) > maxPromptTokens) break;
       take(hit);
     }

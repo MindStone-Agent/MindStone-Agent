@@ -124,10 +124,10 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import {
-  KB_EMBED_LIMITS, KB_VECTORS_FILE, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbVectors, writeKbVectors,
+  KB_EMBED_LIMITS, KB_VECTORS_FILE, cosineSimilarity, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbVectors, writeKbVectors,
 } from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
 import { ingestMindStoneKnowledgebase } from "./packages/mindstone-core/src/knowledgebase/load.ts";
-import { KnowledgebaseRecallProvider } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
+import { KnowledgebaseRecallProvider, knowledgebaseRecallSettings } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
 import { buildMemoryRecallPrompt, CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, recallMindStoneMemory, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
 import { sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
 
@@ -171,6 +171,12 @@ assert.equal(readKbVectors(dir, indexText, { id: "stub", model: "m1" }).state, "
 
 // Failures keep nothing: a throwing embedder, a short answer, mixed
 // dimensions, a value past float32, and the time limit all remove the file.
+// An all-zero vector (or one that rounds to zero in float32) fails the embed, and says why.
+for (const zero of [[0, 0, 0], [1e-50, 0, -1e-50]]) {
+  const zdir = mkdtempSync(join(tmpdir(), "kbvec-zero-"));
+  const zeroed = await writeKbVectors({ kbDir: zdir, kbId: "k", entries, indexText, embedder: { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.map(() => zero); } } as any });
+  assert.match((zeroed as any).reason ?? "", /all-zero vector/, `a zero vector ${JSON.stringify(zero)} must fail the embed`);
+}
 const failing = [
   { id: "stub", model: "m1", async embedTexts() { throw new Error("down"); } },
   { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.slice(1).map(() => [1, 0]); } },
@@ -247,6 +253,24 @@ assert.deepEqual(selectRecallHits(hits, 8).filter((h) => h.id === "kb:a").map(is
   await new KnowledgebaseRecallProvider(unread as any, { embedder: fixed({ question: [1, 0, 0] }), maxResults: 0 }).search({ text: "question", limit: 8 });
   await new KnowledgebaseRecallProvider(unread as any, {}).search({ text: "question", limit: 8 });
 }
+// A source exactly at minSimilarity is recalled (#151).
+{
+  const edge = { documents: [doc("kb:e", "x")], vectors: () => new Map([["kb:e", { dimension: 3, header: [], footer: [], entries: [{ line: "- e", citation: "e", vector: vec([1, 1, 0]) }] }]]) };
+  const at = cosineSimilarity([1, 0, 0], vec([1, 1, 0]));
+  const found = await new KnowledgebaseRecallProvider(edge as any, { embedder: fixed({ q: [1, 0, 0] }), minSimilarity: at }).search({ text: "q", limit: 8 });
+  assert.equal(found.filter(isQuotaHit).length, 1, "a source at exactly minSimilarity must be recalled");
+}
+// knowledgebases.recall: out of range falls back to the default.
+assert.deepEqual(knowledgebaseRecallSettings({ knowledgebases: { recall: { maxResults: 20, minSimilarity: -0.5 } } } as any), { maxResults: 20, minSimilarity: -0.5 });
+assert.deepEqual(knowledgebaseRecallSettings({ knowledgebases: { recall: { maxResults: 21, minSimilarity: 1.5 } } } as any), { maxResults: undefined, minSimilarity: undefined });
+assert.deepEqual(knowledgebaseRecallSettings({ knowledgebases: { recall: { maxResults: 2.5 } } } as any).maxResults, undefined);
+assert.deepEqual(knowledgebaseRecallSettings({ knowledgebases: { recall: { maxResults: -1, minSimilarity: -1.5 } } } as any), { maxResults: undefined, minSimilarity: undefined });
+assert.deepEqual(knowledgebaseRecallSettings({ knowledgebases: { recall: { maxResults: 0, minSimilarity: -1 } } } as any), { maxResults: 0, minSimilarity: -1 });
+// An all-zero question vector recalls nothing by meaning, even with minSimilarity at -1.
+{
+  const zeroQuery = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [0, 0, 0] }), minSimilarity: -1 }).search({ text: "question", limit: 8 });
+  assert.equal(zeroQuery.filter(isQuotaHit).length, 0, "an all-zero question vector must match nothing");
+}
 // Threshold, cap, embedder down, no embedder.
 hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), minSimilarity: 0.7 }).search({ text: "question", limit: 8 });
 assert.deepEqual(hits.filter(isQuotaHit).map((h) => h.id), ["kb:a"]);
@@ -288,9 +312,41 @@ assert.deepEqual(selectRecallHits(merged, 2).map((h) => h.id), ["k1", "m1"]);
   // Budget memory leaves unused goes back to the quota hits left out.
   const small = buildMemoryRecallPrompt([kbBig("k1"), kbBig("k2"), kbBig("k3"), hit("m-small", 0.9)], 2500);
   assert.deepEqual(small.hits.filter(isQuotaHit).map((h) => h.id), ["k1", "k2", "k3"], `unused budget must go to the quota hits left out: ${small.hits.map((h) => h.id)}`);
+  // Other KB sources stop at half of what is left, so later memory hits fit; memory stops at the budget.
+  const memHit = (id: string) => ({ ...hit(id, 0.5), text: "memory ".repeat(340) });
+  const shared = buildMemoryRecallPrompt([hit("m-top", 0.9), kbBig("k1"), kbBig("k2"), kbBig("k3"), memHit("m2"), memHit("m3"), memHit("m4")], 2500);
+  const ids = shared.hits.map((h) => h.id);
+  assert.ok(ids.includes("m3"), `KB sources past half of what was left pushed memory out: ${ids}`);
+  assert.ok(!ids.includes("m4"), `memory went past the budget: ${ids} (${shared.tokens} tokens)`);
   assert.deepEqual(buildMemoryRecallPrompt([long, hit("m2", 0.5)], 2500).hits.map((h) => h.id), ["long"], "with no quota hit, the order decides as before");
 }
 assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) => h.id), ["m1"]);
+// KB slots come out of memory's limit, and memory keeps one when it has a hit (#151).
+{
+  const three = [hit("k1", 0.9, true, "kb"), hit("k2", 0.8, true, "kb"), hit("k3", 0.7, true, "kb")];
+  assert.deepEqual(selectRecallHits([...three, hit("m1", 0.9), hit("m2", 0.8)], 3).map((h) => h.id), ["k1", "k2", "m1"], "memory keeps a slot");
+  assert.deepEqual(selectRecallHits(three, 3).map((h) => h.id), ["k1", "k2", "k3"], "with no memory hit, KB sources take every slot");
+  assert.deepEqual(selectRecallHits([...three, hit("m1", 0.9)], 1).map((h) => h.id), ["m1"], "one slot: memory's");
+  // A KB source's word copy isn't memory: it doesn't take a slot from the quota.
+  assert.deepEqual(selectRecallHits([...three, hit("k3", 0.95, false, "kb")], 3).map((h) => `${h.id}:${isQuotaHit(h) ? "meaning" : "words"}`), ["k1:meaning", "k2:meaning", "k3:meaning"]);
+  // A capped-out source's word copy, ranked above memory's hit, doesn't take memory's slot.
+  const tag = (h: any) => `${h.id}:${isQuotaHit(h) ? "meaning" : h.id.startsWith("k") ? "words" : "memory"}`;
+  assert.deepEqual(selectRecallHits([...three, hit("k3", 0.95, false, "kb"), hit("m1", 0.5)], 3).map(tag), ["k1:meaning", "k2:meaning", "m1:memory"]);
+  assert.deepEqual(selectRecallHits([...three, hit("k1", 0.95, false, "kb"), hit("m1", 0.5)], 1).map(tag), ["m1:memory"]);
+  // A KB source found only by words (no meaning copy) isn't memory either.
+  const kbWords = (id: string) => hit(id, 0.95, false, "kb");
+  const kindTag = (h: any) => `${h.id}:${isQuotaHit(h) ? "meaning" : h.kind === "kb" ? "kb-words" : "memory"}`;
+  assert.deepEqual(selectRecallHits([...three, kbWords("kx"), hit("m1", 0.5)], 3).map(kindTag), ["k1:meaning", "k2:meaning", "m1:memory"]);
+  assert.deepEqual(selectRecallHits([...three, kbWords("kx")], 3).map(kindTag), ["k1:meaning", "k2:meaning", "k3:meaning"], "with no memory hit, KB sources keep every slot");
+  // With no KB source ranked by meaning, selection is by rank alone, as before #151.
+  assert.deepEqual(selectRecallHits([kbWords("ka"), kbWords("kb"), kbWords("kc"), hit("m1", 0.5)], 3).map(kindTag), ["ka:kb-words", "kb:kb-words", "kc:kb-words"]);
+  // In the prompt, the forced hit is memory's own, not a word copy ranked above it.
+  const wordCopy = { ...hit("k8", 0.95, false, "kb"), text: "words ".repeat(900) };
+  const promptWithCopy = buildMemoryRecallPrompt([hit("k8", 0.9, true, "kb"), wordCopy, hit("m1", 0.5)], 500);
+  assert.ok(promptWithCopy.hits.some((h) => h.id === "m1"), `the best memory hit must go in before a word copy: ${promptWithCopy.hits.map((h) => h.id)}`);
+  const promptWithKbWords = buildMemoryRecallPrompt([hit("k8", 0.9, true, "kb"), { ...kbWords("kx"), text: "words ".repeat(900) }, hit("m1", 0.5)], 500);
+  assert.ok(promptWithKbWords.hits.some((h) => h.id === "m1"), `the best memory hit must go in before a KB source found by words: ${promptWithKbWords.hits.map((h) => h.id)}`);
+}
 
 // A request the embedder can't finish in time: the batch once more, an entry a request; one that
 // times out alone says so.
@@ -484,6 +540,10 @@ for bad in "--embed-timeout" "--embed-timeout --json" "--embed-timeout 0" "--emb
 done
 ${MS} kb ingest garage --embed-timeout=300 --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{if (JSON.parse(d).vectors.state!=="ready") process.exit(1);})'
 ${MS} kb ingest garage --embed-timeout 300 --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{if (JSON.parse(d).vectors.state!=="ready") process.exit(1);})'
+# Ingest gives a request 60 s, whatever the query-time EMBEDDER_TIMEOUT_MS (1.5 s here): an embedder slower than that still embeds.
+stub_mode slow
+${MS} kb ingest pantry --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const r=JSON.parse(d); if (r.vectors.state!=="ready") { console.error("slow embedder at ingest:", JSON.stringify(r.vectors)); process.exit(1); }})'
+stub_mode ok
 # A request timeout that isn't a number falls back to the default, rather than aborting every request.
 EMBEDDER_TIMEOUT_MS=abc ${MS} kb ingest garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const r=JSON.parse(d); if (r.vectors.state!=="ready") { console.error("EMBEDDER_TIMEOUT_MS=abc:", JSON.stringify(r.vectors)); process.exit(1); }})'
 
