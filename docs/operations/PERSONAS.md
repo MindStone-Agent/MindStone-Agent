@@ -53,6 +53,31 @@ Rule fields (`sessionKeyPrefix`, `sourceChannel`, `sourceSubstrate`) AND
 together within a rule. Resolution runs per turn in both the native chat/TUI
 path and all Gateway routes.
 
+## A persona the agent proposes, with its components (#125)
+
+The agent's `mindstone-persona-proposal` can carry `components`:
+- `skills`, `workflows`, `knowledgebases`: existing ones, by id. Approving the
+  persona checks they exist (`422 unknown_component` otherwise) and writes
+  them as its lists.
+- `new.skills` (up to 3), `new.workflows` (up to 3), `new.privateKnowledgebases`
+  (up to 2, each up to 5 markdown text sources): each becomes **its own
+  approval card**, linked to the persona's card.
+  - A component card can be approved only after its persona's
+    (`409 persona_pending`); rejecting the persona rejects its components
+    that are still waiting.
+  - An approved component joins its persona's list. A new skill goes through
+    the install gate (advanced settings), and one already installed is
+    refused, force or not. A new workflow is checked strictly, can't hand the
+    turn to or gate on a persona, its skills must be installed by then, and an
+    id the config runs or a persona lists is refused. A new private KB is
+    written and ingested.
+- A proposal whose components don't hold up is dropped whole, as is one that
+  would put a kind over its pending cap (6 cards of a kind per agent), so no
+  persona arrives half-built. Approving never activates, and a non-owner's
+  proposal is dropped.
+- The links live in the approval store (`parentApprovalId`), so a persona's
+  lists only ever hold components that exist.
+
 ## Building a persona in the Console (#125)
 
 The admin API creates and edits personas, workflows and private knowledge
