@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, fstatSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MemoryEmbeddingProvider } from "../memory/embedding.js";
 import type { MindStoneKbIndexEntry, MindStoneKbVectorsStatus } from "./types.js";
@@ -23,6 +23,8 @@ export const KB_EMBED_LIMITS = {
   timeoutMs: 120_000,
   /** A vectors.json larger than this is not read at recall. */
   maxFileBytes: 256 * 1024 * 1024,
+  /** Decoded vectors kept in memory across turns, all KBs together. */
+  cacheBytes: 512 * 1024 * 1024,
 };
 
 type KbVectorsFile = {
@@ -92,8 +94,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 class KbEmbedTimeout extends Error {}
 
+/** A request the embedder didn't answer in time (fetch's abort), not an error the embedder sent back. */
 function isAbort(error: unknown): boolean {
-  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError" || /aborted/i.test(error.message));
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 }
 
 /**
@@ -240,46 +243,67 @@ type ParsedVectorsFile = "too_large" | "unreadable" | { file: Partial<KbVectorsF
 
 /**
  * vectors.json parsed, and its vectors decoded on first use, kept while the
- * file's size and mtime stay the same: recall reads it every turn (#125 §5
- * review). The stale checks still run on every read.
+ * file stays the same one (inode, size, mtime and ctime: ingest moves a new
+ * file into place): recall reads it every turn (#125 §5 review). The stale
+ * checks still run on every read. Least recently used entries go first once
+ * the files kept add up to KB_EMBED_LIMITS.cacheBytes.
  */
-const PARSED_VECTORS = new Map<string, { mtimeMs: number; size: number; parsed: ParsedVectorsFile }>();
+const PARSED_VECTORS = new Map<string, { key: string; bytes: number; parsed: ParsedVectorsFile }>();
 
 function parsedVectorsFile(path: string): ParsedVectorsFile {
-  const stat = statSync(path);
-  const cached = PARSED_VECTORS.get(path);
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.parsed;
-  let parsed: ParsedVectorsFile;
-  if (stat.size > KB_EMBED_LIMITS.maxFileBytes) {
-    parsed = "too_large";
-  } else {
-    try {
-      const file = JSON.parse(readFileSync(path, "utf-8")) as Partial<KbVectorsFile>;
-      if (!file || typeof file !== "object") throw new Error("not an object");
-      let decoded: Map<string, Float32Array> | undefined | null = null;
-      parsed = {
-        file,
-        decoded: () => {
-          if (decoded !== null) return decoded;
-          decoded = new Map();
-          for (const [entryId, encoded] of Object.entries(file.vectors ?? {})) {
-            const vector = decodeVector(encoded, file.dimension as number);
-            if (!vector) {
-              decoded = undefined;
-              break;
-            }
-            decoded.set(entryId, vector);
-          }
-          return decoded;
-        },
-      };
-    } catch {
-      parsed = "unreadable";
+  // One descriptor for the size check and the read: a file swapped in between can't skip the cap.
+  const fd = openSync(path, "r");
+  try {
+    const stat = fstatSync(fd);
+    const key = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    const cached = PARSED_VECTORS.get(path);
+    if (cached && cached.key === key) {
+      PARSED_VECTORS.delete(path);
+      PARSED_VECTORS.set(path, cached);
+      return cached.parsed;
     }
+    let parsed: ParsedVectorsFile;
+    if (stat.size > KB_EMBED_LIMITS.maxFileBytes) {
+      parsed = "too_large";
+    } else {
+      try {
+        const file = JSON.parse(readFileSync(fd, "utf-8")) as Partial<KbVectorsFile>;
+        if (!file || typeof file !== "object") throw new Error("not an object");
+        let decoded: Map<string, Float32Array> | undefined | null = null;
+        parsed = {
+          file,
+          decoded: () => {
+            if (decoded !== null) return decoded;
+            decoded = new Map();
+            for (const [entryId, encoded] of Object.entries(file.vectors ?? {})) {
+              const vector = decodeVector(encoded, file.dimension as number);
+              if (!vector) {
+                decoded = undefined;
+                break;
+              }
+              decoded.set(entryId, vector);
+            }
+            // The base64 isn't needed once decoded: only the floats stay in memory.
+            file.vectors = {};
+            return decoded;
+          },
+        };
+      } catch {
+        parsed = "unreadable";
+      }
+    }
+    PARSED_VECTORS.delete(path);
+    PARSED_VECTORS.set(path, { key, bytes: stat.size, parsed });
+    let total = [...PARSED_VECTORS.values()].reduce((sum, entry) => sum + entry.bytes, 0);
+    for (const [oldPath, entry] of PARSED_VECTORS) {
+      if (total <= KB_EMBED_LIMITS.cacheBytes || oldPath === path) break;
+      PARSED_VECTORS.delete(oldPath);
+      total -= entry.bytes;
+    }
+    return parsed;
+  } finally {
+    closeSync(fd);
   }
-  if (PARSED_VECTORS.size >= 32) PARSED_VECTORS.delete(PARSED_VECTORS.keys().next().value!);
-  PARSED_VECTORS.set(path, { mtimeMs: stat.mtimeMs, size: stat.size, parsed });
-  return parsed;
 }
 
 export function kbVectorsStatus(read: ReadKbVectors): MindStoneKbVectorsStatus {

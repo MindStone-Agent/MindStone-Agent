@@ -116,7 +116,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do curl -s "${STUB}/_test/state" >/dev/null 2>&1 
 # --- 1. Unit ---
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -270,7 +270,13 @@ assert.deepEqual(selectRecallHits(merged, 2).map((h) => h.id), ["k1", "m1"]);
   const long = { ...hit("long", 0.99), text: "word ".repeat(4000) };
   const kbHit = { ...hit("k1", 0.5, true, "kb"), text: "a short KB source" };
   const prompt = buildMemoryRecallPrompt([long, kbHit], 2500);
-  assert.deepEqual(prompt.hits.map((h) => h.id), ["k1"], "the quota hit must fit before the long memory hit");
+  assert.deepEqual(prompt.hits.map((h) => h.id), ["long", "k1"], "the quota hit fits before the long memory hit, and the best memory hit still goes in");
+  // Quota hits take at most half the budget: three large KB sources leave room for memory.
+  const kbBig = (id: string) => ({ ...hit(id, 0.5, true, "kb"), text: "section ".repeat(700) });
+  const memory = { ...hit("m-top", 0.9), text: "memory ".repeat(600) };
+  const crowded = buildMemoryRecallPrompt([memory, kbBig("k1"), kbBig("k2"), kbBig("k3"), hit("m2", 0.4)], 2500);
+  assert.ok(crowded.hits.some((h) => h.id === "m-top"), "the best memory hit must stay in");
+  assert.ok(crowded.hits.filter(isQuotaHit).length <= 2, `quota hits took more than half the budget: ${crowded.hits.map((h) => h.id)}`);
   assert.deepEqual(buildMemoryRecallPrompt([long, hit("m2", 0.5)], 2500).hits.map((h) => h.id), ["long"], "with no quota hit, the order decides as before");
 }
 assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) => h.id), ["m1"]);
@@ -302,6 +308,22 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   } finally {
     KB_EMBED_LIMITS.maxFileBytes = cap;
   }
+}
+// The cache follows the file, not only its size and mtime: a new file moved into place with the
+// same size and mtime (a re-ingest within a second on a coarse clock) is read again.
+{
+  const cdir = mkdtempSync(join(tmpdir(), "kbvec-cache-"));
+  await writeKbVectors({ kbDir: cdir, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }) });
+  assert.equal(readKbVectors(cdir, indexText, { id: "stub", model: "m1" }).state, "ready");
+  const path = join(cdir, KB_VECTORS_FILE);
+  const before = statSync(path);
+  const other = JSON.parse(readFileSync(path, "utf8"));
+  other.indexSha256 = other.indexSha256.replace(/./, (c: string) => (c === "0" ? "1" : "0"));
+  writeFileSync(join(cdir, "next.json"), `${JSON.stringify(other)}\n`);
+  renameSync(join(cdir, "next.json"), path);
+  utimesSync(path, before.atime, before.mtime);
+  assert.equal(statSync(path).size, before.size, "fixture: same size");
+  assert.match((readKbVectors(cdir, indexText, { id: "stub", model: "m1" }) as any).reason ?? "", /index changed/, "a new file with the same size and mtime must be read again");
 }
 // Sections whose headings slug alike get their own ids, and so their own vectors.
 {
@@ -410,6 +432,14 @@ if (Object.keys(v.vectors).length !== index.entries.length) { console.error("not
 ' "${TEMP_RUNTIME}/ingest1.json" "${DATA}/knowledgebases/garage/vectors.json" "${DATA}/knowledgebases/garage/index.json"
 ${MS} kb status garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="ready") { console.error("status after ingest:", JSON.stringify(s.vectors)); process.exit(1); }})'
 ${MS} kb status garage | grep -q "vectors: ready (ollama:kbstub-a, 6 dimensions" || { echo "kb status must show the vectors" >&2; exit 1; }
+# --embed-timeout: <seconds> or =<seconds>, a whole number 1 to 86400; anything else is refused, never ignored.
+for bad in "--embed-timeout" "--embed-timeout --json" "--embed-timeout 0" "--embed-timeout 0.5" "--embed-timeout=abc"; do
+  # shellcheck disable=SC2086
+  if out="$(${MS} kb ingest garage ${bad} 2>&1)"; then echo "kb ingest accepted ${bad}" >&2; exit 1; fi
+  grep -q "whole number of seconds" <<<"${out}" || { echo "kb ingest ${bad}: ${out}" >&2; exit 1; }
+done
+${MS} kb ingest garage --embed-timeout=300 --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{if (JSON.parse(d).vectors.state!=="ready") process.exit(1);})'
+${MS} kb ingest garage --embed-timeout 300 --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{if (JSON.parse(d).vectors.state!=="ready") process.exit(1);})'
 
 # A question sharing no words with the KB recalls it by meaning, and only the
 # source that matches; the query is embedded once.

@@ -178,20 +178,25 @@ export function buildMemoryRecallPrompt(hits: MemoryHit[], maxPromptTokens = DEF
   let tokens = estimatePromptTokens("Relevant MindStone memory:\n");
 
   if (hits.some(isQuotaHit)) {
-    // Quota hits (#125 §5) take the budget first, so a long memory hit ranked
-    // above them can't push them out; the rest fill what is left, in order.
-    // The prompt keeps the ranked order.
+    // Quota hits (#125 §5) take the budget first, up to half of it, so a long
+    // memory hit ranked above them can't push them all out, and they can't
+    // push memory out either: the best memory hit always goes in, as before,
+    // and the rest fill what is left, in order. The prompt keeps the ranked order.
     const chosen = new Set<MemoryHit>();
-    for (const quotaPass of [true, false]) {
-      for (const hit of hits.filter((candidate) => isQuotaHit(candidate) === quotaPass)) {
-        const nextTokens = estimatePromptTokens(formatHit(hit, hits.length));
-        if (chosen.size > 0 && tokens + nextTokens > maxPromptTokens) {
-          if (quotaPass) continue;
-          break;
-        }
-        chosen.add(hit);
-        tokens += nextTokens;
-      }
+    const quotaBudget = tokens + Math.floor((maxPromptTokens - tokens) / 2);
+    for (const hit of hits.filter(isQuotaHit)) {
+      const nextTokens = estimatePromptTokens(formatHit(hit, hits.length));
+      if (tokens + nextTokens > quotaBudget) continue;
+      chosen.add(hit);
+      tokens += nextTokens;
+    }
+    let first = true;
+    for (const hit of hits.filter((candidate) => !isQuotaHit(candidate))) {
+      const nextTokens = estimatePromptTokens(formatHit(hit, hits.length));
+      if (!first && tokens + nextTokens > maxPromptTokens) break;
+      first = false;
+      chosen.add(hit);
+      tokens += nextTokens;
     }
     selected = hits.filter((hit) => chosen.has(hit));
     sections = selected.map((hit, index) => formatHit(hit, index));

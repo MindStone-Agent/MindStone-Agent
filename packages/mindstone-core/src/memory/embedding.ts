@@ -187,7 +187,8 @@ export function createMemoryEmbeddingProvider(
 ): MemoryEmbeddingProvider | undefined {
   const resolved = resolveMemoryEmbeddingProviderConfig(config, env);
   if (!resolved) return undefined;
-  return new OpenAiCompatibleEmbeddingProvider(options.timeoutMs ? { ...resolved, timeoutMs: options.timeoutMs } : resolved);
+  // Never shorter than the one set for the install (EMBEDDER_TIMEOUT_MS on a slow machine).
+  return new OpenAiCompatibleEmbeddingProvider(options.timeoutMs ? { ...resolved, timeoutMs: Math.max(resolved.timeoutMs ?? 0, options.timeoutMs) } : resolved);
 }
 
 /**

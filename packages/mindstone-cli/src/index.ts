@@ -1383,10 +1383,13 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
   if (sub === "ingest") {
     const kbId = argv[4];
     if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id> [--embed-timeout <seconds>]");
-    const embedTimeoutRaw = optionValue(argv, "--embed-timeout");
+    // --embed-timeout <seconds> or --embed-timeout=<seconds>: a whole number, 1 to 86400.
+    const embedTimeoutAt = argv.findIndex((arg) => arg === "--embed-timeout" || arg.startsWith("--embed-timeout="));
+    const embedTimeoutRaw = embedTimeoutAt < 0 ? undefined
+      : argv[embedTimeoutAt].includes("=") ? argv[embedTimeoutAt].slice("--embed-timeout=".length) : (argv[embedTimeoutAt + 1] ?? "");
     const embedTimeoutSeconds = embedTimeoutRaw === undefined ? undefined : Number(embedTimeoutRaw);
-    if (embedTimeoutSeconds !== undefined && !(Number.isFinite(embedTimeoutSeconds) && embedTimeoutSeconds > 0 && embedTimeoutSeconds <= 86_400)) {
-      throw new Error("--embed-timeout takes a number of seconds, 1 to 86400");
+    if (embedTimeoutRaw !== undefined && !(/^\d+$/.test(embedTimeoutRaw) && embedTimeoutSeconds! >= 1 && embedTimeoutSeconds! <= 86_400)) {
+      throw new Error("--embed-timeout takes a whole number of seconds, 1 to 86400");
     }
     // A persona's private KB: its URLs came through the admin API, so they get
     // the gateway's host checks and limits (#142 review).
