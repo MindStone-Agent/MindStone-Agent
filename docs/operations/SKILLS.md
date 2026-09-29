@@ -57,9 +57,10 @@ template the artifact schema generalizes.
   reports skill counts.
 
 Persona packages reference skills by id in `skills.json`
-([PERSONAS.md](PERSONAS.md)); workflow route steps carry `skills` refs into
-their decisions ([WORKFLOWS.md](WORKFLOWS.md)). Those references now resolve
-against this catalog.
+([PERSONAS.md](PERSONAS.md)). While a persona is active, only its listed
+installed skills go into the owner's prompt; with none listed, all of them do
+(#125). A workflow route step's `skills` narrow that set
+([WORKFLOWS.md](WORKFLOWS.md)).
 
 ## Claim status
 

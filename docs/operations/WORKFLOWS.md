@@ -42,17 +42,19 @@ own process.
   blocked), `"continue"` skips it.
 - Conditions: `sessionKeyPrefix`, `sourceChannel`, `sourceSubstrate`,
   `messagePrefix` (fields AND together).
-- `skills`/`knowledgebases` on route steps are carried into the decision as
-  references; they resolve against the skill catalog ([SKILLS.md](SKILLS.md))
-  and KB catalog ([KNOWLEDGEBASES.md](KNOWLEDGEBASES.md)) shipped in #13.
+- `skills`/`knowledgebases` on a route step narrow the answering persona's
+  components for that turn (#125): only the listed skills stay in the prompt,
+  and only the listed KB ids (global or the persona's private ones) are
+  searched. See [PERSONAS.md](PERSONAS.md#components-at-run-time-125).
 
 ## Which workflow runs (deterministic selection order)
 
 1. First matching `workflows.routes` rule in config
    (`{ "workflowId", "sessionKeyPrefix"|"sourceChannel"|"sourceSubstrate"|"messagePrefix" }`).
 2. `workflows.active` in config.
-3. The active persona's packaged `workflows.json` (first reference) — personas
-   bring their own process.
+3. The active persona's `workflows.json`: every listed workflow, in order
+   (#125). The first one that reaches a decision is used; the events of the
+   ones tried before it stay in the transcript.
 
 No match → no workflow; persona resolution proceeds as in PERSONAS.md.
 
