@@ -19,6 +19,7 @@ import {
   promptSurfacesMatch,
 } from "./manifest.js";
 import { satisfiesRange } from "./semver.js";
+import { capabilityList } from "../persona/load.js";
 import {
   clearStaging,
   findOwningPack,
@@ -115,15 +116,24 @@ function artifactIdsFromArchive(files: TarFile[], root: string): Set<string> {
   return ids;
 }
 
-function capabilityIdsFromJson(data: Buffer | undefined, key: string): string[] {
+/**
+ * A packed persona's list file, read as the persona loader reads it: one
+ * the loader would refuse is refused at install (#142 review), instead of
+ * installing a persona that won't load.
+ */
+function capabilityIdsFromJson(data: Buffer | undefined, key: string, errors: string[], personaId: string): string[] {
   if (!data) return [];
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(data.toString("utf-8")) as unknown;
-    const list = Array.isArray(parsed) ? parsed : (parsed as Record<string, unknown> | null)?.[key];
-    return Array.isArray(list) ? list.filter((entry): entry is string => typeof entry === "string") : [];
+    parsed = JSON.parse(data.toString("utf-8")) as unknown;
   } catch {
+    errors.push(`persona ${personaId}: ${key}.json is not valid JSON`);
     return [];
   }
+  const list = capabilityList(parsed, key);
+  if (Array.isArray(list)) return list;
+  errors.push(`persona ${personaId}: ${list.error}`);
+  return [];
 }
 
 /**
@@ -259,13 +269,13 @@ function stagePack(archive: Buffer, packPaths: PackPaths, dataDir: string, optio
   const onDisk = (root: string, id: string): boolean => existsSync(join(dataDir, root, id));
   for (const personaId of manifest.artifacts.personas ?? []) {
     const refFile = (name: string) => files.find((file) => file.path === `personas/${personaId}/${name}`)?.data;
-    for (const skillId of capabilityIdsFromJson(refFile("skills.json"), "skills")) {
+    for (const skillId of capabilityIdsFromJson(refFile("skills.json"), "skills", errors, personaId)) {
       if (!packSkillIds.has(skillId) && !onDisk("skills", skillId)) errors.push(`persona ${personaId} references skill "${skillId}" which is neither in this pack nor installed`);
     }
-    for (const kbId of capabilityIdsFromJson(refFile("knowledgebases.json"), "knowledgebases")) {
+    for (const kbId of capabilityIdsFromJson(refFile("knowledgebases.json"), "knowledgebases", errors, personaId)) {
       if (!packKbIds.has(kbId) && !onDisk("knowledgebases", kbId)) errors.push(`persona ${personaId} references knowledgebase "${kbId}" which is neither in this pack nor installed`);
     }
-    for (const workflowId of capabilityIdsFromJson(refFile("workflows.json"), "workflows")) {
+    for (const workflowId of capabilityIdsFromJson(refFile("workflows.json"), "workflows", errors, personaId)) {
       if (!packWorkflowIds.has(workflowId) && !onDisk("workflows", workflowId)) errors.push(`persona ${personaId} references workflow "${workflowId}" which is neither in this pack nor installed`);
     }
   }

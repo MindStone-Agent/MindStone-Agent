@@ -254,7 +254,6 @@ import {
   addPrivateKnowledgebaseSource,
   ensurePersonaKnowledgebasesDir,
   ingestMindStoneKnowledgebase,
-  kbPrivateHostsAllowed,
   KB_URL_FETCH_LIMITS,
   isSafeComponentId,
   discoverMindStoneKnowledgebases,
@@ -1323,7 +1322,8 @@ async function runConfiguredRoute(input: {
         sessionKey: input.sessionKey,
         agentId: input.agentId,
         role: "event",
-        text: `Persona overlay failed to load (${personaResult.resolution?.personaId ?? "unknown"}): ${personaResult.error}`,
+        // The load error names host paths: only an owner's transcript carries it.
+        text: `Persona overlay failed to load (${personaResult.resolution?.personaId ?? "unknown"})${input.audience === "owner" ? `: ${personaResult.error}` : ""}`,
         runId: run.id,
         source,
         metadata: { event: "persona_load_failed", personaId: personaResult.resolution?.personaId, reason: personaResult.resolution?.reason },
@@ -2626,7 +2626,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       }
       await withAdminWriteLock(() => {
         try {
-          const added = addPrivateKnowledgebaseSource(join(personasDir, id), kbId, body, { allowPrivateHosts: kbPrivateHostsAllowed() });
+          const added = addPrivateKnowledgebaseSource(join(personasDir, id), kbId, body);
           appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_source_added", persona: id, knowledgebase: kbId, kind: added.kind, source: added.name });
           sendJson(res, 201, { ok: true, source: added, indexed: false });
         } catch (error) {
@@ -2663,8 +2663,8 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         noLinks: true,
         fetchTimeoutMs: KB_URL_FETCH_LIMITS.timeoutMs,
         maxFetchBytes: KB_URL_FETCH_LIMITS.maxBytes,
-        // Public hosts only, each redirect checked, unless this host allows private ones (#142 review).
-        privateKbUrls: { allowPrivateHosts: kbPrivateHostsAllowed() },
+        // Public hosts only, each redirect checked, as this host's environment allows (#142 review).
+        privateKbUrls: {},
       });
       if (!result.ok) throw new PersonaComposeError(publicKbText(result.error, root), "ingest_failed", 422);
       appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_ingested", persona: id, knowledgebase: kbId, entries: result.entryCount });

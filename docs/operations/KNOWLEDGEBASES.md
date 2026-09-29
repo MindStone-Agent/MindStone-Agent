@@ -110,23 +110,30 @@ they feed the SAME deterministic ingest/index/search/recall pipeline:
   ingest (#125); a URL source needs the advanced-settings permission, and a
   fetch from the admin API is capped at 20 s and 5 MB.
 - **What a private KB's URL can reach** (#142 review). The gateway host
-  fetches it, so it is held to public hosts: a URL on this machine, a private,
-  shared or link-local network (including the cloud metadata address), or a
-  single-label or intranet name is refused when it is added and again when it
-  is fetched. At fetch time the host is checked by every address it resolves
-  to, the connection goes to those checked addresses (no second lookup), and
+  fetches it, so it is held to public hosts: a URL on this machine (any of
+  its own addresses, public ones included), a private, shared, reserved or
+  link-local network (including cloud metadata addresses), an IPv6 address
+  carrying one of those (mapped, NAT64, 6to4) or a single-label or intranet
+  name is refused when it is added and again when it is fetched. At fetch
+  time the host is checked by every address it resolves to (a name refused
+  that way fails as "could not be fetched", so errors don't tell which
+  internal names exist), the lookup counts toward the 20 s limit, the
+  connection goes to those checked addresses (no second lookup), and
   redirects are followed by hand, at most 5, each one checked the same way.
-  A page must be HTML, markdown or plain text (by its `content-type`, or none)
-  with no NUL bytes, at most 5 MB after decompression. Errors say what went
-  wrong in general terms and never name a redirect's target. The gateway
-  host's own environment can allow private hosts
-  (`MINDSTONE_KB_PRIVATE_HOSTS=1`, for an intranet wiki or a test stub);
-  the Console can't. `kb ingest --persona` applies the same rules. A global
-  KB's `url` sources are operator configuration in `kb.json` and are fetched
-  as before.
+  A page must be HTML, markdown or plain text (by its `content-type`, or
+  none) with no NUL bytes, at most 5 MB after gzip or brotli decompression.
+  Errors say what went wrong in general terms and never name a redirect's
+  target. The gateway host's own environment can widen this, never the
+  Console: `MINDSTONE_KB_PRIVATE_HOSTS=1` allows private networks (an
+  intranet wiki) but still never this machine, link-local or metadata
+  addresses; `MINDSTONE_KB_PRIVATE_HOSTS=any` allows everything, for a test
+  stub on this machine only. `kb ingest --persona` applies the same rules. A
+  global KB's `url` sources are operator configuration in `kb.json` and are
+  fetched as before.
 - Fetched text is recalled into prompts as reference material. Markdown and
-  plain text are kept as they are (an HTML tag in a markdown page stays in
-  its text), so anything showing it must show it as text.
+  plain text are kept as they are (a page is read as HTML only when its
+  `content-type` says HTML, or it has none and starts with `<`), so anything
+  showing it must show it as text.
 - See [PERSONAS.md](PERSONAS.md#components-at-run-time-125) for the full rule.
 
 ### Follow-on source targets (documented plan, not implemented)
