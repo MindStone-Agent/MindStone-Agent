@@ -98,7 +98,10 @@ createServer((req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ object: "list", model: body.model, data: input.map((text, index) => ({ object: "embedding", index, embedding: vectorFor(text, dims) })) }));
     };
-    if (state.mode === "slow") setTimeout(answer, 6000); else answer();
+    if (state.mode === "slow") setTimeout(answer, 6000);
+    // One request at a time, 150 ms an entry, like Ollama's default (#156 review).
+    else if (state.mode === "serial") state.queue = (state.queue ?? Promise.resolve()).then(() => new Promise((resolve) => setTimeout(() => { answer(); resolve(); }, 150 * input.length)));
+    else answer();
   });
 }).listen(Number(process.env.EMBED_PORT), "127.0.0.1", () => console.log("stub embedder up"));
 NODE
@@ -474,6 +477,26 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   assert.match((result.reembedded?.vectors as any).reason ?? "", /index changed while/);
   assert.equal(readFileSync(join(race, "e-race", KB_VECTORS_FILE), "utf8"), beforeRace, "vectors made from an index replaced meanwhile are not written");
 }
+// Two ingests of one KB: the one whose index was replaced meanwhile keeps nothing and removes nothing (#156 review).
+{
+  const root = mkdtempSync(join(tmpdir(), "kbvec-ingest-race-"));
+  mkdirSync(join(root, "r", "sources"), { recursive: true });
+  writeFileSync(join(root, "r", "kb.json"), JSON.stringify({ name: "r" }));
+  writeFileSync(join(root, "r", "sources", "a.md"), "# R\n\nalpha r\n");
+  await ingestMindStoneKnowledgebase(root, "r", { embedder: fixed({ alpha: [1, 0, 0] }) });
+  const kept = readFileSync(join(root, "r", KB_VECTORS_FILE), "utf8");
+  const overlapping = {
+    ...fixed({ alpha: [0, 1, 0] }),
+    async embedTexts(texts: string[]) {
+      // Another ingest writes a newer index while this one embeds.
+      writeFileSync(join(root, "r", "index.json"), readFileSync(join(root, "r", "index.json"), "utf8") + "\n");
+      return texts.map(() => [0, 1, 0]);
+    },
+  };
+  const raced = await ingestMindStoneKnowledgebase(root, "r", { embedder: overlapping as any });
+  assert.match((raced as any).vectors.reason ?? "", /index changed while/);
+  assert.equal(readFileSync(join(root, "r", KB_VECTORS_FILE), "utf8"), kept, "the ingest overtaken by a newer index writes and removes nothing");
+}
 // Sections whose headings slug alike get their own ids, and so their own vectors.
 {
   const kbRoot = mkdtempSync(join(tmpdir(), "kbvec-dup-"));
@@ -792,5 +815,44 @@ for _ in $(seq 1 40); do
 done
 grep -q '"model":"kbstub-b"' "${DATA}/knowledgebases/pantry/vectors.json" || { echo "the stale KB was not embedded again after the owner's chat" >&2; exit 1; }
 ${MS} kb status pantry --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="ready") { console.error("pantry after the chat:", JSON.stringify(s.vectors)); process.exit(1); }})'
+
+# A background re-embed never slows the owner's turns, even with a one-at-a-time embedder (#156 review),
+# and only an owner's chat starts one.
+python3 - <<'PY'
+import json, os, pathlib
+root = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "knowledgebases" / "library"
+(root / "sources").mkdir(parents=True, exist_ok=True)
+(root / "kb.json").write_text(json.dumps({"name": "Library", "version": "0.1.0"}))
+(root / "sources" / "shelves.md").write_text("# Shelves\n\n" + "".join(f"## Shelf {i}\n\nBook row {i} holds bound volumes.\n\n" for i in range(40)))
+PY
+stub_mode ok
+${MS} kb ingest library --json >/dev/null
+chat_ms() { # chat_ms <text> [role]: prints the wall time of one gateway chat, in ms
+  local started ended role="${2:-}"
+  started=$(node -e 'console.log(Date.now())')
+  if [[ -n "${role}" ]]; then
+    curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H "x-mindstone-user-role: ${role}" -H "x-mindstone-user-id: smoke-${role}" -H 'content-type: application/json' -d "{\"text\":\"$1\"}" "${BASE}/chat/send"
+  else
+    curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H 'content-type: application/json' -d "{\"text\":\"$1\"}" "${BASE}/chat/send"
+  fi
+  ended=$(node -e 'console.log(Date.now())')
+  echo $(( ended - started ))
+}
+stub_mode serial
+baseline=0
+for i in 1 2; do t=$(chat_ms "baseline question ${i}"); [[ "${t}" -gt "${baseline}" ]] && baseline=${t}; done
+set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-c"'
+chat_ms "a member's question after the switch" member >/dev/null
+sleep 2
+grep -q '"model":"kbstub-b"' "${DATA}/knowledgebases/library/vectors.json" || { echo "a non-owner chat started a re-embed" >&2; exit 1; }
+chat_ms "the owner's first question after the switch" >/dev/null
+slowest=0
+for i in 1 2 3; do t=$(chat_ms "owner question ${i} during the re-embed"); [[ "${t}" -gt "${slowest}" ]] && slowest=${t}; done
+grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" && { echo "the re-embed finished before the timed chats: nothing was measured" >&2; exit 1; }
+[[ "${slowest}" -le $(( baseline + 1000 )) ]] || { echo "owner turns slowed by the background re-embed: ${slowest} ms vs ${baseline} ms without it" >&2; exit 1; }
+for _ in $(seq 1 120); do grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" && break; sleep 0.5; done
+grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" || { echo "the library KB was never embedded again" >&2; exit 1; }
+grep -q '"action":"kb_reembedded"' "${DATA}/admin-audit.jsonl" 2>/dev/null || grep -rq 'kb_reembedded' "${DATA}" || { echo "the re-embed left no audit entry" >&2; exit 1; }
+stub_mode ok
 
 echo "KB embeddings smoke test passed."

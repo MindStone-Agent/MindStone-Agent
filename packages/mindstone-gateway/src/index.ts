@@ -780,17 +780,25 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
       kbDirs,
       embedder,
       now: new Date().toISOString(),
-      claim: ({ personaId, kbId }) => {
-        if (!personaId) return () => undefined;
-        const key = `${personaId}/${kbId}`;
-        if (PRIVATE_KB_INGESTS.has(key) || PRIVATE_KB_INGESTS.size >= MAX_PRIVATE_KB_INGESTS) return undefined;
-        PRIVATE_KB_INGESTS.add(key);
-        return () => PRIVATE_KB_INGESTS.delete(key);
+      // A KB being ingested is skipped, never held: the owner's own ingest
+      // always goes ahead, and writeKbVectors keeps the newer ingest's vectors
+      // if they overlap (#156 review).
+      claim: ({ personaId, kbId }) => (personaId && PRIVATE_KB_INGESTS.has(`${personaId}/${kbId}`) ? undefined : () => undefined),
+      beforeBatch: async () => {
+        while (turnsInFlight > 0) await new Promise<void>((resolve) => setTimeout(resolve, 200));
       },
     });
     const done = result.reembedded;
     if (done) {
       const where = `${done.personaId ? `${done.personaId}/` : ""}${done.kbId}`;
+      appendAdminAudit(paths.dataDir, {
+        userId: "gateway",
+        action: "kb_reembedded",
+        ...(done.personaId ? { persona: done.personaId } : {}),
+        knowledgebase: done.kbId,
+        embeddingProvider: spec,
+        vectors: done.vectors.state,
+      });
       if (done.vectors.state === "ready") console.info(`[mindstone] knowledge base ${where} embedded again for ${spec}`);
       else console.warn(`[mindstone] knowledge base ${where} not embedded again for ${spec} (word match meanwhile; retried later): ${done.vectors.reason}`);
     } else if (result.deferred === 0) {
@@ -1206,7 +1214,19 @@ function releaseIdentityFormation(agentId: string): void {
   }
 }
 
-async function runConfiguredRoute(input: {
+/** Turns being answered now: a background KB re-embed waits while any runs (#156 review). */
+let turnsInFlight = 0;
+
+async function runConfiguredRoute(input: Parameters<typeof runConfiguredRouteUncounted>[0]): ReturnType<typeof runConfiguredRouteUncounted> {
+  turnsInFlight += 1;
+  try {
+    return await runConfiguredRouteUncounted(input);
+  } finally {
+    turnsInFlight -= 1;
+  }
+}
+
+async function runConfiguredRouteUncounted(input: {
   sessionKey: string;
   agentId: string;
   /**

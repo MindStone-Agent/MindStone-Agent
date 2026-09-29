@@ -123,6 +123,12 @@ export async function writeKbVectors(params: {
   indexPath?: string;
   /** A background re-embed (#151): on failure the old vectors stay, rather than being removed. */
   keepOnFailure?: boolean;
+  /**
+   * Awaited before each request (#156 review): a background re-embed waits
+   * while a turn is being answered. Time spent waiting doesn't count against
+   * the budget.
+   */
+  beforeBatch?: () => Promise<void>;
 }): Promise<KbVectorsWriteResult> {
   const { embedder } = params;
   const indexStillCurrent = () => {
@@ -146,11 +152,12 @@ export async function writeKbVectors(params: {
   const batchSize = Math.max(1, params.batchSize ?? KB_EMBED_LIMITS.batchSize);
   const encoded: Record<string, string> = {};
   let dimension = 0;
+  let paused = 0;
   const embedBatch = async (batch: MindStoneKbIndexEntry[]) => {
     const texts = batch.map((entry) => kbEntryEmbeddingText(entry));
     // The embedder drops blank inputs, which would shift every vector after one.
     if (texts.some((text) => !text)) throw new Error("blank entry");
-    const vectors = await withTimeout(embedder.embedTexts(texts), budget - (Date.now() - started));
+    const vectors = await withTimeout(embedder.embedTexts(texts), budget - (Date.now() - started - paused));
     if (vectors.length !== batch.length) throw new Error("vector count");
     batch.forEach((entry, index) => {
       const vector = vectors[index];
@@ -165,6 +172,11 @@ export async function writeKbVectors(params: {
   };
   try {
     for (let offset = 0; offset < params.entries.length; offset += batchSize) {
+      if (params.beforeBatch) {
+        const waitStarted = Date.now();
+        await params.beforeBatch();
+        paused += Date.now() - waitStarted;
+      }
       const batch = params.entries.slice(offset, offset + batchSize);
       try {
         await embedBatch(batch);

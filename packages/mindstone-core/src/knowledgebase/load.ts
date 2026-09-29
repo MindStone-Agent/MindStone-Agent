@@ -371,8 +371,9 @@ export function ingestApprovedPrivateKnowledgebase(
  * among the global collections and every persona's private KBs. One KB a
  * call, at most `maxEntries` entries; a larger one keeps word match until
  * `kb ingest`. `claim` lets the caller skip a KB being ingested meanwhile. A
- * failed attempt keeps the old vectors (recall uses word match) and isn't
- * tried again for that model for KB_REEMBED_LIMITS.retryAfterMs.
+ * failed attempt keeps the old vectors (recall uses word match) and is tried
+ * again for that model after KB_REEMBED_LIMITS.retryAfterMs, doubling each
+ * time, and not after KB_REEMBED_LIMITS.maxFailures failures.
  * `deferred` counts the stale KBs left for later (claimed, or waiting to be
  * retried): with none and nothing done, nothing is stale for this model.
  */
@@ -383,6 +384,8 @@ export async function reembedStaleKnowledgebase(options: {
   maxEntries?: number;
   timeoutMs?: number;
   claim?: (target: { personaId?: string; kbId: string }) => (() => void) | undefined;
+  /** Awaited before each entry is sent (#156 review): the caller holds the job while turns run. */
+  beforeBatch?: () => Promise<void>;
 }): Promise<{ reembedded?: { kbId: string; personaId?: string; vectors: KbVectorsWriteResult }; deferred: number }> {
   const maxEntries = options.maxEntries ?? KB_REEMBED_LIMITS.maxEntries;
   const spec = memoryEmbeddingSpec(options.embedder);
@@ -402,7 +405,7 @@ export async function reembedStaleKnowledgebase(options: {
       const current = readKbVectors(loaded.kb.dir, read.text, options.embedder, { noLinks, decode: false });
       if (current.state !== "stale" || current.cause !== "model") continue;
       const retryKey = `${loaded.kb.dir}\0${spec}`;
-      if ((REEMBED_RETRY_AT.get(retryKey) ?? 0) > Date.now()) {
+      if ((REEMBED_RETRY_AT.get(retryKey)?.at ?? 0) > Date.now()) {
         deferred += 1;
         continue;
       }
@@ -422,9 +425,21 @@ export async function reembedStaleKnowledgebase(options: {
           now: options.now,
           timeoutMs: options.timeoutMs ?? KB_REEMBED_LIMITS.timeoutMs,
           keepOnFailure: true,
+          // One entry a request: a one-at-a-time embedder answers a turn's own
+          // request after at most one entry (#156 review).
+          batchSize: 1,
+          beforeBatch: options.beforeBatch,
         });
-        if (vectors.state === "ready") REEMBED_RETRY_AT.delete(retryKey);
-        else REEMBED_RETRY_AT.set(retryKey, Date.now() + KB_REEMBED_LIMITS.retryAfterMs);
+        if (vectors.state === "ready") {
+          REEMBED_RETRY_AT.delete(retryKey);
+        } else {
+          // Twice as long after each failure; after five, not again for this model
+          // until the gateway restarts (#156 review): a KB the model keeps
+          // rejecting isn't sent over and over.
+          const failures = (REEMBED_RETRY_AT.get(retryKey)?.failures ?? 0) + 1;
+          const at = failures >= KB_REEMBED_LIMITS.maxFailures ? Number.POSITIVE_INFINITY : Date.now() + KB_REEMBED_LIMITS.retryAfterMs * 2 ** (failures - 1);
+          REEMBED_RETRY_AT.set(retryKey, { at, failures });
+        }
         return { reembedded: { kbId: summary.id, personaId, vectors }, deferred };
       } finally {
         release();
@@ -439,10 +454,11 @@ export const KB_REEMBED_LIMITS = {
   maxEntries: 512,
   timeoutMs: 600_000,
   retryAfterMs: 30 * 60_000,
+  maxFailures: 5,
 };
 
 /** When a KB (its folder, for a model spec) may be tried again after a failed re-embed. */
-const REEMBED_RETRY_AT = new Map<string, number>();
+const REEMBED_RETRY_AT = new Map<string, { at: number; failures: number }>();
 
 export function readMindStoneKbIndex(kb: MindStoneKnowledgebase): MindStoneKbIndex | undefined {
   return readKbIndexWithText(kb)?.index;
