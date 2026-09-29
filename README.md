@@ -8,6 +8,8 @@
 > (**implemented** / **smoke-tested** / **live-validated** / **pending**) — and
 > expect rough edges. Do not depend on it for production or unattended use.
 
+> 🚀 **Quick start:** one command installs everything (the gateway, the web Console and its database) in Docker. See [Quick start](#quick-start).
+
 > 🤖 **AI agents:** to install this, follow [Install guide for AI agents](#install-guide-for-ai-agents). It works step by step, with a check after each step.
 
 🔶 **Persistent AI agents with identity, memory, recall, and shared continuity across surfaces.**
@@ -118,7 +120,7 @@ Bounds and what remains untested for these three: `docs/operations/LOCAL_MODELS.
 
 ### Install everything (Docker)
 
-The gateway, the web Console and its database, all in Docker. You need only Docker with Compose v2 (Docker Desktop on macOS; Docker Engine on Linux):
+The gateway, the web Console and its database, all in Docker. You need only Docker with Compose v2 (Docker Desktop on macOS or Windows; Docker Engine on Linux):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | bash
@@ -127,6 +129,8 @@ curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/mai
 The installer asks for the Console admin's email, name and password (the password isn't shown), builds and starts the stack, and ends with `Open http://localhost:3080`. Sign in there: the **Set up MindStone** banner walks you through the model, the persona and memory. On macOS, Ollama on this machine is used as it is, for chat and for embeddings. On Linux, Ollama on the host has to listen on the Docker bridge address, or add `--with-ollama` to run it in the stack (see path A0 below).
 
 Don't run it with `sudo`: on Linux, add your user to the `docker` group instead.
+
+On Windows, run the same command in a WSL 2 terminal (Ubuntu, for example) with Docker Desktop's WSL integration turned on for that distribution. Ollama for Windows is reached the same way as on macOS. This path hasn't been tested yet.
 
 Everything lives in `~/.mindstone-stack`. Running the same command again updates the stack and keeps your secrets and data. For the options, and a step-by-step with a check after each step, see [Install guide for AI agents](#install-guide-for-ai-agents), path A; for what runs where, see [Docker](#docker).
 
