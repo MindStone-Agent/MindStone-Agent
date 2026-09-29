@@ -356,6 +356,8 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   if (rejection()?.failures !== MEMORY_EMBED_SKIP_AFTER) fail(`refusals should reach ${MEMORY_EMBED_SKIP_AFTER}: ${JSON.stringify(rejection())}`);
   const mix = sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(P), paths);
   if (mix.skipped !== 1 || mix.otherModel !== 0) fail(`the refused chunk should count as skipped, not as waiting to be embedded again: ${JSON.stringify(mix)}`);
+  // An hour on (past the 10 minutes' hold-back), it is still skipped: not sent.
+  age(60 * 60 * 1000);
   sent.length = 0;
   const after = await backfillSqliteMemoryEmbeddings({ paths, provider: P });
   if (refusedSends() !== 0 || after.chunksConsidered !== 0) fail(`a skipped chunk shouldn't be sent again: ${JSON.stringify(after)}, ${refusedSends()} sends`);
