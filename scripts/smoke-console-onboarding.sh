@@ -60,6 +60,7 @@ createServer((req, res) => {
       // Streamed, as Ollama does when asked (#145); a pull that isn't streamed
       // is refused, so a gateway that waits for one answer fails here.
       if (body.stream !== true) return send(400, { error: "the smoke's stub only answers a streamed pull" });
+      if (body.model === "refused-embed") return send(500, { error: "synthetic refusal" });
       res.writeHead(200, { "content-type": "application/x-ndjson" });
       const line = (value) => res.write(JSON.stringify(value) + "\n");
       line({ status: "pulling manifest" });
@@ -177,8 +178,8 @@ if (!(first < 2)) { console.error(`the headers came after ${first} s of a ${tota
 if (!text.startsWith("\n")) { console.error("no newline was sent while the download ran"); process.exit(1); }
 if (JSON.parse(text).ok !== true) { console.error(`the slow download failed: ${text.trim()}`); process.exit(1); }
 ' "${first}" "${total}" "${BODY}" || exit 1
-# Ollama reports a failure, or the stream stops before it says success.
-for pair in "broken-embed|synthetic pull failure" "cut-embed|the download ended before it finished"; do
+# Ollama reports a failure, the stream stops before it says success, or Ollama refuses the pull.
+for pair in "broken-embed|synthetic pull failure" "cut-embed|the download ended before it finished" "refused-embed|synthetic refusal"; do
   model="${pair%%|*}" want="${pair#*|}"
   expect "$(post /admin/memory/check "{\"embeddingProvider\":\"ollama:${model}\"}")" 200 "checking ${model}"
   expect "$(post /admin/memory/pull "{\"model\":\"${model}\"}")" 200 "downloading ${model}"

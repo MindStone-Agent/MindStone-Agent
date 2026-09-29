@@ -3409,6 +3409,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       if (!res.destroyed && !res.writableEnded) res.write("\n");
     }, OLLAMA_PULL_HEARTBEAT_MS);
     let result: { ok: true } | { ok: false; error: string };
+    let answered = false;
     try {
       // Streamed (#145): Ollama answers at once and reports progress as it
       // goes, so the gateway's own fetch never waits 300 s for a byte either.
@@ -3418,6 +3419,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         body: JSON.stringify({ model, stream: true }),
         signal: AbortSignal.any([AbortSignal.timeout(OLLAMA_PULL_MS), clientGone.signal]),
       });
+      answered = true;
       if (response.ok) {
         result = await readOllamaPull(response);
       } else {
@@ -3435,14 +3437,21 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         ok: false,
         error: clientGone.signal.aborted
           ? "the download was stopped because the request was closed"
-          : error instanceof Error && error.name === "TimeoutError" ? "the download took too long" : "Ollama can't be reached from the gateway",
+          : error instanceof Error && error.name === "TimeoutError"
+            ? "the download took too long"
+            : answered ? "the connection to Ollama was lost during the download" : "Ollama can't be reached from the gateway",
       };
     } finally {
       clearInterval(heartbeat);
       ollamaPullRunning = false;
     }
     if (result.ok) lastMissingOllamaModel = undefined;
-    appendAdminAudit(paths.dataDir, { userId, action: "memory_model_pulled", model, ok: result.ok });
+    try {
+      appendAdminAudit(paths.dataDir, { userId, action: "memory_model_pulled", model, ok: result.ok });
+    } catch (error) {
+      // The headers are gone, so the answer ends here whatever happens (#145 review).
+      console.warn(`[mindstone] the model download wasn't audited: ${error instanceof Error ? error.message : String(error)}`);
+    }
     if (!res.destroyed && !res.writableEnded) res.end(JSON.stringify(result, null, 2));
     return;
   }
@@ -4262,6 +4271,8 @@ async function readOllamaPull(response: Response): Promise<{ ok: true } | { ok: 
         take(buffered.slice(0, newline));
         buffered = buffered.slice(newline + 1);
         if (typeof last.error === "string") return { ok: false, error: last.error };
+        // Done: a connection dropped after this doesn't undo the download.
+        if (last.status === "success") return { ok: true };
       }
       if (buffered.length > OLLAMA_PULL_LINE_BYTES) return { ok: false, error: "Ollama's answer isn't a download report" };
     }
