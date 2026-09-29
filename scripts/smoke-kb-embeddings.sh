@@ -885,16 +885,18 @@ sleep 1
 for i in 1 2 3; do chat_ms "owner question ${i} during the re-embed" >/dev/null; sleep 0.5; done
 grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" && { echo "the re-embed finished before the timed chats: nothing was measured" >&2; exit 1; }
 # Each owner turn's query embedding, as the stub saw it: no library entry is sent while it waits,
-# and it waits behind one entry at most (150 ms here), not a batch.
+# and it waits behind one entry at most (150 ms here, so 300 ms with its own), not a batch.
 node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
   const library = s.requests.filter((q)=>q.input.some((t)=>t.includes("Book row")));
   const queries = s.requests.filter((q)=>q.input.some((t)=>t.includes("during the re-embed")));
+  const batched = library.filter((l)=>l.input.length > 1).length;
+  if (batched) { console.error(`the re-embed sent ${batched} requests of more than one entry`); process.exit(1); }
   if (queries.length !== 3) { console.error(`expected 3 owner query embeddings, saw ${queries.length}`); process.exit(1); }
   for (const q of queries) {
     if (!(q.done >= q.t)) { console.error("an owner query embedding was never answered"); process.exit(1); }
     const sent = library.filter((l)=>l.t > q.t && l.t < q.done).length;
     if (sent) { console.error(`the re-embed sent ${sent} entries while an owner turn waited on the embedder`); process.exit(1); }
-    if (q.done - q.t > 1000) { console.error(`an owner turn waited ${q.done - q.t} ms behind the re-embed`); process.exit(1); }
+    if (q.done - q.t > 450) { console.error(`an owner turn waited ${q.done - q.t} ms behind the re-embed`); process.exit(1); }
   }
 })' "${STUB}/_test/state" || exit 1
 [[ "$(library_requests_between 0 "$(node -e 'console.log(Date.now())')")" -gt 0 ]] || { echo "no re-embed request was seen at all" >&2; exit 1; }
