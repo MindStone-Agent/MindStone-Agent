@@ -1,12 +1,14 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { discoverMindStoneKnowledgebases, privateKnowledgebaseLinkError } from "../knowledgebase/load.js";
+import type { MindStoneConfig } from "../config/types.js";
+import { knowledgebasesDirFromConfig, loadableKnowledgebaseIds, privateKnowledgebaseLinkError } from "../knowledgebase/load.js";
 import { kbUrlHostRefused, parseExternalSources } from "../knowledgebase/sources.js";
-import { discoverMindStoneSkills } from "../skills/artifacts.js";
-import { loadMindStoneWorkflow } from "../workflow/load.js";
+import type { MindStoneRuntimePaths } from "../paths/runtime.js";
+import { discoverMindStoneSkills, skillsDirFromConfig } from "../skills/artifacts.js";
+import { discoverMindStoneWorkflows, loadMindStoneWorkflow, workflowsDirFromConfig } from "../workflow/load.js";
 import { isRealWorkflowDir } from "../workflow/validate.js";
 import { isRealDirectory, isSafeComponentId, personaKnowledgebasesDir, readablePersonaKnowledgebasesDir } from "./components.js";
-import { PERSONA_PROPOSAL_ID } from "./create.js";
+import { PERSONA_PROPOSAL_ID, type PersonaComponentCatalog } from "./create.js";
 import { capabilityList, loadMindStonePersona } from "./load.js";
 
 /**
@@ -78,6 +80,36 @@ function idList(value: unknown, field: string): string[] | undefined {
   return [...new Set(value as string[])];
 }
 
+/**
+ * The ids a persona can list, as `checkPersonaComponents` would find them
+ * (#160): installed skills, workflows that load and shared knowledge bases.
+ */
+export function personaComponentCatalog(dirs: Omit<Dirs, "personasDir">): PersonaComponentCatalog {
+  const safe = (ids: string[]) => ids.filter((id) => isSafeComponentId(id)).sort();
+  return {
+    skills: safe(discoverMindStoneSkills(dirs.skillsDir).filter((skill) => skill.source === "installed" && !skill.error).map((skill) => skill.id)),
+    // As approval finds a workflow: exactly its id, a real folder and file, and it loads (#160 review).
+    workflows: safe(discoverMindStoneWorkflows(dirs.workflowsDir).filter((workflow) => !workflow.error && isRealWorkflowDir(dirs.workflowsDir, workflow.id)).map((workflow) => workflow.id)),
+    knowledgebases: safe(loadableKnowledgebaseIds(dirs.knowledgebasesDir)),
+  };
+}
+
+/**
+ * `personaComponentCatalog` for the directories a config names, or undefined
+ * if they can't be read: the turn then goes on without it (#160 review).
+ */
+export function personaComponentCatalogFromConfig(config: MindStoneConfig | undefined, paths?: MindStoneRuntimePaths): PersonaComponentCatalog | undefined {
+  try {
+    return personaComponentCatalog({
+      skillsDir: skillsDirFromConfig(config, paths),
+      workflowsDir: workflowsDirFromConfig(config, paths),
+      knowledgebasesDir: knowledgebasesDirFromConfig(config, paths),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 /** Checks that every listed component exists; the error names the first that doesn't. */
 export function checkPersonaComponents(lists: PersonaComponentLists, dirs: Omit<Dirs, "personasDir">): void {
   if (lists.skills?.length) {
@@ -91,7 +123,7 @@ export function checkPersonaComponents(lists: PersonaComponentLists, dirs: Omit<
     if (!loaded?.ok) throw new PersonaComposeError(`no workflow named "${id}" that loads`, "unknown_component", 422);
   }
   if (lists.knowledgebases?.length) {
-    const kbs = new Set(discoverMindStoneKnowledgebases(dirs.knowledgebasesDir).filter((kb) => !kb.error).map((kb) => kb.id));
+    const kbs = new Set(loadableKnowledgebaseIds(dirs.knowledgebasesDir));
     const missing = lists.knowledgebases.find((id) => !kbs.has(id));
     if (missing) throw new PersonaComposeError(`no knowledge base collection named "${missing}"`, "unknown_component", 422);
   }
