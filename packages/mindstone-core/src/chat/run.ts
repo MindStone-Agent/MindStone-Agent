@@ -506,6 +506,7 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
   // the owner's context here is an App Engine tenant run.
   const turnComponents = resolveTurnComponents({
     persona: personaResolution.persona,
+    failedPersonaId: personaResolution.error ? personaResolution.resolution?.personaId : undefined,
     decision: decisionForAnsweringPersona(workflowOutcome?.decision, input.route?.personaId),
     privateAllowed: privateKnowledgebasesAllowed(ownerContext ? "owner" : "tenant"),
   });

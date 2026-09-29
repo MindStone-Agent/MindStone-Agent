@@ -62,6 +62,11 @@ export type MindStoneTurnComponents = {
   stepKnowledgebases?: string[];
   /** The persona's private KBs searched on this turn; absent when none are. */
   privateKnowledgebases?: { personaId: string; dir: string };
+  /**
+   * The persona that should answer didn't load (#142 review): the turn runs
+   * with no skills and no knowledge bases rather than with everything.
+   */
+  loadFailed?: true;
 };
 
 function unique(ids: string[]): string[] {
@@ -99,7 +104,8 @@ export function isRealDirectory(path: string): boolean {
 /**
  * The components in play for one turn. Nothing changes when no persona
  * answers: every skill and every global KB, and a workflow step's lists are
- * only logged, as before.
+ * only logged, as before. A persona that should answer but doesn't load
+ * gets none of either (`failedPersonaId`).
  * - Skills: the persona's list, or every installed skill when it lists none.
  * - Global KBs: the persona's list, or every collection when it lists none.
  *   Private KBs never switch global recall off.
@@ -112,10 +118,17 @@ export function isRealDirectory(path: string): boolean {
  */
 export function resolveTurnComponents(params: {
   persona?: MindStonePersona;
+  /** The persona that should answer, when it failed to load: then nothing is allowed (fail closed). */
+  failedPersonaId?: string;
   decision?: MindStoneWorkflowDecision;
   privateAllowed: boolean;
 }): MindStoneTurnComponents {
   const { persona, decision } = params;
+  if (!persona && params.failedPersonaId) {
+    // A persona that can't load mustn't widen the turn to every skill and
+    // every KB (#142 review): none at all, and the summary says why.
+    return { personaId: params.failedPersonaId, skills: [], globalKnowledgebases: [], loadFailed: true };
+  }
   if (!persona) return {};
   const skills = narrow(persona.skills.length ? unique(persona.skills) : undefined, decision?.skills);
   const globalKnowledgebases = persona.knowledgebases.length ? unique(persona.knowledgebases) : undefined;
@@ -165,5 +178,6 @@ export function personaComponentsSummary(
     ...(components.stepKnowledgebases ? { stepKnowledgebases: components.stepKnowledgebases } : {}),
     ...(unknownStepKnowledgebases?.length ? { stepKnowledgebasesUnknown: unknownStepKnowledgebases } : {}),
     privateKnowledgebases: components.privateKnowledgebases ? "own" : "none",
+    ...(components.loadFailed ? { loadFailed: true, note: "the persona didn't load, so this turn had no skills and no knowledge bases; see the persona list for the error" } : {}),
   };
 }

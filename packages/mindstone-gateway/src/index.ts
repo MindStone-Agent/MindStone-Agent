@@ -254,6 +254,8 @@ import {
   addPrivateKnowledgebaseSource,
   ensurePersonaKnowledgebasesDir,
   ingestMindStoneKnowledgebase,
+  kbPrivateHostsAllowed,
+  KB_URL_FETCH_LIMITS,
   isSafeComponentId,
   discoverMindStoneKnowledgebases,
   workflowForEditing,
@@ -1246,6 +1248,7 @@ async function runConfiguredRoute(input: {
     // The answering persona's skills and knowledge bases (#125).
     const turnComponents = resolveTurnComponents({
       persona: personaResult.persona,
+      failedPersonaId: personaResult.error ? personaResult.resolution?.personaId : undefined,
       decision: decisionForAnsweringPersona(workflowOutcome?.decision, input.route?.personaId),
       privateAllowed: privateKnowledgebasesAllowed(input.audience),
     });
@@ -1312,6 +1315,19 @@ async function runConfiguredRoute(input: {
       },
     });
 
+    // The persona that should answer didn't load: said, as in a CLI chat,
+    // and the turn ran with no skills and no KBs (#142 review).
+    if (personaResult.error) {
+      appendTranscriptEntry({
+        sessionKey: input.sessionKey,
+        agentId: input.agentId,
+        role: "event",
+        text: `Persona overlay failed to load (${personaResult.resolution?.personaId ?? "unknown"}): ${personaResult.error}`,
+        runId: run.id,
+        source,
+        metadata: { event: "persona_load_failed", personaId: personaResult.resolution?.personaId, reason: personaResult.resolution?.reason },
+      });
+    }
     if (route.identityFormation?.enabled) {
       appendTranscriptEntry({
         sessionKey: input.sessionKey,
@@ -2603,7 +2619,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       }
       await withAdminWriteLock(() => {
         try {
-          const added = addPrivateKnowledgebaseSource(join(personasDir, id), kbId, body);
+          const added = addPrivateKnowledgebaseSource(join(personasDir, id), kbId, body, { allowPrivateHosts: kbPrivateHostsAllowed() });
           appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_source_added", persona: id, knowledgebase: kbId, kind: added.kind, source: added.name });
           sendJson(res, 201, { ok: true, source: added, indexed: false });
         } catch (error) {
@@ -2635,7 +2651,14 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         throw new PersonaComposeError(`a private knowledge base is ingested with at most ${PRIVATE_KB_LIMITS.urlSources} URL sources; it has ${sources.urls.length}`, "too_many_sources", 422);
       }
       const root = ensurePersonaKnowledgebasesDir(join(personasDir, id));
-      const result = await ingestMindStoneKnowledgebase(root, kbId, { now: new Date().toISOString(), noLinks: true, fetchTimeoutMs: 20_000, maxFetchBytes: 5 * 1024 * 1024 });
+      const result = await ingestMindStoneKnowledgebase(root, kbId, {
+        now: new Date().toISOString(),
+        noLinks: true,
+        fetchTimeoutMs: KB_URL_FETCH_LIMITS.timeoutMs,
+        maxFetchBytes: KB_URL_FETCH_LIMITS.maxBytes,
+        // Public hosts only, each redirect checked, unless this host allows private ones (#142 review).
+        privateKbUrls: { allowPrivateHosts: kbPrivateHostsAllowed() },
+      });
       if (!result.ok) throw new PersonaComposeError(publicKbText(result.error, root), "ingest_failed", 422);
       appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_ingested", persona: id, knowledgebase: kbId, entries: result.entryCount });
       sendJson(res, 200, { ok: true, knowledgebase: { id: kbId, entryCount: result.entryCount, sourceCount: result.sourceCount } });

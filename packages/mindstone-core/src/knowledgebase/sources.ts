@@ -1,5 +1,12 @@
+import { lookup } from "node:dns/promises";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { request as httpRequest, type IncomingMessage, type RequestOptions } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { isIP, type LookupFunction } from "node:net";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import type { Readable } from "node:stream";
+import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
+import { isNonPublicHost } from "../provider/enterprise.js";
 
 /**
  * External KB source providers (issue #23): feed OUTSIDE content into the #13
@@ -190,19 +197,93 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&#39;/g, "'");
 }
 
+/** Elements whose content is dropped: code, styling and page chrome. */
+const HTML_SKIPPED = new Set(["script", "style", "nav", "header", "footer", "noscript"]);
+/** Elements that start a new line. */
+const HTML_BLOCKS = new Set(["p", "div", "li", "br", "tr"]);
+
+/**
+ * The text of an HTML page as markdown-ish lines: its title, `#`/`##` for
+ * h1/h2, a line per block element, everything else as spaces.
+ *
+ * One pass over the page with `indexOf`, never a backtracking regex: the
+ * gateway runs this on fetched pages (#125), and a page built to be slow
+ * ("<title>" repeated a million times) must not hold its event loop (#142
+ * review). Every search starts where the last one ended, or is skipped once
+ * it is known to find nothing.
+ */
 export function extractHtmlText(html: string): { title?: string; markdown: string } {
-  const rawTitle = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.replace(/\s+/g, " ").trim();
-  const title = rawTitle ? decodeHtmlEntities(rawTitle) : undefined;
-  let body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html)?.[1] ?? html;
-  body = decodeHtmlEntities(
-    body
-      .replace(/<(script|style|nav|header|footer|noscript)[^>]*>[\s\S]*?<\/\1>/gi, " ")
-      .replace(/<h1[^>]*>([\s\S]*?)<\/h1>/gi, (_, text: string) => `\n# ${text.replace(/<[^>]+>/g, "").trim()}\n`)
-      .replace(/<h2[^>]*>([\s\S]*?)<\/h2>/gi, (_, text: string) => `\n## ${text.replace(/<[^>]+>/g, "").trim()}\n`)
-      .replace(/<(p|div|li|br|tr)[^>]*>/gi, "\n")
-      .replace(/<[^>]+>/g, " "),
-  );
-  const markdown = body
+  const lower = html.toLowerCase();
+  const tagName = (at: number): string => {
+    let end = at;
+    while (end < html.length && end - at < 16 && /[a-z0-9]/.test(lower[end]!)) end += 1;
+    return lower.slice(at, end);
+  };
+  // The first <title ...>...</title>.
+  let title: string | undefined;
+  const titleAt = lower.indexOf("<title");
+  if (titleAt >= 0) {
+    const open = lower.indexOf(">", titleAt);
+    const close = open >= 0 ? lower.indexOf("</title", open) : -1;
+    if (close >= 0) {
+      const raw = html.slice(open + 1, close).replace(/\s+/g, " ").trim();
+      title = raw ? decodeHtmlEntities(raw) : undefined;
+    }
+  }
+  // From the first <body ...> to the last </body>, or the whole page.
+  let from = 0;
+  let to = html.length;
+  const bodyAt = lower.indexOf("<body");
+  const bodyOpen = bodyAt >= 0 ? lower.indexOf(">", bodyAt) : -1;
+  const bodyClose = lower.lastIndexOf("</body");
+  if (bodyOpen >= 0 && bodyClose > bodyOpen) {
+    from = bodyOpen + 1;
+    to = bodyClose;
+  }
+  const out: string[] = [];
+  // A skipped element whose closing tag is known to be missing is read as text, as before.
+  const noClose = new Set<string>();
+  let heading: string | undefined;
+  let i = from;
+  while (i < to) {
+    const lt = html.indexOf("<", i);
+    if (lt < 0 || lt >= to) {
+      out.push(html.slice(i, to));
+      break;
+    }
+    out.push(html.slice(i, lt));
+    const gt = html.indexOf(">", lt + 1);
+    if (gt < 0 || gt >= to) {
+      // No tag ends before the body does: the rest is text.
+      out.push(html.slice(lt, to));
+      break;
+    }
+    const closing = html[lt + 1] === "/";
+    const name = tagName(lt + (closing ? 2 : 1));
+    i = gt + 1;
+    if (!closing && HTML_SKIPPED.has(name) && !noClose.has(name)) {
+      const close = lower.indexOf(`</${name}`, i);
+      const closeEnd = close >= 0 && close < to ? html.indexOf(">", close) : -1;
+      if (closeEnd >= 0 && closeEnd < to) {
+        out.push(" ");
+        i = closeEnd + 1;
+        continue;
+      }
+      noClose.add(name);
+    }
+    if ((name === "h1" || name === "h2") && !closing) {
+      heading = name;
+      out.push(`\n${name === "h1" ? "#" : "##"} `);
+    } else if (closing && name === heading) {
+      heading = undefined;
+      out.push("\n");
+    } else if (!closing && HTML_BLOCKS.has(name)) {
+      out.push("\n");
+    } else {
+      out.push(" ");
+    }
+  }
+  const markdown = decodeHtmlEntities(out.join(""))
     .split("\n")
     .map((line) => line.replace(/[ \t]+/g, " ").trim())
     .join("\n")
@@ -212,14 +293,199 @@ export function extractHtmlText(html: string): { title?: string; markdown: strin
 }
 
 /**
- * `timeoutMs` and `maxBytes` bound a fetch the gateway makes for the admin
- * API (#125); the CLI's `kb ingest` passes neither, as before.
+ * Set only in the gateway host's own environment (a test stub, an intranet
+ * wiki), never from the Console: a persona's private KB URLs may then reach
+ * this machine and the private network (#142 review).
+ */
+export function kbPrivateHostsAllowed(): boolean {
+  return process.env.MINDSTONE_KB_PRIVATE_HOSTS === "1";
+}
+
+/** Bounds on a private KB's URL fetch (#125, #142 review). */
+export const KB_URL_FETCH_LIMITS = { timeoutMs: 20_000, maxBytes: 5 * 1024 * 1024, redirects: 5 } as const;
+
+/** What a KB page may be: the extractor reads HTML, and markdown and plain text as they are. */
+const KB_TEXT_TYPES = new Set(["text/html", "application/xhtml+xml", "text/markdown", "text/x-markdown", "text/plain"]);
+
+class UrlHostRefused extends Error {}
+class UrlBodyTooLarge extends Error {}
+
+/**
+ * The addresses to connect to: the host must not be this machine or a
+ * private network, by name and by every address it resolves to (#142 review).
+ */
+async function checkedAddresses(hostname: string, refused: ((host: string) => boolean) | undefined): Promise<Array<{ address: string; family: number }>> {
+  const host = hostname.replace(/^\[|\]$/g, "");
+  if (refused?.(host)) throw new UrlHostRefused();
+  const literal = isIP(host);
+  if (literal) return [{ address: host, family: literal }];
+  const resolved = await lookup(host, { all: true, verbatim: true });
+  if (!resolved.length) throw new Error("no address");
+  if (refused && resolved.some((entry) => refused(entry.address))) throw new UrlHostRefused();
+  return resolved;
+}
+
+/**
+ * One GET to the addresses that were checked, never a second lookup, so DNS
+ * can't change them in between. All of them, so a host whose first address
+ * doesn't answer (IPv6 before IPv4) is still reached on the next.
+ */
+function requestPinned(url: URL, pinned: Array<{ address: string; family: number }>, signal: AbortSignal): Promise<IncomingMessage> {
+  const pinnedLookup = ((_hostname: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
+    if (options?.all) callback(null, pinned);
+    else callback(null, pinned[0]!.address, pinned[0]!.family);
+  }) as unknown as LookupFunction;
+  return new Promise((resolveResponse, reject) => {
+    const send = url.protocol === "https:" ? httpsRequest : httpRequest;
+    const options: RequestOptions & { autoSelectFamily: boolean } = {
+      method: "GET",
+      headers: { Accept: "text/html, text/markdown, text/plain", "Accept-Encoding": "gzip, deflate, br" },
+      signal,
+      lookup: pinnedLookup,
+      // Try each checked address in turn (the lookup is asked for all of them).
+      autoSelectFamily: true,
+      agent: false,
+    };
+    const request = send(url, options);
+    request.on("response", resolveResponse);
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+/** The body, decompressed, and refused past `maxBytes` of text. */
+async function readCappedBody(response: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  const encoding = String(response.headers["content-encoding"] ?? "identity").trim().toLowerCase();
+  const decoder = encoding === "gzip" || encoding === "x-gzip" ? createGunzip()
+    : encoding === "deflate" ? createInflate()
+    : encoding === "br" ? createBrotliDecompress()
+    : undefined;
+  if (!decoder && encoding !== "identity" && encoding !== "") {
+    response.destroy();
+    throw new Error("unsupported encoding");
+  }
+  let stream: Readable = response;
+  if (decoder) {
+    response.on("error", (error) => decoder.destroy(error));
+    response.on("aborted", () => decoder.destroy(new Error("aborted")));
+    stream = response.pipe(decoder);
+  }
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of stream) {
+      total += (chunk as Buffer).length;
+      if (total > maxBytes) throw new UrlBodyTooLarge();
+      chunks.push(chunk as Buffer);
+    }
+  } finally {
+    if (total > maxBytes || !response.complete) {
+      response.destroy();
+      decoder?.destroy();
+    }
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * A private KB's URL, fetched for the gateway (#125, #142 review):
+ * - every hop's host is checked, by name and resolved address, and the
+ *   connection goes to the checked address (no DNS rebinding);
+ * - redirects are followed by hand, at most 5, each one checked again;
+ * - HTML, markdown or plain text only, no NUL bytes, at most `maxBytes`
+ *   after decompression, all within `timeoutMs`;
+ * - errors say what went wrong in general terms (refused, timed out, an
+ *   HTTP status), never a socket error code, and name the stored address
+ *   as `publicAddress` writes it, never a redirect target.
+ */
+async function fetchPrivateKbUrl(
+  start: string,
+  sourceId: string,
+  options: { allowPrivateHosts: boolean; refusedHost?: (host: string) => boolean; timeoutMs: number; maxBytes: number },
+): Promise<{ contentType: string; raw: string }> {
+  const refused = options.allowPrivateHosts ? undefined : options.refusedHost ?? isNonPublicHost;
+  const shown = publicAddress(start);
+  const fail = (why: string) => new Error(`url source "${sourceId}" ${why}: ${shown}`);
+  const signal = AbortSignal.timeout(options.timeoutMs);
+  let url: URL;
+  try {
+    url = new URL(start);
+  } catch {
+    throw fail("is not an http or https address");
+  }
+  for (let hop = 0; ; hop += 1) {
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) {
+      throw fail(hop ? "redirected to an address that can't be fetched" : "is not an http or https address");
+    }
+    let response: IncomingMessage;
+    try {
+      response = await requestPinned(url, await checkedAddresses(url.hostname, refused), signal);
+    } catch (error) {
+      if (error instanceof UrlHostRefused) {
+        throw fail(hop ? "redirected to this machine or a private network, which isn't fetched" : "is on this machine or a private network, which isn't fetched");
+      }
+      throw fail(signal.aborted ? "timed out" : "could not be fetched");
+    }
+    const status = response.statusCode ?? 0;
+    if ([301, 302, 303, 307, 308].includes(status)) {
+      const location = response.headers.location;
+      response.destroy();
+      if (!location) throw fail("redirected with no address");
+      if (hop >= KB_URL_FETCH_LIMITS.redirects) throw fail("redirected too many times");
+      try {
+        url = new URL(location, url);
+      } catch {
+        throw fail("redirected to an address that can't be fetched");
+      }
+      continue;
+    }
+    if (status < 200 || status >= 300) {
+      response.destroy();
+      throw fail(`fetch failed: HTTP ${status}`);
+    }
+    const contentType = String(response.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+    if (contentType && !KB_TEXT_TYPES.has(contentType)) {
+      response.destroy();
+      throw fail("is not HTML, markdown or plain text");
+    }
+    let body: Buffer;
+    try {
+      body = await readCappedBody(response, options.maxBytes);
+    } catch (error) {
+      if (error instanceof UrlBodyTooLarge) throw new Error(`url source "${sourceId}" is larger than ${options.maxBytes} bytes`);
+      throw fail(signal.aborted ? "timed out" : "could not be fetched");
+    }
+    if (body.includes(0)) throw fail("is not text");
+    return { contentType, raw: new TextDecoder().decode(body) };
+  }
+}
+
+/**
+ * `timeoutMs` and `maxBytes` bound a fetch; the CLI's `kb ingest` of a
+ * global KB passes neither, as before. `privateKb` is a persona's private
+ * KB (#125): its URLs come from the admin API, so they are fetched by
+ * `fetchPrivateKbUrl`, public hosts only unless the host allows private ones.
  */
 export async function loadUrlSourceDocument(
   source: MindStoneKbExternalSource,
-  options: { now?: string; timeoutMs?: number; maxBytes?: number } = {},
+  options: {
+    now?: string;
+    timeoutMs?: number;
+    maxBytes?: number;
+    /** `refusedHost` replaces `isNonPublicHost`, for tests on this machine only. */
+    privateKb?: { allowPrivateHosts: boolean; refusedHost?: (host: string) => boolean };
+  } = {},
 ): Promise<ExternalSourceDocument> {
   const url = source.url ?? "";
+  if (options.privateKb) {
+    const fetched = await fetchPrivateKbUrl(url, source.id, {
+      allowPrivateHosts: options.privateKb.allowPrivateHosts,
+      refusedHost: options.privateKb.refusedHost,
+      timeoutMs: options.timeoutMs ?? KB_URL_FETCH_LIMITS.timeoutMs,
+      maxBytes: options.maxBytes ?? KB_URL_FETCH_LIMITS.maxBytes,
+    });
+    return urlDocument(source, url, fetched.contentType, fetched.raw, options.now);
+  }
   // Errors name the address without its user name, password or query, which can hold a token (#125).
   const shown = publicAddress(url);
   let response: Response;
@@ -242,7 +508,11 @@ export async function loadUrlSourceDocument(
   }
   const contentType = response.headers.get("content-type") ?? "";
   const raw = options.maxBytes ? await readTextCapped(response, options.maxBytes, source.id) : await response.text();
-  const now = options.now ?? new Date().toISOString();
+  return urlDocument(source, url, contentType, raw, options.now);
+}
+
+function urlDocument(source: MindStoneKbExternalSource, url: string, contentType: string, raw: string, at?: string): ExternalSourceDocument {
+  const now = at ?? new Date().toISOString();
   let markdown = raw;
   let titleHint: string | undefined;
   if (contentType.includes("text/html") || /^\s*</.test(raw)) {

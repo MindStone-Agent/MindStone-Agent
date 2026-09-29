@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { join } from "node:path";
 import { discoverMindStoneKnowledgebases, privateKnowledgebaseLinkError } from "../knowledgebase/load.js";
 import { parseExternalSources } from "../knowledgebase/sources.js";
+import { isNonPublicHost } from "../provider/enterprise.js";
 import { discoverMindStoneSkills } from "../skills/artifacts.js";
 import { loadMindStoneWorkflow } from "../workflow/load.js";
 import { isRealWorkflowDir } from "../workflow/validate.js";
@@ -372,7 +373,13 @@ export function listPrivateKnowledgebaseSources(personaDir: string, kbId: string
  * (a new name only: an existing one is refused). A URL is added to kb.json's
  * url sources and fetched at the next ingest. Neither is indexed until then.
  */
-export function addPrivateKnowledgebaseSource(personaDir: string, kbId: string, body: Record<string, unknown>): { kind: "text" | "url"; name: string } {
+export function addPrivateKnowledgebaseSource(
+  personaDir: string,
+  kbId: string,
+  body: Record<string, unknown>,
+  /** Private network hosts, allowed only by the host's own environment (`kbPrivateHostsAllowed`). */
+  options: { allowPrivateHosts?: boolean } = {},
+): { kind: "text" | "url"; name: string } {
   const dir = privateKnowledgebaseDir(personaDir, kbId);
   const current = listPrivateKnowledgebaseSources(personaDir, kbId);
   if (current.text.length + current.urls.length >= PRIVATE_KB_LIMITS.sources) {
@@ -420,6 +427,11 @@ export function addPrivateKnowledgebaseSource(personaDir: string, kbId: string, 
     // URL only if the site takes one in its query, which reads back masked.
     if (url.username || url.password) {
       throw new PersonaComposeError("url can't hold a user name or password", "invalid_source", 400);
+    }
+    // Checked again, by resolved address and on every redirect, when it is
+    // fetched (#142 review); refused here so it is never stored.
+    if (!options.allowPrivateHosts && isNonPublicHost(url.hostname)) {
+      throw new PersonaComposeError("url must be a public address, not this machine or a private network", "invalid_source", 400);
     }
     if (body.refreshMs !== undefined && (!Number.isInteger(body.refreshMs) || (body.refreshMs as number) < 60_000)) {
       throw new PersonaComposeError("refreshMs must be a whole number of milliseconds, at least 60000", "invalid_source", 400);

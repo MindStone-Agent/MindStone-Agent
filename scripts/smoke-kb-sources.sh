@@ -79,6 +79,24 @@ assert.ok(extracted.markdown.includes("## Alpha"));
 assert.ok(extracted.markdown.includes('Intro "quoted".'));
 assert.ok(!extracted.markdown.includes("evil"));
 assert.ok(!extracted.markdown.includes("menu"));
+// An element with no closing tag is read as text, and a heading keeps its own line.
+assert.ok(extractHtmlText("<body><script>kept text<p>after</p></body>").markdown.includes("kept text"));
+assert.deepEqual(extractHtmlText("<p>a</p><h1>Big <b>one</b></h1>tail").markdown.split("\n"), ["a", "# Big one", "tail"]);
+// A page built to be slow for a backtracking regex is read in linear time (#142 review):
+// each of these, about 5 MB, in well under a second.
+for (const [what, page] of [
+  ["<title>", "<title>".repeat(700_000)],
+  ["<body>", "<body>".repeat(800_000)],
+  ["<script>", "<script>".repeat(600_000)],
+  ["<", "<".repeat(5_000_000)],
+  ["<h1>", "<h1>".repeat(1_200_000)],
+  ["</title", "<title>" + "</titl".repeat(800_000)],
+]) {
+  const started = performance.now();
+  extractHtmlText(page);
+  const took = performance.now() - started;
+  assert.ok(took < 1500, `extracting ${what} x N took ${Math.round(took)} ms`);
+}
 console.log("kb source parsing + wikilink + html extraction unit assertions passed");
 TS
 
