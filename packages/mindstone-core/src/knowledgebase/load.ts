@@ -22,6 +22,7 @@ import {
   type ExternalSourceDocument,
 } from "./sources.js";
 import {
+  KB_REEMBED_MAX_FAILURES,
   KB_REEMBED_NOTE,
   KB_REEMBED_STATE_FALLBACK,
   KB_REEMBED_STATE_FILE,
@@ -406,7 +407,7 @@ export async function reembedStaleKnowledgebase(options: {
   /** Awaited before each entry is sent (#156 review): the caller holds the job while turns run. */
   beforeBatch?: () => Promise<void>;
   /** How a 429 pauses the job (#158); KB_REEMBED_LIMITS.rateLimit by default. */
-  rateLimit?: { minMs: number; maxMs: number; maxWaits: number };
+  rateLimit?: { minMs: number; maxMs: number; maxWaits: number; maxTotalMs: number };
 }): Promise<{ reembedded?: { kbId: string; personaId?: string; vectors: KbVectorsWriteResult; gaveUp?: true }; deferred: number }> {
   const maxEntries = options.maxEntries ?? KB_REEMBED_LIMITS.maxEntries;
   const spec = memoryEmbeddingSpec(options.embedder);
@@ -505,12 +506,36 @@ export const KB_REEMBED_LIMITS = {
   maxEntries: 512,
   timeoutMs: 600_000,
   retryAfterMs: 30 * 60_000,
-  maxFailures: 5,
+  maxFailures: KB_REEMBED_MAX_FAILURES,
   /** A turn running longer than this no longer holds the re-embed back: it may never end (#158). */
   turnWaitMs: 10 * 60_000,
-  /** A 429 pauses the job: Retry-After within 30 s to 5 minutes, up to 5 times in a row (#158). */
-  rateLimit: { minMs: 30_000, maxMs: 5 * 60_000, maxWaits: 5 },
+  /**
+   * A 429 pauses the job: Retry-After within 30 s to 5 minutes, up to 5 times
+   * in a row, and 30 minutes of waiting in all per run (#158).
+   */
+  rateLimit: { minMs: 30_000, maxMs: 5 * 60_000, maxWaits: 5, maxTotalMs: 30 * 60_000 },
 };
+
+/**
+ * Waits while turns in flight (their start times, read each time) hold a
+ * background re-embed back (#156 review, #158): the gateway's `beforeBatch`.
+ */
+export async function waitWhileTurnsRun(starts: () => Iterable<number>, pollMs = 200): Promise<void> {
+  while (turnsHoldReembed(starts())) await new Promise<void>((resolve) => setTimeout(resolve, pollMs));
+}
+
+/**
+ * Clears a KB's re-embed state, so the next owner chat tries it again (#158
+ * review): the admin's reset after fixing the embedder. False if there is no
+ * such KB, or a private one is linked.
+ */
+export function resetKnowledgebaseReembed(kbDir: string, kbId: string, options: { noLinks?: boolean } = {}): boolean {
+  if (options.noLinks && privateKnowledgebaseLinkError(kbDir, kbId)) return false;
+  const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
+  if (!loaded.ok) return false;
+  clearKbReembedState(loaded.kb.dir);
+  return true;
+}
 
 /** Whether turns in flight (their start times) hold a background re-embed back (#156 review, #158). */
 export function turnsHoldReembed(starts: Iterable<number>, now = Date.now(), waitMs = KB_REEMBED_LIMITS.turnWaitMs): boolean {

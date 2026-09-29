@@ -60,6 +60,8 @@ export type KbEmbedFailureCause = "unavailable" | "rate-limited" | "rejected";
 
 /** The re-embed's state for a KB (#158), beside its vectors, so a restart keeps it. */
 export const KB_REEMBED_STATE_FILE = "reembed.json";
+/** Counted failures after which a KB isn't embedded again for that model (#158). */
+export const KB_REEMBED_MAX_FAILURES = 5;
 /** How the stale reason ends while the gateway may still embed the KB again. */
 export const KB_REEMBED_NOTE = " (a KB of at most 512 entries is also embedded again after an owner's chat through the gateway)";
 
@@ -151,6 +153,8 @@ export function readKbReembedState(kbDir: string, options: { noLinks?: boolean }
     if (
       state?.version !== 1 || typeof state.spec !== "string" || typeof state.updatedAt !== "string"
       || typeof state.failures !== "number" || !Number.isInteger(state.failures) || state.failures < 0
+      // Never more than a give-up takes: a larger number is a hand edit (#158 review).
+      || state.failures > KB_REEMBED_MAX_FAILURES
       || (state.nextAttemptAt !== undefined && (typeof state.nextAttemptAt !== "string" || Number.isNaN(Date.parse(state.nextAttemptAt))))
       || (state.gaveUp !== undefined && state.gaveUp !== true)
       || (state.reason !== undefined && (typeof state.reason !== "string" || state.reason.length > 300 || /\p{C}/u.test(state.reason)))
@@ -231,7 +235,7 @@ export async function writeKbVectors(params: {
    * minMs..maxMs) and send the same entry again, up to maxWaits times in a
    * row. Waiting doesn't count against the budget.
    */
-  rateLimit?: { minMs: number; maxMs: number; maxWaits: number };
+  rateLimit?: { minMs: number; maxMs: number; maxWaits: number; maxTotalMs: number };
 }): Promise<KbVectorsWriteResult> {
   const { embedder } = params;
   const indexStillCurrent = () => {
@@ -256,6 +260,8 @@ export async function writeKbVectors(params: {
   const encoded: Record<string, string> = {};
   let dimension = 0;
   let paused = 0;
+  /** Time spent waiting on 429s in this run: capped by rateLimit.maxTotalMs (#158 review). */
+  let limitedFor = 0;
   const embedBatch = async (batch: MindStoneKbIndexEntry[]) => {
     const texts = batch.map((entry) => kbEntryEmbeddingText(entry));
     // The embedder drops blank inputs, which would shift every vector after one.
@@ -296,6 +302,9 @@ export async function writeKbVectors(params: {
           if (!limit || embedFailureCause(error) !== "rate-limited" || waits >= limit.maxWaits) throw error;
           const asked = (error as { retryAfterMs?: unknown }).retryAfterMs;
           const wait = Math.min(limit.maxMs, Math.max(limit.minMs, typeof asked === "number" ? asked : 0));
+          // A run that has waited long enough on 429s stops, so it can't hold the job for days.
+          if (limitedFor + wait > limit.maxTotalMs) throw error;
+          limitedFor += wait;
           const waitStarted = Date.now();
           await new Promise((resolve) => setTimeout(resolve, wait));
           // The resend waits for turns like any request (#158 review).

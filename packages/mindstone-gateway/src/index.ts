@@ -121,7 +121,8 @@ import {
   personaKnowledgebasesDir,
   reembedStaleKnowledgebase,
   knowledgebaseReembedState,
-  turnsHoldReembed,
+  resetKnowledgebaseReembed,
+  waitWhileTurnsRun,
   decisionForAnsweringPersona,
   personaComponentsSummary,
   privateKnowledgebasesAllowed,
@@ -788,7 +789,7 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
       // if they overlap (#156 review).
       claim: ({ personaId, kbId }) => (personaId && PRIVATE_KB_INGESTS.has(`${personaId}/${kbId}`) ? undefined : () => undefined),
       beforeBatch: async () => {
-        while (turnsHoldReembed(turnsInFlight.values())) await new Promise<void>((resolve) => setTimeout(resolve, 200));
+        await waitWhileTurnsRun(() => turnsInFlight.values());
       },
     });
     const done = result.reembedded;
@@ -2801,14 +2802,42 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     });
     return;
   }
-  const privateKbSourceWriteMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases\/([a-z0-9][a-z0-9-]{0,39})\/(sources|ingest)$/.exec(url.pathname);
+  const globalKbReembedMatch = /^\/admin\/knowledgebases\/([a-z0-9][a-z0-9-]{0,39})\/reembed$/.exec(url.pathname);
+  if (req.method === "POST" && globalKbReembedMatch) {
+    // Try again after a give-up (#158 review): clears the KB's re-embed state,
+    // so the next owner chat embeds it again. The Console's retry; the CLI's is `kb ingest`.
+    const body = await readAdminBody(req, res);
+    if (!body) return;
+    const kbId = globalKbReembedMatch[1]!;
+    if (!resetKnowledgebaseReembed(knowledgebasesDirFromConfig(gateConfig.config, paths), kbId)) {
+      refuse(404, { error: `no knowledge base named "${kbId}"`, code: "not_found" }, { reason: "not_found", knowledgebase: kbId });
+      return;
+    }
+    kbReembedClean = undefined;
+    appendAdminAudit(paths.dataDir, { userId, action: "kb_reembed_reset", knowledgebase: kbId });
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+  const privateKbSourceWriteMatch = /^\/admin\/personas\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/knowledgebases\/([a-z0-9][a-z0-9-]{0,39})\/(sources|ingest|reembed)$/.exec(url.pathname);
   if (req.method === "POST" && privateKbSourceWriteMatch) {
     const body = await readAdminBody(req, res);
     if (!body) return;
-    const [, id, kbId, action] = privateKbSourceWriteMatch as unknown as [string, string, string, "sources" | "ingest"];
+    const [, id, kbId, action] = privateKbSourceWriteMatch as unknown as [string, string, string, "sources" | "ingest" | "reembed"];
     const personasDir = personasDirFromConfig(gateConfig.config, paths);
     if (!adminPersonaOnDisk(personasDir, id)) {
       refuse(404, { error: `no persona named "${id}"`, code: "not_found" }, { reason: "not_found", persona: id });
+      return;
+    }
+    if (action === "reembed") {
+      // The private KB's retry after a give-up (#158 review), as for a shared one.
+      const privateDir = readablePersonaKnowledgebasesDir(join(personasDir, id));
+      if (!privateDir || !resetKnowledgebaseReembed(privateDir, kbId, { noLinks: true })) {
+        refuse(404, { error: `persona "${id}" has no knowledge base named "${kbId}"`, code: "not_found" }, { reason: "not_found", persona: id, knowledgebase: kbId });
+        return;
+      }
+      kbReembedClean = undefined;
+      appendAdminAudit(paths.dataDir, { userId, action: "kb_reembed_reset", persona: id, knowledgebase: kbId });
+      sendJson(res, 200, { ok: true });
       return;
     }
     if (action === "sources") {

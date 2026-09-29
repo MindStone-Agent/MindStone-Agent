@@ -131,7 +131,7 @@ import { join } from "node:path";
 import {
   KB_EMBED_LIMITS, KB_REEMBED_STATE_FILE, KB_VECTORS_FILE, cosineSimilarity, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbReembedState, readKbVectors, writeKbReembedState, writeKbVectors,
 } from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
-import { KB_REEMBED_LIMITS, ingestMindStoneKnowledgebase, knowledgebaseReembedState, mindStoneKbStatus, reembedState, reembedStaleKnowledgebase, turnsHoldReembed } from "./packages/mindstone-core/src/knowledgebase/load.ts";
+import { KB_REEMBED_LIMITS, ingestMindStoneKnowledgebase, knowledgebaseReembedState, mindStoneKbStatus, privateKnowledgebaseLinkError, reembedState, reembedStaleKnowledgebase, turnsHoldReembed, waitWhileTurnsRun } from "./packages/mindstone-core/src/knowledgebase/load.ts";
 import { KnowledgebaseRecallProvider, knowledgebaseRecallSettings } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
 import { buildMemoryRecallPrompt, CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, recallMindStoneMemory, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
 import { createMemoryEmbeddingProvider, sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
@@ -620,7 +620,7 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
       await kb(root, "o-kb", "# O\n\nalpha o\n", "old");
       const embedder = failing(error);
       for (let attempt = 1; attempt <= 7; attempt += 1) {
-        result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder, rateLimit: { minMs: 1, maxMs: 1, maxWaits: 1 } });
+        result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder, rateLimit: { minMs: 1, maxMs: 1, maxWaits: 1, maxTotalMs: 10 } });
         assert.ok(result.reembedded && !result.reembedded.gaveUp, `${name}: attempt ${attempt} runs and doesn't give up`);
         const state = readKbReembedState(join(root, "o-kb"))!;
         assert.deepEqual([state.failures, Date.parse(state.nextAttemptAt!) - clock], [0, 30 * MIN], `${name}: nothing counted`);
@@ -648,7 +648,7 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     await ingestMindStoneKnowledgebase(root, id, { embedder: { ...fixed({ alpha: [1, 0, 0] }), model } as any });
   };
   const two = "# T\n\n## One\n\nalpha one\n\n## Two\n\nalpha two\n";
-  const quick = { minMs: 1, maxMs: 5, maxWaits: 2 };
+  const quick = { minMs: 1, maxMs: 5, maxWaits: 2, maxTotalMs: 1000 };
   const limited = () => Object.assign(new Error("x"), { status: 429 });
   // A 429 pauses and the same entry is sent again: the KB is embedded, the wait off the budget.
   {
@@ -661,6 +661,29 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     assert.equal(done.reembedded?.vectors.state, "ready", "a 429 is a pause, then the entry again");
     assert.equal(calls, 3, "two entries, one sent twice");
     assert.equal(gates, 3, "the resend waits for turns like every request");
+  }
+  // A 429 wait: Retry-After honoured and capped, off the budget, up to maxWaits in a row, and
+  // at most maxTotalMs in all per run, so a rate limit can't hold the job for days.
+  {
+    const run = async (name: string, script: (call: number) => unknown, rateLimit: any, timeoutMs?: number) => {
+      const dir = mkdtempSync(join(tmpdir(), `kbvec-r3-${name}-`));
+      let calls = 0;
+      const embedder = { id: "stub", model: "m1", async embedTexts(texts: string[]) { calls += 1; const error = script(calls); if (error) throw error; return texts.map(() => [1, 0, 0]); } } as any;
+      const started = Date.now();
+      const result = await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder, batchSize: 1, rateLimit, ...(timeoutMs ? { timeoutMs } : {}) }) as any;
+      return { result, calls, ms: Date.now() - started };
+    };
+    const once = (retryAfterMs: number) => (call: number) => (call === 1 ? Object.assign(limited(), { retryAfterMs }) : undefined);
+    const honoured = await run("honoured", once(80), { minMs: 1, maxMs: 1000, maxWaits: 1, maxTotalMs: 5000 });
+    assert.ok(honoured.result.state === "ready" && honoured.ms >= 75, `Retry-After honoured: ${honoured.ms} ms`);
+    const capped = await run("capped", once(5000), { minMs: 1, maxMs: 40, maxWaits: 1, maxTotalMs: 5000 });
+    assert.ok(capped.result.state === "ready" && capped.ms < 1000, `Retry-After capped at maxMs: ${capped.ms} ms`);
+    const offBudget = await run("budget", once(120), { minMs: 120, maxMs: 1000, maxWaits: 1, maxTotalMs: 5000 }, 60);
+    assert.equal(offBudget.result.state, "ready", "a 429 wait longer than the budget doesn't spend it");
+    const twice = await run("twice", (call) => (call <= 2 ? limited() : undefined), { minMs: 1, maxMs: 1, maxWaits: 2, maxTotalMs: 5000 });
+    assert.equal(twice.result.state, "ready", "two 429s in a row, within maxWaits");
+    const always = await run("total", () => limited(), { minMs: 5, maxMs: 5, maxWaits: 5, maxTotalMs: 12 });
+    assert.deepEqual([always.result.cause, always.calls], ["rate-limited", 3], "stopped once 12 ms of waiting in all is spent (two 5 ms waits)");
   }
   // A 429 after entries were embedded, past the waits, counts: the work is lost.
   {
@@ -711,6 +734,35 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     await kb(root, "d-kb", "# D\n\nalpha d\n", "m1");
     assert.ok(existsSync(join(root, "d-kb", KB_VECTORS_FILE)), "the ingest kept its vectors");
   }
+  // A state with more failures than a give-up takes is a hand edit: not read.
+  {
+    const root = mkdtempSync(join(tmpdir(), "kbvec-r3-failures-"));
+    writeFileSync(join(root, KB_REEMBED_STATE_FILE), JSON.stringify({ version: 1, spec: "stub:m1", failures: 12, nextAttemptAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+    assert.equal(readKbReembedState(root), undefined);
+  }
+  // A private KB's reembed.json can't be a link: read with O_NOFOLLOW, and the KB counts as linked.
+  {
+    const root = mkdtempSync(join(tmpdir(), "kbvec-r3-link-"));
+    await kb(root, "l-kb", "# L\n\nalpha l\n", "old");
+    const target = join(root, "elsewhere.json");
+    writeFileSync(target, JSON.stringify({ version: 1, spec: "stub:m1", failures: 5, gaveUp: true, updatedAt: new Date().toISOString() }));
+    symlinkSync(target, join(root, "l-kb", KB_REEMBED_STATE_FILE));
+    assert.equal(readKbReembedState(join(root, "l-kb"), { noLinks: true }), undefined, "a link isn't followed for a private KB");
+    assert.equal(readKbReembedState(join(root, "l-kb"))?.gaveUp, true, "control: the same file read without noLinks");
+    assert.ok(privateKnowledgebaseLinkError(root, "l-kb"), "a linked reembed.json makes a private KB linked");
+  }
+  // The wait for turns: a turn that runs holds it, one past turnWaitMs doesn't.
+  {
+    const starts = new Map<string, number>([["turn", Date.now()]]);
+    let done = false;
+    const waiting = waitWhileTurnsRun(() => starts.values(), 5).then(() => { done = true; });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(done, false, "held while the turn runs");
+    starts.delete("turn");
+    await waiting;
+    starts.set("hung", Date.now() - KB_REEMBED_LIMITS.turnWaitMs - 1);
+    await waitWhileTurnsRun(() => starts.values(), 5);
+  }
   // A state whose reason has control or direction characters isn't read.
   for (const reason of ["x\u001b[2Jy", "x\u202Ey"]) {
     const root = mkdtempSync(join(tmpdir(), "kbvec-r2-reason-"));
@@ -736,6 +788,7 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
       req.resume();
       req.on("end", () => {
         if (req.url?.includes("junk")) { res.writeHead(200, { "content-type": "application/json" }); res.end("null"); return; }
+        if (req.url?.includes("dated")) { res.writeHead(429, { "content-type": "application/json", "retry-after": new Date(Date.now() + 3000).toUTCString() }); res.end("{}"); return; }
         res.writeHead(429, { "content-type": "application/json", "retry-after": "2" }); res.end("{}");
       });
     });
@@ -745,6 +798,8 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     try {
       const limitedError = await provider("limited").embedTexts(["x"]).then(() => undefined, (e) => e);
       assert.equal(limitedError?.retryAfterMs, 2000, "Retry-After, in ms");
+      const dated = (await provider("dated").embedTexts(["x"]).then(() => undefined, (e) => e))?.retryAfterMs;
+      assert.ok(typeof dated === "number" && dated > 1000 && dated <= 3000, `an HTTP-date Retry-After: ${dated}`);
       const junkDir = mkdtempSync(join(tmpdir(), "kbvec-r2-junk-"));
       const junk = await writeKbVectors({ kbDir: junkDir, kbId: "k", entries, indexText, embedder: provider("junk") }) as any;
       assert.equal(junk.cause, "rejected", "a 200 the provider can't use is the embedder's work, not an outage");
@@ -1177,6 +1232,25 @@ for _ in $(seq 1 60); do grep -q '"cause":"unavailable"' "${DATA}/admin/audit.js
 grep -q '"cause":"unavailable"' "${DATA}/admin/audit.jsonl" || { echo "no re-embed attempt recorded its cause" >&2; exit 1; }
 [[ "$(call GET /admin/knowledgebases)" == 200 ]] || { echo "admin KB list: $(cat "${BODY}")" >&2; exit 1; }
 node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const kbs=(b.knowledgebases??[]).filter((k)=>k.reembed); if (kbs.length !== 1 || kbs[0].reembed.failures !== 0 || !kbs[0].reembed.nextAttemptAt || kbs[0].reembed.gaveUp) { console.error("the admin KB list should show one KB waiting to be embedded again: " + JSON.stringify(b.knowledgebases)); process.exit(1); }' "${BODY}"
+# The Console's retry (#158 review): resetting clears it, so the next owner chat tries again.
+WAITING="$(node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(b.knowledgebases.find((k)=>k.reembed).id)' "${BODY}")"
+[[ "$(call POST "/admin/knowledgebases/${WAITING}/reembed" '{}')" == 200 ]] || { echo "reset ${WAITING}: $(cat "${BODY}")" >&2; exit 1; }
+[[ "$(call GET /admin/knowledgebases)" == 200 ]] || exit 1
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if ((b.knowledgebases??[]).some((k)=>k.reembed)) { console.error("a reset KB still shows its state: " + JSON.stringify(b.knowledgebases)); process.exit(1); }' "${BODY}"
+grep -q '"action":"kb_reembed_reset"' "${DATA}/admin/audit.jsonl" || { echo "the reset wasn't audited" >&2; exit 1; }
+[[ "$(call POST /admin/knowledgebases/no-such-kb/reembed '{}')" == 404 ]] || { echo "resetting a KB that doesn't exist: $(cat "${BODY}")" >&2; exit 1; }
+# A persona's KB: a reembed.json that is a link isn't read for its list; a real one is, and resets.
+SPEC="$(node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").map((x)=>JSON.parse(x)).filter((e)=>e.action==="kb_reembedded"); process.stdout.write(l.pop().embeddingProvider)' "${DATA}/admin/audit.jsonl")"
+BEDS="${DATA}/personas/grower/knowledgebases/beds"
+SPEC="${SPEC}" node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ version: 1, spec: process.env.SPEC, failures: 5, gaveUp: true, reason: "synthetic", updatedAt: new Date().toISOString() }))' "${TEMP_RUNTIME}/state-elsewhere.json"
+ln -s "${TEMP_RUNTIME}/state-elsewhere.json" "${BEDS}/reembed.json"
+[[ "$(call GET /admin/personas/grower/knowledgebases)" == 200 ]] || { echo "private KB list: $(cat "${BODY}")" >&2; exit 1; }
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if ((b.knowledgebases??[]).some((k)=>k.reembed)) { console.error("a linked reembed.json was read for a persona KB: " + JSON.stringify(b.knowledgebases)); process.exit(1); }' "${BODY}"
+rm "${BEDS}/reembed.json" && cp "${TEMP_RUNTIME}/state-elsewhere.json" "${BEDS}/reembed.json"
+[[ "$(call GET /admin/personas/grower/knowledgebases)" == 200 ]] || exit 1
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const p=(b.knowledgebases??[]).find((k)=>k.id==="beds"); if (!p?.reembed?.gaveUp) { console.error("control: a real reembed.json should show: " + JSON.stringify(b.knowledgebases)); process.exit(1); }' "${BODY}"
+[[ "$(call POST /admin/personas/grower/knowledgebases/beds/reembed '{}')" == 200 ]] || { echo "reset beds: $(cat "${BODY}")" >&2; exit 1; }
+[[ ! -e "${BEDS}/reembed.json" ]] || { echo "the private reset left the state" >&2; exit 1; }
 stub_mode ok
 
 echo "KB embeddings smoke test passed."
