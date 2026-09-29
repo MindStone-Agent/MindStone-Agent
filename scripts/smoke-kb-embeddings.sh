@@ -491,6 +491,11 @@ hits="$(chat_hits "${SEMANTIC}")"
 grep -q '^kb:garage:fleet.md|embedding$' <<<"${hits}" || { echo "semantic question did not recall the KB source: ${hits}" >&2; exit 1; }
 if grep -q 'kb:pantry' <<<"${hits}"; then echo "an unrelated KB source was recalled: ${hits}" >&2; exit 1; fi
 [[ "$(stub_count "${SEMANTIC}")" == "1" ]] || { echo "query embedded $(stub_count "${SEMANTIC}") times" >&2; exit 1; }
+# A request timeout that isn't a number doesn't abort the question's embedding at recall either.
+export EMBEDDER_TIMEOUT_MS=abc
+hits="$(chat_hits "timeout check: ${SEMANTIC}")"
+export EMBEDDER_TIMEOUT_MS=1500
+grep -q '^kb:garage:fleet.md|embedding$' <<<"${hits}" || { echo "EMBEDDER_TIMEOUT_MS=abc broke recall by meaning: ${hits}" >&2; exit 1; }
 
 # With the sqlite-vec index too: memory and KB recall share one query embedding.
 set_config 'c["memory"]["vectorStore"] = "sqlite-vec"'
