@@ -12,9 +12,15 @@
 # CONSOLE_REF. To build from local checkouts instead, set MINDSTONE_BUILD_CONTEXT
 # and CONSOLE_BUILD_CONTEXT to their paths.
 #
+# Don't edit this file: an update replaces it. Put your own changes in
+# compose.override.yml beside it; install-stack.sh uses it and never overwrites it.
+#
+# Networks: `app` joins the gateway, the Console and the optional Ollama; `db`
+# joins only the Console and MongoDB, so nothing else can reach the database.
+#
 # Published on loopback only. Put a reverse proxy with TLS in front of the
 # Console before exposing it to a network.
-name: mindstone
+name: mindstone-stack
 
 services:
   gateway:
@@ -39,6 +45,7 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks: [app]
     volumes:
       - gateway-runtime:/home/node/.mindstone-agent
       - pi-agent:/home/node/.pi/agent
@@ -71,6 +78,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file: console.env
+    networks: [app, db]
     environment:
       HOST: 0.0.0.0
       MONGO_URI: mongodb://mongodb:27017/MindStoneConsole
@@ -87,20 +95,35 @@ services:
     image: mongo:8.0.20
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"
+    networks: [db]
     volumes:
       - ./data/mongo:/data/db
     command: mongod --noauth
 
   # Optional: Ollama in a container, for Linux hosts or a machine without Ollama.
-  # Turn it on with COMPOSE_PROFILES=ollama and OLLAMA_BASE_URL=http://ollama:11434/v1
-  # in .env (install-stack.sh --with-ollama does both). CPU only as written; for
-  # an NVIDIA GPU, add a device reservation. Not published on the host.
+  # install-stack.sh --with-ollama turns it on (COMPOSE_PROFILES=ollama and
+  # OLLAMA_BASE_URL=http://ollama:11434/v1 in .env); --without-ollama turns it off.
+  # CPU only as written. For an NVIDIA GPU, add to compose.override.yml:
+  #   services:
+  #     ollama:
+  #       deploy:
+  #         resources:
+  #           reservations:
+  #             devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+  # Not published on the host, and not on the database network.
   ollama:
     image: ollama/ollama:0.35.0
     profiles: ["ollama"]
     restart: unless-stopped
+    networks: [app]
     volumes:
       - ollama-models:/root/.ollama
+
+networks:
+  app:
+  # Internal: MongoDB has no route out, and only the Console is on it with it.
+  db:
+    internal: true
 
 volumes:
   gateway-runtime:

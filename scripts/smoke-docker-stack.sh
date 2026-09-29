@@ -78,6 +78,11 @@ STUB="${TMP_DIR}/bin"
 mkdir -p "${STUB}"
 CALLS="${TMP_DIR}/docker-calls"
 FIXTURES="${TMP_DIR}/fixtures"
+# What the stubbed MongoDB answers: how many accounts have the email, and which usernames are taken.
+EMAIL_COUNT="${TMP_DIR}/email-count"
+TAKEN="${TMP_DIR}/taken-usernames"
+echo 0 >"${EMAIL_COUNT}"
+: >"${TAKEN}"
 mkdir -p "${FIXTURES}"
 cat >"${FIXTURES}/env.example" <<'EOF'
 APP_TITLE=MindStone Console
@@ -112,6 +117,11 @@ echo "\$*" >>"${CALLS}"
 case "\$*" in
   info*) exit 0 ;;
   "compose version --short") echo "2.33.1" ;;
+  ps\ *) exit 0 ;;
+  *"mongosh"*"countDocuments({ email:"*) cat "${EMAIL_COUNT}" ;;
+  *"mongosh"*"countDocuments({ username:"*)
+    name="\$(printf '%s' "\$*" | sed -n "s/.*username: '\\([^']*\\)'.*/\\1/p")"
+    grep -qx "\${name}" "${TAKEN}" && echo 1 || echo 0 ;;
   *" exec -T console npm run --silent create-user -- "*)
     IFS= read -r password
     [[ \${#password} -ge 8 ]] || { echo "Error: password too short"; exit 1; }
@@ -121,24 +131,32 @@ exit 0
 EOF
 chmod +x "${STUB}/curl" "${STUB}/docker"
 
-INSTALL="${TMP_DIR}/install"
+# The calling shell's generic variables must not be adopted (#173 review, 5).
 run_installer() {
+  local dir="$1"
+  shift
   PATH="${STUB}:${PATH}" MINDSTONE_REF="" CONSOLE_REF="" CONSOLE_PORT=27990 MINDSTONE_GATEWAY_PORT=27991 \
-    MINDSTONE_PROJECT=smoketest bash ./install-stack.sh --dir "${INSTALL}" "$@" </dev/null
+    COMPOSE_PROJECT_NAME=other-project COMPOSE_PROFILES=ollama OLLAMA_BASE_URL=http://localhost:11434 \
+    MINDSTONE_PROJECT=smoketest bash ./install-stack.sh --dir "${dir}" "$@" </dev/null
 }
-first_out="$(run_installer --admin-email owner@example.com 2>&1)"
+INSTALL="${TMP_DIR}/install"
+value() { awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print }' "${INSTALL}/$1"; }
+creates() { grep -c "create-user" "${CALLS}" 2>/dev/null || true; }
+
+first_out="$(run_installer "${INSTALL}" --admin-email Owner@Example.com 2>&1)"
 check "prints the Console address" '[[ "${first_out}" == *"Open http://localhost:27990"* ]]'
 check "prints the password file, not the password" '[[ "${first_out}" == *"${INSTALL}/admin-password"* ]]'
-check "install dir is 700" '[[ "$(mode "${INSTALL}")" == 700 ]]'
+check "install dir is 700 and carries the marker" '[[ "$(mode "${INSTALL}")" == 700 && -f "${INSTALL}/.mindstone-stack" ]]'
 for f in .env gateway.env console.env admin-password; do
   check "${f} is 600" '[[ "$(mode "${INSTALL}/${f}")" == 600 ]]'
 done
 check "console.env has its 6 secrets" '[[ "$(grep -cE "^(CREDS_KEY|CREDS_IV|JWT_SECRET|JWT_REFRESH_SECRET|MINDSTONE_GATEWAY_TOKEN|MINDSTONE_ADMIN_TOKEN)=.+" "${INSTALL}/console.env")" == 6 ]]'
-value() { awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print }' "${INSTALL}/$1"; }
 check "one gateway token in both files" '[[ "$(value gateway.env MINDSTONE_AGENT_GATEWAY_TOKEN)" == "$(value console.env MINDSTONE_GATEWAY_TOKEN)" ]]'
 check "the gateway gets only the admin digest" '[[ "$(value gateway.env MINDSTONE_ADMIN_TOKEN_SHA256)" == "$(printf %s "$(value console.env MINDSTONE_ADMIN_TOKEN)" | sha)" ]] && ! grep -q "^MINDSTONE_ADMIN_TOKEN=" "${INSTALL}/gateway.env"'
 check "the Console reaches the gateway on the stack network" '[[ "$(value console.env MINDSTONE_GATEWAY_URL)" == "http://gateway:19789/v1" ]]'
 check ".env names the project and ports" '[[ "$(value .env COMPOSE_PROJECT_NAME)" == smoketest && "$(value .env CONSOLE_PORT)" == 27990 && "$(value .env MINDSTONE_GATEWAY_PORT)" == 27991 ]]'
+check "the shell's COMPOSE_PROFILES and OLLAMA_BASE_URL aren't adopted" '! grep -q "^COMPOSE_PROFILES=" "${INSTALL}/.env" && [[ "$(value .env OLLAMA_BASE_URL)" == "http://host.docker.internal:11434/v1" ]]'
+check "compose runs without the shell's COMPOSE_* (stub saw the install's project dir)" 'grep -q -- "--project-directory ${INSTALL}" "${CALLS}"'
 leaks=0
 for key in CREDS_KEY CREDS_IV JWT_SECRET JWT_REFRESH_SECRET MINDSTONE_GATEWAY_TOKEN MINDSTONE_ADMIN_TOKEN; do
   secret="$(value console.env "${key}")"
@@ -147,25 +165,113 @@ done
 [[ "${first_out}" != *"$(head -n 1 "${INSTALL}/admin-password")"* ]] || leaks=$((leaks + 1))
 check "no secret in the installer's output (${leaks} found)" '[[ "${leaks}" == 0 ]]'
 check "the stack was built and started" 'grep -q "up -d --build --remove-orphans" "${CALLS}"'
-check "the admin was created once" '[[ "$(grep -c "create-user" "${CALLS}")" == 1 ]]'
+check "the admin was created once, lowercased, with its local part as username" '[[ "$(creates)" == 1 ]] && grep -q "create-user -- owner@example.com Admin owner --email-verified=true" "${CALLS}"'
 
 sums_before="$(cat "${INSTALL}/gateway.env" "${INSTALL}/console.env" "${INSTALL}/admin-password" | sha)"
-second_out="$(run_installer 2>&1)"
+second_out="$(run_installer "${INSTALL}" 2>&1)"
 sums_after="$(cat "${INSTALL}/gateway.env" "${INSTALL}/console.env" "${INSTALL}/admin-password" | sha)"
 check "a re-run keeps every secret" '[[ "${sums_before}" == "${sums_after}" ]]'
-check "a re-run doesn't create the admin again" '[[ "$(grep -c "create-user" "${CALLS}")" == 1 ]] && [[ "${second_out}" == *"already created"* ]]'
+check "a re-run doesn't create the admin again" '[[ "$(creates)" == 1 ]] && [[ "${second_out}" == *"set up by an earlier run"* ]]'
+
+# An earlier install without the marker (before #173's review) is still adopted.
+rm "${INSTALL}/.mindstone-stack"
+check "an earlier stack install is adopted and marked" 'run_installer "${INSTALL}" >/dev/null 2>&1 && [[ -f "${INSTALL}/.mindstone-stack" ]]'
+
+ollama_out="$(run_installer "${INSTALL}" --with-ollama 2>&1)"
+check "--with-ollama turns the profile and in-stack address on" '[[ "$(value .env COMPOSE_PROFILES)" == ollama && "$(value .env OLLAMA_BASE_URL)" == "http://ollama:11434/v1" ]]'
+check "--with-ollama says Ollama runs in the stack, and how to switch back" '[[ "${ollama_out}" == *"Ollama runs in the stack"* && "${ollama_out}" == *"--without-ollama"* && "${ollama_out}" != *"Ollama on this machine is reached"* ]]'
+check "switching tells to change the provider address in Settings" '[[ "${ollama_out}" == *"change the Ollama provider"* ]]'
+back_out="$(run_installer "${INSTALL}" --without-ollama 2>&1)"
+check "--without-ollama goes back" '! grep -q "^COMPOSE_PROFILES=" "${INSTALL}/.env" && [[ "$(value .env OLLAMA_BASE_URL)" == "http://host.docker.internal:11434/v1" && "${back_out}" == *"Ollama on this machine is reached"* ]]'
+check "--without-ollama stops the in-stack Ollama" 'grep -q "rm --stop --force ollama" "${CALLS}"'
+warn_out="$(run_installer "${INSTALL}" --ollama-url http://localhost:11434 2>&1)"
+check "a loopback Ollama address and a missing /v1 are warned about" '[[ "${warn_out}" == *"is the container itself"* && "${warn_out}" == *"should end in /v1"* ]]'
+run_installer "${INSTALL}" --without-ollama >/dev/null 2>&1
 
 uninstall_out="$(PATH="${STUB}:${PATH}" bash ./install-stack.sh --dir "${INSTALL}" --uninstall 2>&1)"
 check "uninstall stops the stack and keeps volumes" 'tail -n 1 "${CALLS}" | grep -q " down --remove-orphans$"'
-check "uninstall says how to delete the data" '[[ "${uninstall_out}" == *"down -v"* ]]'
+check "uninstall never prints down -v or rm -rf of the folder" '[[ "${uninstall_out}" != *"down -v"* && "${uninstall_out}" != *"rm -rf \"${INSTALL}\""* ]]'
+check "uninstall names only this project's volumes" '[[ "${uninstall_out}" == *"docker volume rm smoketest_gateway-runtime smoketest_pi-agent smoketest_pi-sessions smoketest_console-data"* ]]'
 check "uninstall keeps the files" '[[ -f "${INSTALL}/console.env" && -d "${INSTALL}/data/mongo" ]]'
+# The printed delete removes the installer's files and leaves a file of the user's.
+touch "${INSTALL}/compose.override.yml" "${INSTALL}/compose.yml.bak.20260101000000"
+delete_line="$(grep -E '^  cd ".*" && rm -rf data' <<<"${uninstall_out}")"
+(eval "${delete_line}") 2>/dev/null || true
+check "the printed delete removes only what the installer made" '[[ -d "${INSTALL}" && "$(ls -A "${INSTALL}")" == "compose.override.yml" ]]'
+
+echo "== --dir refusals =="
+FAKE_HOME="${TMP_DIR}/home/me"
+mkdir -p "${FAKE_HOME}"
+refuse() { HOME="${FAKE_HOME}" run_installer "$1" --admin-email owner@example.com 2>&1; }
+OTHER="${TMP_DIR}/project"
+mkdir -p "${OTHER}"
+printf 'console.log(1)\n' >"${OTHER}/app.js"
+printf 'PROJECT_SETTING=1\n' >"${OTHER}/.env"
+chmod 755 "${OTHER}"
+calls_before="$(wc -l <"${CALLS}")"
+out="$(refuse "${OTHER}" || true)"
+check "a folder with other files is refused" '[[ "${out}" == *"isn'"'"'t empty and isn'"'"'t a MindStone stack install"* ]]'
+check "a refused folder is left exactly as it was" '[[ "$(cat "${OTHER}/.env")" == "PROJECT_SETTING=1" && "$(mode "${OTHER}")" == 755 && ! -e "${OTHER}/.mindstone-stack" ]]'
+out="$(refuse "${FAKE_HOME}" || true)"
+check "the home folder is refused" '[[ "${out}" == *"Refusing to install"* ]]'
+out="$(refuse "${TMP_DIR}/home" || true)"
+check "a folder that contains the home folder is refused" '[[ "${out}" == *"Refusing to install"* ]]'
+out="$(refuse / || true)"
+check "the root is refused" '[[ "${out}" == *"Refusing to install"* ]]'
+check "nothing ran for a refused folder" '[[ "$(wc -l <"${CALLS}")" == "${calls_before}" ]]'
+mkdir -p "${TMP_DIR}/empty"
+check "an empty folder is adopted" 'run_installer "${TMP_DIR}/empty" >/dev/null 2>&1 && [[ -f "${TMP_DIR}/empty/.mindstone-stack" ]]'
+
+echo "== admin account =="
+fresh() { rm -rf "${TMP_DIR}/a"; mkdir -p "${TMP_DIR}/a"; }
+fresh
+out="$(run_installer "${TMP_DIR}/a" --admin-email owner@example.com --admin-name Al 2>&1 || true)"
+check "a name under 3 characters is refused before the build" '[[ "${out}" == *"3 to 80 characters"* && "${out}" != *"Building"* ]]'
+fresh
+out="$(run_installer "${TMP_DIR}/a" --admin-email "o'\''x@example.com" 2>&1 || true)"
+check "an email with a quote is refused" '[[ "${out}" == *"is not an email address"* ]]'
+fresh
+run_installer "${TMP_DIR}/a" --admin-email a@example.com >/dev/null 2>&1
+check "a one-letter local part gets a longer username" 'grep -qE "create-user -- a@example.com Admin a_[0-9a-f]{4} --email-verified=true" "${CALLS}"'
+fresh
+echo owner >"${TAKEN}"
+out="$(run_installer "${TMP_DIR}/a" --admin-email owner@work.example 2>&1)"
+check "a taken username gets a longer one" 'grep -qE "create-user -- owner@work.example Admin owner_[0-9a-f]{4} --email-verified=true" "${CALLS}" && [[ "${out}" == *"(username owner_"* ]]'
+: >"${TAKEN}"
+fresh
+echo 1 >"${EMAIL_COUNT}"
+creates_before="$(creates)"
+out="$(run_installer "${TMP_DIR}/a" --admin-email owner@example.com 2>&1)"
+check "an existing email: its own status, no account created" '[[ "$(creates)" == "${creates_before}" && "${out}" == *"already exists in this Console"* && "${out}" != *"The password is in"* ]]'
+check "an existing email: no password file is claimed or made" '[[ ! -e "${TMP_DIR}/a/admin-password" ]]'
+check "an existing email: later runs say it wasn't created here" 'grep -q "existed before" "${TMP_DIR}/a/.admin-created"'
+echo 0 >"${EMAIL_COUNT}"
+
+echo "== ports and truncation =="
+fresh
+node -e 'require("net").createServer().listen(27993, "127.0.0.1", () => setTimeout(() => process.exit(0), 20000))' &
+listener=$!
+disown "${listener}" 2>/dev/null || true
+for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/27993) 2>/dev/null && break; sleep 0.1; done
+out="$(CONSOLE_PORT=27993 PATH="${STUB}:${PATH}" MINDSTONE_GATEWAY_PORT=27991 bash ./install-stack.sh --dir "${TMP_DIR}/a" 2>&1 || true)"
+kill "${listener}" 2>/dev/null || true
+check "a taken port stops the install with its name" '[[ "${out}" == *"Port 27993 on 127.0.0.1 is already in use (CONSOLE_PORT)"* && "${out}" != *"Building"* ]]'
+head -n "$(( $(wc -l <install-stack.sh) - 1 ))" install-stack.sh >"${TMP_DIR}/truncated.sh"
+PATH="${STUB}:${PATH}" bash "${TMP_DIR}/truncated.sh" --dir "${TMP_DIR}/cut" --admin-email owner@example.com >/dev/null 2>&1 || true
+check "a download cut before its last line runs nothing" '[[ ! -e "${TMP_DIR}/cut" ]]'
 
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   echo "== compose file =="
-  cfg="$(docker compose --project-directory "${INSTALL}" -f "${ROOT}/deploy/docker/compose.yml" config 2>&1)"
+  CFG_DIR="${TMP_DIR}/cfg"
+  mkdir -p "${CFG_DIR}"
+  touch "${CFG_DIR}/gateway.env" "${CFG_DIR}/console.env"
+  cfg="$(docker compose --project-directory "${CFG_DIR}" -f "${ROOT}/deploy/docker/compose.yml" --profile ollama config 2>&1)"
   check "compose file is valid" '[[ "${cfg}" == *"services:"* ]]'
   check "only loopback ports are published" '[[ "$(grep -c "host_ip: 127.0.0.1" <<<"${cfg}")" == 2 && "$(grep -c "published:" <<<"${cfg}")" == 2 ]]'
   check "the gateway declares docker as its supervisor" 'grep -q "MINDSTONE_AGENT_SUPERVISOR: docker" <<<"${cfg}"'
+  nets="$(docker compose --project-directory "${CFG_DIR}" -f "${ROOT}/deploy/docker/compose.yml" --profile ollama config --format json 2>/dev/null |
+    node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const c=JSON.parse(s);console.log(Object.entries(c.services).map(([k,v])=>k+":"+Object.keys(v.networks||{}).sort().join(",")).sort().join(" "))})')"
+  check "MongoDB shares a network with the Console only (${nets})" '[[ "${nets}" == "console:app,db gateway:app mongodb:db ollama:app" ]]'
 fi
 
 echo "Docker stack smoke passed."

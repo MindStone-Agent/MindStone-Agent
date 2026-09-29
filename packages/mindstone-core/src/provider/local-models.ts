@@ -54,14 +54,23 @@ export type LocalProviderPreset = {
 export const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1";
 
 /**
- * The Ollama address for chat models: OLLAMA_BASE_URL with any trailing slash
- * trimmed, as memory embeddings read it (memory/embedding.ts), or
- * DEFAULT_OLLAMA_BASE_URL. In a container, OLLAMA_BASE_URL points both at
- * Ollama on the host (#171), for example http://host.docker.internal:11434/v1.
+ * The Ollama address for chat models and memory embeddings: OLLAMA_BASE_URL
+ * with any trailing slash trimmed, or DEFAULT_OLLAMA_BASE_URL. In a container,
+ * OLLAMA_BASE_URL points both at Ollama on the host (#171), for example
+ * http://host.docker.internal:11434/v1. The server's root, the form other
+ * tools use (http://localhost:11434), gets Ollama's OpenAI-compatible /v1, so
+ * chat doesn't 404 on /chat/completions; any other path is kept as given.
  */
 export function ollamaBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   const value = env.OLLAMA_BASE_URL?.trim().replace(/\/+$/g, "");
-  return value || DEFAULT_OLLAMA_BASE_URL;
+  if (!value) return DEFAULT_OLLAMA_BASE_URL;
+  try {
+    const url = new URL(value);
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.pathname === "/" && !url.search && !url.hash) return `${value}/v1`;
+  } catch {
+    // Not a URL: used as given, and the provider check reports it.
+  }
+  return value;
 }
 
 export const LOCAL_PROVIDER_PRESETS: Record<LocalProviderPresetId, LocalProviderPreset> = {

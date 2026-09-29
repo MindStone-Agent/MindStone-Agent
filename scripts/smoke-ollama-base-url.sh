@@ -29,6 +29,30 @@ assert.equal({ ...LOCAL_PROVIDER_PRESETS.ollama }.baseUrl, hostUrl, "a copy of t
 const embedding = resolveMemoryEmbeddingProviderConfig({ memory: { embeddingProvider: "ollama:nomic-embed-text" } } as never);
 assert.equal(embedding?.baseUrl, LOCAL_PROVIDER_PRESETS.ollama.baseUrl, "chat and embeddings reach the same Ollama");
 
+// A server root (the form other tools use) gets /v1; another path is kept.
+assert.equal(ollamaBaseUrl({ OLLAMA_BASE_URL: "http://localhost:11434" }), "http://localhost:11434/v1");
+assert.equal(ollamaBaseUrl({ OLLAMA_BASE_URL: "http://localhost:11434/" }), "http://localhost:11434/v1");
+assert.equal(ollamaBaseUrl({ OLLAMA_BASE_URL: "http://proxy.local/ollama/v1" }), "http://proxy.local/ollama/v1");
+assert.equal(ollamaBaseUrl({ OLLAMA_BASE_URL: "http://proxy.local/ollama" }), "http://proxy.local/ollama");
+process.env.OLLAMA_BASE_URL = "http://localhost:11434";
+assert.equal(LOCAL_PROVIDER_PRESETS.ollama.baseUrl, "http://localhost:11434/v1");
+assert.equal(
+  resolveMemoryEmbeddingProviderConfig({ memory: { embeddingProvider: "ollama:nomic-embed-text" } } as never)?.baseUrl,
+  "http://localhost:11434/v1",
+  "embeddings read a server root the same way",
+);
+assert.equal(
+  resolveMemoryEmbeddingProviderConfig({ memory: { embeddingProvider: "ollama:nomic-embed-text" } } as never, { OLLAMA_BASE_URL: "http://localhost:11434", EMBEDDER_BASE_URL: "http://embed.local:1/x" })?.baseUrl,
+  "http://embed.local:1/x",
+  "an explicit embedder address is used as given",
+);
+assert.equal(
+  resolveMemoryEmbeddingProviderConfig({ memory: { embeddingProvider: "ollama:nomic-embed-text" } } as never, {})?.baseUrl,
+  "http://127.0.0.1:11434/v1",
+  "embeddings keep their default when nothing is set",
+);
+delete process.env.OLLAMA_BASE_URL;
+
 // Other presets are unaffected.
 assert.equal(LOCAL_PROVIDER_PRESETS.lmstudio.baseUrl, "http://localhost:1234/v1");
 assert.equal(LOCAL_PROVIDER_PRESETS["ollama-cloud"].baseUrl, "https://ollama.com/v1");

@@ -124,9 +124,11 @@ The gateway, the web Console and its database, all in Docker. You need only Dock
 curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | bash
 ```
 
-The installer asks for the Console admin's email, name and password (the password isn't shown), builds and starts the stack, and ends with `Open http://localhost:3080`. Sign in there: the **Set up MindStone** banner walks you through the model, the persona and memory. Ollama on this machine is used as it is, for chat and for embeddings.
+The installer asks for the Console admin's email, name and password (the password isn't shown), builds and starts the stack, and ends with `Open http://localhost:3080`. Sign in there: the **Set up MindStone** banner walks you through the model, the persona and memory. On macOS, Ollama on this machine is used as it is, for chat and for embeddings. On Linux, Ollama on the host has to listen on the Docker bridge address, or add `--with-ollama` to run it in the stack (see path A0 below).
 
-Everything lives in `~/.mindstone`. Running the same command again updates the stack and keeps your secrets and data. For the options, and a step-by-step with a check after each step, see [Install guide for AI agents](#install-guide-for-ai-agents), path A; for what runs where, see [Docker](#docker).
+Don't run it with `sudo`: on Linux, add your user to the `docker` group instead.
+
+Everything lives in `~/.mindstone-stack`. Running the same command again updates the stack and keeps your secrets and data. For the options, and a step-by-step with a check after each step, see [Install guide for AI agents](#install-guide-for-ai-agents), path A; for what runs where, see [Docker](#docker).
 
 ### Install from the public repository
 
@@ -173,43 +175,54 @@ Choose **one** path:
 
 ### A. The whole stack in Docker
 
-The commands below assume the default install folder `~/.mindstone` and the default ports: the Console on `127.0.0.1:3080` and the gateway on `127.0.0.1:19789`. Both listen on loopback only.
+The commands below assume the default install folder `~/.mindstone-stack` and the default ports: the Console on `127.0.0.1:3080` and the gateway on `127.0.0.1:19789`. Both listen on loopback only.
 
 #### A0. Requirements
 
 - macOS or Linux (arm64 or x86_64), with `curl`.
 - Docker with Compose v2: Docker Desktop on macOS, or Docker Engine with the Compose plugin on Linux. Docker must be running.
 - About 10 GB of free disk space for the images. The first build takes 10 to 20 minutes.
-- Optional: [Ollama](https://ollama.com) on this machine, for local models and embeddings. On Linux it must listen on an address the containers can reach (`OLLAMA_HOST=0.0.0.0`), or use `--with-ollama` (step A1) to run Ollama in the stack instead.
+- Your user can run Docker. On Linux, that means being in the `docker` group (`sudo usermod -aG docker $USER`, then log in again). Don't run the installer with `sudo`: it would install into root's home, with root's ids.
+- Optional: [Ollama](https://ollama.com) on this machine, for local models and embeddings.
+  - **macOS (Docker Desktop):** nothing to do.
+  - **Linux:** the containers reach the host at its Docker bridge address (usually `172.17.0.1`; see `ip -4 addr show docker0`), and Ollama listens on `127.0.0.1` by default. Bind it to the bridge address as well (for example `OLLAMA_HOST=172.17.0.1` in its service's environment), or use `--with-ollama` (step A1) to run Ollama in the stack. Don't bind it to `0.0.0.0`: Ollama's API has no authentication, so that opens it to your whole network.
 
 **Check:**
 
 ```bash
 docker info >/dev/null && docker compose version
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:19789/health
 ```
 
-The first prints `Docker Compose version v2.…`. The second prints `000`: nothing is using port 3080 yet. If something is, choose other ports in step A1.
+The first prints `Docker Compose version v2.…`. The other two print `000`: nothing is using port 3080 or port 19789 yet. A native MindStone gateway (path B) uses 19789; stop it, or choose other ports in step A1. The installer checks both ports too, and stops with a clear message if either is taken.
 
 #### A1. Install
 
-Without a terminal to type into, pass the admin's email. The installer then generates the admin password into `~/.mindstone/admin-password` (mode 600) and prints the file's path, never the password:
+Without a terminal to type into, pass the admin's email. The installer then generates the admin password into `~/.mindstone-stack/admin-password` (mode 600) and prints the file's path, never the password:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | \
   bash -s -- --admin-email <the person's email>
 ```
 
-A person at a terminal can leave out `--admin-email` and answer the prompts instead.
+A person at a terminal can leave out `--admin-email` and answer the prompts instead. Either way the details are checked before the build: the name must be 3 to 80 characters, and the Console username is the email's local part (letters, digits, `.` and `_`), made longer when it's under 2 characters or already taken. If an account with that email already exists, the installer creates none, sets no password, and says so: sign in with that account's own password.
 
-Options go after `bash -s --`: `--dir <path>` (install folder), `--ref <git ref>` and `--console-ref <git ref>` (the MindStone-Agent and Console versions to build, `main` by default), `--admin-name <name>`, and `--with-ollama` (run Ollama in the stack too). Ports and the Compose project name are environment variables, set on `bash` (not on `curl`):
+Options go after `bash -s --`:
+- `--dir <path>`: the install folder. It must be new, empty, or an earlier stack install (it carries a `.mindstone-stack` marker file); the installer refuses any other folder, your home folder, and any folder that contains it.
+- `--ref <git ref>` and `--console-ref <git ref>`: the MindStone-Agent and Console versions to build, `main` by default.
+- `--admin-name <name>`.
+- `--with-ollama` runs Ollama in the stack too, and `--without-ollama` goes back to Ollama on this machine. If you switch after setup is done, also change the Ollama provider's address in the Console (Settings, **Your setup**, model provider): chat keeps the address it was set up with, while memory follows the new one.
+- `--ollama-url <url>`: Ollama as the gateway container sees it, ending in `/v1`. Inside the container `localhost` is the container itself, so the installer warns about it.
+
+Ports and the Compose project name (`mindstone-stack` by default) are environment variables, set on `bash` (not on `curl`). The installer reads only its own variables (`CONSOLE_PORT`, `MINDSTONE_GATEWAY_PORT`, `MINDSTONE_PROJECT`, `MINDSTONE_REF`, `CONSOLE_REF`, `MINDSTONE_OLLAMA_BASE_URL`, `MINDSTONE_DIR`), never `COMPOSE_*` or `OLLAMA_BASE_URL` from your shell:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | \
   CONSOLE_PORT=3090 MINDSTONE_GATEWAY_PORT=19790 bash -s -- --admin-email <email>
 ```
 
-If you change them, use your ports in place of 3080 and 19789 in the checks below. The installer saves them in `~/.mindstone/.env`, so later runs and `docker compose` commands use them too.
+If you change them, use your ports in place of 3080 and 19789 in the checks below. The installer saves them in `~/.mindstone-stack/.env`, so later runs and `docker compose` commands use them too.
 
 What it does:
 - checks Docker and Compose v2;
@@ -222,17 +235,17 @@ What it does:
 **Check:** the installer exits 0 and prints `Open http://localhost:3080`. Then:
 
 ```bash
-cd ~/.mindstone && docker compose ps --format '{{.Service}} {{.Status}}'
+cd ~/.mindstone-stack && docker compose ps --format '{{.Service}} {{.Status}}'
 ```
 
 It lists `gateway` as `Up … (healthy)`, and `console` and `mongodb` as `Up`.
 
 #### A2. Check the secrets and the gateway
 
-Run these in `~/.mindstone`. They count and compare, and never show a value:
+Run these in `~/.mindstone-stack`. They count and compare, and never show a value:
 
 ```bash
-cd ~/.mindstone
+cd ~/.mindstone-stack
 grep -cE '^(CREDS_KEY|CREDS_IV|JWT_SECRET|JWT_REFRESH_SECRET|MINDSTONE_GATEWAY_TOKEN|MINDSTONE_ADMIN_TOKEN)=.+' console.env
 ls -l gateway.env console.env | cut -c1-10
 curl -s http://127.0.0.1:19789/health
@@ -256,7 +269,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080
 **Check:** it prints `200`. Signing in works: with a generated password, this prints `200` without showing it (`--data @-` reads the request from stdin):
 
 ```bash
-cd ~/.mindstone
+cd ~/.mindstone-stack
 printf '{"email":"%s","password":"%s"}' "<the admin's email>" "$(head -n 1 admin-password)" | \
   curl -s -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' --data @- http://127.0.0.1:3080/api/auth/login
 ```
@@ -270,7 +283,7 @@ Setup is done in the Console, in a browser: skip `mindstone onboard`, and don't 
 Ollama on this machine is reached from the gateway container as `http://host.docker.internal:11434/v1`: the Ollama choice in setup is already filled in with it. To check the container reaches it:
 
 ```bash
-cd ~/.mindstone && docker compose exec gateway curl -s -o /dev/null -w '%{http_code}\n' http://host.docker.internal:11434/api/tags
+cd ~/.mindstone-stack && docker compose exec gateway curl -s -o /dev/null -w '%{http_code}\n' http://host.docker.internal:11434/api/tags
 ```
 
 **Check:**
@@ -284,13 +297,14 @@ The `mindstone` CLI runs inside the gateway container as `docker compose exec ga
 
 - **Update:** run the step A1 command again, with the same `--dir` if you used one (`--admin-email` isn't needed again). It keeps the refs and ports saved in `.env`, rebuilds both images, and never regenerates a secret or touches your data. To move to other versions, pass `--ref` and `--console-ref`.
 - **Restart the gateway:** from the Console's settings page, or `docker compose restart gateway`. The container's restart policy brings the gateway back after the Console restarts it.
-- **Stop and start:** `cd ~/.mindstone && docker compose stop`, then `docker compose up -d`.
-- **Uninstall:** run the installer with `--uninstall` (and the same `--dir`). It stops and removes the containers and keeps the data: the Docker volumes, `~/.mindstone/data` and the secrets. It prints how to delete them, which can't be undone.
+- **Stop and start:** `cd ~/.mindstone-stack && docker compose stop`, then `docker compose up -d`.
+- **Customise:** put your own changes (an Ollama GPU, extra mounts) in `~/.mindstone-stack/compose.override.yml`. The installer includes it and never overwrites it; an update replaces `compose.yml`, keeping the previous copy as `compose.yml.bak.<time>`.
+- **Uninstall:** run the installer with `--uninstall` (and the same `--dir`). It stops and removes the containers and keeps the data: the Docker volumes, `~/.mindstone-stack/data` and the secrets. It prints how to delete them, which can't be undone: `docker volume rm` of this project's volumes by name, and a delete of only the files and folders the installer made (never the whole folder, and never `docker compose down -v`).
 
 **Check (after an update):** the secrets are unchanged, and the stack is healthy again:
 
 ```bash
-cd ~/.mindstone
+cd ~/.mindstone-stack
 cat gateway.env console.env | shasum -a 256 > .secrets-before.sha256   # before the update (sha256sum on Linux)
 # ... run the update ...
 cat gateway.env console.env | shasum -a 256 | diff -q - .secrets-before.sha256 >/dev/null && echo unchanged
@@ -938,12 +952,16 @@ See `docs/operations/CONNECTORS.md`, `EMAIL_CONNECTOR.md`, and
 | `mongodb` | `mongo:8.0.20`, the Console's database. | the stack's network only |
 | `ollama` | Optional (Compose profile `ollama`, or `install-stack.sh --with-ollama`): Ollama in a container, for Linux or a machine without Ollama. Pull models with `docker compose exec ollama ollama pull <model>`, or let the Console download the embedding model. | the stack's network only |
 
-What it keeps, and where (in the install folder, `~/.mindstone` by default):
+What it keeps, and where (in the install folder, `~/.mindstone-stack` by default):
 - **Secrets:** `gateway.env` (the gateway token and the admin credential's sha256) and `console.env` (the Console's secrets, the gateway token and the admin credential), both mode 600. The gateway's entrypoint writes the token to `secrets/gateway-token` (600) in its runtime and doesn't pass the variable on to the agent's processes.
 - **Settings:** `.env` holds the refs, ports, project name and UID/GID, and no secrets. Compose reads it, so plain `docker compose` commands in the folder use the same settings.
-- **Data:** the Docker volumes `<project>_gateway-runtime` (config, memory, transcripts), `<project>_pi-agent` and `<project>_pi-sessions` (Pi's isolated state), and `<project>_console-data`; the Console's database, uploads and logs are in `data/`.
+- **Data:** the Docker volumes (the project is `mindstone-stack` unless `MINDSTONE_PROJECT` says otherwise) `<project>_gateway-runtime` (config, memory, transcripts), `<project>_pi-agent` and `<project>_pi-sessions` (Pi's isolated state), and `<project>_console-data`; the Console's database, uploads and logs are in `data/`.
 
-Ollama: the gateway reaches Ollama on the host as `http://host.docker.internal:11434/v1` (`OLLAMA_BASE_URL`), for chat models and for memory embeddings. Set `OLLAMA_BASE_URL` in `.env` to use another address.
+Networks: the gateway, the Console and the optional Ollama share the `app` network; MongoDB is on an internal `db` network with the Console only, so the gateway and Ollama can't reach it.
+
+Ollama: the gateway reaches Ollama on the host as `http://host.docker.internal:11434/v1` (`OLLAMA_BASE_URL` in `.env`, set with `--ollama-url`), for chat models and for memory embeddings. A server root such as `http://host:11434` is read as `http://host:11434/v1`.
+
+Your changes go in `compose.override.yml` beside `compose.yml`: the installer includes it and never overwrites it.
 
 Restarting the gateway from the Console works: the service declares `MINDSTONE_AGENT_SUPERVISOR=docker` and `restart: unless-stopped`, so the gateway exits with code 75 and Docker starts it again (`docs/operations/GATEWAY_RESTART.md`). The gateway's own port can't be changed from the Console's settings in this stack: it listens on 19789 inside the container, and `MINDSTONE_GATEWAY_PORT` moves the host port.
 
