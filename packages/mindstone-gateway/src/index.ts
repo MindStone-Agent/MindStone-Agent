@@ -798,7 +798,10 @@ function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
         knowledgebase: done.kbId,
         embeddingProvider: spec,
         vectors: done.vectors.state,
+        ...(done.vectors.state === "missing" ? { reason: done.vectors.reason } : {}),
+        ...(done.gaveUp ? { gaveUp: true } : {}),
       });
+      if (done.gaveUp) console.warn(`[mindstone] stopped embedding knowledge base ${where} again for ${spec} after ${KB_REEMBED_LIMITS.maxFailures} failures; it uses word match until \`kb ingest\``);
       if (done.vectors.state === "ready") console.info(`[mindstone] knowledge base ${where} embedded again for ${spec}`);
       else console.warn(`[mindstone] knowledge base ${where} not embedded again for ${spec} (word match meanwhile; retried later): ${done.vectors.reason}`);
     } else if (result.deferred === 0) {

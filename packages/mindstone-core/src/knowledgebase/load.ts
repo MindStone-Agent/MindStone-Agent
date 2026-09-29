@@ -386,7 +386,7 @@ export async function reembedStaleKnowledgebase(options: {
   claim?: (target: { personaId?: string; kbId: string }) => (() => void) | undefined;
   /** Awaited before each entry is sent (#156 review): the caller holds the job while turns run. */
   beforeBatch?: () => Promise<void>;
-}): Promise<{ reembedded?: { kbId: string; personaId?: string; vectors: KbVectorsWriteResult }; deferred: number }> {
+}): Promise<{ reembedded?: { kbId: string; personaId?: string; vectors: KbVectorsWriteResult; gaveUp?: true }; deferred: number }> {
   const maxEntries = options.maxEntries ?? KB_REEMBED_LIMITS.maxEntries;
   const spec = memoryEmbeddingSpec(options.embedder);
   const yieldTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -405,7 +405,10 @@ export async function reembedStaleKnowledgebase(options: {
       const current = readKbVectors(loaded.kb.dir, read.text, options.embedder, { noLinks, decode: false });
       if (current.state !== "stale" || current.cause !== "model") continue;
       const retryKey = `${loaded.kb.dir}\0${spec}`;
-      if ((REEMBED_RETRY_AT.get(retryKey)?.at ?? 0) > Date.now()) {
+      const retry = REEMBED_RETRY_AT.get(retryKey);
+      // Given up on for this model: not waiting, so not deferred (#156 review).
+      if (retry?.at === Number.POSITIVE_INFINITY) continue;
+      if ((retry?.at ?? 0) > Date.now()) {
         deferred += 1;
         continue;
       }
@@ -432,6 +435,8 @@ export async function reembedStaleKnowledgebase(options: {
         });
         if (vectors.state === "ready") {
           REEMBED_RETRY_AT.delete(retryKey);
+        } else if (vectors.superseded) {
+          // A newer ingest won: not a failure of the embedder (#156 review).
         } else {
           // Twice as long after each failure; after five, not again for this model
           // until the gateway restarts (#156 review): a KB the model keeps
@@ -439,6 +444,7 @@ export async function reembedStaleKnowledgebase(options: {
           const failures = (REEMBED_RETRY_AT.get(retryKey)?.failures ?? 0) + 1;
           const at = failures >= KB_REEMBED_LIMITS.maxFailures ? Number.POSITIVE_INFINITY : Date.now() + KB_REEMBED_LIMITS.retryAfterMs * 2 ** (failures - 1);
           REEMBED_RETRY_AT.set(retryKey, { at, failures });
+          if (at === Number.POSITIVE_INFINITY) return { reembedded: { kbId: summary.id, personaId, vectors, gaveUp: true }, deferred };
         }
         return { reembedded: { kbId: summary.id, personaId, vectors }, deferred };
       } finally {

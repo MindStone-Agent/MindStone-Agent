@@ -42,7 +42,7 @@ type KbVectorsFile = {
 
 export type KbVectorsWriteResult =
   | { state: "ready"; provider: string; model: string; dimension: number; count: number }
-  | { state: "missing"; reason: string };
+  | { state: "missing"; reason: string; superseded?: true };
 
 export type LoadedKbVectors = {
   provider: string;
@@ -203,7 +203,7 @@ export async function writeKbVectors(params: {
     dropOld();
     return { state: "missing", reason: "the index has no entries" };
   }
-  if (!indexStillCurrent()) return { state: "missing", reason: "the index changed while these were embedded; the newer ingest's vectors are kept" };
+  if (!indexStillCurrent()) return { state: "missing", reason: "the index changed while these were embedded; the newer ingest's vectors are kept", superseded: true };
   const file: KbVectorsFile = {
     version: 1,
     kbId: params.kbId,

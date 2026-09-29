@@ -87,7 +87,7 @@ createServer((req, res) => {
     if (req.method !== "POST" || req.url !== "/v1/embeddings") { res.writeHead(404); res.end("{}"); return; }
     const body = JSON.parse(raw);
     const input = Array.isArray(body.input) ? body.input : [body.input];
-    state.requests.push({ model: body.model, input });
+    state.requests.push({ model: body.model, input, t: Date.now() });
     if (state.mode === "fail") {
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "stub embedder is down" } }));
@@ -462,6 +462,23 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   assert.equal(result.reembedded?.vectors.state, "missing");
   assert.equal(modelOf(failing2, "f-kb"), "old", "a failed re-embed keeps the old vectors");
   assert.deepEqual(await reembedStaleKnowledgebase({ kbDirs: [{ dir: failing2 }], embedder: now }), { deferred: 1 }, "not tried again at once");
+  // Retries double, and after five failures the KB is given up on for that model: not deferred any more (#156 review).
+  const realNow = Date.now;
+  try {
+    let clock = realNow();
+    Date.now = () => clock;
+    let last: any;
+    for (let attempt = 2; attempt <= 5; attempt += 1) {
+      clock += 24 * 3600_000;
+      last = await reembedStaleKnowledgebase({ kbDirs: [{ dir: failing2 }], embedder: down });
+      assert.equal(last.reembedded?.vectors.state, "missing", `attempt ${attempt} must run`);
+    }
+    assert.equal(last.reembedded?.gaveUp, true, "the fifth failure gives up");
+    clock += 365 * 24 * 3600_000;
+    assert.deepEqual(await reembedStaleKnowledgebase({ kbDirs: [{ dir: failing2 }], embedder: now }), { deferred: 0 }, "a given-up KB is neither tried nor counted as waiting");
+  } finally {
+    Date.now = realNow;
+  }
   // An ingest that finishes while a re-embed runs keeps its own vectors.
   const race = mkdtempSync(join(tmpdir(), "kbvec-reembed-race-"));
   await kb(race, "e-race", "# E\n\nalpha e\n", "old");
@@ -476,6 +493,8 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: race }], embedder: racing });
   assert.match((result.reembedded?.vectors as any).reason ?? "", /index changed while/);
   assert.equal(readFileSync(join(race, "e-race", KB_VECTORS_FILE), "utf8"), beforeRace, "vectors made from an index replaced meanwhile are not written");
+  assert.equal((result.reembedded?.vectors as any).superseded, true);
+  assert.equal((await reembedStaleKnowledgebase({ kbDirs: [{ dir: race }], embedder: now })).reembedded?.kbId, "e-race", "an overtaken attempt isn't a failure: tried again at once");
 }
 // Two ingests of one KB: the one whose index was replaced meanwhile keeps nothing and removes nothing (#156 review).
 {
@@ -548,6 +567,7 @@ config["session"] = {"mode": "single", "defaultSessionKey": "agent:default:main"
 config["memory"] = {"autoRecall": True}
 config.setdefault("gateway", {})["auth"] = {"mode": "token", "tokenEnv": "KBE_TOKEN"}
 config["gateway"]["admin"] = {"tokenEnv": "KBE_ADMIN_TOKEN"}
+config["gateway"]["http"] = {"chatCompletions": {"enabled": True}}
 config_path.write_text(json.dumps(config, indent=2) + "\n")
 PY
 
@@ -827,29 +847,41 @@ root = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "
 PY
 stub_mode ok
 ${MS} kb ingest library --json >/dev/null
-chat_ms() { # chat_ms <text> [role]: prints the wall time of one gateway chat, in ms
+chat_ms() { # chat_ms <text> [role]: prints "<start ms> <end ms>" of one gateway chat
   local started ended role="${2:-}"
   started=$(node -e 'console.log(Date.now())')
   if [[ -n "${role}" ]]; then
-    curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H "x-mindstone-user-role: ${role}" -H "x-mindstone-user-id: smoke-${role}" -H 'content-type: application/json' -d "{\"text\":\"$1\"}" "${BASE}/chat/send"
+    # A Console user's turn, as the Console sends it: the OpenAI endpoint with the user's role.
+    curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H "x-mindstone-user-role: ${role}" -H "x-mindstone-user-id: smoke-${role}" -H 'content-type: application/json' -d "{\"model\":\"mindstone/default\",\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}]}" "${BASE}/v1/chat/completions"
   else
     curl -s -o "${BODY}" -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H 'content-type: application/json' -d "{\"text\":\"$1\"}" "${BASE}/chat/send"
   fi
   ended=$(node -e 'console.log(Date.now())')
-  echo $(( ended - started ))
+  echo "${started} ${ended}"
 }
+# library_requests_between <from ms> <to ms>: how many library entries the stub was sent in that window.
+library_requests_between() { node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>console.log(s.requests.filter((q)=>q.input.some((t)=>t.includes("Book row")) && q.t > Number(process.argv[2]) && q.t < Number(process.argv[3])).length))' "${STUB}/_test/state" "$1" "$2"; }
+# Memory's own backfill after a model switch (#140) isn't this PR's: without the sqlite-vec index only the KB re-embed runs.
+set_config 'c["memory"].pop("vectorStore", None)'
 stub_mode serial
-baseline=0
-for i in 1 2; do t=$(chat_ms "baseline question ${i}"); [[ "${t}" -gt "${baseline}" ]] && baseline=${t}; done
 set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-c"'
-chat_ms "a member's question after the switch" member >/dev/null
-sleep 2
-grep -q '"model":"kbstub-b"' "${DATA}/knowledgebases/library/vectors.json" || { echo "a non-owner chat started a re-embed" >&2; exit 1; }
+read -r member_start member_end <<<"$(chat_ms "a member's question after the switch" member)"
+grep -q '"choices"' "${BODY}" || { echo "the member's chat didn't run: $(cat "${BODY}")" >&2; exit 1; }
+sleep 3
+[[ "$(library_requests_between "${member_start}" "$(node -e 'console.log(Date.now())')")" == "0" ]] || { echo "a non-owner chat started a re-embed" >&2; exit 1; }
 chat_ms "the owner's first question after the switch" >/dev/null
-slowest=0
-for i in 1 2 3; do t=$(chat_ms "owner question ${i} during the re-embed"); [[ "${t}" -gt "${slowest}" ]] && slowest=${t}; done
+sleep 1
+windows=""
+for i in 1 2 3; do windows="${windows} $(chat_ms "owner question ${i} during the re-embed")"; sleep 0.5; done
 grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" && { echo "the re-embed finished before the timed chats: nothing was measured" >&2; exit 1; }
-[[ "${slowest}" -le $(( baseline + 1000 )) ]] || { echo "owner turns slowed by the background re-embed: ${slowest} ms vs ${baseline} ms without it" >&2; exit 1; }
+set -- ${windows}
+while [[ $# -ge 2 ]]; do
+  # No library entry is sent while a turn runs (a little slack at each edge for the HTTP round trip).
+  n="$(library_requests_between $(( $1 + 150 )) $(( $2 - 150 )))"
+  [[ "${n}" == "0" ]] || { echo "the re-embed sent ${n} entries while an owner turn ran ($1..$2)" >&2; exit 1; }
+  shift 2
+done
+[[ "$(library_requests_between 0 "$(node -e 'console.log(Date.now())')")" -gt 0 ]] || { echo "no re-embed request was seen at all" >&2; exit 1; }
 for _ in $(seq 1 120); do grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" && break; sleep 0.5; done
 grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" || { echo "the library KB was never embedded again" >&2; exit 1; }
 grep -q '"action":"kb_reembedded"' "${DATA}/admin-audit.jsonl" 2>/dev/null || grep -rq 'kb_reembedded' "${DATA}" || { echo "the re-embed left no audit entry" >&2; exit 1; }
