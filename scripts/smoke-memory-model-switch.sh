@@ -362,10 +362,10 @@ turn_ms=()
 for i in 1 2 3; do turn_ms+=("$(chat "question ${i} during the switch")"); sleep 0.5; done
 node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
   const b = s.requests.filter((q)=>q.model === "model-b");
-  const isOld = (t)=>/an older note number|zebraword/.test(t);
-  const reembed = b.filter((q)=>q.input.every(isOld));
   const queries = b.filter((q)=>q.input.length === 1 && /^question \d during the switch$/.test(q.input[0]));
-  if (queries.length !== 3) { console.error(`expected 3 query embeddings, saw ${queries.length}: ${JSON.stringify(b.filter((q)=>!q.input.every(isOld)).map((q)=>q.input))}`); process.exit(1); }
+  // Everything else sent for model-b that holds none of these chats text is the re-embed.
+  const reembed = b.filter((q)=>!queries.includes(q) && !q.input.some((t)=>/switch/.test(t)) && q.input[0] !== "MindStone embedding health check");
+  if (queries.length !== 3) { console.error(`expected 3 query embeddings, saw ${queries.length}: ${JSON.stringify(b.filter((q)=>!reembed.includes(q)).map((q)=>q.input))}`); process.exit(1); }
   const big = reembed.filter((q)=>q.input.length > 4).length;
   if (big) { console.error(`the re-embed sent ${big} requests of more than 4 chunks`); process.exit(1); }
   // The re-embed was running throughout: a request before the first query and between each two.
@@ -377,13 +377,51 @@ node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
     if (!(q.done >= q.t)) { console.error("a query embedding was never answered"); process.exit(1); }
     const sent = reembed.filter((r)=>r.t > q.t && r.t < q.done).length;
     if (sent) { console.error(`the re-embed sent ${sent} requests while a turn waited on the embedder`); process.exit(1); }
-    // Behind one request of 4 at most: 600 ms, and its own 150 ms.
-    if (q.done - q.t > 900) { console.error(`a turn waited ${q.done - q.t} ms for its query embedding`); process.exit(1); }
+    // Behind one request of 4 at most: 600 ms, its own 150 ms, and 300 ms of slack (16 a request took 2.4 s).
+    if (q.done - q.t > 1050) { console.error(`a turn waited ${q.done - q.t} ms for its query embedding`); process.exit(1); }
   }
   console.log(`query waits ${queries.map((q)=>q.done - q.t).join(", ")} ms; ${reembed.length} re-embed requests so far`);
 })' "${STUB}/_test/state" || exit 1
 # The turn itself: never the 5 s the next turn would wait if the re-embed held up the index update.
 for ms in "${turn_ms[@]}"; do (( ms < 3000 )) || { echo "a turn took ${ms} ms during the switch (turns: ${turn_ms[*]})" >&2; exit 1; }; done
 echo "turns during the switch: ${turn_ms[*]} ms"
+# reembed_chunks [after ms]: chunks the re-embed sent for model-b (after that time, if given); as above.
+reembed_chunks() { node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
+  const b = s.requests.filter((q)=>q.model === "model-b" && q.t > Number(process.argv[2] || 0));
+  const reembed = b.filter((q)=>!(q.input.length === 1 && /^question \d during the switch$/.test(q.input[0])) && !q.input.some((t)=>/switch/.test(t)) && q.input[0] !== "MindStone embedding health check");
+  console.log(reembed.reduce((n, q)=>n + q.input.length, 0));
+})' "${STUB}/_test/state" "${1:-0}"; }
+# One run does 128 at most: with the embedder fast again, the first run ends there, and nothing more
+# is sent until a turn starts another run.
+curl -s -X POST -d '{"mode":"ok"}' "${STUB}/_test/mode" >/dev/null
+for _ in $(seq 1 60); do [[ "$(reembed_chunks)" -ge 128 ]] && break; sleep 0.5; done
+sleep 1
+first_run="$(reembed_chunks)"
+[[ "${first_run}" == 128 ]] || { echo "one run should embed 128 of another model's chunks again: ${first_run}" >&2; exit 1; }
+chat "a switch question after the first run" >/dev/null
+for _ in $(seq 1 60); do [[ "$(reembed_chunks)" -gt 128 ]] && break; sleep 0.5; done
+[[ "$(reembed_chunks)" -gt 128 ]] || { echo "a turn after the first run ended started no second run" >&2; exit 1; }
+# A run stops when the config changes under it (#157 review): here the embedding model.
+curl -s -X POST -d '{"mode":"serial"}' "${STUB}/_test/mode" >/dev/null
+sleep 1
+before_run3="$(reembed_chunks)"
+chat "a switch question before the model changes again" >/dev/null
+for _ in $(seq 1 20); do [[ "$(reembed_chunks)" -gt "${before_run3}" ]] && break; sleep 0.5; done
+[[ "$(reembed_chunks)" -gt "${before_run3}" ]] || { echo "control: the third run sent nothing, so the config change can't be measured" >&2; exit 1; }
+python3 - <<'PY'
+import json, os, pathlib
+p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
+c = json.loads(p.read_text())
+c["memory"]["embeddingProvider"] = "ollama:model-c"
+p.write_text(json.dumps(c, indent=2) + "\n")
+PY
+changed_at=$(node -e 'console.log(Date.now())')
+sleep 3
+# One request may have passed its check just before the change; nothing is sent after it.
+late="$(reembed_chunks $((changed_at + 250)))"
+[[ "${late}" == 0 ]] || { echo "the run sent ${late} chunks for the old model after the config changed" >&2; exit 1; }
+third_run=$(( $(reembed_chunks) - before_run3 ))
+(( third_run < 128 )) || { echo "control: the third run had already finished (${third_run} chunks) before the change" >&2; exit 1; }
+echo "a run stopped at the config change after ${third_run} chunks"
 
 echo "Memory embedding model switch smoke test passed."

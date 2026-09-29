@@ -725,8 +725,9 @@ export async function indexSqliteMemoryTurn(options: {
     db.close();
   }
   const provider = options.provider ?? createMemoryEmbeddingProvider(options.config);
-  // The turn's own chunks, then a few of another model's: a model switch is finished over later turns
-  // (or at once by `mindstone memory backfill --embed`), never ahead of this turn's chunks (#140 review).
+  // The turn's own chunks, then (unless otherModelLimit is 0, as the gateway passes, #157) a few of
+  // another model's: a model switch is finished over later turns (or at once by
+  // `mindstone memory backfill --embed`), never ahead of this turn's chunks (#140 review).
   const embedded = provider
     ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true, otherModelLimit: options.otherModelLimit ?? MEMORY_REEMBED_PER_TURN })
     : undefined;

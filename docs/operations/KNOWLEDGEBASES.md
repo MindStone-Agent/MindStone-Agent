@@ -102,8 +102,8 @@ alike.
   - `unused`: vectors exist but no embedder is configured now.
 
   **After a switch of embedding model** (#151), a KB whose vectors the old
-  model made is embedded again on its own, as memory's chunks are (#140,
-  paced the same way since #157):
+  model made is embedded again on its own, as memory's chunks are (#140; both
+  are paced, memory's 4 chunks a request since #157):
   after each owner chat through the gateway (automatic recall on), one such
   KB, global or private, is embedded from its current `index.json`, in the
   background; its sources aren't read or fetched again. A KB of more than 512
@@ -113,7 +113,8 @@ alike.
   and starts none while a chat turn is running (a turn running more than 10
   minutes, which may never end, stops holding it), so a turn's own question
   waits behind one entry at most, even with an embedder that answers one
-  request at a time. On a gateway that is always answering, the re-embed waits
+  request at a time (and behind one request of memory's re-embed, 4 chunks,
+  when memory is being embedded again too). On a gateway that is always answering, the re-embed waits
   for a gap; `kb ingest` works meanwhile. A failed attempt keeps the old
   vectors (word match meanwhile) and is tried again later (#158):
   - A 429 is a pause: the job waits (the embedder's Retry-After, between 30
