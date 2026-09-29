@@ -14,16 +14,23 @@ set -euo pipefail
 #      another model -> word match only, status says why; a failed embed
 #      keeps the ingest and removes old vectors; the quota keeps a KB slot
 #      against better-scoring memory; a persona's private KB, and a private
-#      vectors.json that is a link
-#   Binds stub port base+38. No gateway.
+#      vectors.json that is a link; a partly embedded source stays on word
+#      match; through the gateway, an admin ingest embeds a private KB and a
+#      chat turn recalls by meaning with one query embedding
+#   Binds stub port base+38 and gateway port base+39.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEMP_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/mindstone-agent-kbembed-smoke.XXXXXX")"
 SMOKE_PORT_BASE="${MINDSTONE_SMOKE_PORT_BASE:-19800}"
 EMBED_PORT="$((SMOKE_PORT_BASE + 38))"
+GATEWAY_PORT="$((SMOKE_PORT_BASE + 39))"
 
 cleanup() {
+  if [[ -n "${gateway_pid:-}" ]]; then
+    kill "${gateway_pid}" >/dev/null 2>&1 || true
+    wait "${gateway_pid}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${embed_pid:-}" ]]; then
     kill "${embed_pid}" >/dev/null 2>&1 || true
     wait "${embed_pid}" >/dev/null 2>&1 || true
@@ -36,6 +43,9 @@ export MINDSTONE_AGENT_RUNTIME_DIR="${TEMP_RUNTIME}"
 export EMBEDDER_BASE_URL="http://127.0.0.1:${EMBED_PORT}/v1"
 export EMBEDDER_TIMEOUT_MS=1500
 export EMBED_PORT
+export MINDSTONE_AGENT_GATEWAY_PORT="${GATEWAY_PORT}"
+export KBE_TOKEN="kb-embed-smoke-service-token"
+export KBE_ADMIN_TOKEN="kb-embed-smoke-admin-token"
 
 cd "${PROJECT_ROOT}"
 
@@ -174,8 +184,10 @@ const started = Date.now();
 written = await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder: slow as any, timeoutMs: 300 });
 assert.equal(written.state, "missing"); assert.match((written as any).reason, /longer than/);
 assert.ok(Date.now() - started < 3000, "the time limit must end the embed");
+await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }) });
 written = await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder: undefined });
 assert.match((written as any).reason, /no embedder/);
+assert.ok(!existsSync(join(dir, KB_VECTORS_FILE)), "ingest with no embedder must remove old vectors");
 
 // A private KB's vectors.json that is a link is not read.
 await writeKbVectors({ kbDir: dir, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }) });
@@ -204,6 +216,10 @@ assert.equal(semantic[0].text, "header\n- a1\n- a0\nfooter", "closest section fi
 assert.equal(semantic[0].metadata?.bestCitation, "a1");
 assert.ok(hits.some((h) => h.id === "kb:c" && !isQuotaHit(h)), "word match still runs");
 assert.equal(queryEmbedder.calls, 1);
+// A source found by meaning isn't listed again by word match.
+hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), minSimilarity: 0.5 }).search({ text: "question header", limit: 8 });
+assert.equal(hits.filter((h) => h.id === "kb:a").length, 1);
+assert.ok(isQuotaHit(hits.find((h) => h.id === "kb:a")!));
 // Threshold, cap, embedder down, no embedder.
 hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), minSimilarity: 0.7 }).search({ text: "question", limit: 8 });
 assert.deepEqual(hits.filter(isQuotaHit).map((h) => h.id), ["kb:a"]);
@@ -250,7 +266,7 @@ def kb(root, kb_id, name, sources):
     for file, text in sources.items():
         write(root / kb_id / "sources" / file, text)
 kb(data / "knowledgebases", "garage", "Garage", {
-    "fleet.md": "# Fleet\n\n## Sedan upkeep\n\nSedan tire rotation every 5000 miles.\n",
+    "fleet.md": "# Fleet\n\n## Sedan upkeep\n\nSedan tire rotation every 5000 miles.\n\n## Paperwork\n\nRegistration renewal forms.\n",
 })
 kb(data / "knowledgebases", "pantry", "Pantry", {
     "loaf.md": "# Loaf\n\n## Dough\n\nBake bread in a hot oven.\n",
@@ -263,6 +279,8 @@ config = json.loads(config_path.read_text())
 config["routing"] = {"mode": "mock", "defaultAgentId": "default", "defaultModel": "mindstone/mock", "mock": {"responsePrefix": "kbembed"}}
 config["session"] = {"mode": "single", "defaultSessionKey": "agent:default:main"}
 config["memory"] = {"autoRecall": True}
+config.setdefault("gateway", {})["auth"] = {"mode": "token", "tokenEnv": "KBE_TOKEN"}
+config["gateway"]["admin"] = {"tokenEnv": "KBE_ADMIN_TOKEN"}
 config_path.write_text(json.dumps(config, indent=2) + "\n")
 PY
 
@@ -366,6 +384,17 @@ c.pop("knowledgebases", None)
 c["memory"].pop("recall", None)
 c["memory"].pop("localDocuments", None)'
 
+# A source with an entry missing from vectors.json stays on word match.
+cp "${DATA}/knowledgebases/garage/vectors.json" "${TEMP_RUNTIME}/garage-vectors.json"
+node -e '
+const fs = require("fs"); const p = process.argv[1]; const v = JSON.parse(fs.readFileSync(p, "utf8"));
+const paperwork = Object.keys(v.vectors).find((id) => id.includes("paperwork"));
+if (!paperwork || Object.keys(v.vectors).length < 2) { console.error("fixture: expected a paperwork entry", Object.keys(v.vectors)); process.exit(1); }
+delete v.vectors[paperwork]; fs.writeFileSync(p, JSON.stringify(v));' "${DATA}/knowledgebases/garage/vectors.json"
+hits="$(chat_hits "partial check: ${SEMANTIC}")"
+if grep -q 'kb:garage' <<<"${hits}"; then echo "a partly embedded source was ranked by meaning: ${hits}" >&2; exit 1; fi
+cp "${TEMP_RUNTIME}/garage-vectors.json" "${DATA}/knowledgebases/garage/vectors.json"
+
 # Another model: stale, and status says re-ingest; recall ignores the vectors.
 set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-b"'
 ${MS} kb status garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="stale" || !/re-ingest/.test(s.vectors.reason)) { console.error("model change:", JSON.stringify(s.vectors)); process.exit(1); }})'
@@ -401,5 +430,36 @@ if out="$(${MS} kb ingest --persona grower plots 2>&1)"; then echo "ingest throu
 grep -q "vectors.json is a link" <<<"${out}" || { echo "unexpected refusal: ${out}" >&2; exit 1; }
 hits="$(chat_hits "seedling nurturing, linked?")"
 if grep -q 'pkb:grower' <<<"${hits}"; then echo "a private KB with a linked vectors.json was recalled: ${hits}" >&2; exit 1; fi
+
+# --- 3. Through the gateway: an admin ingest embeds, a chat turn recalls by meaning. ---
+set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-a"; c["memory"]["vectorStore"] = "sqlite-vec"; c["personas"] = {"active": "grower"}'
+./scripts/start-gateway.sh >"${TEMP_RUNTIME}/gateway.log" 2>&1 &
+gateway_pid=$!
+BASE="http://127.0.0.1:${GATEWAY_PORT}"
+for _ in $(seq 1 30); do curl -sf "${BASE}/health" >/dev/null 2>&1 && break; sleep 0.5; done
+ADMIN=(-H "Authorization: Bearer ${KBE_TOKEN}" -H "x-mindstone-admin-token: ${KBE_ADMIN_TOKEN}" -H 'x-mindstone-user-role: admin' -H 'x-mindstone-user-id: smoke-admin' -H 'content-type: application/json')
+BODY="${TEMP_RUNTIME}/body.json"
+call() { curl -s -o "${BODY}" -w '%{http_code}' -X "$1" "${ADMIN[@]}" ${3:+-d "$3"} "${BASE}$2"; }
+[[ "$(call POST /admin/personas/grower/knowledgebases '{"id":"beds"}')" == "201" ]] || { echo "create private KB: $(cat "${BODY}")" >&2; exit 1; }
+[[ "$(call POST /admin/personas/grower/knowledgebases/beds/sources '{"kind":"text","name":"beds","text":"# Beds\n\nRaised garden beds drain well.\n"}')" == "201" ]] || { echo "add source: $(cat "${BODY}")" >&2; exit 1; }
+stub_mode fail
+[[ "$(call POST /admin/personas/grower/knowledgebases/beds/ingest '{}')" == "200" ]] || { echo "admin ingest, embedder down: $(cat "${BODY}")" >&2; exit 1; }
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const v=b.knowledgebase.vectors; if (v.state!=="missing" || /stub embedder is down/.test(JSON.stringify(b))) { console.error("admin ingest, embedder down:", JSON.stringify(b)); process.exit(1); }' "${BODY}"
+stub_mode ok
+[[ "$(call POST /admin/personas/grower/knowledgebases/beds/ingest '{}')" == "200" ]] || { echo "admin ingest: $(cat "${BODY}")" >&2; exit 1; }
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const v=b.knowledgebase.vectors; if (v.state!=="ready" || v.dimension!==6 || !(v.count>=1)) { console.error("admin ingest vectors:", JSON.stringify(b)); process.exit(1); }' "${BODY}"
+[[ -f "${DATA}/personas/grower/knowledgebases/beds/vectors.json" ]] || { echo "admin ingest wrote no vectors.json" >&2; exit 1; }
+stub_mode ok
+GQ="seedling nurturing through the gateway?"
+code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H 'content-type: application/json' -d "{\"text\":\"${GQ}\"}" "${BASE}/chat/send")"
+[[ "${code}" == "200" ]] || { echo "gateway chat ${code}: $(cat "${BODY}")" >&2; exit 1; }
+QUESTION="${GQ}" node -e '
+  const fs = require("node:fs"), path = require("node:path");
+  const dir = path.join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "mindstone", "transcripts");
+  const files = []; (function walk(d) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (p.endsWith(".jsonl")) files.push(p); } })(dir);
+  let last; for (const f of files) for (const line of fs.readFileSync(f, "utf8").split("\n")) { if (!line.trim()) continue; const e = JSON.parse(line); if (e.metadata?.event === "memory_recall_injected" && e.metadata.query === process.env.QUESTION) last = e; }
+  const ids = (last?.metadata?.hits ?? []).filter((h) => h.recallMode === "embedding").map((h) => h.id);
+  if (!ids.includes("pkb:grower:beds:beds.md")) { console.error("gateway turn did not recall the private KB by meaning:", JSON.stringify(last?.metadata?.hits)); process.exit(1); }'
+[[ "$(stub_count "${GQ}")" == "1" ]] || { echo "gateway: query embedded $(stub_count "${GQ}") times" >&2; exit 1; }
 
 echo "KB embeddings smoke test passed."

@@ -90,9 +90,9 @@ With no persona active, nothing changes.
   under another persona. Non-owner chats get no recall at all. Their recall
   ids are `pkb:<persona-id>:<kb-id>:<source>`, so a private and a global KB
   with the same id stay apart. They are the persona's own files: a persona
-  folder, `knowledgebases` folder, KB folder, `kb.json`, `index.json` or
-  `sources` that is a symbolic link is not used, and ingesting one refuses
-  linked source files and folder sources outside it. Manage them with `mindstone kb … --persona <id>`
+  folder, `knowledgebases` folder, KB folder, `kb.json`, `index.json`,
+  `vectors.json` or `sources` that is a symbolic link is not used, and ingesting one refuses
+  linked source files and folder sources outside it. Like global collections, they are embedded at ingest when the install has an embedder, and then also recalled by meaning (#125 §5). Manage them with `mindstone kb … --persona <id>`
   ([KNOWLEDGEBASES.md](KNOWLEDGEBASES.md)). "Private" is a recall rule, not a
   security boundary: anything a reply quotes lands in the transcript, the
   agent's file tools (off by default) can read any file it can reach, and
