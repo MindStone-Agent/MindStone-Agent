@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,7 +8,7 @@ import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtim
 import { SCOPE_DIMENSIONS as RECALL_SCOPE_DIMENSIONS, scopeMatchesRecallFilter } from "../app-engine/types.js";
 import { connectorOwnerSenders, isOwnerDirectMessage } from "../channels/session.js";
 import type { TranscriptEntry } from "../transcript/index.js";
-import { createMemoryEmbeddingProvider, memoryEmbeddingSpec, type MemoryEmbeddingProvider } from "./embedding.js";
+import { createMemoryEmbeddingProvider, embeddingFailureCause, memoryEmbeddingSpec, type MemoryEmbeddingProvider } from "./embedding.js";
 import { discoverFileMemoryDocuments } from "./file-memory.js";
 import { redactSecrets } from "./redact.js";
 import type { MemoryDocument, MemoryHit, MemoryQuery, MemoryRecallProvider } from "./types.js";
@@ -42,6 +42,12 @@ export type SqliteMemoryEmbeddingBackfillOptions = {
    * After it, a chunk removed or rewritten meanwhile is left out of the request.
    */
   beforeBatch?: () => Promise<void>;
+  /**
+   * At most this many chunks sent alone in this run, after which it ends without an error (#170 review 3):
+   * the turn's update and the paced re-embed pass MEMORY_EMBED_SINGLES_PER_RUN, since another run follows.
+   * Absent: no limit, so `mindstone memory backfill --embed` still does them all in one run.
+   */
+  singlesPerRun?: number;
 };
 
 /** How many of another model's chunks each turn's index update embeds again (#140 review). */
@@ -54,12 +60,49 @@ export const MEMORY_REEMBED_PER_TURN = 128;
  */
 export const MEMORY_REEMBED_BATCH = 4;
 
+/**
+ * After this many refusals on its own, a chunk isn't sent to that model again
+ * (#170): it stays found by its words, and the rest of the index goes on being
+ * embedded. A chunk whose text changes is tried afresh.
+ */
+export const MEMORY_EMBED_SKIP_AFTER = 3;
+
+/**
+ * A chunk's refusals count at most once per this long (#170 review), so reaching
+ * MEMORY_EMBED_SKIP_AFTER takes at least 20 minutes of refusals, not one burst of runs.
+ */
+export const MEMORY_EMBED_REFUSAL_SPACING_MS = 10 * 60 * 1000;
+
+/**
+ * How long a skipped chunk stays skipped after its last counted refusal (#170 review 2):
+ * then it is sent again (last), since an embedder that refused on and off, or was
+ * fixed under the same model name, may take it now. Its count starts again then
+ * (#170 review 3), so it takes MEMORY_EMBED_SKIP_AFTER spaced refusals to skip it again.
+ */
+export const MEMORY_EMBED_SKIP_RETRY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How many chunks a turn's update or a paced re-embed sends alone (#170 review 3). A run that
+ * reaches it ends there, without an error; what it counted is held back, so the next run gets
+ * further. This bounds what a turn's update, or a day's expired skips, can cost. A full
+ * backfill (`mindstone memory backfill --embed`) has no such limit.
+ */
+export const MEMORY_EMBED_SINGLES_PER_RUN = 32;
+
+/**
+ * The start of the short text sent after a request none of whose chunks went in, to tell a refused text
+ * from a refusing embedder (#170 review). A random word follows it each time, so a cache can't answer it.
+ */
+export const MEMORY_EMBED_PROBE_TEXT = "memory";
+
 export type SqliteMemoryEmbeddingBackfillResult = {
   databasePath: string;
   providerId: string;
   model: string;
   chunksConsidered: number;
   chunksEmbedded: number;
+  /** Chunks the embedder refused on their own in this run (#170); after MEMORY_EMBED_SKIP_AFTER they are skipped for that model. */
+  chunksRejected: number;
   dimensions?: number;
 };
 
@@ -285,24 +328,79 @@ function initializeSchema(db: DatabaseSync): void {
   if (!columns.some((column) => column.name === "embedding_spec")) {
     db.exec("ALTER TABLE memory_chunks ADD COLUMN embedding_spec TEXT");
   }
+  // Chunks an embedding model refused on their own, and how often (#170): after
+  // MEMORY_EMBED_SKIP_AFTER, not sent to that model again while the text is the same.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_embed_rejections (
+      chunk_id TEXT NOT NULL,
+      spec TEXT NOT NULL,
+      text TEXT NOT NULL,
+      failures INTEGER NOT NULL,
+      reason TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (chunk_id, spec)
+    );
+  `);
 }
+
+/** An ISO time `ms` before now, for a comparison with updated_at; only ever a toISOString() result, so safe inline. */
+const isoBefore = (ms: number) => `'${new Date(Date.now() - ms).toISOString()}'`;
+/**
+ * SQL: skipped for the model (the first parameter), as reported: this chunk (memory_chunks) was
+ * refused MEMORY_EMBED_SKIP_AFTER times, text unchanged, however long ago (#170 review 3): after a day
+ * it is tried again (heldBackForSpec), and only a refusal then starts its count again.
+ */
+const skippedForSpec = () => `EXISTS (
+  SELECT 1 FROM memory_embed_rejections r
+  WHERE r.chunk_id = memory_chunks.chunk_id AND r.spec = ? AND r.text = memory_chunks.text
+    AND r.failures >= ${MEMORY_EMBED_SKIP_AFTER}
+)`;
+/**
+ * SQL: not sent to the model (the first parameter) now: refused less than MEMORY_EMBED_REFUSAL_SPACING_MS
+ * ago (so a turn's update doesn't send it again on every turn, #170 review 2), or skipped less than
+ * MEMORY_EMBED_SKIP_RETRY_MS ago. A time ahead of now (a clock set back since) holds nothing back (#170 review 3).
+ */
+const heldBackForSpec = () => `EXISTS (
+  SELECT 1 FROM memory_embed_rejections r
+  WHERE r.chunk_id = memory_chunks.chunk_id AND r.spec = ? AND r.text = memory_chunks.text
+    AND r.updated_at <= ${isoBefore(0)}
+    AND (r.updated_at > ${isoBefore(MEMORY_EMBED_REFUSAL_SPACING_MS)}
+      OR (r.failures >= ${MEMORY_EMBED_SKIP_AFTER} AND r.updated_at > ${isoBefore(MEMORY_EMBED_SKIP_RETRY_MS)}))
+)`;
+/** Refusal records whose chunk is gone or whose text has changed: they no longer count, and the old text shouldn't stay (#170 review 2). */
+const STALE_REJECTIONS = `FROM memory_embed_rejections WHERE NOT EXISTS (
+  SELECT 1 FROM memory_chunks c WHERE c.chunk_id = memory_embed_rejections.chunk_id AND c.text = memory_embed_rejections.text
+)`;
+/** Drops them, writing only when there are any (a write waits for another run's lock, #170 review 3). */
+function dropStaleRejections(db: DatabaseSync): void {
+  if (db.prepare(`SELECT 1 AS present ${STALE_REJECTIONS} LIMIT 1`).get()) db.exec(`DELETE ${STALE_REJECTIONS}`);
+}
+/** SQL: the model (the first parameter) refused this chunk before, text unchanged: such chunks go last, so they can't head every run (#170). */
+const REFUSED_BEFORE = `EXISTS (
+  SELECT 1 FROM memory_embed_rejections r
+  WHERE r.chunk_id = memory_chunks.chunk_id AND r.spec = ? AND r.text = memory_chunks.text
+)`;
 
 /** How many chunks have a vector, and how many of those another model made (or an unrecorded one). */
 export function sqliteMemoryEmbeddingMix(
   spec: string,
   paths: MindStoneRuntimePaths = runtimePathsFromEnv(),
-): { embedded: number; otherModel: number } {
+): { embedded: number; otherModel: number; skipped: number } {
   const databasePath = sqliteMemoryDatabasePath(paths);
-  if (!existsSync(databasePath)) return { embedded: 0, otherModel: 0 };
+  if (!existsSync(databasePath)) return { embedded: 0, otherModel: 0, skipped: 0 };
   const db = openDatabase(databasePath);
   try {
     initializeSchema(db);
+    // otherModel: another model's chunks still to be embedded again with this one, so not the ones
+    // this model refused MEMORY_EMBED_SKIP_AFTER times (skipped, below) (#170 review).
     const row = db.prepare(`
       SELECT count(*) AS embedded,
-             sum(CASE WHEN embedding_spec IS NULL OR embedding_spec != ? THEN 1 ELSE 0 END) AS otherModel
+             sum(CASE WHEN (embedding_spec IS NULL OR embedding_spec != ?) AND NOT ${skippedForSpec()} THEN 1 ELSE 0 END) AS otherModel
       FROM memory_chunks WHERE embedding_json IS NOT NULL
-    `).get(spec) as { embedded: number; otherModel: number | null };
-    return { embedded: Number(row.embedded ?? 0), otherModel: Number(row.otherModel ?? 0) };
+    `).get(spec, spec) as { embedded: number; otherModel: number | null };
+    // Chunks this model refused MEMORY_EMBED_SKIP_AFTER times: found by their words only (#170).
+    const skipped = db.prepare(`SELECT count(*) AS n FROM memory_chunks WHERE ${skippedForSpec()}`).get(spec) as { n: number };
+    return { embedded: Number(row.embedded ?? 0), otherModel: Number(row.otherModel ?? 0), skipped: Number(skipped.n ?? 0) };
   } finally {
     db.close();
   }
@@ -674,6 +772,8 @@ export type SqliteMemoryTurnIndexResult = {
   databasePath: string;
   sourcesIndexed: number;
   chunksEmbedded: number;
+  /** The turn's own chunks the embedder refused on their own (#170). */
+  chunksRejected: number;
 };
 
 /**
@@ -732,9 +832,9 @@ export async function indexSqliteMemoryTurn(options: {
   // another model's: a model switch is finished over later turns (or at once by
   // `mindstone memory backfill --embed`), never ahead of this turn's chunks (#140 review).
   const embedded = provider
-    ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true, otherModelLimit: options.otherModelLimit ?? MEMORY_REEMBED_PER_TURN })
+    ? await backfillSqliteMemoryEmbeddings({ paths, config: options.config, provider, newestFirst: true, otherModelLimit: options.otherModelLimit ?? MEMORY_REEMBED_PER_TURN, singlesPerRun: MEMORY_EMBED_SINGLES_PER_RUN })
     : undefined;
-  return { databasePath, sourcesIndexed, chunksEmbedded: embedded?.chunksEmbedded ?? 0 };
+  return { databasePath, sourcesIndexed, chunksEmbedded: embedded?.chunksEmbedded ?? 0, chunksRejected: embedded?.chunksRejected ?? 0 };
 }
 
 /**
@@ -758,6 +858,7 @@ export async function reembedSqliteMemoryOtherModel(options: {
     otherModelLimit: options.limit ?? MEMORY_REEMBED_PER_TURN,
     batchSize: MEMORY_REEMBED_BATCH,
     beforeBatch: options.beforeBatch,
+    singlesPerRun: MEMORY_EMBED_SINGLES_PER_RUN,
   });
 }
 
@@ -770,27 +871,38 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
   const spec = memoryEmbeddingSpec(provider);
   const db = openDatabase(databasePath);
   initializeSchema(db);
-  const order = `ORDER BY updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC`;
+  // A refusal whose chunk is gone (pruned, re-indexed under another id) or whose text changed is dropped, text and all (#170 review).
+  try {
+    dropStaleRejections(db);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+  // A chunk this model refused before goes last, and one it refused MEMORY_EMBED_SKIP_AFTER times isn't
+  // sent again while its text is the same (#170); --force sends everything.
+  const order = `ORDER BY ${REFUSED_BEFORE} ASC, updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC`;
   // Chunks with no vector, and chunks another model (or an unrecorded one) embedded (#140);
   // with otherModelLimit, every chunk with no vector first, then at most that many of the others, newest first.
   const rows = (options.force
-    ? db.prepare(`SELECT chunk_id, text FROM memory_chunks ${order}`).all()
+    ? db.prepare(`SELECT chunk_id, text FROM memory_chunks ORDER BY updated_at ${options.newestFirst ? "DESC" : "ASC"}, chunk_id ASC`).all()
     : options.otherModelLimit === undefined
       ? db.prepare(`
         SELECT chunk_id, text
         FROM memory_chunks
-        WHERE embedding_json IS NULL OR embedding_spec IS NULL OR embedding_spec != ?
+        WHERE (embedding_json IS NULL OR embedding_spec IS NULL OR embedding_spec != ?) AND NOT ${heldBackForSpec()}
         ${order}
-      `).all(spec)
+      `).all(spec, spec, spec)
       : [
-          ...(options.otherModelOnly ? [] : db.prepare(`SELECT chunk_id, text FROM memory_chunks WHERE embedding_json IS NULL ${order}`).all()),
+          ...(options.otherModelOnly
+            ? []
+            : db.prepare(`SELECT chunk_id, text FROM memory_chunks WHERE embedding_json IS NULL AND NOT ${heldBackForSpec()} ${order}`).all(spec, spec)),
           ...db.prepare(`
             SELECT chunk_id, text
             FROM memory_chunks
-            WHERE embedding_json IS NOT NULL AND (embedding_spec IS NULL OR embedding_spec != ?)
-            ORDER BY updated_at DESC, chunk_id ASC
+            WHERE embedding_json IS NOT NULL AND (embedding_spec IS NULL OR embedding_spec != ?) AND NOT ${heldBackForSpec()}
+            ORDER BY ${REFUSED_BEFORE} ASC, updated_at DESC, chunk_id ASC
             LIMIT ?
-          `).all(spec, Math.max(0, Math.floor(options.otherModelLimit))),
+          `).all(spec, spec, spec, Math.max(0, Math.floor(options.otherModelLimit))),
         ]) as Array<{ chunk_id: string; text: string }>;
 
   const batchSize = Math.max(1, options.batchSize ?? 16);
@@ -801,31 +913,141 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
   // Only the text that was embedded: a chunk re-indexed meanwhile keeps its own (#140 review).
   const update = db.prepare("UPDATE memory_chunks SET embedding_json = ?, embedding_spec = ? WHERE chunk_id = ? AND text = ?");
   const still = db.prepare("SELECT 1 AS present FROM memory_chunks WHERE chunk_id = ? AND text = ?");
+  const cleared = db.prepare("DELETE FROM memory_embed_rejections WHERE chunk_id = ? AND spec = ?");
+  // One more refusal on its own, at most one per MEMORY_EMBED_REFUSAL_SPACING_MS (#170 review): an embedder
+  // that refuses on and off can't skip a chunk in one burst of runs. The count starts again when the text
+  // changes, and when a skip has run out (#170 review 3). A time ahead of now (a clock set back) is spaced out.
+  const refused = db.prepare(`
+    INSERT INTO memory_embed_rejections (chunk_id, spec, text, failures, reason, updated_at)
+    VALUES ($chunk, $spec, $text, 1, $reason, $now)
+    ON CONFLICT (chunk_id, spec) DO UPDATE SET
+      failures = CASE
+        WHEN memory_embed_rejections.text != excluded.text THEN 1
+        WHEN memory_embed_rejections.updated_at > $now THEN memory_embed_rejections.failures + 1
+        WHEN memory_embed_rejections.failures >= ${MEMORY_EMBED_SKIP_AFTER} AND memory_embed_rejections.updated_at <= $retry THEN 1
+        WHEN memory_embed_rejections.updated_at <= $spaced THEN memory_embed_rejections.failures + 1
+        ELSE memory_embed_rejections.failures
+      END,
+      updated_at = CASE
+        WHEN memory_embed_rejections.text != excluded.text OR memory_embed_rejections.updated_at > $now OR memory_embed_rejections.updated_at <= $spaced THEN excluded.updated_at
+        ELSE memory_embed_rejections.updated_at
+      END,
+      text = excluded.text,
+      reason = excluded.reason
+  `);
+  let chunksRejected = 0;
+  const record = (row: { chunk_id: string; text: string }, reasonError: unknown) => {
+    // Only for the text that was refused: a chunk rewritten meanwhile keeps the record of its own (#170 review 3).
+    if (still.get(row.chunk_id, row.text) === undefined) return;
+    const now = Date.now();
+    const reason = (reasonError instanceof Error ? reasonError.message : String(reasonError)).replace(/\p{C}/gu, " ").slice(0, 300);
+    refused.run({
+      $chunk: row.chunk_id,
+      $spec: spec,
+      $text: row.text,
+      $reason: reason,
+      $now: new Date(now).toISOString(),
+      $spaced: new Date(now - MEMORY_EMBED_REFUSAL_SPACING_MS).toISOString(),
+      $retry: new Date(now - MEMORY_EMBED_SKIP_RETRY_MS).toISOString(),
+    });
+    chunksRejected += 1;
+  };
 
-  try {
-    for (let offset = 0; offset < rows.length; offset += batchSize) {
-      let batch = rows.slice(offset, offset + batchSize);
-      if (options.beforeBatch) {
-        await options.beforeBatch();
-        // The wait can be long: a chunk removed or rewritten meanwhile isn't sent (#157 review).
-        batch = batch.filter((row) => still.get(row.chunk_id, row.text) !== undefined);
-        if (batch.length === 0) continue;
-      }
-      const embeddings = await provider.embedTexts(batch.map((row) => row.text));
-      if (embeddings.length !== batch.length) {
-        throw new Error(`embedding provider returned ${embeddings.length} vectors for ${batch.length} chunks`);
-      }
+  /** Waits in beforeBatch, then leaves out a chunk removed or rewritten meanwhile (#157 review). */
+  const ready = async (batch: Array<{ chunk_id: string; text: string }>) => {
+    if (!options.beforeBatch) return batch;
+    await options.beforeBatch();
+    return batch.filter((row) => still.get(row.chunk_id, row.text) !== undefined);
+  };
+  const embedAndStore = async (batch: Array<{ chunk_id: string; text: string }>) => {
+    const embeddings = await provider.embedTexts(batch.map((row) => row.text));
+    if (embeddings.length !== batch.length) {
+      throw new Error(`embedding provider returned ${embeddings.length} vectors for ${batch.length} chunks`);
+    }
+    try {
       db.exec("BEGIN");
       try {
         embeddings.forEach((embedding, index) => {
           dimensions ??= embedding.length;
           const changed = update.run(JSON.stringify(embedding), spec, batch[index].chunk_id, batch[index].text);
           if (Number(changed.changes) > 0) chunksEmbedded += 1;
+          cleared.run(batch[index].chunk_id, spec);
         });
         db.exec("COMMIT");
       } catch (error) {
-        db.exec("ROLLBACK");
+        if (db.isTransaction) db.exec("ROLLBACK");
         throw error;
+      }
+    } catch (error) {
+      // The index couldn't be written (locked by another run, for one): not a refusal of the text (#170 review 2).
+      throw Object.assign(new Error(`writing the memory index failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { storeFailed: true });
+    }
+  };
+  /** The embedder refused the text: not an outage, and not a failure to write the index. */
+  const refusal = (error: unknown) => !(error as { storeFailed?: boolean }).storeFailed && embeddingFailureCause(error) === "rejected";
+  let singlesSent = 0;
+  const refusedEverything = () =>
+    Object.assign(
+      new Error(`the embedding model ${spec} refused a request and then a short test text; check the model and its endpoint. Nothing from that request was counted as refused${chunksRejected > 0 ? ` (${chunksRejected} counted earlier in this run)` : ""}.`),
+      { refusedEverything: true },
+    );
+  /**
+   * After a request refused whole, and again after its single sends if none went in: one short text, to tell
+   * texts this model can't take from an embedder that refuses everything (a chat model behind the embeddings route, a
+   * proxy's 400 while its upstream is down) (#170 review). An outage here stops the run as anywhere.
+   */
+  const probeAccepted = async () => {
+    await options.beforeBatch?.();
+    try {
+      await provider.embedTexts([`${MEMORY_EMBED_PROBE_TEXT} ${randomUUID().slice(0, 8)}`]);
+      return true;
+    } catch (error) {
+      if (embeddingFailureCause(error) !== "rejected") throw error;
+      return false;
+    }
+  };
+
+  try {
+    for (let offset = 0; offset < rows.length; offset += batchSize) {
+      const batch = await ready(rows.slice(offset, offset + batchSize));
+      if (batch.length === 0) continue;
+      try {
+        await embedAndStore(batch);
+      } catch (error) {
+        // An embedder that is down or limiting requests stops the run as before; one that refused
+        // the text gets the request's chunks one at a time, so a chunk it can't take (an old one
+        // too long for a smaller model) doesn't stop the rest for good (#170).
+        if (!refusal(error)) throw error;
+        // This run has sent as many chunks alone as it may: it ends here, and the next run goes on.
+        if (batch.length > 1 && options.singlesPerRun !== undefined && singlesSent + batch.length > options.singlesPerRun) break;
+        // These texts, or everything? The short test text first (#170 review 3): an embedder that refuses
+        // everything then costs this request and the test text, not a send of each chunk too.
+        if (!(await probeAccepted())) throw refusedEverything();
+        const refusedAlone: Array<{ row: { chunk_id: string; text: string }; error: unknown }> = [];
+        let wentInAlone = false;
+        if (batch.length === 1) {
+          // A request of one chunk was that chunk alone already.
+          refusedAlone.push({ row: batch[0]!, error });
+        } else {
+          singlesSent += batch.length;
+          for (const row of batch) {
+            const [single] = await ready([row]);
+            if (!single) continue;
+            try {
+              await embedAndStore([single]);
+              wentInAlone = true;
+            } catch (alone) {
+              if (!refusal(alone)) throw alone;
+              refusedAlone.push({ row: single, error: alone });
+            }
+          }
+        }
+        if (refusedAlone.length === 0) continue;
+        // Only a refusal shown to be about the text is counted: another chunk of the request went in
+        // alone, or the test text went in. When none went in alone, the test text is sent again, so an
+        // embedder that turned to refusing everything during the single sends counts nothing.
+        if (!wentInAlone && batch.length > 1 && !(await probeAccepted())) throw refusedEverything();
+        for (const { row, error: why } of refusedAlone) record(row, why);
       }
     }
   } finally {
@@ -838,6 +1060,7 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
     model: provider.model,
     chunksConsidered: rows.length,
     chunksEmbedded,
+    chunksRejected,
     dimensions,
   };
 }
@@ -954,6 +1177,8 @@ export function maintainSqliteMemoryIndex(options: SqliteMemoryMaintenanceOption
         }
         const emptyResult = db.prepare("DELETE FROM memory_sources WHERE id NOT IN (SELECT DISTINCT source_id FROM memory_chunks)").run();
         emptySourcesRemoved = Number(emptyResult.changes ?? 0);
+        // A refusal record whose chunk is gone or whose text changed is dropped, text and all (#170 review).
+        dropStaleRejections(db);
         db.exec("COMMIT");
       } catch (error) {
         db.exec("ROLLBACK");

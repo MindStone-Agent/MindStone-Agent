@@ -213,6 +213,26 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
   }
 }
 
+/** Why an embed request failed (#158, #170): the embedder's state, or the text it was sent. */
+export type EmbeddingFailureCause = "unavailable" | "rate-limited" | "rejected";
+
+/**
+ * Why an embed request failed, from the error the embedding provider threw
+ * (#158; shared with the memory re-embed, #170). A 429 is rate-limited; a 5xx,
+ * a request timeout, or a key, permission or model the embedder doesn't have
+ * is unavailable (nothing about the text); not reached or not answered in
+ * time is unavailable too. Anything else, a reply it couldn't use included,
+ * is the embedder refusing that text.
+ */
+export function embeddingFailureCause(error: unknown): EmbeddingFailureCause {
+  const { status, unavailable } = (error ?? {}) as { status?: unknown; unavailable?: unknown };
+  if (status === 429) return "rate-limited";
+  if (typeof status === "number") return status >= 500 || [401, 403, 404, 408].includes(status) ? "unavailable" : "rejected";
+  if (unavailable === true) return "unavailable";
+  if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) return "unavailable";
+  return "rejected";
+}
+
 export function createMemoryEmbeddingProvider(
   config?: MindStoneConfig,
   env: NodeJS.ProcessEnv = process.env,
