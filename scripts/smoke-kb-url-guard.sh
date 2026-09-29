@@ -68,7 +68,11 @@ const envCases: Array<[string | undefined, string, boolean]> = [
   [undefined, "10.1.2.3", true], [undefined, "example.com", false],
   ["1", "10.1.2.3", false], ["1", "wiki.corp", false], ["1", "127.0.0.1", true], ["1", "localhost", true],
   ["1", "169.254.169.254", true], ["1", "::ffff:169.254.169.254", true], ["1", "168.63.129.16", true], ["1", "::1", true],
-  ["any", "127.0.0.1", false],
+  ["1", "fd00:ec2::254", true], ["1", "100.100.100.200", true], ["1", "192.0.0.192", true], ["1", "::7f00:1", true], ["1", "::127.0.0.1", true],
+  ["any", "127.0.0.1", false], ["any", "10.1.2.3", false],
+  // "any" is for a stub on this machine: link-local and metadata addresses stay refused.
+  ["any", "169.254.169.254", true], ["any", "fd00:ec2::254", true], ["any", "100.100.100.200", true], ["any", "192.0.0.192", true],
+  ["any", "168.63.129.16", true], ["any", "fe80::1", true], ["any", "::ffff:169.254.169.254", true],
 ];
 for (const [mode, host, refused] of envCases) {
   if (mode === undefined) delete process.env.MINDSTONE_KB_PRIVATE_HOSTS; else process.env.MINDSTONE_KB_PRIVATE_HOSTS = mode;
@@ -135,6 +139,18 @@ await refusedWith("a redirect with credentials", fetchWith(`${base}/redir-cred`,
 // An encoding it can't read, and a markdown page that starts with "<" (kept as markdown, not read as HTML).
 await refusedWith("an unknown encoding", fetchWith(`${base}/odd-encoding`, only127002), /could not be fetched/);
 assert.match((await fetchWith(`${base}/md-angle`, only127002)).raw, /<!-- kept -->/, "a markdown page is kept as it is");
+// A name with one allowed and one refused address is refused (any, not every).
+{
+  const { lookup } = await import("node:dns/promises");
+  const both = await lookup("localhost", { all: true, verbatim: true });
+  const families = new Set(both.map((entry) => entry.family));
+  if (families.size >= 2) {
+    const onlyV6Refused = { refusedHost: (host: string) => host === "::1" };
+    await refusedWith("a name with one public and one private address", fetchWith(`http://localhost:${port}/doc.md`, onlyV6Refused), /could not be fetched/);
+  } else {
+    console.log("(skipped the mixed-address case: localhost resolves to one family here)");
+  }
+}
 // The connection goes to the checked address, never a second lookup: a name
 // that resolves nowhere still reaches the address it was pinned to.
 const pinned = await requestPinned(new URL(`http://pinned.invalid:${port}/doc.md`), [{ address: "127.0.0.1", family: 4 }], AbortSignal.timeout(3000));

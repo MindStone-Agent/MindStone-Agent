@@ -72,6 +72,10 @@ loadable as before. See [API_REFERENCE.md](../gateway/API_REFERENCE.md).
    workflow tried stay in the transcript, and the response's `workflow`
    lists them in `tried`.
 
+A step whose `skills` or `knowledgebases` isn't a list of ids makes its
+workflow fail to load (#142 review), so it is skipped as above: that turn
+uses the persona's own lists, without the step's narrowing.
+
 No match → no workflow; persona resolution proceeds as in PERSONAS.md.
 
 ## Transcript events
