@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MemoryEmbeddingProvider } from "../memory/embedding.js";
 import type { MindStoneKbIndexEntry, MindStoneKbVectorsStatus } from "./types.js";
@@ -211,7 +211,7 @@ export function readKbVectors(
   let parsed: ParsedVectorsFile;
   try {
     if (options.noLinks && lstatSync(path).isSymbolicLink()) return { state: "missing", reason: "vectors.json is a link" };
-    parsed = parsedVectorsFile(path);
+    parsed = parsedVectorsFile(path, options.noLinks === true);
   } catch {
     return { state: "missing", reason: embedder ? "not embedded yet; re-ingest" : "no embedder is configured" };
   }
@@ -250,11 +250,14 @@ type ParsedVectorsFile = "too_large" | "unreadable" | { file: Partial<KbVectorsF
  */
 const PARSED_VECTORS = new Map<string, { key: string; bytes: number; parsed: ParsedVectorsFile }>();
 
-function parsedVectorsFile(path: string): ParsedVectorsFile {
-  // One descriptor for the size check and the read: a file swapped in between can't skip the cap.
-  const fd = openSync(path, "r");
+function parsedVectorsFile(path: string, noLinks: boolean): ParsedVectorsFile {
+  // One descriptor for the size check and the read: a file swapped in between
+  // can't skip the cap. Never through a link for a private KB, and never
+  // waiting on something that isn't a file (a pipe).
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | (noLinks ? constants.O_NOFOLLOW : 0));
   try {
     const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("not a file");
     const key = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
     const cached = PARSED_VECTORS.get(path);
     if (cached && cached.key === key) {
@@ -293,7 +296,8 @@ function parsedVectorsFile(path: string): ParsedVectorsFile {
       }
     }
     PARSED_VECTORS.delete(path);
-    PARSED_VECTORS.set(path, { key, bytes: stat.size, parsed });
+    // A file not read (too large, unreadable) holds no memory.
+    PARSED_VECTORS.set(path, { key, bytes: typeof parsed === "string" ? 0 : stat.size, parsed });
     let total = [...PARSED_VECTORS.values()].reduce((sum, entry) => sum + entry.bytes, 0);
     for (const [oldPath, entry] of PARSED_VECTORS) {
       if (total <= KB_EMBED_LIMITS.cacheBytes || oldPath === path) break;
@@ -304,6 +308,11 @@ function parsedVectorsFile(path: string): ParsedVectorsFile {
   } finally {
     closeSync(fd);
   }
+}
+
+/** The vectors.json paths the cache holds, least recently used first (for tests). */
+export function kbVectorsCachedPaths(): string[] {
+  return [...PARSED_VECTORS.keys()];
 }
 
 export function kbVectorsStatus(read: ReadKbVectors): MindStoneKbVectorsStatus {

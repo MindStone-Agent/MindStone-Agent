@@ -178,25 +178,30 @@ export function buildMemoryRecallPrompt(hits: MemoryHit[], maxPromptTokens = DEF
   let tokens = estimatePromptTokens("Relevant MindStone memory:\n");
 
   if (hits.some(isQuotaHit)) {
-    // Quota hits (#125 §5) take the budget first, up to half of it, so a long
-    // memory hit ranked above them can't push them all out, and they can't
-    // push memory out either: the best memory hit always goes in, as before,
-    // and the rest fill what is left, in order. The prompt keeps the ranked order.
+    // Quota hits (#125 §5) and memory share the budget: the best of each
+    // always goes in (as the best hit always did), other quota hits up to half
+    // the budget, then memory in order, then any quota hit left out, in what
+    // memory didn't use. The prompt keeps the ranked order.
     const chosen = new Set<MemoryHit>();
-    const quotaBudget = tokens + Math.floor((maxPromptTokens - tokens) / 2);
-    for (const hit of hits.filter(isQuotaHit)) {
-      const nextTokens = estimatePromptTokens(formatHit(hit, hits.length));
-      if (tokens + nextTokens > quotaBudget) continue;
+    const cost = (hit: MemoryHit) => estimatePromptTokens(formatHit(hit, hits.length));
+    const quota = hits.filter(isQuotaHit);
+    const others = hits.filter((candidate) => !isQuotaHit(candidate));
+    const take = (hit: MemoryHit) => {
       chosen.add(hit);
-      tokens += nextTokens;
+      tokens += cost(hit);
+    };
+    take(quota[0]!);
+    if (others[0]) take(others[0]);
+    const quotaBudget = tokens + Math.max(0, Math.floor((maxPromptTokens - tokens) / 2));
+    for (const hit of quota.slice(1)) {
+      if (tokens + cost(hit) <= quotaBudget) take(hit);
     }
-    let first = true;
-    for (const hit of hits.filter((candidate) => !isQuotaHit(candidate))) {
-      const nextTokens = estimatePromptTokens(formatHit(hit, hits.length));
-      if (!first && tokens + nextTokens > maxPromptTokens) break;
-      first = false;
-      chosen.add(hit);
-      tokens += nextTokens;
+    for (const hit of others.slice(1)) {
+      if (tokens + cost(hit) > maxPromptTokens) break;
+      take(hit);
+    }
+    for (const hit of quota) {
+      if (!chosen.has(hit) && tokens + cost(hit) <= maxPromptTokens) take(hit);
     }
     selected = hits.filter((hit) => chosen.has(hit));
     sections = selected.map((hit, index) => formatHit(hit, index));

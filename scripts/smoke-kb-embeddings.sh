@@ -118,9 +118,10 @@ MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import {
-  KB_EMBED_LIMITS, KB_VECTORS_FILE, kbEntryEmbeddingText, readKbVectors, writeKbVectors,
+  KB_EMBED_LIMITS, KB_VECTORS_FILE, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbVectors, writeKbVectors,
 } from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
 import { ingestMindStoneKnowledgebase } from "./packages/mindstone-core/src/knowledgebase/load.ts";
 import { KnowledgebaseRecallProvider } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
@@ -278,6 +279,12 @@ assert.deepEqual(selectRecallHits(merged, 2).map((h) => h.id), ["k1", "m1"]);
   const crowded = buildMemoryRecallPrompt([memory, kbBig("k1"), kbBig("k2"), kbBig("k3"), hit("m2", 0.4)], 2500);
   assert.ok(crowded.hits.some((h) => h.id === "m-top"), "the best memory hit must stay in");
   assert.ok(crowded.hits.filter(isQuotaHit).length <= 2, `quota hits took more than half the budget: ${crowded.hits.map((h) => h.id)}`);
+  // The best quota hit always goes in, even past half the budget, as the best memory hit does.
+  const oversize = { ...hit("k-big", 0.5, true, "kb"), text: "section ".repeat(700) };
+  assert.deepEqual(buildMemoryRecallPrompt([oversize], 1000).hits.map((h) => h.id), ["k-big"], "a lone quota hit past half the budget must still go in");
+  // Budget memory leaves unused goes back to the quota hits left out.
+  const small = buildMemoryRecallPrompt([kbBig("k1"), kbBig("k2"), kbBig("k3"), hit("m-small", 0.9)], 2500);
+  assert.deepEqual(small.hits.filter(isQuotaHit).map((h) => h.id), ["k1", "k2", "k3"], `unused budget must go to the quota hits left out: ${small.hits.map((h) => h.id)}`);
   assert.deepEqual(buildMemoryRecallPrompt([long, hit("m2", 0.5)], 2500).hits.map((h) => h.id), ["long"], "with no quota hit, the order decides as before");
 }
 assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) => h.id), ["m1"]);
@@ -328,6 +335,36 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   assert.equal(statSync(path).size, before.size, "fixture: same size");
   assert.equal(statSync(path).mtimeMs, before.mtimeMs, "fixture: same mtime");
   assert.match((readKbVectors(cdir, indexText, { id: "stub", model: "m1" }) as any).reason ?? "", /index changed/, "a new file with the same size and mtime must be read again");
+}
+// The cache: a file too large to read holds no memory; past the byte budget the least recently used goes.
+{
+  const make = async () => {
+    const d = mkdtempSync(join(tmpdir(), "kbvec-lru-"));
+    await writeKbVectors({ kbDir: d, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }) });
+    return d;
+  };
+  const [a, b, c] = [await make(), await make(), await make()];
+  const size = statSync(join(a, KB_VECTORS_FILE)).size;
+  const saved = { ...KB_EMBED_LIMITS };
+  try {
+    KB_EMBED_LIMITS.cacheBytes = size + 10;
+    readKbVectors(a, indexText, { id: "stub", model: "m1" });
+    KB_EMBED_LIMITS.maxFileBytes = 10;
+    assert.match((readKbVectors(b, indexText, { id: "stub", model: "m1" }) as any).reason, /larger than/);
+    KB_EMBED_LIMITS.maxFileBytes = saved.maxFileBytes;
+    assert.ok(kbVectorsCachedPaths().includes(join(a, KB_VECTORS_FILE)), "a file not read must not push others out");
+    readKbVectors(c, indexText, { id: "stub", model: "m1" });
+    const cached = kbVectorsCachedPaths();
+    assert.ok(cached.includes(join(c, KB_VECTORS_FILE)) && !cached.includes(join(a, KB_VECTORS_FILE)), `past the budget the least recently used goes: ${cached}`);
+  } finally {
+    Object.assign(KB_EMBED_LIMITS, saved);
+  }
+}
+// A vectors.json that is a pipe is never waited on.
+{
+  const d = mkdtempSync(join(tmpdir(), "kbvec-fifo-"));
+  execFileSync("mkfifo", [join(d, KB_VECTORS_FILE)]);
+  assert.equal(readKbVectors(d, indexText, { id: "stub", model: "m1" }).state, "missing");
 }
 // Sections whose headings slug alike get their own ids, and so their own vectors.
 {
@@ -437,13 +474,15 @@ if (Object.keys(v.vectors).length !== index.entries.length) { console.error("not
 ${MS} kb status garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="ready") { console.error("status after ingest:", JSON.stringify(s.vectors)); process.exit(1); }})'
 ${MS} kb status garage | grep -q "vectors: ready (ollama:kbstub-a, 6 dimensions" || { echo "kb status must show the vectors" >&2; exit 1; }
 # --embed-timeout: <seconds> or =<seconds>, a whole number 1 to 86400; anything else is refused, never ignored.
-for bad in "--embed-timeout" "--embed-timeout --json" "--embed-timeout 0" "--embed-timeout 0.5" "--embed-timeout=abc"; do
+for bad in "--embed-timeout" "--embed-timeout --json" "--embed-timeout 0" "--embed-timeout 0.5" "--embed-timeout=abc" "--embed-timeout 300 --embed-timeout=abc"; do
   # shellcheck disable=SC2086
   if out="$(${MS} kb ingest garage ${bad} 2>&1)"; then echo "kb ingest accepted ${bad}" >&2; exit 1; fi
   grep -q "whole number of seconds" <<<"${out}" || { echo "kb ingest ${bad}: ${out}" >&2; exit 1; }
 done
 ${MS} kb ingest garage --embed-timeout=300 --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{if (JSON.parse(d).vectors.state!=="ready") process.exit(1);})'
 ${MS} kb ingest garage --embed-timeout 300 --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{if (JSON.parse(d).vectors.state!=="ready") process.exit(1);})'
+# A request timeout that isn't a number falls back to the default, rather than aborting every request.
+EMBEDDER_TIMEOUT_MS=abc ${MS} kb ingest garage --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const r=JSON.parse(d); if (r.vectors.state!=="ready") { console.error("EMBEDDER_TIMEOUT_MS=abc:", JSON.stringify(r.vectors)); process.exit(1); }})'
 
 # A question sharing no words with the KB recalls it by meaning, and only the
 # source that matches; the query is embedded once.

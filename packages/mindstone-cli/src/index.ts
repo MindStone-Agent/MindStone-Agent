@@ -1384,7 +1384,9 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
     const kbId = argv[4];
     if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id> [--embed-timeout <seconds>]");
     // --embed-timeout <seconds> or --embed-timeout=<seconds>: a whole number, 1 to 86400.
-    const embedTimeoutAt = argv.findIndex((arg) => arg === "--embed-timeout" || arg.startsWith("--embed-timeout="));
+    const isEmbedTimeout = (arg: string) => arg === "--embed-timeout" || arg.startsWith("--embed-timeout=");
+    if (argv.filter(isEmbedTimeout).length > 1) throw new Error("--embed-timeout takes a whole number of seconds, 1 to 86400, given once");
+    const embedTimeoutAt = argv.findIndex(isEmbedTimeout);
     const embedTimeoutRaw = embedTimeoutAt < 0 ? undefined
       : argv[embedTimeoutAt].includes("=") ? argv[embedTimeoutAt].slice("--embed-timeout=".length) : (argv[embedTimeoutAt + 1] ?? "");
     const embedTimeoutSeconds = embedTimeoutRaw === undefined ? undefined : Number(embedTimeoutRaw);

@@ -140,7 +140,8 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
     this.#headers = config.headers;
     this.#followRedirects = config.followRedirects !== false;
     this.#unavailable = config.unavailable;
-    this.#timeoutMs = config.timeoutMs ?? 10_000;
+    // A timeout that isn't a positive number (EMBEDDER_TIMEOUT_MS=abc) would abort every request at once.
+    this.#timeoutMs = typeof config.timeoutMs === "number" && Number.isFinite(config.timeoutMs) && config.timeoutMs > 0 ? config.timeoutMs : 10_000;
   }
 
   async embedTexts(texts: string[]): Promise<number[][]> {
@@ -188,7 +189,8 @@ export function createMemoryEmbeddingProvider(
   const resolved = resolveMemoryEmbeddingProviderConfig(config, env);
   if (!resolved) return undefined;
   // Never shorter than the one set for the install (EMBEDDER_TIMEOUT_MS on a slow machine).
-  return new OpenAiCompatibleEmbeddingProvider(options.timeoutMs ? { ...resolved, timeoutMs: Math.max(resolved.timeoutMs ?? 0, options.timeoutMs) } : resolved);
+  const configured = typeof resolved.timeoutMs === "number" && Number.isFinite(resolved.timeoutMs) ? resolved.timeoutMs : 0;
+  return new OpenAiCompatibleEmbeddingProvider(options.timeoutMs ? { ...resolved, timeoutMs: Math.max(configured, options.timeoutMs) } : resolved);
 }
 
 /**
