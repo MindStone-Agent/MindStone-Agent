@@ -45,6 +45,11 @@ export type EnterpriseField = {
   hint?: string;
   /** A secret pasted as several lines (a service account key file). */
   multiline?: boolean;
+  /**
+   * Not available yet (#140): shown in the Console, disabled and marked as
+   * such, so the option is visible; the gateway refuses a value for it.
+   */
+  planned?: boolean;
 };
 
 export const ENTERPRISE_KINDS: Record<EnterpriseKind, EnterpriseKindInfo> = {
@@ -59,6 +64,7 @@ export const ENTERPRISE_KINDS: Record<EnterpriseKind, EnterpriseKindInfo> = {
       { name: "models", label: "Deployment names", type: "list", required: true, hint: "The names of your model deployments" },
       { name: "apiVersion", label: "API version", type: "text", required: false, hint: "Leave empty for the v1 API" },
       { name: "secret", label: "API key", type: "secret", required: true },
+      { name: "entraIdentity", label: "Microsoft Entra ID / managed identity", type: "text", required: false, planned: true, hint: "Not available yet: an API key for now" },
     ],
   },
   bedrock: {
@@ -73,6 +79,8 @@ export const ENTERPRISE_KINDS: Record<EnterpriseKind, EnterpriseKindInfo> = {
       { name: "region", label: "Region", type: "text", required: true, hint: "for example us-east-1" },
       { name: "models", label: "Model ids", type: "list", required: true, hint: "for example anthropic.claude-sonnet-4-5-20250929-v1:0" },
       { name: "bearerTokenSecret", label: "Bedrock API key", type: "secret", required: true },
+      { name: "roleArn", label: "IAM role to assume (role ARN)", type: "text", required: false, planned: true, hint: "Not available yet: a Bedrock API key for now" },
+      { name: "accessKeys", label: "Access key id and secret access key", type: "text", required: false, planned: true, hint: "Not available yet: a Bedrock API key for now" },
     ],
   },
   vertex: {
@@ -87,6 +95,7 @@ export const ENTERPRISE_KINDS: Record<EnterpriseKind, EnterpriseKindInfo> = {
       { name: "serviceAccountSecret", label: "Service account key (JSON)", type: "secret", required: "one-of", group: "adc", multiline: true },
       { name: "project", label: "Project id", type: "text", required: "one-of", group: "adc" },
       { name: "location", label: "Location", type: "text", required: "one-of", group: "adc", hint: "for example us-central1" },
+      { name: "workloadIdentity", label: "Workload identity federation", type: "text", required: false, planned: true, hint: "Not available yet: an API key or a service account key for now" },
     ],
   },
   "enterprise-openai": {
@@ -289,7 +298,9 @@ export function parseEnterpriseRegistration(
   policy: EnterpriseHostPolicy = {},
 ): { error: string } | EnterpriseRegistration {
   const info = ENTERPRISE_KINDS[kind];
-  const allowed = new Set(info.fields.map((field) => field.name));
+  const planned = info.fields.find((field) => field.planned && Object.hasOwn(body, field.name));
+  if (planned) return { error: `${planned.label} isn't available yet` };
+  const allowed = new Set(info.fields.filter((field) => !field.planned).map((field) => field.name));
   if (kind === "bedrock" && ["accessKeyIdSecret", "secretAccessKeySecret", "sessionTokenSecret"].some((key) => Object.hasOwn(body, key))) {
     return { error: "Bedrock access keys aren't supported: Pi sends the stored key as a Bedrock API key. Register a Bedrock API key (bearerTokenSecret)" };
   }
