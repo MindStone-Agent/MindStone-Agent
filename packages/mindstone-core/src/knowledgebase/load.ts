@@ -476,7 +476,8 @@ export async function reembedStaleKnowledgebase(options: {
           // limiting requests; anything else, or no cause at all, counts (#158 review).
           const free = (vectors.cause === "unavailable" || vectors.cause === "rate-limited") && !((vectors.embedded ?? 0) > 0);
           const counts = !free;
-          const failures = (state?.failures ?? 0) + (counts ? 1 : 0);
+          // Read again now: a reset during this attempt starts the count afresh (#164).
+          const failures = (reembedState(loaded.kb.dir, spec, noLinks)?.failures ?? 0) + (counts ? 1 : 0);
           const gaveUp = counts && failures >= KB_REEMBED_LIMITS.maxFailures;
           const next: KbReembedState = {
             version: 1,
@@ -529,12 +530,23 @@ export async function waitWhileTurnsRun(starts: () => Iterable<number>, pollMs =
  * review): the admin's reset after fixing the embedder. False if there is no
  * such KB, or a private one is linked.
  */
-export function resetKnowledgebaseReembed(kbDir: string, kbId: string, options: { noLinks?: boolean } = {}): boolean {
-  if (options.noLinks && privateKnowledgebaseLinkError(kbDir, kbId)) return false;
+export function resetKnowledgebaseReembed(
+  kbDir: string,
+  kbId: string,
+  options: { noLinks?: boolean } = {},
+): "reset" | "not_found" | "not_cleared" {
+  if (options.noLinks && privateKnowledgebaseLinkError(kbDir, kbId)) return "not_found";
+  // Exactly its folder's name: a case-folding filesystem would find "GARAGE" for "garage" (#164).
+  try {
+    if (!readdirSync(kbDir).includes(kbId)) return "not_found";
+  } catch {
+    return "not_found";
+  }
   const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
-  if (!loaded.ok) return false;
+  if (!loaded.ok) return "not_found";
   clearKbReembedState(loaded.kb.dir);
-  return true;
+  // A state file that couldn't be removed (a read-only folder) would still apply: say so (#164 review).
+  return existsSync(join(loaded.kb.dir, KB_REEMBED_STATE_FILE)) ? "not_cleared" : "reset";
 }
 
 /** Whether turns in flight (their start times) hold a background re-embed back (#156 review, #158). */
