@@ -136,6 +136,7 @@ import {
   selectMemoryRecallProvider,
   sharedQueryEmbedder,
   createMemoryEmbeddingProvider,
+  KB_EMBED_LIMITS,
   indexSqliteMemoryTurn,
   isAutoRecallEnabled,
   transcriptPathForSession,
@@ -2663,7 +2664,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
         // Public hosts only, each redirect checked, as this host's environment allows (#142 review).
         privateKbUrls: {},
         // Each entry embedded with the install's embedder (#125 §5); its reasons are fixed text.
-        embedder: createMemoryEmbeddingProvider(gateConfig.config),
+        embedder: createMemoryEmbeddingProvider(gateConfig.config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs }),
       });
       if (!result.ok) throw new PersonaComposeError(publicKbText(result.error, root), "ingest_failed", 422);
       appendAdminAudit(paths.dataDir, { userId, action: "persona_kb_ingested", persona: id, knowledgebase: kbId, entries: result.entryCount, vectors: result.vectors.state });

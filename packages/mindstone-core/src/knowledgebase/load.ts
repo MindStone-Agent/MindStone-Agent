@@ -314,6 +314,14 @@ export async function ingestMindStoneKnowledgebase(
     }));
   }
 
+  // Sections whose headings slug alike ("C++" and "C#", or "Example" twice)
+  // would share an id, and so a vector (#125 §5 review): later ones get a suffix.
+  const seenEntryIds = new Map<string, number>();
+  for (const entry of entries) {
+    const count = seenEntryIds.get(entry.entryId) ?? 0;
+    seenEntryIds.set(entry.entryId, count + 1);
+    if (count > 0) entry.entryId = `${entry.entryId}~${count + 1}`;
+  }
   const index: MindStoneKbIndex = { kbId, ingestedAt: options.now, entries };
   const text = `${JSON.stringify(index, null, 2)}\n`;
   if (options.noLinks) {
@@ -544,9 +552,15 @@ export type KnowledgebaseDocumentVectors = {
 
 export type KnowledgebaseRecall = {
   documents: MemoryDocument[];
-  /** Recall document id -> its vectors, for KBs whose vectors match the install's embedder. */
-  vectors: Map<string, KnowledgebaseDocumentVectors>;
+  /**
+   * Recall document id -> its vectors, for KBs whose vectors match the
+   * install's embedder. Read on first call only, so a turn that doesn't rank
+   * by meaning never reads vectors.json (#125 §5 review).
+   */
+  vectors: () => Map<string, KnowledgebaseDocumentVectors>;
 };
+
+type VectorLoader = (into: Map<string, KnowledgebaseDocumentVectors>) => void;
 
 export type KnowledgebaseRecallOptions = {
   config?: MindStoneConfig;
@@ -578,9 +592,20 @@ export function discoverKnowledgebaseRecallDocuments(options: KnowledgebaseRecal
 
 /** The recall documents, plus each one's entry vectors where the KB has usable ones (#125 §5). */
 export function discoverKnowledgebaseRecall(options: KnowledgebaseRecallOptions = {}): KnowledgebaseRecall {
-  const recall: KnowledgebaseRecall = { documents: [], vectors: new Map() };
+  const loaders: VectorLoader[] = [];
+  let vectors: Map<string, KnowledgebaseDocumentVectors> | undefined;
+  const recall: KnowledgebaseRecall = {
+    documents: [],
+    vectors: () => {
+      if (!vectors) {
+        vectors = new Map();
+        for (const load of loaders) load(vectors);
+      }
+      return vectors;
+    },
+  };
   if (options.config?.knowledgebases?.recall?.enabled === false) return recall;
-  knowledgebaseRecallDocuments(recall, knowledgebasesDirFromConfig(options.config, options.paths), {
+  knowledgebaseRecallDocuments(recall, loaders, knowledgebasesDirFromConfig(options.config, options.paths), {
     only: options.only,
     step: options.step,
     embedder: options.embedder,
@@ -590,7 +615,7 @@ export function discoverKnowledgebaseRecall(options: KnowledgebaseRecallOptions 
     searchCommand: "mindstone kb search",
   });
   if (options.private) {
-    knowledgebaseRecallDocuments(recall, options.private.dir, {
+    knowledgebaseRecallDocuments(recall, loaders, options.private.dir, {
       step: options.step,
       embedder: options.embedder,
       noLinks: true,
@@ -604,7 +629,7 @@ export function discoverKnowledgebaseRecall(options: KnowledgebaseRecallOptions 
   return recall;
 }
 
-function knowledgebaseRecallDocuments(recall: KnowledgebaseRecall, kbDir: string, options: {
+function knowledgebaseRecallDocuments(recall: KnowledgebaseRecall, loaders: VectorLoader[], kbDir: string, options: {
   only?: string[];
   step?: string[];
   embedder?: { id: string; model: string };
@@ -629,8 +654,7 @@ function knowledgebaseRecallDocuments(recall: KnowledgebaseRecall, kbDir: string
     const read = readKbIndexWithText(loaded.kb);
     if (!read) continue;
     const index = read.index;
-    const kbVectors = options.embedder ? readKbVectors(loaded.kb.dir, read.text, options.embedder, { noLinks: options.noLinks }) : undefined;
-    const loadedVectors = kbVectors?.state === "ready" ? kbVectors.loaded : undefined;
+    const forVectors: Array<{ id: string; entries: MindStoneKbIndexEntry[]; lines: string[]; header: string[]; footer: string[] }> = [];
     const bySource = new Map<string, MindStoneKbIndexEntry[]>();
     for (const entry of index.entries) {
       const list = bySource.get(entry.sourcePath) ?? [];
@@ -667,17 +691,27 @@ function knowledgebaseRecallDocuments(recall: KnowledgebaseRecall, kbDir: string
           ...(sensitivity ? { sensitivity } : {}),
         },
       });
-      if (loadedVectors) {
-        const withVectors = entries.flatMap((entry, ordinal) => {
+      forVectors.push({ id, entries, lines, header, footer });
+    }
+    const embedder = options.embedder;
+    if (!embedder) continue;
+    const kbDirOfVectors = loaded.kb.dir;
+    const indexText = read.text;
+    loaders.push((into) => {
+      const kbVectors = readKbVectors(kbDirOfVectors, indexText, embedder, { noLinks: options.noLinks });
+      if (kbVectors.state !== "ready") return;
+      const loadedVectors = kbVectors.loaded;
+      for (const source of forVectors) {
+        const withVectors = source.entries.flatMap((entry, ordinal) => {
           const vector = loadedVectors.vectors.get(entry.entryId);
-          return vector ? [{ line: lines[ordinal], citation: entry.citation, vector }] : [];
+          return vector ? [{ line: source.lines[ordinal], citation: entry.citation, vector }] : [];
         });
         // Every entry embedded, or the document stays on word match: a
         // partly embedded source would be ranked on some of its sections only.
-        if (withVectors.length === entries.length) {
-          recall.vectors.set(id, { dimension: loadedVectors.dimension, header, footer, entries: withVectors });
+        if (withVectors.length === source.entries.length) {
+          into.set(source.id, { dimension: loadedVectors.dimension, header: source.header, footer: source.footer, entries: withVectors });
         }
       }
-    }
+    });
   }
 }

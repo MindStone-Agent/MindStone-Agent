@@ -55,6 +55,7 @@ import {
   probeMemoryEmbeddingProvider,
   createMemoryEmbeddingProvider,
   resolveMemoryEmbeddingProviderConfig,
+  KB_EMBED_LIMITS,
   resolveConfigPath,
   resolveConfiguredSessionKey,
   resolveDefaultSessionKey,
@@ -1381,15 +1382,21 @@ async function runKbCommand(rawArgv: string[]): Promise<void> {
 
   if (sub === "ingest") {
     const kbId = argv[4];
-    if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id>");
+    if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id> [--embed-timeout <seconds>]");
+    const embedTimeoutRaw = optionValue(argv, "--embed-timeout");
+    const embedTimeoutSeconds = embedTimeoutRaw === undefined ? undefined : Number(embedTimeoutRaw);
+    if (embedTimeoutSeconds !== undefined && !(Number.isFinite(embedTimeoutSeconds) && embedTimeoutSeconds > 0 && embedTimeoutSeconds <= 86_400)) {
+      throw new Error("--embed-timeout takes a number of seconds, 1 to 86400");
+    }
     // A persona's private KB: its URLs came through the admin API, so they get
     // the gateway's host checks and limits (#142 review).
     const result = await ingestMindStoneKnowledgebase(kbDir, kbId, {
       now: new Date().toISOString(),
       noLinks: Boolean(scoped.personaId),
       ...(scoped.personaId ? { privateKbUrls: {} } : {}),
-      // Each entry embedded with the install's embedder (#125 §5).
-      embedder: createMemoryEmbeddingProvider(config),
+      // Each entry embedded with the install's embedder (#125 §5), a request at a time given longer than a query's.
+      embedder: createMemoryEmbeddingProvider(config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs }),
+      ...(embedTimeoutSeconds ? { embedTimeoutMs: embedTimeoutSeconds * 1000 } : {}),
     });
     if (!result.ok) throw new Error(result.error);
     if (json) {

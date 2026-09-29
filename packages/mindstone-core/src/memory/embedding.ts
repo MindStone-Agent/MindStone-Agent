@@ -182,9 +182,12 @@ export class OpenAiCompatibleEmbeddingProvider implements MemoryEmbeddingProvide
 export function createMemoryEmbeddingProvider(
   config?: MindStoneConfig,
   env: NodeJS.ProcessEnv = process.env,
+  /** A request timeout of its own (KB ingest embeds many entries a request, #125 §5); default EMBEDDER_TIMEOUT_MS or 10 s. */
+  options: { timeoutMs?: number } = {},
 ): MemoryEmbeddingProvider | undefined {
   const resolved = resolveMemoryEmbeddingProviderConfig(config, env);
-  return resolved ? new OpenAiCompatibleEmbeddingProvider(resolved) : undefined;
+  if (!resolved) return undefined;
+  return new OpenAiCompatibleEmbeddingProvider(options.timeoutMs ? { ...resolved, timeoutMs: options.timeoutMs } : resolved);
 }
 
 /**

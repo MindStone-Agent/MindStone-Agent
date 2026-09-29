@@ -120,10 +120,11 @@ import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, exist
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  KB_VECTORS_FILE, kbEntryEmbeddingText, readKbVectors, writeKbVectors,
+  KB_EMBED_LIMITS, KB_VECTORS_FILE, kbEntryEmbeddingText, readKbVectors, writeKbVectors,
 } from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
+import { ingestMindStoneKnowledgebase } from "./packages/mindstone-core/src/knowledgebase/load.ts";
 import { KnowledgebaseRecallProvider } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
-import { CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
+import { buildMemoryRecallPrompt, CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, recallMindStoneMemory, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
 import { sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
 
 const entry = (id: string, text: string, section?: string) => ({
@@ -202,7 +203,7 @@ const doc = (id: string, text: string) => ({ id, kind: "kb" as const, text, meta
 const vec = (values: number[]) => new Float32Array(values);
 const recall = {
   documents: [doc("kb:a", "header\n- a1\nfooter"), doc("kb:b", "header\n- b1\nfooter"), doc("kb:c", "zebra words only"), doc("kb:d", "header\n- d1")],
-  vectors: new Map([
+  vectors: () => new Map([
     ["kb:a", { dimension: 3, header: ["header"], footer: ["footer"], entries: [{ line: "- a0", citation: "a0", vector: vec([0, 1, 0]) }, { line: "- a1", citation: "a1", vector: vec([1, 0, 0]) }] }],
     ["kb:b", { dimension: 3, header: ["header"], footer: ["footer"], entries: [{ line: "- b1", citation: "b1", vector: vec([0.6, 0.8, 0]) }] }],
     ["kb:d", { dimension: 2, header: ["header"], footer: [], entries: [{ line: "- d1", citation: "d1", vector: vec([1, 0]) }] }],
@@ -217,10 +218,31 @@ assert.equal(semantic[0].text, "header\n- a1\n- a0\nfooter", "closest section fi
 assert.equal(semantic[0].metadata?.bestCitation, "a1");
 assert.ok(hits.some((h) => h.id === "kb:c" && !isQuotaHit(h)), "word match still runs");
 assert.equal(queryEmbedder.calls, 1);
-// A source found by meaning isn't listed again by word match.
+// A source found by meaning and by words comes back twice; the selection keeps one copy.
 hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), minSimilarity: 0.5 }).search({ text: "question header", limit: 8 });
-assert.equal(hits.filter((h) => h.id === "kb:a").length, 1);
-assert.ok(isQuotaHit(hits.find((h) => h.id === "kb:a")!));
+const copies = hits.filter((h) => h.id === "kb:a");
+assert.equal(copies.length, 2, "both copies of kb:a");
+assert.notEqual(copies[0].chunkId, copies[1].chunkId, "each copy has its own chunk id");
+assert.deepEqual(selectRecallHits(hits, 8).filter((h) => h.id === "kb:a").map(isQuotaHit), [true], "the meaning copy is kept, the word copy dropped");
+// A weak meaning score never loses an exact-term source: a quota hit meets its own threshold, not minScore.
+{
+  const weak = { id: "stub", model: "m1", async embedTexts() { return [[0.55, Math.sqrt(1 - 0.55 * 0.55), 0]]; } };
+  const provider = new KnowledgebaseRecallProvider(recall as any, { embedder: weak as any, minSimilarity: 0.5 });
+  const result = await recallMindStoneMemory({ agentId: "unit", entries: [{ role: "user", text: "question header" }] as any, provider, config: { minScore: 0.9, maxResults: 4 } });
+  assert.ok(result?.hits.some((h) => h.id === "kb:a"), `the source must survive a high minScore: ${JSON.stringify(result?.hits.map((h) => h.id))}`);
+}
+// A source found by meaning shows its 5 closest sections, then says how many more.
+{
+  const many = { documents: [doc("kb:m", "x")], vectors: () => new Map([["kb:m", { dimension: 3, header: ["h"], footer: ["f"], entries: Array.from({ length: 8 }, (_, i) => ({ line: `- s${i}`, citation: `s${i}`, vector: vec([1, i / 10, 0]) })) }]]) };
+  const [meaning] = (await new KnowledgebaseRecallProvider(many as any, { embedder: fixed({ q: [1, 0, 0] }), minSimilarity: 0 }).search({ text: "q", limit: 8 })).filter(isQuotaHit);
+  assert.equal(meaning.text, "h\n- s0\n- s1\n- s2\n- s3\n- s4\n- …and 3 more section(s) of this source\nf");
+}
+// A turn that doesn't rank by meaning never reads vectors.json.
+{
+  const unread = { documents: recall.documents, vectors: () => { throw new Error("vectors were read"); } };
+  await new KnowledgebaseRecallProvider(unread as any, { embedder: fixed({ question: [1, 0, 0] }), maxResults: 0 }).search({ text: "question", limit: 8 });
+  await new KnowledgebaseRecallProvider(unread as any, {}).search({ text: "question", limit: 8 });
+}
 // Threshold, cap, embedder down, no embedder.
 hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), minSimilarity: 0.7 }).search({ text: "question", limit: 8 });
 assert.deepEqual(hits.filter(isQuotaHit).map((h) => h.id), ["kb:a"]);
@@ -241,9 +263,59 @@ const merged = await new CombinedMemoryRecallProvider([
   { id: "m", search: () => [hit("m1", 0.99), hit("m2", 0.98), hit("m3", 0.97)] },
   { id: "k", search: () => [hit("k1", 0.51, true, "kb")] },
 ]).search({ text: "q", limit: 2 });
-assert.deepEqual(merged.map((h) => h.id), ["m1", "m2", "k1"]);
-assert.deepEqual(selectRecallHits(merged, 2).map((h) => h.id), ["m1", "k1"]);
+assert.deepEqual(merged.map((h) => h.id), ["k1", "m1", "m2"]);
+assert.deepEqual(selectRecallHits(merged, 2).map((h) => h.id), ["k1", "m1"]);
+// The prompt budget goes to quota hits first: a long memory hit ranked above can't push them out.
+{
+  const long = { ...hit("long", 0.99), text: "word ".repeat(4000) };
+  const kbHit = { ...hit("k1", 0.5, true, "kb"), text: "a short KB source" };
+  const prompt = buildMemoryRecallPrompt([long, kbHit], 2500);
+  assert.deepEqual(prompt.hits.map((h) => h.id), ["k1"], "the quota hit must fit before the long memory hit");
+  assert.deepEqual(buildMemoryRecallPrompt([long, hit("m2", 0.5)], 2500).hits.map((h) => h.id), ["long"], "with no quota hit, the order decides as before");
+}
 assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) => h.id), ["m1"]);
+
+// A request the embedder can't finish in time: the batch once more, an entry a request; one that
+// times out alone says so.
+{
+  const abort = () => Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+  const onlySingles = { id: "stub", model: "m1", async embedTexts(texts: string[]) { if (texts.length > 1) throw abort(); return [[1, 0]]; } };
+  const retried = await writeKbVectors({ kbDir: mkdtempSync(join(tmpdir(), "kbvec-retry-")), kbId: "k", entries, indexText, embedder: onlySingles as any });
+  assert.equal(retried.state, "ready", "a batch that timed out is retried an entry a request");
+  const never = { id: "stub", model: "m1", async embedTexts() { throw abort(); } };
+  const gaveUp = await writeKbVectors({ kbDir: mkdtempSync(join(tmpdir(), "kbvec-abort-")), kbId: "k", entries, indexText, embedder: never as any });
+  assert.match((gaveUp as any).reason, /didn't answer a request in time/);
+}
+// Another file version, or a file over the size limit, is stale.
+{
+  const vdir = mkdtempSync(join(tmpdir(), "kbvec-version-"));
+  await writeKbVectors({ kbDir: vdir, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }) });
+  const v2 = JSON.parse(readFileSync(join(vdir, KB_VECTORS_FILE), "utf8"));
+  writeFileSync(join(vdir, KB_VECTORS_FILE), JSON.stringify({ ...v2, version: 2 }));
+  assert.equal(readKbVectors(vdir, indexText, { id: "stub", model: "m1" }).state, "stale");
+  const big = mkdtempSync(join(tmpdir(), "kbvec-big-"));
+  await writeKbVectors({ kbDir: big, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }) });
+  const cap = KB_EMBED_LIMITS.maxFileBytes;
+  KB_EMBED_LIMITS.maxFileBytes = 10;
+  try {
+    assert.match((readKbVectors(big, indexText, { id: "stub", model: "m1" }) as any).reason, /larger than/);
+  } finally {
+    KB_EMBED_LIMITS.maxFileBytes = cap;
+  }
+}
+// Sections whose headings slug alike get their own ids, and so their own vectors.
+{
+  const kbRoot = mkdtempSync(join(tmpdir(), "kbvec-dup-"));
+  mkdirSync(join(kbRoot, "d", "sources"), { recursive: true });
+  writeFileSync(join(kbRoot, "d", "kb.json"), JSON.stringify({ name: "d" }));
+  writeFileSync(join(kbRoot, "d", "sources", "a.md"), "# A\n\n## Example\n\nalpha one\n\n## Example\n\nbeta two\n\n## C++\n\nalpha three\n\n## C#\n\nbeta four\n");
+  const ingested = await ingestMindStoneKnowledgebase(kbRoot, "d", { embedder: fixed({ alpha: [1, 0, 0], beta: [0, 1, 0] }) });
+  assert.ok(ingested.ok);
+  const index = JSON.parse(readFileSync(join(kbRoot, "d", "index.json"), "utf8"));
+  const ids = index.entries.map((e: any) => e.entryId);
+  assert.equal(new Set(ids).size, ids.length, `entry ids must be unique: ${ids}`);
+  assert.equal((ingested as any).vectors.count, ids.length, "one vector per entry");
+}
 
 // The shared embedder: one request for one text, however many ask at once.
 const base = fixed({});
@@ -425,11 +497,20 @@ hits="$(chat_hits "seedling nurturing?")"
 grep -q '^pkb:grower:plots:plots.md|embedding$' <<<"${hits}" || { echo "private KB not recalled by meaning: ${hits}" >&2; exit 1; }
 ${MS} kb status --persona grower plots --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="ready") process.exit(1);})'
 
+# Under another persona, grower's private KB is never recalled, by meaning or by words.
+mkdir -p "${DATA}/personas/other"
+printf '# other\n\nAnother persona.\n' > "${DATA}/personas/other/PERSONA.md"
+set_config 'c["personas"] = {"active": "other"}'
+hits="$(chat_hits "seedling nurturing, other persona?")"
+if grep -q 'pkb:grower' <<<"${hits}"; then echo "another persona got grower's private KB: ${hits}" >&2; exit 1; fi
+set_config 'c["personas"] = {"active": "grower"}'
+
 # A private vectors.json that is a link: the KB is refused and left out of recall.
 mv "${DATA}/personas/grower/knowledgebases/plots/vectors.json" "${TEMP_RUNTIME}/plots-vectors.json"
 ln -s "${TEMP_RUNTIME}/plots-vectors.json" "${DATA}/personas/grower/knowledgebases/plots/vectors.json"
 if out="$(${MS} kb ingest --persona grower plots 2>&1)"; then echo "ingest through a linked vectors.json must fail" >&2; exit 1; fi
 grep -q "vectors.json is a link" <<<"${out}" || { echo "unexpected refusal: ${out}" >&2; exit 1; }
+if ${MS} kb status --persona grower plots --json 2>/dev/null | grep -q '"state": "ready"'; then echo "kb status read a private KB's linked vectors.json" >&2; exit 1; fi
 hits="$(chat_hits "seedling nurturing, linked?")"
 if grep -q 'pkb:grower' <<<"${hits}"; then echo "a private KB with a linked vectors.json was recalled: ${hits}" >&2; exit 1; fi
 

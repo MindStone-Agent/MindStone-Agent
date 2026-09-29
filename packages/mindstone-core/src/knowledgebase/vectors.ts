@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MemoryEmbeddingProvider } from "../memory/embedding.js";
 import type { MindStoneKbIndexEntry, MindStoneKbVectorsStatus } from "./types.js";
@@ -15,9 +15,14 @@ export const KB_VECTORS_FILE = "vectors.json";
 export const KB_EMBED_LIMITS = {
   /** Characters of an entry sent to the embedder: its title, heading and the start of its text. */
   maxChars: 6000,
-  batchSize: 32,
+  /** Entries a request: small enough for a CPU embedder to answer within `requestTimeoutMs`. */
+  batchSize: 8,
+  /** One embedding request at ingest (longer than the query's 10 s). */
+  requestTimeoutMs: 60_000,
   /** The whole embedding pass. Past it, ingest keeps the index and drops the vectors. */
   timeoutMs: 120_000,
+  /** A vectors.json larger than this is not read at recall. */
+  maxFileBytes: 256 * 1024 * 1024,
 };
 
 type KbVectorsFile = {
@@ -87,6 +92,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 class KbEmbedTimeout extends Error {}
 
+function isAbort(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError" || /aborted/i.test(error.message));
+}
+
 /**
  * Embeds a freshly written index and writes vectors.json beside it, whole and
  * moved into place. Never fails the ingest: with no embedder, a failing one, or
@@ -114,30 +123,41 @@ export async function writeKbVectors(params: {
   const batchSize = Math.max(1, params.batchSize ?? KB_EMBED_LIMITS.batchSize);
   const encoded: Record<string, string> = {};
   let dimension = 0;
+  const embedBatch = async (batch: MindStoneKbIndexEntry[]) => {
+    const texts = batch.map((entry) => kbEntryEmbeddingText(entry));
+    // The embedder drops blank inputs, which would shift every vector after one.
+    if (texts.some((text) => !text)) throw new Error("blank entry");
+    const vectors = await withTimeout(embedder.embedTexts(texts), budget - (Date.now() - started));
+    if (vectors.length !== batch.length) throw new Error("vector count");
+    batch.forEach((entry, index) => {
+      const vector = vectors[index];
+      if (dimension === 0) dimension = vector.length;
+      if (vector.length !== dimension || dimension === 0) throw new Error("dimension");
+      // Stored as float32: a value past its range would read back as infinity.
+      if (vector.some((value) => !Number.isFinite(Math.fround(value)))) throw new Error("range");
+      encoded[entry.entryId] = encodeVector(vector);
+    });
+  };
   try {
     for (let offset = 0; offset < params.entries.length; offset += batchSize) {
       const batch = params.entries.slice(offset, offset + batchSize);
-      const texts = batch.map((entry) => kbEntryEmbeddingText(entry));
-      // The embedder drops blank inputs, which would shift every vector after one.
-      if (texts.some((text) => !text)) throw new Error("blank entry");
-      const vectors = await withTimeout(embedder.embedTexts(texts), budget - (Date.now() - started));
-      if (vectors.length !== batch.length) throw new Error("vector count");
-      batch.forEach((entry, index) => {
-        const vector = vectors[index];
-        if (dimension === 0) dimension = vector.length;
-        if (vector.length !== dimension || dimension === 0) throw new Error("dimension");
-        // Stored as float32: a value past its range would read back as infinity.
-        if (vector.some((value) => !Number.isFinite(Math.fround(value)))) throw new Error("range");
-        encoded[entry.entryId] = encodeVector(vector);
-      });
+      try {
+        await embedBatch(batch);
+      } catch (error) {
+        // A request the embedder couldn't finish in time: its entries once more, one a request.
+        if (error instanceof KbEmbedTimeout || !isAbort(error) || batch.length === 1) throw error;
+        for (const entry of batch) await embedBatch([entry]);
+      }
     }
   } catch (error) {
     removeKbVectors(params.kbDir);
     return {
       state: "missing",
       reason: error instanceof KbEmbedTimeout
-        ? `embedding took longer than ${Math.round(budget / 1000)} s`
-        : "the embedder failed; run `mindstone doctor` to check it",
+        ? `embedding took longer than ${Math.round(budget / 1000)} s; ingest again with a longer limit (CLI: --embed-timeout <seconds>)`
+        : isAbort(error)
+          ? "the embedder didn't answer a request in time; run `mindstone doctor` to check it"
+          : "the embedder failed; run `mindstone doctor` to check it",
     };
   }
   if (dimension === 0) {
@@ -185,19 +205,16 @@ export function readKbVectors(
   options: { noLinks?: boolean } = {},
 ): ReadKbVectors {
   const path = join(kbDir, KB_VECTORS_FILE);
-  let raw: string;
+  let parsed: ParsedVectorsFile;
   try {
     if (options.noLinks && lstatSync(path).isSymbolicLink()) return { state: "missing", reason: "vectors.json is a link" };
-    raw = readFileSync(path, "utf-8");
+    parsed = parsedVectorsFile(path);
   } catch {
     return { state: "missing", reason: embedder ? "not embedded yet; re-ingest" : "no embedder is configured" };
   }
-  let file: Partial<KbVectorsFile>;
-  try {
-    file = JSON.parse(raw) as Partial<KbVectorsFile>;
-  } catch {
-    return { state: "stale", reason: "vectors.json can't be read; re-ingest" };
-  }
+  if (parsed === "too_large") return { state: "stale", reason: `vectors.json is larger than ${KB_EMBED_LIMITS.maxFileBytes / 1024 / 1024} MB; recall uses word match for this KB` };
+  if (parsed === "unreadable") return { state: "stale", reason: "vectors.json can't be read; re-ingest" };
+  const file = parsed.file;
   const dimension = file.dimension;
   if (
     !file || typeof file !== "object" || file.version !== 1 || typeof file.provider !== "string" || typeof file.model !== "string"
@@ -214,13 +231,55 @@ export function readKbVectors(
   if (file.indexSha256 !== kbIndexDigest(indexText)) {
     return { state: "stale", reason: "the index changed after these vectors were made; re-ingest", ...described };
   }
-  const vectors = new Map<string, Float32Array>();
-  for (const [entryId, encoded] of Object.entries(file.vectors)) {
-    const vector = decodeVector(encoded, dimension);
-    if (!vector) return { state: "stale", reason: "vectors.json can't be read; re-ingest", ...described };
-    vectors.set(entryId, vector);
-  }
+  const vectors = parsed.decoded();
+  if (!vectors) return { state: "stale", reason: "vectors.json can't be read; re-ingest", ...described };
   return { state: "ready", loaded: { provider: file.provider, model: file.model, dimension, vectors }, count: vectors.size };
+}
+
+type ParsedVectorsFile = "too_large" | "unreadable" | { file: Partial<KbVectorsFile>; decoded: () => Map<string, Float32Array> | undefined };
+
+/**
+ * vectors.json parsed, and its vectors decoded on first use, kept while the
+ * file's size and mtime stay the same: recall reads it every turn (#125 §5
+ * review). The stale checks still run on every read.
+ */
+const PARSED_VECTORS = new Map<string, { mtimeMs: number; size: number; parsed: ParsedVectorsFile }>();
+
+function parsedVectorsFile(path: string): ParsedVectorsFile {
+  const stat = statSync(path);
+  const cached = PARSED_VECTORS.get(path);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.parsed;
+  let parsed: ParsedVectorsFile;
+  if (stat.size > KB_EMBED_LIMITS.maxFileBytes) {
+    parsed = "too_large";
+  } else {
+    try {
+      const file = JSON.parse(readFileSync(path, "utf-8")) as Partial<KbVectorsFile>;
+      if (!file || typeof file !== "object") throw new Error("not an object");
+      let decoded: Map<string, Float32Array> | undefined | null = null;
+      parsed = {
+        file,
+        decoded: () => {
+          if (decoded !== null) return decoded;
+          decoded = new Map();
+          for (const [entryId, encoded] of Object.entries(file.vectors ?? {})) {
+            const vector = decodeVector(encoded, file.dimension as number);
+            if (!vector) {
+              decoded = undefined;
+              break;
+            }
+            decoded.set(entryId, vector);
+          }
+          return decoded;
+        },
+      };
+    } catch {
+      parsed = "unreadable";
+    }
+  }
+  if (PARSED_VECTORS.size >= 32) PARSED_VECTORS.delete(PARSED_VECTORS.keys().next().value!);
+  PARSED_VECTORS.set(path, { mtimeMs: stat.mtimeMs, size: stat.size, parsed });
+  return parsed;
 }
 
 export function kbVectorsStatus(read: ReadKbVectors): MindStoneKbVectorsStatus {

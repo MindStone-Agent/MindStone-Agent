@@ -107,10 +107,15 @@ export function isQuotaHit(hit: MemoryHit): boolean {
   return hit.kind === "kb" && hit.metadata?.recallQuota === KB_RECALL_QUOTA;
 }
 
-/** The `limit` hits a turn keeps: quota hits first claim their slots, the rest go to the best others. Order is kept. */
+/**
+ * The `limit` hits a turn keeps: quota hits first claim their slots, the rest
+ * go to the best others. A source already in by its quota copy isn't taken
+ * again by its other copy. Order is kept.
+ */
 export function selectRecallHits(hits: MemoryHit[], limit: number): MemoryHit[] {
   const quota = hits.filter(isQuotaHit).slice(0, limit);
-  const others = hits.filter((hit) => !isQuotaHit(hit)).slice(0, Math.max(0, limit - quota.length));
+  const inByQuota = new Set(quota.map((hit) => hit.id));
+  const others = hits.filter((hit) => !isQuotaHit(hit) && !inByQuota.has(hit.id)).slice(0, Math.max(0, limit - quota.length));
   const kept = new Set([...quota, ...others]);
   return hits.filter((hit) => kept.has(hit));
 }
@@ -129,9 +134,11 @@ export class CombinedMemoryRecallProvider implements MemoryRecallProvider {
     const limit = query.limit ?? DEFAULT_MAX_RESULTS;
     const results = (await Promise.all(this.#providers.map((provider) => provider.search(query)))).flat();
     const byScore = (a: MemoryHit, b: MemoryHit) => b.score - a.score || a.chunkId.localeCompare(b.chunkId);
+    // Quota hits first: when a source's two copies carry the same text, the
+    // repeat check keeps the first one it sees.
     return [
-      ...results.filter((hit) => !isQuotaHit(hit)).sort(byScore).slice(0, limit),
       ...results.filter(isQuotaHit).sort(byScore),
+      ...results.filter((hit) => !isQuotaHit(hit)).sort(byScore).slice(0, limit),
     ];
   }
 }
@@ -166,17 +173,37 @@ function formatHit(hit: MemoryHit, index: number): string {
 }
 
 export function buildMemoryRecallPrompt(hits: MemoryHit[], maxPromptTokens = DEFAULT_MAX_PROMPT_TOKENS): { text?: string; tokens: number; hits: MemoryHit[] } {
-  const selected: MemoryHit[] = [];
-  const sections: string[] = [];
+  let selected: MemoryHit[] = [];
+  let sections: string[] = [];
   let tokens = estimatePromptTokens("Relevant MindStone memory:\n");
 
-  for (const hit of hits) {
-    const next = formatHit(hit, selected.length);
-    const nextTokens = estimatePromptTokens(next);
-    if (selected.length > 0 && tokens + nextTokens > maxPromptTokens) break;
-    selected.push(hit);
-    sections.push(next);
-    tokens += nextTokens;
+  if (hits.some(isQuotaHit)) {
+    // Quota hits (#125 §5) take the budget first, so a long memory hit ranked
+    // above them can't push them out; the rest fill what is left, in order.
+    // The prompt keeps the ranked order.
+    const chosen = new Set<MemoryHit>();
+    for (const quotaPass of [true, false]) {
+      for (const hit of hits.filter((candidate) => isQuotaHit(candidate) === quotaPass)) {
+        const nextTokens = estimatePromptTokens(formatHit(hit, hits.length));
+        if (chosen.size > 0 && tokens + nextTokens > maxPromptTokens) {
+          if (quotaPass) continue;
+          break;
+        }
+        chosen.add(hit);
+        tokens += nextTokens;
+      }
+    }
+    selected = hits.filter((hit) => chosen.has(hit));
+    sections = selected.map((hit, index) => formatHit(hit, index));
+  } else {
+    for (const hit of hits) {
+      const next = formatHit(hit, selected.length);
+      const nextTokens = estimatePromptTokens(next);
+      if (selected.length > 0 && tokens + nextTokens > maxPromptTokens) break;
+      selected.push(hit);
+      sections.push(next);
+      tokens += nextTokens;
+    }
   }
 
   if (sections.length === 0) return { tokens: 0, hits: [] };
@@ -236,7 +263,8 @@ export async function recallMindStoneMemory(input: MemoryRecallInput): Promise<M
     seenTexts.add(text);
     return true;
   });
-  const thresholdHits = freshHits.filter((hit) => hit.score >= minScore);
+  // A quota hit met its own threshold (knowledgebases.recall.minSimilarity), on its own scale (#125 §5).
+  const thresholdHits = freshHits.filter((hit) => hit.score >= minScore || isQuotaHit(hit));
   const ranked = rankMemoryHitsWithScri(thresholdHits, {
     activeEntries: input.entries,
     dedupAgainstActiveContext: input.config?.dedupAgainstActiveContext,

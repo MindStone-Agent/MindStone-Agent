@@ -4,6 +4,9 @@ import type { MemoryHit, MemoryQuery, MemoryRecallProvider } from "../memory/typ
 import { discoverKnowledgebaseRecall, type KnowledgebaseRecall, type KnowledgebaseRecallOptions } from "./load.js";
 import { cosineSimilarity } from "./vectors.js";
 
+/** Sections a KB source found by meaning shows in the prompt. */
+export const KB_MEANING_SECTIONS = 5;
+
 export const KB_RECALL_DEFAULTS = {
   /** Slots a turn keeps for KB sources ranked by meaning. */
   maxResults: 3,
@@ -55,15 +58,21 @@ export class KnowledgebaseRecallProvider implements MemoryRecallProvider {
     this.#minSimilarity = options.minSimilarity ?? KB_RECALL_DEFAULTS.minSimilarity;
   }
 
+  /**
+   * A source can come back twice, by meaning and by words (its own chunk ids):
+   * the turn's selection keeps the meaning copy when it takes a slot, and the
+   * word-match copy otherwise, so an exact term is never lost to a weak
+   * meaning score (#125 §5 review).
+   */
   async search(query: MemoryQuery): Promise<MemoryHit[]> {
     const semantic = await this.#semanticSearch(query.text);
-    const taken = new Set(semantic.map((hit) => hit.id));
-    const lexical = this.#lexical.search({ ...query, limit: (query.limit ?? 8) + taken.size }).filter((hit) => !taken.has(hit.id));
-    return [...semantic, ...lexical.slice(0, query.limit ?? 8)];
+    return [...semantic, ...this.#lexical.search(query)];
   }
 
   async #semanticSearch(text: string): Promise<MemoryHit[]> {
-    if (!this.#embedder || this.#maxResults <= 0 || this.#recall.vectors.size === 0) return [];
+    if (!this.#embedder || this.#maxResults <= 0) return [];
+    const allVectors = this.#recall.vectors();
+    if (allVectors.size === 0) return [];
     let queryVector: number[] | undefined;
     try {
       [queryVector] = await this.#embedder.embedTexts([text]);
@@ -73,7 +82,7 @@ export class KnowledgebaseRecallProvider implements MemoryRecallProvider {
     if (!queryVector?.length) return [];
     const hits: MemoryHit[] = [];
     this.#recall.documents.forEach((document, ordinal) => {
-      const vectors = this.#recall.vectors.get(document.id);
+      const vectors = allVectors.get(document.id);
       // Vectors of another dimension than the query's came from another model: ignored.
       if (!vectors || vectors.dimension !== queryVector!.length) return;
       const scored = vectors.entries
@@ -81,11 +90,14 @@ export class KnowledgebaseRecallProvider implements MemoryRecallProvider {
         .sort((a, b) => b.similarity - a.similarity);
       const best = scored[0];
       if (!best || !(best.similarity >= this.#minSimilarity)) return;
+      // The sections closest to the question first, at most KB_MEANING_SECTIONS
+      // of them, so one long source can't use up the prompt's recall budget.
+      const shown = scored.slice(0, KB_MEANING_SECTIONS).map(({ entry }) => entry.line);
+      const more = scored.length - shown.length;
       hits.push({
         ...document,
-        // The sections closest to the question first.
-        text: [...vectors.header, scored.map(({ entry }) => entry.line).join("\n"), ...vectors.footer].join("\n"),
-        chunkId: `${document.id}#0`,
+        text: [...vectors.header, [...shown, ...(more > 0 ? [`- …and ${more} more section(s) of this source`] : [])].join("\n"), ...vectors.footer].join("\n"),
+        chunkId: `${document.id}#meaning`,
         sourceId: document.id,
         ordinal,
         score: best.similarity,
