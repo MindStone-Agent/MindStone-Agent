@@ -102,7 +102,8 @@ alike.
   - `unused`: vectors exist but no embedder is configured now.
 
   **After a switch of embedding model** (#151), a KB whose vectors the old
-  model made is embedded again on its own, as memory's chunks are (#140):
+  model made is embedded again on its own, as memory's chunks are (#140,
+  paced the same way since #157):
   after each owner chat through the gateway (automatic recall on), one such
   KB, global or private, is embedded from its current `index.json`, in the
   background; its sources aren't read or fetched again. A KB of more than 512
