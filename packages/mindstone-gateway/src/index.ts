@@ -2080,7 +2080,18 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       sendJson(res, 404, { ok: false, error: `no proposed action matches id "${approvalMatch[1]}"` });
       return;
     }
-    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation, persona: action.persona, skill: action.skill, components: action.components, workflow: action.workflow, knowledgebase: action.knowledgebase } });
+    // A persona's listed workflows with their steps (#125 review): what the
+    // persona would run, as the CLI shows it; a missing one is null.
+    const listedWorkflows = action.components?.workflows.length
+      ? (() => {
+          const workflowsDir = workflowsDirFromConfig(loadMindStoneConfig(configPath).config, paths);
+          return action.components!.workflows.map((id) => {
+            const loaded = isSafeComponentId(id) ? loadMindStoneWorkflow(workflowsDir, id) : undefined;
+            return { id, steps: loaded?.ok ? loaded.workflow.steps : null };
+          });
+        })()
+      : undefined;
+    sendJson(res, 200, { ok: true, action: { ...approvalSummary(action), send: action.send, memory: action.memory, mutation: action.mutation, persona: action.persona, skill: action.skill, components: action.components, ...(listedWorkflows ? { listedWorkflows } : {}), workflow: action.workflow, knowledgebase: action.knowledgebase } });
     return;
   }
   if (req.method === "GET" && url.pathname === "/admin/skills") {
@@ -2696,9 +2707,13 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
             // Approving a proposed private KB writes and ingests it (#125). Text
             // sources only, so nothing is fetched. A failed ingest leaves the KB
             // written, and says so, even when the ingest throws (#125 review):
-            // the approval has happened by then.
+            // the approval has happened by then. It counts as that KB's
+            // ingest, so an admin ingest of it can't overlap (#125 review).
+            const ingestKey = `${result.personaId}/${result.kbId}`;
+            PRIVATE_KB_INGESTS.add(ingestKey);
             const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true })
-              .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }));
+              .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }))
+              .finally(() => PRIVATE_KB_INGESTS.delete(ingestKey));
             const { kbRoot: _root, ...shown } = result;
             sendJson(res, 200, { ok: true, result: { ...shown, ingested: ingested.ok ? { entryCount: ingested.entryCount } : { error: publicKbText(ingested.error, result.kbRoot) } } });
             return;

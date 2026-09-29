@@ -33,7 +33,7 @@ export class ApprovalActionError extends Error {
       | "memory_exists" | "unsafe_path" | "no_payload" | "no_personas_dir" | "persona_exists" | "persona_referenced"
       | "no_persona_references" | "skill_exists" | "invalid_skill" | "install_failed"
       | "persona_pending" | "unknown_component" | "workflow_exists" | "workflow_referenced" | "invalid_workflow"
-      | "knowledgebase_exists" | "invalid_knowledgebase" | "invalid_persona" | "persona_rejected",
+      | "knowledgebase_exists" | "invalid_knowledgebase" | "invalid_persona" | "persona_rejected" | "persona_missing",
     readonly status: number,
     /** For callers outside this host (the Console): the same refusal without host paths or CLI hints. */
     readonly publicMessage: string = message,
@@ -91,6 +91,23 @@ function addComponentOrExplain(personaDir: string, key: "skills" | "workflows", 
   }
 }
 
+/**
+ * A component card's persona card: refused while it waits (`persona_pending`)
+ * or when it no longer exists (`persona_missing`: the card can only be
+ * rejected). A rejected one is returned; the caller rejects the card.
+ */
+function componentParentOrRefuse(store: ApprovalStore, action: ProposedAction): ProposedAction {
+  const kind = action.kind === "skill_install" ? "skill" : action.kind === "workflow_create" ? "workflow" : "knowledge base";
+  const parent = store.get(action.parentApprovalId!);
+  if (!parent || !parent.persona) {
+    throw new ApprovalActionError(`this ${kind} belongs to a persona proposal (approval ${action.parentApprovalId}) that no longer exists; reject this card`, "persona_missing", 409);
+  }
+  if (parent.status === "pending") {
+    throw new ApprovalActionError(`approve the persona first (approval ${action.parentApprovalId}); this ${kind} is part of it`, "persona_pending", 409);
+  }
+  return parent;
+}
+
 /** `store.decide`, with its refusal (decided meanwhile) as an ApprovalActionError. */
 function decideOrRefuse(store: ApprovalStore, id: string, decision: Parameters<ApprovalStore["decide"]>[1]): ProposedAction {
   try {
@@ -122,6 +139,10 @@ export function checkApprovable(store: ApprovalStore, id: string): ApprovalCheck
   // "queuing" alone can't tell an approve that is still running (waiting for
   // the queue lock) from one that was killed. The approve records its
   // process; while that process is alive, it isn't repaired (#77 round 3).
+  // A component card (#125) is refused here, before any confirmation, while
+  // its persona card waits or is gone (#125 review); one whose persona was
+  // rejected is rejected by the approve itself.
+  if (!repair && action.parentApprovalId) componentParentOrRefuse(store, action);
   if (repair && action.queuingBy && approverStillRunning(action.queuingBy)) {
     throw new ApprovalActionError(
       `an approve of ${action.id} is still running (process ${action.queuingBy.pid}); let it finish, or stop it and approve again`,
@@ -184,20 +205,17 @@ export function approveProposedAction(
   let parentPersonaDir: string | undefined;
   let parentPersonaId: string | undefined;
   if (action.parentApprovalId) {
-    const parent = store.get(action.parentApprovalId);
+    // Checked again: the persona card may have changed since checkApprovable.
+    const parent = componentParentOrRefuse(store, action);
     // Its persona was rejected (a reject that missed it): it goes the same way (#125 review).
-    if (parent?.status === "rejected" && !repair) {
+    if (parent.status === "rejected" && !repair) {
       const at = now();
       decideOrRefuse(store, action.id, { status: "rejected", decidedBy: options.decidedBy, note: "its persona was rejected", now: at });
       options.onDecision?.(action, "rejected", "its persona was rejected");
       throw new ApprovalActionError(`its persona (approval ${action.parentApprovalId}) was rejected, so this card is rejected too`, "persona_rejected", 409);
     }
-    if (!parent || parent.status !== "approved" || !parent.persona) {
-      throw new ApprovalActionError(
-        `approve the persona first (approval ${action.parentApprovalId}); this ${action.kind === "skill_install" ? "skill" : action.kind === "workflow_create" ? "workflow" : "knowledge base"} is part of it`,
-        "persona_pending",
-        409,
-      );
+    if (parent.status !== "approved" || !parent.persona) {
+      throw new ApprovalActionError(`approve the persona first (approval ${action.parentApprovalId})`, "persona_pending", 409);
     }
     if (!options.personasDir) throw new ApprovalActionError("approving a persona's component needs the personas directory", "no_personas_dir", 422);
     parentPersonaDir = join(options.personasDir, parent.persona.id);

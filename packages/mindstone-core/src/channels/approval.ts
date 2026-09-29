@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtime.js";
 import { appendTranscriptEntry, type TranscriptEntry, type TranscriptSource } from "../transcript/index.js";
 import type { ConnectorOutboundMessage } from "./connector.js";
-import { parsePersonaProposal, PERSONA_TEXT_INVISIBLE, type PersonaProposalPayload } from "../persona/create.js";
+import { parsePersonaProposal, PERSONA_TEXT_INVISIBLE, STACKED_MARKS, type PersonaProposalPayload } from "../persona/create.js";
 import { validateWorkflowDefinition, WORKFLOW_ID, type WorkflowDefinitionInput } from "../workflow/validate.js";
 import { builtinMindStoneSkills } from "../skills/artifacts.js";
 
@@ -377,11 +377,20 @@ export type ParsedPersonaComponents = {
   knowledgebases: Array<{ id: string; name?: string; sources: Array<{ name: string; text: string }> }>;
 };
 
-/** Every string in a proposed component, CRLF read as LF, so the invisible check covers them all (#125 review). */
+/**
+ * Every string in a proposed component, keys included, CRLF read as LF: the
+ * same refusals as a persona's own fields (#105), invisible characters and
+ * stacked combining marks (#125 review).
+ */
 function hasInvisibleText(value: unknown): boolean {
-  if (typeof value === "string") return PERSONA_TEXT_INVISIBLE.test(value.replace(/\r\n/g, "\n"));
+  if (typeof value === "string") {
+    const text = value.replace(/\r\n/g, "\n");
+    return PERSONA_TEXT_INVISIBLE.test(text) || STACKED_MARKS.test(text);
+  }
   if (Array.isArray(value)) return value.some(hasInvisibleText);
-  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).some(hasInvisibleText);
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>).some(([key, item]) => hasInvisibleText(key) || hasInvisibleText(item));
+  }
   return false;
 }
 
@@ -462,7 +471,8 @@ export function checkPersonaComponentsProposal(value: unknown): { ok: true; comp
     if (typeof kb.id !== "string" || !PRIVATE_KB_PROPOSAL_ID.test(kb.id)) return fail("a new private knowledge base's id isn't lowercase letters, digits and hyphens");
     if (parsed.knowledgebases.some((other) => other.id === kb.id)) return fail("two new private knowledge bases have the same id");
     const name = kb.name === undefined ? undefined : boundedText(kb.name, 80);
-    if (kb.name !== undefined && (!name || /\n/.test(name))) return fail("a new private knowledge base's name isn't one line of up to 80 characters");
+    // The same rule as a KB created on the admin API, so the card can be approved.
+    if (kb.name !== undefined && (!name || /[\u0000-\u001f\u007f]/.test(name))) return fail("a new private knowledge base's name isn't one line of up to 80 characters");
     if (!Array.isArray(kb.sources) || kb.sources.length === 0 || kb.sources.length > PERSONA_COMPONENT_LIMITS.sourcesPerKnowledgebase) {
       return fail(`a new private knowledge base doesn't have 1 to ${PERSONA_COMPONENT_LIMITS.sourcesPerKnowledgebase} sources`);
     }
@@ -564,8 +574,8 @@ export type ExtractedActionProposals = {
   persona?: PersonaProposalPayload;
   /** Its components (#125); a proposal whose components don't hold up is dropped whole. */
   personaComponents?: ParsedPersonaComponents;
-  /** Why a persona proposal was dropped for its components (#125 review), so the reply can say so. */
-  personaComponentsError?: string;
+  /** Why a persona proposal was dropped (#125 review), so the reply can say so. */
+  personaProposalError?: string;
   /** At most one proposed skill per reply (#104). */
   skill?: SkillInstallPayload;
 };
@@ -575,7 +585,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
   let memory: MemoryWritePayload | undefined;
   let persona: PersonaProposalPayload | undefined;
   let personaComponents: ParsedPersonaComponents | undefined;
-  let personaComponentsError: string | undefined;
+  let personaProposalError: string | undefined;
   let skill: SkillInstallPayload | undefined;
   const split = splitProposalBlocks(replyText);
   for (const { kind: fenceKind, body } of split.blocks) {
@@ -592,9 +602,11 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
           if (base && components?.ok) {
             persona = base;
             personaComponents = components.components;
-            personaComponentsError = undefined;
+            personaProposalError = undefined;
           } else if (components && !components.ok) {
-            personaComponentsError ??= components.error;
+            personaProposalError ??= components.error;
+          } else {
+            personaProposalError ??= "its id, name, voice, working style or boundaries don't hold up (see their limits)";
           }
         }
       } else if (fenceKind === "skill") {
@@ -608,10 +620,12 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
         }
       }
     } catch {
-      // malformed proposal blocks are dropped from the reply, never applied
+      // malformed proposal blocks are dropped from the reply, never applied;
+      // a persona's is said in the reply (#125 review)
+      if (fenceKind === "persona" && !persona) personaProposalError ??= "its block isn't valid JSON, or couldn't be read";
     }
   }
-  return { text: split.text.trim(), memory, mutations, persona, personaComponents, ...(persona ? {} : { personaComponentsError }), skill };
+  return { text: split.text.trim(), memory, mutations, persona, personaComponents, ...(persona ? {} : { personaProposalError }), skill };
 }
 
 /** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
@@ -714,7 +728,7 @@ export function applyActionProposalDiscipline(params: {
   const persona = params.allowPersona && !capped ? extracted.persona : undefined;
   const skill = params.allowSkill ? extracted.skill : undefined;
   // A dropped proposal is said, not swallowed: the owner reads why in the reply.
-  const refused = params.allowPersona ? extracted.personaComponentsError : undefined;
+  const refused = params.allowPersona ? extracted.personaProposalError : undefined;
   const cappedNote = capped
     ? `\n\n(The persona proposal wasn't saved: too many persona proposals, or proposed skills, workflows or knowledge bases, are already waiting on the Approvals page. Approve or reject those first.)`
     : refused

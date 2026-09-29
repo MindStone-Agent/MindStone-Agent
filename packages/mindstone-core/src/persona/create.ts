@@ -47,7 +47,7 @@ const INVISIBLE = /[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u
 export const PERSONA_TEXT_INVISIBLE = INVISIBLE;
 
 /** Three or more combining marks on one character: they can draw over the card rows around them (#105 review). */
-const STACKED_MARKS = /\p{M}{3,}/u;
+export const STACKED_MARKS = /\p{M}{3,}/u;
 
 function text(value: unknown, max: number, singleLine = false): string | undefined | false {
   if (value === undefined) return undefined;

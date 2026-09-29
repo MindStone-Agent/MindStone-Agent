@@ -1745,6 +1745,9 @@ function personaComponentReview(action: ProposedAction, store: ApprovalStore, wo
   if (action.parentApprovalId) {
     const parent = store.get(action.parentApprovalId);
     lines.push(`Part of persona ${parent?.persona?.id ?? "(missing)"} (approval ${action.parentApprovalId.slice(0, 8)}, ${parent?.status ?? "missing"}): it can be approved only after the persona, and rejecting the persona rejects it.`);
+    if (action.kind === "skill_install") {
+      lines.push("Approving installs it like any skill: it is also in the prompt with no persona active, and for every persona that lists no skills.");
+    }
   }
   if (action.kind === "persona_create" && action.persona) {
     const listed = action.components ?? { skills: [], workflows: [], knowledgebases: [] };
@@ -1762,7 +1765,7 @@ function personaComponentReview(action: ProposedAction, store: ApprovalStore, wo
     for (const child of children) lines.push(`  ${child.id.slice(0, 8)} [${child.status}] ${child.summary}`);
   }
   if (action.kind === "workflow_create" && action.workflow) {
-    lines.push(`Workflow ${action.workflow.id}, used while persona ${action.workflow.personaId} is active:`);
+    lines.push(`Workflow ${action.workflow.id}, listed by persona ${action.workflow.personaId}: it runs on that persona's turns, unless the config's own workflow (workflows.active or a route rule) applies first.`);
     lines.push(`--- workflow.json ---\n${JSON.stringify(action.workflow.definition, null, 2)}\n--- end workflow.json ---`);
   }
   if (action.kind === "persona_kb_create" && action.knowledgebase) {
