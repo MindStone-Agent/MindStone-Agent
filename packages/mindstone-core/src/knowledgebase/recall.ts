@@ -84,7 +84,8 @@ export class KnowledgebaseRecallProvider implements MemoryRecallProvider {
     } catch {
       return [];
     }
-    if (!queryVector?.length) return [];
+    // An all-zero question vector matches nothing (cosine 0), however low minSimilarity is set.
+    if (!queryVector?.length || queryVector.every((value) => value === 0)) return [];
     const hits: MemoryHit[] = [];
     this.#recall.documents.forEach((document, ordinal) => {
       const vectors = allVectors.get(document.id);

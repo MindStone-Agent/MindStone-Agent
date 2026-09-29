@@ -115,9 +115,10 @@ alike.
 - **Their own quota.** Cosine and word-match scores aren't on one scale, so
   sources found by meaning don't compete with memory on score: they take up to
   `knowledgebases.recall.maxResults` of the turn's `memory.recall.maxResults`
-  slots; memory keeps at least one of them when it has a hit (#151). In the prompt's
-  recall token budget (`memory.recall.maxPromptTokens`), the best KB source
-  and the best memory hit always go in, even past the budget (by up to one KB
+  slots; memory keeps at least one of them when it has a hit of its own (not a
+  KB source's word copy, #151). In the prompt's
+  recall token budget (`memory.recall.maxPromptTokens`), when there is a slot
+  for each, the best KB source and the best memory hit always go in, even past the budget (by up to one KB
   source, about 650 tokens at 5 sections); other KB sources take up to half
   of what is left, memory and word-match hits fill the rest in their order,
   and a KB source left out gets any budget memory didn't use.

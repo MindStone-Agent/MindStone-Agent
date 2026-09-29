@@ -120,7 +120,15 @@ export function selectRecallHits(hits: MemoryHit[], limit: number): MemoryHit[] 
   const memoryWaiting = hits.some((hit) => !isQuotaHit(hit) && !quotaIds.has(hit.id));
   const quota = allQuota.slice(0, Math.max(0, memoryWaiting ? limit - 1 : limit));
   const inByQuota = new Set(quota.map((hit) => hit.id));
-  const others = hits.filter((hit) => !isQuotaHit(hit) && !inByQuota.has(hit.id)).slice(0, Math.max(0, limit - quota.length));
+  const candidates = hits.filter((hit) => !isQuotaHit(hit) && !inByQuota.has(hit.id));
+  const room = Math.max(0, limit - quota.length);
+  let others = candidates.slice(0, room);
+  // The slot kept for memory goes to a hit of memory's own, not to a KB
+  // source's word copy ranked above it (#151 review).
+  if (memoryWaiting && room > 0 && !others.some((hit) => !quotaIds.has(hit.id))) {
+    const memory = candidates.find((hit) => !quotaIds.has(hit.id));
+    if (memory) others = [...others.slice(0, room - 1), memory];
+  }
   const kept = new Set([...quota, ...others]);
   return hits.filter((hit) => kept.has(hit));
 }
@@ -196,12 +204,15 @@ export function buildMemoryRecallPrompt(hits: MemoryHit[], maxPromptTokens = DEF
       tokens += cost(hit);
     };
     take(quota[0]!);
-    if (others[0]) take(others[0]);
+    // The best hit of memory's own, not a KB source's word copy (#151 review).
+    const quotaIds = new Set(quota.map((hit) => hit.id));
+    const bestMemory = others.find((hit) => !quotaIds.has(hit.id)) ?? others[0];
+    if (bestMemory) take(bestMemory);
     const quotaBudget = tokens + Math.max(0, Math.floor((maxPromptTokens - tokens) / 2));
     for (const hit of quota.slice(1)) {
       if (tokens + cost(hit) <= quotaBudget) take(hit);
     }
-    for (const hit of others.slice(1)) {
+    for (const hit of others.filter((candidate) => candidate !== bestMemory)) {
       if (tokens + cost(hit) > maxPromptTokens) break;
       take(hit);
     }

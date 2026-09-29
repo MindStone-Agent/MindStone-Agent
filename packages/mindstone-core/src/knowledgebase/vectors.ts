@@ -93,6 +93,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 class KbEmbedTimeout extends Error {}
+class KbZeroVector extends Error {}
 
 /** A request the embedder didn't answer in time (fetch's abort), not an error the embedder sent back. */
 function isAbort(error: unknown): boolean {
@@ -138,8 +139,8 @@ export async function writeKbVectors(params: {
       if (vector.length !== dimension || dimension === 0) throw new Error("dimension");
       // Stored as float32: a value past its range would read back as infinity.
       if (vector.some((value) => !Number.isFinite(Math.fround(value)))) throw new Error("range");
-      // An all-zero vector matches nothing; an embedder that returns one isn't working (#151).
-      if (vector.every((value) => value === 0)) throw new Error("zero");
+      // An all-zero vector (as stored, in float32) matches nothing (#151).
+      if (vector.every((value) => Math.fround(value) === 0)) throw new KbZeroVector();
       encoded[entry.entryId] = encodeVector(vector);
     });
   };
@@ -158,7 +159,9 @@ export async function writeKbVectors(params: {
     removeKbVectors(params.kbDir);
     return {
       state: "missing",
-      reason: error instanceof KbEmbedTimeout
+      reason: error instanceof KbZeroVector
+        ? "the embedder returned an all-zero vector for an entry; check the embedding model, then re-ingest"
+        : error instanceof KbEmbedTimeout
         ? `embedding took longer than ${Math.round(budget / 1000)} s; ingest again with a longer limit (CLI: --embed-timeout <seconds>)`
         : isAbort(error)
           ? "the embedder didn't answer a request in time; run `mindstone doctor` to check it"

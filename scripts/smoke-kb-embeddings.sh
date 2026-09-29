@@ -171,8 +171,13 @@ assert.equal(readKbVectors(dir, indexText, { id: "stub", model: "m1" }).state, "
 
 // Failures keep nothing: a throwing embedder, a short answer, mixed
 // dimensions, a value past float32, and the time limit all remove the file.
+// An all-zero vector (or one that rounds to zero in float32) fails the embed, and says why.
+for (const zero of [[0, 0, 0], [1e-50, 0, -1e-50]]) {
+  const zdir = mkdtempSync(join(tmpdir(), "kbvec-zero-"));
+  const zeroed = await writeKbVectors({ kbDir: zdir, kbId: "k", entries, indexText, embedder: { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.map(() => zero); } } as any });
+  assert.match((zeroed as any).reason ?? "", /all-zero vector/, `a zero vector ${JSON.stringify(zero)} must fail the embed`);
+}
 const failing = [
-  { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.map(() => [0, 0, 0]); } },
   { id: "stub", model: "m1", async embedTexts() { throw new Error("down"); } },
   { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.slice(1).map(() => [1, 0]); } },
   { id: "stub", model: "m1", async embedTexts(texts: string[]) { return [...texts, "extra"].map(() => [1, 0]); } },
@@ -259,6 +264,13 @@ assert.deepEqual(selectRecallHits(hits, 8).filter((h) => h.id === "kb:a").map(is
 assert.deepEqual(knowledgebaseRecallSettings({ knowledgebases: { recall: { maxResults: 20, minSimilarity: -0.5 } } } as any), { maxResults: 20, minSimilarity: -0.5 });
 assert.deepEqual(knowledgebaseRecallSettings({ knowledgebases: { recall: { maxResults: 21, minSimilarity: 1.5 } } } as any), { maxResults: undefined, minSimilarity: undefined });
 assert.deepEqual(knowledgebaseRecallSettings({ knowledgebases: { recall: { maxResults: 2.5 } } } as any).maxResults, undefined);
+assert.deepEqual(knowledgebaseRecallSettings({ knowledgebases: { recall: { maxResults: -1, minSimilarity: -1.5 } } } as any), { maxResults: undefined, minSimilarity: undefined });
+assert.deepEqual(knowledgebaseRecallSettings({ knowledgebases: { recall: { maxResults: 0, minSimilarity: -1 } } } as any), { maxResults: 0, minSimilarity: -1 });
+// An all-zero question vector recalls nothing by meaning, even with minSimilarity at -1.
+{
+  const zeroQuery = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [0, 0, 0] }), minSimilarity: -1 }).search({ text: "question", limit: 8 });
+  assert.equal(zeroQuery.filter(isQuotaHit).length, 0, "an all-zero question vector must match nothing");
+}
 // Threshold, cap, embedder down, no embedder.
 hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), minSimilarity: 0.7 }).search({ text: "question", limit: 8 });
 assert.deepEqual(hits.filter(isQuotaHit).map((h) => h.id), ["kb:a"]);
@@ -317,6 +329,14 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   assert.deepEqual(selectRecallHits([...three, hit("m1", 0.9)], 1).map((h) => h.id), ["m1"], "one slot: memory's");
   // A KB source's word copy isn't memory: it doesn't take a slot from the quota.
   assert.deepEqual(selectRecallHits([...three, hit("k3", 0.95)], 3).map((h) => `${h.id}:${isQuotaHit(h) ? "meaning" : "words"}`), ["k1:meaning", "k2:meaning", "k3:meaning"]);
+  // A capped-out source's word copy, ranked above memory's hit, doesn't take memory's slot.
+  const tag = (h: any) => `${h.id}:${isQuotaHit(h) ? "meaning" : h.id.startsWith("k") ? "words" : "memory"}`;
+  assert.deepEqual(selectRecallHits([...three, hit("k3", 0.95), hit("m1", 0.5)], 3).map(tag), ["k1:meaning", "k2:meaning", "m1:memory"]);
+  assert.deepEqual(selectRecallHits([...three, hit("k1", 0.95), hit("m1", 0.5)], 1).map(tag), ["m1:memory"]);
+  // In the prompt, the forced hit is memory's own, not a word copy ranked above it.
+  const wordCopy = { ...hit("k8", 0.95), text: "words ".repeat(900) };
+  const promptWithCopy = buildMemoryRecallPrompt([hit("k8", 0.9, true, "kb"), wordCopy, hit("m1", 0.5)], 500);
+  assert.ok(promptWithCopy.hits.some((h) => h.id === "m1"), `the best memory hit must go in before a word copy: ${promptWithCopy.hits.map((h) => h.id)}`);
 }
 
 // A request the embedder can't finish in time: the batch once more, an entry a request; one that
