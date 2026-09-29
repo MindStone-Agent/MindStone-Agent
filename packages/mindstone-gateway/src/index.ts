@@ -4174,6 +4174,9 @@ function readProviderSecret(
 function isLocalHost(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host === "host.docker.internal") return true;
+  // A single-label name (no dot), such as a Compose service ("ollama"), is on a
+  // private network, as enterprise.ts's isNonPublicHost treats it (#171).
+  if (host && !host.includes(".") && !host.includes(":")) return true;
   if (host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host)) return true;
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   if (!v4) return false;

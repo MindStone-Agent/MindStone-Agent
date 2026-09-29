@@ -1,6 +1,7 @@
 import type { MindStoneConfig } from "../config/index.js";
 import { runtimePathsFromEnv } from "../paths/runtime.js";
 import { enterpriseEmbeddingEndpoint, isEnterpriseEmbeddingProvider } from "../provider/enterprise.js";
+import { ollamaBaseUrl } from "../provider/local-models.js";
 
 export type MemoryEmbeddingProviderConfig = {
   id: string;
@@ -67,7 +68,8 @@ export function resolveMemoryEmbeddingProviderConfig(
     return {
       id: provider,
       model,
-      baseUrl: trimTrailingSlash(envValue(env, "EMBEDDER_BASE_URL", "OLLAMA_EMBEDDER_BASE_URL", "OLLAMA_BASE_URL") ?? "http://127.0.0.1:11434/v1"),
+      // OLLAMA_BASE_URL as chat reads it (a server root gets /v1); an explicit embedder address as given.
+      baseUrl: trimTrailingSlash(envValue(env, "EMBEDDER_BASE_URL", "OLLAMA_EMBEDDER_BASE_URL") ?? (envValue(env, "OLLAMA_BASE_URL") ? ollamaBaseUrl(env) : "http://127.0.0.1:11434/v1")),
       apiKey: envValue(env, "EMBEDDER_API_KEY", "OLLAMA_API_KEY"),
       timeoutMs: Number(envValue(env, "EMBEDDER_TIMEOUT_MS") ?? 10_000),
     };

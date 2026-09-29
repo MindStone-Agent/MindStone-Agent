@@ -1,0 +1,133 @@
+# MindStone, the whole stack in Docker (#171): the MindStone-Agent gateway, the
+# MindStone Console and MongoDB. install-stack.sh at the repo root downloads this
+# file, generates the secrets and runs it; see README.md, "Install everything (Docker)".
+#
+# Files beside this one (install-stack.sh creates them):
+#   .env            compose settings: refs, ports, UID/GID, project name. No secrets.
+#   gateway.env     600: MINDSTONE_AGENT_GATEWAY_TOKEN and MINDSTONE_ADMIN_TOKEN_SHA256.
+#   console.env     600: the Console's secrets, the gateway token and the admin credential.
+#   librechat.yaml  the Console's config (from mindstone-console/mindstone/).
+#
+# Both images are built locally, from the public git repos at MINDSTONE_REF and
+# CONSOLE_REF. To build from local checkouts instead, set MINDSTONE_BUILD_CONTEXT
+# and CONSOLE_BUILD_CONTEXT to their paths.
+#
+# Don't edit this file: an update replaces it. Put your own changes in
+# compose.override.yml beside it; install-stack.sh uses it and never overwrites it.
+#
+# Networks: `app` joins the gateway, the Console and the optional Ollama; `db`
+# joins only the Console and MongoDB, so nothing else can reach the database.
+#
+# Published on loopback only. Put a reverse proxy with TLS in front of the
+# Console before exposing it to a network.
+name: mindstone-stack
+
+services:
+  gateway:
+    build:
+      context: ${MINDSTONE_BUILD_CONTEXT:-https://github.com/MindStone-Agent/MindStone-Agent.git#${MINDSTONE_REF:-main}}
+      dockerfile: Dockerfile
+    # The Docker entrypoint: sets up the runtime and the Console's gateway
+    # settings on every start, then runs the gateway in the foreground.
+    entrypoint: ["./scripts/docker-gateway-entrypoint.sh"]
+    # A small init as PID 1: it passes the gateway's exit code (75 after a
+    # restart from the Console) to Docker, which starts it again.
+    init: true
+    restart: unless-stopped
+    env_file: gateway.env
+    environment:
+      MINDSTONE_AGENT_GATEWAY_HOST: 0.0.0.0
+      MINDSTONE_AGENT_GATEWAY_PORT: "19789"
+      # The Console's "restart gateway" exits the process; the restart policy above brings it back.
+      MINDSTONE_AGENT_SUPERVISOR: docker
+      # Ollama for chat models and memory embeddings: on the host by default.
+      # With the optional ollama service below, set OLLAMA_BASE_URL=http://ollama:11434/v1 in .env.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [app]
+    volumes:
+      - gateway-runtime:/home/node/.mindstone-agent
+      - pi-agent:/home/node/.pi/agent
+      - pi-sessions:/home/node/.pi-sessions
+    # Loopback only, for the CLI and checks on this machine. The Console reaches
+    # the gateway over the stack's own network.
+    ports:
+      - "127.0.0.1:${MINDSTONE_GATEWAY_PORT:-19789}:19789"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:19789/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 6
+
+  console:
+    build:
+      context: ${CONSOLE_BUILD_CONTEXT:-https://github.com/MindStone-Agent/mindstone-console.git#${CONSOLE_REF:-main}}
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Loopback only: the page lets people sign in and reach the agent.
+    ports:
+      - "127.0.0.1:${CONSOLE_PORT:-3080}:3080"
+    depends_on:
+      gateway:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+    user: "${UID:-1000}:${GID:-1000}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file: console.env
+    networks: [app, db]
+    environment:
+      HOST: 0.0.0.0
+      MONGO_URI: mongodb://mongodb:27017/MindStoneConsole
+      MINDSTONE_GATEWAY_URL: http://gateway:19789/v1
+      NO_PROXY: localhost,127.0.0.1,mongodb,gateway,host.docker.internal
+    volumes:
+      - ./console.env:/app/.env:ro
+      - ./librechat.yaml:/app/librechat.yaml:ro
+      - ./data/uploads:/app/uploads
+      - ./data/logs:/app/logs
+      - console-data:/app/data
+
+  mongodb:
+    image: mongo:8.0.20
+    restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
+    networks: [db]
+    volumes:
+      - ./data/mongo:/data/db
+    command: mongod --noauth
+
+  # Optional: Ollama in a container, for Linux hosts or a machine without Ollama.
+  # install-stack.sh --with-ollama turns it on (COMPOSE_PROFILES=ollama and
+  # OLLAMA_BASE_URL=http://ollama:11434/v1 in .env); --without-ollama turns it off.
+  # CPU only as written. For an NVIDIA GPU, add to compose.override.yml:
+  #   services:
+  #     ollama:
+  #       deploy:
+  #         resources:
+  #           reservations:
+  #             devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+  # Not published on the host, and not on the database network.
+  ollama:
+    image: ollama/ollama:0.35.0
+    profiles: ["ollama"]
+    restart: unless-stopped
+    networks: [app]
+    volumes:
+      - ollama-models:/root/.ollama
+
+networks:
+  app:
+  # Internal: MongoDB has no route out, and only the Console is on it with it.
+  db:
+    internal: true
+
+volumes:
+  gateway-runtime:
+  pi-agent:
+  pi-sessions:
+  console-data:
+  ollama-models:

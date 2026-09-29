@@ -50,6 +50,8 @@
     "smoke:onboard-custom-ux": "./scripts/smoke-onboard-custom-ux.sh",
     "smoke:onboard-model-setup": "./scripts/smoke-onboard-model-setup.sh",
     "smoke:config-pi-models": "./scripts/smoke-config-pi-models.sh",
+    "smoke:ollama-base-url": "./scripts/smoke-ollama-base-url.sh",
+    "smoke:docker-stack": "./scripts/smoke-docker-stack.sh",
     "smoke:local-route": "./scripts/smoke-local-route.sh",
     "smoke:persona": "./scripts/smoke-persona.sh",
     "smoke:workflow": "./scripts/smoke-workflow.sh",

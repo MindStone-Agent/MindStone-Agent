@@ -674,7 +674,7 @@ async function setupLocalModelProvider(params: CustomProviderSetupParams): Promi
   const kind = await prompter.select<LocalKind>({
     message: "Which local model server do you use?",
     options: [
-      { value: "ollama", label: "Ollama", hint: "default http://localhost:11434/v1" },
+      { value: "ollama", label: "Ollama", hint: `default ${LOCAL_PROVIDER_PRESETS.ollama.baseUrl}` },
       { value: "lmstudio", label: "LM Studio", hint: "default http://localhost:1234/v1" },
       { value: "openai-compatible", label: "Other OpenAI-compatible server", hint: "vLLM, llama.cpp server, LiteLLM, ..." },
       { value: "cancel", label: "Back", hint: "return without local model setup" },

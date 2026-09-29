@@ -603,6 +603,9 @@ grep -q '"reason":"probe_failed"' "${TEMP_RUNTIME}/mindstone/admin/audit.jsonl" 
 expect "$(post /admin/providers/openai-compatible '{"secret":"cloud.key","baseUrl":"http://127.0.0.1:'"${FAKE_PORT}"'/huge"}')" 422 "a listing over the size cap"
 grep -q 'too large' "${BODY}" || { echo "an oversized listing should be refused as too large: $(head -c 300 "${BODY}")" >&2; exit 1; }
 expect "$(post /admin/providers/ollama '{"baseUrl":"http://127.0.0.1:9/v1"}')" 422 "an unreachable local server"
+# A single-label host, such as the Docker stack's "ollama" service (#171), is local:
+# checked (and unreachable here), not refused as public.
+expect "$(post /admin/providers/ollama '{"baseUrl":"http://ollama-smoke-unresolvable:9/v1"}')" 422 "a single-label host is a local server"
 expect "$(post /admin/providers/ollama '{"models":["llama3"]}')" 200 "a local server with explicit models"
 # Headers set on the host don't follow a provider re-registered from the Console.
 node -e 'const f=process.argv[1]; const fs=require("fs"); const c=JSON.parse(fs.readFileSync(f,"utf8")); c.providers.lmstudio.headers={"X-Host":"HOSTHDR-SENTINEL"}; c.providers.lmstudio.baseUrl="https://user:HOSTPW-SENTINEL@lm.example/v1"; c.providers.lmstudio.apiKey="sk-ab$CDEF"; fs.writeFileSync(f, JSON.stringify(c,null,2))' "${MODELS_JSON}"
