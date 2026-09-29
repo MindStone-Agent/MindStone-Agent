@@ -550,8 +550,10 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
 {
   const pdir = mkdtempSync(join(tmpdir(), "kbvec-paused-"));
   let first = true;
+  // An embedder that takes 50 ms: past a spent budget, the timeout would win the race.
+  const slowish = { id: "stub", model: "m1", async embedTexts(texts: string[]) { await new Promise((resolve) => setTimeout(resolve, 50)); return texts.map(() => [1, 0, 0]); } } as any;
   const paused = await writeKbVectors({
-    kbDir: pdir, kbId: "k", entries, indexText, embedder: fixed({ alpha: [1, 0, 0] }), batchSize: 1, timeoutMs: 300,
+    kbDir: pdir, kbId: "k", entries, indexText, embedder: slowish, batchSize: 1, timeoutMs: 300,
     beforeBatch: async () => { if (first) { first = false; await new Promise((resolve) => setTimeout(resolve, 400)); } },
   });
   assert.equal(paused.state, "ready", "a 400 ms pause under a 300 ms budget still embeds");
