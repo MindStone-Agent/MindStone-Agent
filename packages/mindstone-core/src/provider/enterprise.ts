@@ -162,6 +162,8 @@ function secretName(value: unknown, field: string): { error: string } | string |
 export function isNonPublicHost(hostname: string): boolean {
   const host = bareHost(hostname);
   if (!host) return true;
+  // IPv4-compatible and other "::"-prefixed addresses (not IPv4-mapped) are never public, as before.
+  if (/^::(?!ffff:)/.test(host)) return true;
   const v4 = ipv4Of(host);
   if (v4) return isNonPublicV4(v4);
   if (host.includes(":")) {
@@ -191,6 +193,9 @@ export function ipv4Of(host: string): number[] | undefined {
   const hex = (high: string, low: string) => [parseInt(high, 16) >> 8, parseInt(high, 16) & 255, parseInt(low, 16) >> 8, parseInt(low, 16) & 255];
   const mapped = /^(?:::ffff:|64:ff9b::)(?:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(host);
   if (mapped) return mapped[1] !== undefined ? mapped.slice(1, 5).map(Number) : hex(mapped[5]!, mapped[6]!);
+  // IPv4-compatible (deprecated, "::7f00:1"): the last 32 bits.
+  const compatible = /^::(?:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/.exec(host);
+  if (compatible) return compatible[1] !== undefined ? compatible.slice(1, 5).map(Number) : hex(compatible[5]!, compatible[6]!);
   const sixToFour = /^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})(?::|$)/.exec(host);
   if (sixToFour) return hex(sixToFour[1]!, sixToFour[2]!);
   return undefined;

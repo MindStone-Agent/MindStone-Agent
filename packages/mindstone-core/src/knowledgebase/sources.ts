@@ -304,11 +304,22 @@ function ownAddresses(): Set<string> {
   return own;
 }
 
-/** This machine or a link-local network (the cloud metadata addresses live there). */
-function isThisMachineOrLinkLocal(host: string): boolean {
-  if (host === "localhost" || host.endsWith(".localhost") || host === "::" || host === "::1" || /^fe[89ab][0-9a-f]?:/.test(host)) return true;
+/** This machine: loopback and unspecified addresses in any form, and localhost names. */
+function isThisMachine(host: string): boolean {
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::" || host === "::1") return true;
   const v4 = ipv4Of(host);
-  return v4 !== undefined && (v4[0] === 127 || v4[0] === 0 || (v4[0] === 169 && v4[1] === 254) || (v4[0] === 168 && v4[1] === 63 && v4[2] === 129 && v4[3] === 16));
+  return v4 !== undefined && (v4[0] === 127 || v4[0] === 0);
+}
+
+/** Cloud metadata and host-agent addresses, which aren't all link-local (#142 review). */
+const METADATA_V4 = ["168.63.129.16", "100.100.100.200", "192.0.0.192"];
+const METADATA_V6 = ["fd00:ec2::254"];
+
+/** Link-local networks and metadata addresses: never reached, whatever the host allows. */
+function isLinkLocalOrMetadata(host: string): boolean {
+  if (/^fe[89ab][0-9a-f]?:/.test(host) || METADATA_V6.includes(host)) return true;
+  const v4 = ipv4Of(host);
+  return v4 !== undefined && ((v4[0] === 169 && v4[1] === 254) || METADATA_V4.includes(v4.join(".")));
 }
 
 /**
@@ -317,13 +328,15 @@ function isThisMachineOrLinkLocal(host: string): boolean {
  * - default: public hosts only, never one of this machine's own addresses;
  * - `MINDSTONE_KB_PRIVATE_HOSTS=1`: private networks too (an intranet wiki),
  *   still never this machine, link-local or metadata addresses;
- * - `MINDSTONE_KB_PRIVATE_HOSTS=any`: everything, for a test stub on this machine.
+ * - `MINDSTONE_KB_PRIVATE_HOSTS=any`: this machine and private networks too,
+ *   for a test stub, still never link-local or metadata addresses.
  */
 export function kbUrlHostRefused(hostname: string): boolean {
   const mode = process.env.MINDSTONE_KB_PRIVATE_HOSTS;
-  if (mode === "any") return false;
   const host = bareHost(hostname);
-  if (ownAddresses().has(host) || isThisMachineOrLinkLocal(host)) return true;
+  if (isLinkLocalOrMetadata(host)) return true;
+  if (mode === "any") return false;
+  if (ownAddresses().has(host) || isThisMachine(host)) return true;
   return mode === "1" ? false : isNonPublicHost(host);
 }
 

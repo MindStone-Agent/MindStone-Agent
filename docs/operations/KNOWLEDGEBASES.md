@@ -126,8 +126,10 @@ they feed the SAME deterministic ingest/index/search/recall pipeline:
   target. The gateway host's own environment can widen this, never the
   Console: `MINDSTONE_KB_PRIVATE_HOSTS=1` allows private networks (an
   intranet wiki) but still never this machine, link-local or metadata
-  addresses; `MINDSTONE_KB_PRIVATE_HOSTS=any` allows everything, for a test
-  stub on this machine only. `kb ingest --persona` applies the same rules. A
+  addresses (169.254/16, fe80::/10, 168.63.129.16, 100.100.100.200,
+  192.0.0.192, fd00:ec2::254); `MINDSTONE_KB_PRIVATE_HOSTS=any` also allows
+  this machine, for a test stub, and still never link-local or metadata
+  addresses. `kb ingest --persona` applies the same rules. A
   global KB's `url` sources are operator configuration in `kb.json` and are
   fetched as before.
 - Fetched text is recalled into prompts as reference material. Markdown and
