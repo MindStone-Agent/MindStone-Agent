@@ -30,6 +30,16 @@ export interface MemoryEmbeddingProvider {
   embedTexts(texts: string[]): Promise<number[][]>;
 }
 
+/**
+ * The embedding model a vector comes from, as recorded with each chunk
+ * (#140) and each KB's vectors (#151): `<provider id>:<model>`. A chunk
+ * embedded by another model (or before this was recorded) is embedded again
+ * by the next backfill, and until then recall finds it by its words.
+ */
+export function memoryEmbeddingSpec(provider: Pick<MemoryEmbeddingProvider, "id" | "model">): string {
+  return `${provider.id}:${provider.model}`;
+}
+
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/g, "");
 }

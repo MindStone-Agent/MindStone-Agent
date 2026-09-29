@@ -68,7 +68,10 @@ alike.
   embedding runs whenever one of those is set, **even with no `sqlite-vec`
   index**, which memory recall needs. Every ingest does it: `kb ingest`, the
   admin API's ingest, and approving an agent-proposed private KB (the card
-  shows its text in full). Ingest then sends each entry's text,
+  shows its text in full). So does the re-embed after a switch of model
+  (below): after each owner chat through the gateway, one KB's entries (at
+  most 512, global or any persona's) go to the new embedder, with no ingest
+  by anyone. Ingest then sends each entry's text,
   and every turn that ranks by meaning sends the question, to that embedder.
   With a hosted embedder (`openai:`, an enterprise endpoint), KB text leaves
   this machine; check that an `EMBEDDING_PROVIDER` set for another tool isn't
@@ -97,6 +100,33 @@ alike.
     the index was written again after them, or the file can't be read or is
     over 256 MB. Re-ingest;
   - `unused`: vectors exist but no embedder is configured now.
+
+  **After a switch of embedding model** (#151), a KB whose vectors the old
+  model made is embedded again on its own, as memory's chunks are (#140):
+  after each owner chat through the gateway (automatic recall on), one such
+  KB, global or private, is embedded from its current `index.json`, in the
+  background; its sources aren't read or fetched again. A KB of more than 512
+  entries needs `kb ingest`; so does one whose index changed after its
+  vectors while the model stayed the same. A private KB being ingested at
+  that moment waits for the next chat. The re-embed sends one entry a request
+  and starts none while a chat turn is running, so a turn's own question waits
+  behind one entry at most, even with an embedder that answers one request at
+  a time. On a gateway that is always answering, the re-embed waits for a gap;
+  `kb ingest` works meanwhile. A failed attempt keeps the old vectors (word match meanwhile) and is
+  tried again after 30 minutes, then 60, 120 and 240; after the fifth failure
+  that KB isn't tried again for that model until the gateway restarts (use
+  `kb ingest`). An ingest that finishes while a re-embed runs keeps its own
+  vectors, and that doesn't count as a failure. Each attempt is recorded in the
+  admin audit log as `kb_reembedded` (with `reason` when it failed,
+  `gaveUp: true` on the fifth failure, and `superseded: true` when an ingest
+  rewrote the index meanwhile) and in the gateway log. Once nothing is left
+  to embed again for the model, the gateway looks again only after 30 minutes
+  or when the model changes, so a KB made stale later (for example by a CLI
+  `kb ingest` whose environment names another embedder) is picked up within
+  half an hour of chats. Until a KB is embedded again, recall finds it by its words. KB word-match hits are marked
+  `recallMode: "lexical"` in the recall event, as memory's are, and KB
+  vectors are matched to the install's model by the same `<provider>:<model>`
+  spec memory records.
 
   Status can't see a change of dimension under the same provider and model
   name (another server, or a model replaced under its name) without calling
