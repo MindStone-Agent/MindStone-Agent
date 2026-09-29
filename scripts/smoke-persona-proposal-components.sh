@@ -43,7 +43,7 @@ BODY="${TEMP_RUNTIME}/body.json"
 npx tsx <<'TS'
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { applyActionProposalDiscipline, ApprovalStore, extractActionProposals, MAX_PENDING_COMPONENTS, parsePersonaComponents } from "./packages/mindstone-core/src/index.ts";
+import { applyActionProposalDiscipline, ApprovalActionError, ApprovalStore, approveProposedAction, checkApprovable, extractActionProposals, MAX_PENDING_COMPONENTS, parsePersonaComponents } from "./packages/mindstone-core/src/index.ts";
 const route = (extra = {}) => ({ id: "s", kind: "route", ...extra });
 assert.ok(parsePersonaComponents({ skills: ["a"], new: { workflows: [{ id: "w", steps: [route()] }] } }), "a plain component list parses");
 assert.equal(parsePersonaComponents({ new: { workflows: [{ id: "w", steps: [route({ personaId: "x" })] }] } }), undefined, "a proposed workflow routing to a persona must be refused");
@@ -54,13 +54,55 @@ assert.equal(parsePersonaComponents({ new: { privateKnowledgebases: [{ id: "../k
 assert.equal(parsePersonaComponents({ skills: ["../x"] }), undefined, "a path as a listed id must be refused");
 const skill = (id) => ({ id, label: "L", description: "D", whenToUse: ["w"], outputs: ["o"], safetyNotes: ["s"] });
 assert.equal(parsePersonaComponents({ new: { skills: [skill("a1"), skill("a2"), skill("a3"), skill("a4")] } }), undefined, "more than 3 new skills must be refused");
+// Invisible characters anywhere in a new component, not only in KB text (#125 review).
+assert.equal(parsePersonaComponents({ new: { workflows: [{ id: "w", name: "Tri\u200Bage", steps: [route()] }] } }), undefined, "an invisible character in a workflow name must be refused");
+assert.equal(parsePersonaComponents({ new: { workflows: [{ id: "w", steps: [route({ when: { messagePrefix: "go\u2066" } })] }] } }), undefined, "an invisible character in a condition must be refused");
+assert.equal(parsePersonaComponents({ new: { privateKnowledgebases: [{ id: "k", name: "No\u200Dtes", sources: [{ text: "x" }] }] } }), undefined, "an invisible character in a KB name must be refused");
+assert.equal(parsePersonaComponents({ new: { skills: [{ ...skill("a1"), label: "La\u200Bbel" }] } }), undefined, "an invisible character in a skill label must be refused");
+// CRLF is a line break, not an invisible character, and is stored as LF.
+assert.equal(parsePersonaComponents({ new: { privateKnowledgebases: [{ id: "k", sources: [{ text: "# A\r\n\r\nB" }] }] } })?.knowledgebases[0]?.sources[0]?.text, "# A\n\nB", "a CRLF source must parse, as LF");
+// A skill or workflow both listed and new can never be approved.
+assert.equal(parsePersonaComponents({ skills: ["a1"], new: { skills: [skill("a1")] } }), undefined, "a skill both listed and new must be refused");
+assert.equal(parsePersonaComponents({ workflows: ["w"], new: { workflows: [{ id: "w", steps: [route()] }] } }), undefined, "a workflow both listed and new must be refused");
+// A built-in skill's id can't be brought as new: it would override the built-in.
+assert.equal(parsePersonaComponents({ new: { skills: [skill("integration-builder")] } }), undefined, "a built-in skill's id must be refused");
 const block = (json) => "Here it is.\n```mindstone-persona-proposal\n" + JSON.stringify(json) + "\n```";
+const kbs = (n) => Array.from({ length: n }, (_, i) => ({ id: `k${i}`, sources: [{ text: "x" }] }));
 const base = { id: "unit", name: "Unit", voice: "Plain." };
 assert.equal(extractActionProposals(block({ ...base, components: { bogus: true } })).persona, undefined, "a persona with bad components must be dropped whole");
 assert.equal(extractActionProposals(block({ ...base, components: { skills: ["a"] } })).persona?.id, "unit");
+// A proposal dropped for its components says so in the reply, with the reason.
+{
+  const noteStore = new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "note-approvals.json") });
+  const dropped = applyActionProposalDiscipline({ replyText: block({ ...base, components: { skills: ["a1"], new: { skills: [skill("a1")] } } }), origin: "unit", allowPersona: true, store: noteStore });
+  assert.equal(dropped.proposals.length, 0);
+  assert.match(dropped.text, /wasn't saved, and nothing was put up for approval: a skill or workflow is both listed/, "the reply must say why the proposal was dropped");
+  const notOwner = applyActionProposalDiscipline({ replyText: block({ ...base, components: { bogus: 1 } }), origin: "unit", allowPersona: false, store: noteStore });
+  assert.doesNotMatch(notOwner.text, /wasn't saved/, "a turn that can't propose a persona gets no note");
+}
+// Plain skill proposals (#104) don't count toward the component cap (#125 review).
+{
+  const plainStore = new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "plain-approvals.json") });
+  for (let i = 0; i < MAX_PENDING_COMPONENTS + 1; i += 1) {
+    plainStore.propose({ kind: "skill_install", connectorId: "unit", summary: `plain ${i}`, skill: skill(`plain-${i}`) });
+  }
+  const bare = applyActionProposalDiscipline({ replyText: block({ ...base, id: "bare" }), origin: "unit", allowPersona: true, store: plainStore });
+  assert.equal(bare.proposals.length, 1, "a persona with no components must be saved while plain skill proposals wait");
+  const withSkill = applyActionProposalDiscipline({ replyText: block({ ...base, id: "with-skill", components: { new: { skills: [skill("n1")] } } }), origin: "unit", allowPersona: true, store: plainStore });
+  assert.equal(withSkill.proposals.length, 2, "a persona with a new skill must be saved while plain skill proposals wait");
+}
+// A component left pending under a rejected persona is rejected when approved (#125 review).
+{
+  const orphanStore = new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "orphan-approvals.json") });
+  const made = applyActionProposalDiscipline({ replyText: block({ ...base, id: "orphan", components: { new: { privateKnowledgebases: kbs(1) } } }), origin: "unit", allowPersona: true, store: orphanStore });
+  const [parent, child] = made.proposals;
+  orphanStore.decide(parent.id, { status: "rejected", decidedBy: "unit", now: "t" });
+  assert.throws(() => approveProposedAction(orphanStore, checkApprovable(orphanStore, child.id), { decidedBy: "unit", memoryDir: "/nonexistent", personasDir: "/nonexistent" }),
+    (error) => error instanceof ApprovalActionError && error.code === "persona_rejected");
+  assert.equal(orphanStore.get(child.id)?.status, "rejected", "the orphaned card must be rejected");
+}
 // Caps: past MAX_PENDING_COMPONENTS of a kind, the whole proposal is dropped, with a note.
 const store = new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "unit-approvals.json") });
-const kbs = (n) => Array.from({ length: n }, (_, i) => ({ id: `k${i}`, sources: [{ text: "x" }] }));
 for (let i = 0; i < 3; i += 1) {
   const r = applyActionProposalDiscipline({ replyText: block({ ...base, id: `cap${i}`, components: { new: { privateKnowledgebases: kbs(2) } } }), origin: "unit", allowPersona: true, store });
   assert.equal(r.proposals.length, 3, `proposal ${i} should make a persona card and two KB cards`);
@@ -139,6 +181,17 @@ say admin conv-propose "${P2}"
 node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const reply=b.choices?.[0]?.message?.content ?? ""; if (!reply || reply.includes("mindstone-persona-proposal")) { console.error("the proposal block reached the reply: " + reply); process.exit(1); }' "${BODY}"
 PERSONA_CARD="$(card p2 persona_create)"; SKILL_CARD="$(card p2 skill_install)"; WF_CARD="$(card p2 workflow_create)"; KB_CARD="$(card p2 persona_kb_create)"
 echo "cards ok"
+# The CLI shows everything each card holds before it is approved (#125 review).
+shows() { # shows <card> <text>...
+  local id="$1"; shift
+  ./scripts/mindstone approvals show "${id}" > "${TEMP_RUNTIME}/show.txt"
+  for text in "$@"; do grep -qF -- "${text}" "${TEMP_RUNTIME}/show.txt" || { echo "approvals show ${id} lacks '${text}': $(cat "${TEMP_RUNTIME}/show.txt")" >&2; exit 1; }; done
+}
+shows "${PERSONA_CARD}" "Skills: only alpha-skill" "Shared knowledge bases: only g1" "Workflows: none" "${WF_CARD:0:8}" "${KB_CARD:0:8}" "${SKILL_CARD:0:8}"
+shows "${KB_CARD}" "Part of persona p2" "PPROP-9901" "App Engine runs"
+shows "${WF_CARD}" "Part of persona p2" '"messagePrefix": "p2:"'
+shows "${SKILL_CARD}" "Part of persona p2" "SKILLBODY-beta-new"
+echo "cli show ok"
 
 # --- 2. A component waits for its persona.
 expect 409 "the KB card before the persona" POST "/admin/approvals/${KB_CARD}/approve" '{}' persona_pending
@@ -153,6 +206,7 @@ expect 403 "a skill card without advanced settings" POST "/admin/approvals/${SKI
 expect 200 "grant advanced settings" POST /admin/permissions/advanced '{"enabled":true,"confirm":"enable advanced settings"}'
 expect 200 "approve the skill card" POST "/admin/approvals/${SKILL_CARD}/approve" '{}'
 grep -q '"beta-new"' "${DATA}/personas/p2/skills.json" || { echo "the approved skill didn't join its persona" >&2; exit 1; }
+node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(b.result?.persona?.listed === true ? 0 : 1)' "${BODY}" || { echo "the skill result doesn't say it joined its persona: $(cat "${BODY}")" >&2; exit 1; }
 expect 200 "approve the workflow card" POST "/admin/approvals/${WF_CARD}/approve" '{}'
 [[ -f "${DATA}/workflows/wf-p2/workflow.json" ]] || { echo "the approved workflow wasn't written" >&2; exit 1; }
 grep -q '"wf-p2"' "${DATA}/personas/p2/workflows.json" || { echo "the approved workflow didn't join its persona" >&2; exit 1; }
@@ -189,11 +243,33 @@ P5='{"id":"p5","name":"Five","voice":"x","components":{"new":{"skills":[{"id":"a
 say admin conv-p5 "$(proposal "${P5}")"
 expect 200 "approve p5" POST "/admin/approvals/$(card p5 persona_create)/approve" '{}'
 expect 409 "a new skill that is installed, with force" POST "/admin/approvals/$(card p5 skill_install)/approve" '{"force":true}' skill_exists
+! grep -qi 'force' "${BODY}" || { echo "a persona's skill refusal offers force: $(cat "${BODY}")" >&2; exit 1; }
 grep -q 'SKILLBODY-alpha' "${DATA}/skills/alpha-skill/SKILL.md" || { echo "the installed skill was replaced" >&2; exit 1; }
 # A workflow id the config runs.
 expect 409 "a proposed workflow the config runs" POST "/admin/approvals/$(card p5 workflow_create)/approve" '{}' workflow_referenced
 [[ ! -e "${DATA}/workflows/wf-live" ]] || { echo "a workflow the config runs was created" >&2; exit 1; }
+# The persona folder is gone: its components are refused before anything is written.
+P9='{"id":"p9","name":"Nine","voice":"x","components":{"new":{"skills":[{"id":"nine-skill","label":"N","description":"D","whenToUse":["w"],"outputs":["o"],"safetyNotes":["s"]}],"workflows":[{"id":"wf-nine","steps":[{"id":"s","kind":"route"}]}]}}}'
+say admin conv-p9 "$(proposal "${P9}")"
+expect 200 "approve p9" POST "/admin/approvals/$(card p9 persona_create)/approve" '{}'
+rm -rf "${DATA}/personas/p9"
+expect 409 "p9's skill with its persona gone" POST "/admin/approvals/$(card p9 skill_install)/approve" '{}' invalid_persona
+expect 409 "p9's workflow with its persona gone" POST "/admin/approvals/$(card p9 workflow_create)/approve" '{}' invalid_persona
+[[ ! -e "${DATA}/skills/nine-skill" && ! -e "${DATA}/workflows/wf-nine" ]] || { echo "a component of a missing persona was written" >&2; exit 1; }
+[[ "$(status_of "$(card p9 skill_install)")" == pending ]] || { echo "a refused component card isn't pending" >&2; exit 1; }
 echo "refusals ok"
+
+# --- 7b. A persona that lists no skills keeps every installed skill when its new skill is approved.
+P10='{"id":"p10","name":"Ten","voice":"x","components":{"new":{"skills":[{"id":"ten-skill","label":"T","description":"D","whenToUse":["w"],"outputs":["o"],"safetyNotes":["s"]}],"privateKnowledgebases":[{"id":"ten-notes","sources":[{"text":"# Ten\n\nThe reference code is TPROP-1010."}]}]}}}'
+say admin conv-p10 "$(proposal "${P10}")"
+# Approved from the CLI this time, persona first, then its KB (written and ingested).
+./scripts/mindstone approvals approve "$(card p10 persona_create)" --yes > "${TEMP_RUNTIME}/cli.txt"
+./scripts/mindstone approvals approve "$(card p10 persona_kb_create)" --yes > "${TEMP_RUNTIME}/cli.txt"
+grep -qF "written and ingested for persona p10" "${TEMP_RUNTIME}/cli.txt" || { echo "the CLI KB approve: $(cat "${TEMP_RUNTIME}/cli.txt")" >&2; exit 1; }
+./scripts/mindstone approvals approve "$(card p10 skill_install)" --yes > "${TEMP_RUNTIME}/cli.txt"
+grep -qF "every installed skill" "${TEMP_RUNTIME}/cli.txt" || { echo "the CLI skill approve doesn't say the persona keeps every skill: $(cat "${TEMP_RUNTIME}/cli.txt")" >&2; exit 1; }
+[[ ! -e "${DATA}/personas/p10/skills.json" ]] || { echo "approving a new skill narrowed a persona that lists none to it: $(cat "${DATA}/personas/p10/skills.json")" >&2; exit 1; }
+echo "all skills kept ok"
 
 # --- 8. A non-owner's proposal, and one whose workflow routes to a persona, are dropped whole.
 before="$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).actions.length))' "${DATA}/approvals/actions.json")"

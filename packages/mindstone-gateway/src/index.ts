@@ -2695,8 +2695,10 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
           if (result.kind === "persona_kb_create" && result.outcome === "approved") {
             // Approving a proposed private KB writes and ingests it (#125). Text
             // sources only, so nothing is fetched. A failed ingest leaves the KB
-            // written, and says so.
-            const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true });
+            // written, and says so, even when the ingest throws (#125 review):
+            // the approval has happened by then.
+            const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true })
+              .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }));
             const { kbRoot: _root, ...shown } = result;
             sendJson(res, 200, { ok: true, result: { ...shown, ingested: ingested.ok ? { entryCount: ingested.entryCount } : { error: publicKbText(ingested.error, result.kbRoot) } } });
             return;

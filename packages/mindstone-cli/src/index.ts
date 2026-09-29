@@ -66,6 +66,9 @@ import {
   synthesizeMindStoneIdentityActivation,
   type AgentRunner,
   type MindStoneConfig,
+  type MindStoneWorkflowStep,
+  type ProposedAction,
+  loadMindStoneWorkflow,
   type MindStoneRuntimePaths,
   isRealDirectory,
   isSafeComponentId,
@@ -1720,6 +1723,56 @@ function appendApprovalAuditEvent(action: { id: string; kind: string; connectorI
   });
 }
 
+/** One workflow step in a line, for the approval review (#125): what it routes to or checks. */
+function describeWorkflowStep(step: MindStoneWorkflowStep): string {
+  if (step.kind === "gate") return `${step.id}: gate ${JSON.stringify(step.gate ?? {})}${step.onFail ? `, on fail ${step.onFail}` : ""}`;
+  const parts = [
+    step.when ? `when ${JSON.stringify(step.when)}` : "always",
+    step.personaId ? `answers as persona ${step.personaId}` : undefined,
+    step.skills?.length ? `skills ${step.skills.join(", ")}` : undefined,
+    step.knowledgebases?.length ? `knowledge bases ${step.knowledgebases.join(", ")}` : undefined,
+  ].filter(Boolean);
+  return `${step.id}: route ${parts.join(", ")}`;
+}
+
+/**
+ * Everything a persona card and its component cards hold (#125), for
+ * `approvals show` and the approve prompt: the owner reads what the agent
+ * will act on before approving it, as with a skill (#104) or persona (#105).
+ */
+function personaComponentReview(action: ProposedAction, store: ApprovalStore, workflowsDir: string): string {
+  const lines: string[] = [];
+  if (action.parentApprovalId) {
+    const parent = store.get(action.parentApprovalId);
+    lines.push(`Part of persona ${parent?.persona?.id ?? "(missing)"} (approval ${action.parentApprovalId.slice(0, 8)}, ${parent?.status ?? "missing"}): it can be approved only after the persona, and rejecting the persona rejects it.`);
+  }
+  if (action.kind === "persona_create" && action.persona) {
+    const listed = action.components ?? { skills: [], workflows: [], knowledgebases: [] };
+    lines.push(`Skills: ${listed.skills.length ? `only ${listed.skills.join(", ")}` : "every installed skill (it lists none)"}`);
+    lines.push(`Shared knowledge bases: ${listed.knowledgebases.length ? `only ${listed.knowledgebases.join(", ")}` : "every one (it lists none)"}`);
+    lines.push(`Workflows: ${listed.workflows.length ? "" : "none"}`);
+    for (const id of listed.workflows) {
+      const loaded = loadMindStoneWorkflow(workflowsDir, id);
+      lines.push(loaded.ok
+        ? `  ${id}:\n${loaded.workflow.steps.map((step) => `    ${describeWorkflowStep(step)}`).join("\n")}`
+        : `  ${id}: not found, so approving the persona is refused`);
+    }
+    const children = store.list().filter((entry) => entry.parentApprovalId === action.id);
+    lines.push(children.length ? "New components, each on its own card, approved after this one:" : "New components: none");
+    for (const child of children) lines.push(`  ${child.id.slice(0, 8)} [${child.status}] ${child.summary}`);
+  }
+  if (action.kind === "workflow_create" && action.workflow) {
+    lines.push(`Workflow ${action.workflow.id}, used while persona ${action.workflow.personaId} is active:`);
+    lines.push(`--- workflow.json ---\n${JSON.stringify(action.workflow.definition, null, 2)}\n--- end workflow.json ---`);
+  }
+  if (action.kind === "persona_kb_create" && action.knowledgebase) {
+    const kb = action.knowledgebase;
+    lines.push(`Private knowledge base ${kb.id}${kb.name ? ` (${kb.name})` : ""} for persona ${kb.personaId}: recalled while that persona answers you, and in App Engine runs under it.`);
+    for (const source of kb.sources) lines.push(`--- ${source.name}.md ---\n${source.text}\n--- end ${source.name}.md ---`);
+  }
+  return lines.join("\n");
+}
+
 async function runApprovalsCommand(argv: string[]): Promise<void> {
   const subcommand = argv[3] ?? "list";
   const store = new ApprovalStore();
@@ -1733,6 +1786,8 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
         "  mindstone approvals list [--all] [--json]   Pending proposed actions (--all includes decided)",
         "  mindstone approvals show <id>               Full record incl. the draft text",
         "  mindstone approvals approve <id> [--yes]    Approve: connector_send enqueues for delivery; memory_write applies the file",
+        "                                              persona_create saves a persona; workflow_create and persona_kb_create",
+        "                                              write its new components, after the persona is approved",
         "  mindstone approvals reject <id> [--note TEXT]",
         "",
         "Notes:",
@@ -1800,6 +1855,8 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`Persona: ${action.persona.name} (${action.persona.id}); approving saves it (switching to it is separate)\n`);
       output.write(`--- PERSONA.md ---\n${renderPersonaMarkdown(action.persona)}--- end PERSONA.md ---\n`);
     }
+    const componentReview = personaComponentReview(action, store, workflowsDirFromConfig(loadMindStoneConfig(resolveConfigPath()).config));
+    if (componentReview) output.write(`${componentReview}\n`);
     if (action.status !== "pending") {
       output.write(`Decided: ${action.decidedAt ?? "?"} by ${action.decidedBy ?? "?"}${action.decisionNote ? ` — ${action.decisionNote}` : ""}\n`);
     }
@@ -1815,13 +1872,20 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       const prompter = makeTerminalPrompter();
       try {
         const preview = action.send?.text ?? action.memory?.content ?? (action.mutation ? JSON.stringify(action.mutation, null, 2) : "") ?? "";
-        const personaPreview = action.persona ? `${renderPersonaMarkdown(action.persona)}\nApproving saves it; switching to it is separate.` : "";
+        // A persona's components and a component card are shown in full too (#125).
+        const componentReview = personaComponentReview(action, store, workflowsDirFromConfig(loadMindStoneConfig(resolveConfigPath()).config));
+        const personaPreview = action.persona ? `${renderPersonaMarkdown(action.persona)}\n${componentReview}\nApproving saves it; switching to it is separate.` : "";
         // A skill is shown exactly as the agent will read it (#104).
         const composedSkill = action.skill ? composeMindStoneSkillDraft({ ...action.skill, skillMarkdown: action.skill.instructions }) : undefined;
         const skillPreview = composedSkill?.ok
           ? `${renderMindStoneSkillForPrompt(composedSkill.artifact, composedSkill.skillMarkdown)}\nApproving installs it: the agent reads it on your turns from the next message.`
           : "";
-        await prompter.note(`${action.summary}\n\n${personaPreview || skillPreview || preview}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
+        const shown = action.persona
+          ? personaPreview
+          : action.kind === "skill_install"
+            ? [skillPreview, componentReview].filter(Boolean).join("\n\n")
+            : componentReview || preview;
+        await prompter.note(`${action.summary}\n\n${shown}`, repair ? `Queue ${action.kind}? It was approved, but the approve stopped before it was queued.` : `Approve ${action.kind}?`);
         const accepted = await prompter.confirm({ message: repair ? "Queue it now?" : "Approve this action now?", initialValue: false });
         if (!accepted) {
           output.write(repair ? "Cancelled — nothing queued.\n" : "Approval cancelled — the action stays pending.\n");
@@ -1858,10 +1922,14 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`${gold("Approved")} — persona ${result.personaId} saved. It isn't active until you switch to it: mindstone persona activate ${result.personaId}\n`);
     } else if (result.kind === "skill_install") {
       output.write(`${gold("Approved")} — skill installed: ${result.skillId}. The agent sees it from its next turn.\n`);
+      if (result.persona) output.write(`${result.persona.listed ? "" : "Warning: "}For persona ${result.persona.id}: ${result.persona.note}.\n`);
     } else if (result.kind === "workflow_create") {
-      output.write(`${gold("Approved")} — workflow ${result.workflowId} written and listed by persona ${result.personaId}.\n`);
+      output.write(`${gold("Approved")} — workflow ${result.workflowId} written for persona ${result.personaId}.\n`);
+      output.write(`${result.listed ? "" : "Warning: "}${result.note[0]!.toUpperCase()}${result.note.slice(1)}.\n`);
     } else if (result.kind === "persona_kb_create") {
-      const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true });
+      // The approval has happened by now: an ingest that throws is reported like one that fails.
+      const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true })
+        .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }));
       output.write(ingested.ok
         ? `${gold("Approved")} — private knowledge base ${result.kbId} written and ingested for persona ${result.personaId} (${ingested.entryCount} entries).\n`
         : `${gold("Approved")} — private knowledge base ${result.kbId} written for persona ${result.personaId}, but the ingest failed: ${ingested.error}. Run: mindstone kb ingest --persona ${result.personaId} ${result.kbId}\n`);

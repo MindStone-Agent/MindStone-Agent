@@ -448,7 +448,7 @@ export function addPrivateKnowledgebaseSource(personaDir: string, kbId: string, 
  * The file keeps its shape (`[...]` or `{ "<key>": [...] }`) and is replaced
  * in one rename.
  */
-export function addPersonaComponentId(personaDir: string, key: "skills" | "workflows" | "knowledgebases", id: string): void {
+export function addPersonaComponentId(personaDir: string, key: "skills" | "workflows" | "knowledgebases", id: string): "added" | "all" {
   if (!isRealDirectory(personaDir)) throw new PersonaComposeError("the persona folder is missing or a link", "invalid_persona", 422);
   const path = join(personaDir, `${key}.json`);
   let data: unknown = [];
@@ -460,9 +460,13 @@ export function addPersonaComponentId(personaDir: string, key: "skills" | "workf
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new PersonaComposeError(`${key}.json can't be read`, "invalid_persona", 422);
   }
   const list = Array.isArray(data) ? data : data && typeof data === "object" && Array.isArray((data as Record<string, unknown>)[key]) ? ((data as Record<string, unknown>)[key] as unknown[]) : [];
+  // No skills listed means every installed skill, this one included: writing
+  // the list would take all the others away (#125 review).
+  if (key === "skills" && list.length === 0) return "all";
   if (!list.includes(id)) list.push(id);
   const next = Array.isArray(data) || !data || typeof data !== "object" ? list : { ...(data as Record<string, unknown>), [key]: list };
   replaceFile(path, `${JSON.stringify(next, null, 2)}\n`);
+  return "added";
 }
 
 /** Write a proposed private KB's text sources (#125): the KB must be new, created here. */

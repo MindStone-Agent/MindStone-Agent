@@ -65,15 +65,28 @@ The agent's `mindstone-persona-proposal` can carry `components`:
   - A component card can be approved only after its persona's
     (`409 persona_pending`); rejecting the persona rejects its components
     that are still waiting.
-  - An approved component joins its persona's list. A new skill goes through
-    the install gate (advanced settings), and one already installed is
-    refused, force or not. A new workflow is checked strictly, can't hand the
+  - An approved component joins its persona's list, except that a new skill
+    for a persona that lists no skills adds nothing: that persona already uses
+    every installed skill, the new one included. A new skill goes through the
+    install gate (advanced settings), and one already installed, or with a
+    built-in skill's id, is refused, force or not. A new workflow is checked strictly, can't hand the
     turn to or gate on a persona, its skills must be installed by then, and an
     id the config runs or a persona lists is refused. A new private KB is
     written and ingested.
-- A proposal whose components don't hold up is dropped whole, as is one that
-  would put a kind over its pending cap (6 cards of a kind per agent), so no
-  persona arrives half-built. Approving never activates, and a non-owner's
+  - If the persona's folder is gone when a component is approved, it is
+    refused (`409 invalid_persona`) before anything is installed or written.
+    A card left waiting under a rejected persona is rejected when someone
+    tries to approve it (`409 persona_rejected`).
+  - `mindstone approvals show` prints everything a card holds: a persona's
+    listed skills, shared KBs and workflows (with their steps) and its linked
+    cards; a workflow card's `workflow.json`; a KB card's source text. The
+    approve prompt shows the same.
+- A proposal whose components don't hold up is dropped whole, and the reply
+  says why. So is one that would put a kind it brings over its pending cap
+  (6 component cards of a kind per agent; a plain skill proposal doesn't
+  count). No persona arrives half-built. Components are refused for:
+  invisible characters in any of their text, an id both listed and brought
+  as new, or a new skill with a built-in skill's id. Approving never activates, and a non-owner's
   proposal is dropped.
 - The links live in the approval store (`parentApprovalId`), so a persona's
   lists only ever hold components that exist.

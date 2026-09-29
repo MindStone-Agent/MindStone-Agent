@@ -6,6 +6,7 @@ import { appendTranscriptEntry, type TranscriptEntry, type TranscriptSource } fr
 import type { ConnectorOutboundMessage } from "./connector.js";
 import { parsePersonaProposal, PERSONA_TEXT_INVISIBLE, type PersonaProposalPayload } from "../persona/create.js";
 import { validateWorkflowDefinition, WORKFLOW_ID, type WorkflowDefinitionInput } from "../workflow/validate.js";
+import { builtinMindStoneSkills } from "../skills/artifacts.js";
 
 /**
  * Durable proposed-action store (issue #21, designed to be absorbed by the
@@ -376,22 +377,36 @@ export type ParsedPersonaComponents = {
   knowledgebases: Array<{ id: string; name?: string; sources: Array<{ name: string; text: string }> }>;
 };
 
+/** Every string in a proposed component, CRLF read as LF, so the invisible check covers them all (#125 review). */
+function hasInvisibleText(value: unknown): boolean {
+  if (typeof value === "string") return PERSONA_TEXT_INVISIBLE.test(value.replace(/\r\n/g, "\n"));
+  if (Array.isArray(value)) return value.some(hasInvisibleText);
+  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).some(hasInvisibleText);
+  return false;
+}
+
 /**
- * A persona proposal's `components` (#125), or undefined when they don't hold
- * up; then the whole proposal is dropped, so no persona arrives half-built.
+ * A persona proposal's `components` (#125), or why they don't hold up; then
+ * the whole proposal is dropped, so no persona arrives half-built, and the
+ * reply says why. The reasons are fixed text: nothing from the proposal is
+ * echoed.
  * - `skills`, `workflows`, `knowledgebases`: existing ids, checked on approval.
  * - `new.skills`: skill proposals, with exactly the fields and limits of a
- *   `mindstone-skill-proposal`.
+ *   `mindstone-skill-proposal`; not a built-in skill's id.
  * - `new.workflows`: `{ id, name?, description?, steps }`, checked strictly;
  *   a step can't name a persona (`personaId`, `personaLoadable`).
  * - `new.privateKnowledgebases`: `{ id, name?, sources: [{ text }] }`.
+ * - No id both listed and new, and no invisible characters in any text.
  */
-export function parsePersonaComponents(value: unknown): ParsedPersonaComponents | undefined {
+export function checkPersonaComponentsProposal(value: unknown): { ok: true; components: ParsedPersonaComponents } | { ok: false; error: string } {
   const empty: ParsedPersonaComponents = { listed: { skills: [], workflows: [], knowledgebases: [] }, skills: [], workflows: [], knowledgebases: [] };
-  if (value === undefined) return empty;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const fail = (error: string) => ({ ok: false as const, error });
+  if (value === undefined) return { ok: true, components: empty };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fail("its components aren't an object");
   const record = value as Record<string, unknown>;
-  if (Object.keys(record).some((key) => !["skills", "workflows", "knowledgebases", "new"].includes(key))) return undefined;
+  if (Object.keys(record).some((key) => !["skills", "workflows", "knowledgebases", "new"].includes(key))) {
+    return fail("its components have a key other than skills, workflows, knowledgebases and new");
+  }
   const ids = (list: unknown): string[] | undefined => {
     if (list === undefined) return [];
     if (!Array.isArray(list) || list.length > PERSONA_COMPONENT_LIMITS.listed) return undefined;
@@ -401,53 +416,82 @@ export function parsePersonaComponents(value: unknown): ParsedPersonaComponents 
   const skills = ids(record.skills);
   const workflows = ids(record.workflows);
   const knowledgebases = ids(record.knowledgebases);
-  if (!skills || !workflows || !knowledgebases) return undefined;
+  if (!skills || !workflows || !knowledgebases) {
+    return fail(`a list of existing skills, workflows or knowledge bases isn't a list of up to ${PERSONA_COMPONENT_LIMITS.listed} ids`);
+  }
   const parsed: ParsedPersonaComponents = { ...empty, listed: { skills, workflows, knowledgebases } };
-  if (record.new === undefined) return parsed;
-  if (!record.new || typeof record.new !== "object" || Array.isArray(record.new)) return undefined;
+  if (record.new === undefined) return { ok: true, components: parsed };
+  if (!record.new || typeof record.new !== "object" || Array.isArray(record.new)) return fail("its new components aren't an object");
   const next = record.new as Record<string, unknown>;
-  if (Object.keys(next).some((key) => !["skills", "workflows", "privateKnowledgebases"].includes(key))) return undefined;
+  if (Object.keys(next).some((key) => !["skills", "workflows", "privateKnowledgebases"].includes(key))) {
+    return fail("its new components have a key other than skills, workflows and privateKnowledgebases");
+  }
+  if (hasInvisibleText(next)) return fail("a new component has characters that can't be seen on the approval card");
   const list = (entry: unknown, max: number): unknown[] | undefined =>
     entry === undefined ? [] : Array.isArray(entry) && entry.length <= max ? entry : undefined;
   const newSkills = list(next.skills, PERSONA_COMPONENT_LIMITS.newSkills);
   const newWorkflows = list(next.workflows, PERSONA_COMPONENT_LIMITS.newWorkflows);
   const newKbs = list(next.privateKnowledgebases, PERSONA_COMPONENT_LIMITS.newKnowledgebases);
-  if (!newSkills || !newWorkflows || !newKbs) return undefined;
+  if (!newSkills || !newWorkflows || !newKbs) {
+    return fail(`it brings more than ${PERSONA_COMPONENT_LIMITS.newSkills} new skills, ${PERSONA_COMPONENT_LIMITS.newWorkflows} new workflows or ${PERSONA_COMPONENT_LIMITS.newKnowledgebases} private knowledge bases`);
+  }
+  const builtins = new Set(builtinMindStoneSkills().map((skill) => skill.artifact.id));
   for (const raw of newSkills) {
     const skill = parseSkillProposal(raw);
-    if (!skill || parsed.skills.some((other) => other.id === skill.id)) return undefined;
+    if (!skill) return fail("a new skill isn't a valid skill proposal");
+    if (parsed.skills.some((other) => other.id === skill.id)) return fail("two new skills have the same id");
+    if (builtins.has(skill.id)) return fail("a new skill has the id of a built-in skill");
     parsed.skills.push(skill);
   }
   for (const raw of newWorkflows) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail("a new workflow isn't an object");
     const { id, ...definition } = raw as Record<string, unknown>;
-    if (typeof id !== "string" || !WORKFLOW_ID.test(id) || parsed.workflows.some((other) => other.id === id)) return undefined;
+    if (typeof id !== "string" || !WORKFLOW_ID.test(id)) return fail("a new workflow's id isn't lowercase letters, digits and hyphens");
+    if (parsed.workflows.some((other) => other.id === id)) return fail("two new workflows have the same id");
     // No step of an agent-proposed workflow may name a persona: such a
     // workflow could make one answer turns on the owner's behalf (#125).
     // The checker is told no persona exists, so a step that names one fails.
     const checked = validateWorkflowDefinition(definition, { personaExists: () => false });
-    if (!checked.ok) return undefined;
+    if (!checked.ok) return fail("a new workflow isn't valid (its steps route or gate, and none can name a persona)");
     parsed.workflows.push({ id, definition: checked.workflow });
   }
   for (const raw of newKbs) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail("a new private knowledge base isn't an object");
     const kb = raw as Record<string, unknown>;
-    if (Object.keys(kb).some((key) => !["id", "name", "sources"].includes(key))) return undefined;
-    if (typeof kb.id !== "string" || !PRIVATE_KB_PROPOSAL_ID.test(kb.id) || parsed.knowledgebases.some((other) => other.id === kb.id)) return undefined;
+    if (Object.keys(kb).some((key) => !["id", "name", "sources"].includes(key))) return fail("a new private knowledge base has a key other than id, name and sources");
+    if (typeof kb.id !== "string" || !PRIVATE_KB_PROPOSAL_ID.test(kb.id)) return fail("a new private knowledge base's id isn't lowercase letters, digits and hyphens");
+    if (parsed.knowledgebases.some((other) => other.id === kb.id)) return fail("two new private knowledge bases have the same id");
     const name = kb.name === undefined ? undefined : boundedText(kb.name, 80);
-    if (kb.name !== undefined && (!name || /\n/.test(name))) return undefined;
-    if (!Array.isArray(kb.sources) || kb.sources.length === 0 || kb.sources.length > PERSONA_COMPONENT_LIMITS.sourcesPerKnowledgebase) return undefined;
+    if (kb.name !== undefined && (!name || /\n/.test(name))) return fail("a new private knowledge base's name isn't one line of up to 80 characters");
+    if (!Array.isArray(kb.sources) || kb.sources.length === 0 || kb.sources.length > PERSONA_COMPONENT_LIMITS.sourcesPerKnowledgebase) {
+      return fail(`a new private knowledge base doesn't have 1 to ${PERSONA_COMPONENT_LIMITS.sourcesPerKnowledgebase} sources`);
+    }
     const sources: Array<{ name: string; text: string }> = [];
     for (const [index, source] of kb.sources.entries()) {
-      if (!source || typeof source !== "object" || Array.isArray(source)) return undefined;
-      if (Object.keys(source as Record<string, unknown>).some((key) => key !== "text")) return undefined;
+      if (!source || typeof source !== "object" || Array.isArray(source) || Object.keys(source as Record<string, unknown>).some((key) => key !== "text")) {
+        return fail("a knowledge base source isn't an object with only `text`");
+      }
       const text = (source as Record<string, unknown>).text;
-      if (typeof text !== "string" || !text.trim() || text.length > PERSONA_COMPONENT_LIMITS.sourceText || PERSONA_TEXT_INVISIBLE.test(text)) return undefined;
+      if (typeof text !== "string" || !text.trim() || text.length > PERSONA_COMPONENT_LIMITS.sourceText) {
+        return fail(`a knowledge base source's text is empty or longer than ${PERSONA_COMPONENT_LIMITS.sourceText} characters`);
+      }
       sources.push({ name: `source-${index + 1}`, text: text.replace(/\r\n/g, "\n") });
     }
     parsed.knowledgebases.push({ id: kb.id, ...(name ? { name } : {}), sources });
   }
-  return parsed;
+  // Listed and new at once: the persona can't be approved (the listed one
+  // doesn't exist yet) and the new card waits for the persona (#125 review).
+  const clash = (listed: string[], added: Array<{ id: string }>) => added.some((item) => listed.some((id) => id.toLowerCase() === item.id.toLowerCase()));
+  if (clash(parsed.listed.skills, parsed.skills) || clash(parsed.listed.workflows, parsed.workflows)) {
+    return fail("a skill or workflow is both listed as existing and brought as new; list only existing ones");
+  }
+  return { ok: true, components: parsed };
+}
+
+/** `checkPersonaComponentsProposal` without the reason. */
+export function parsePersonaComponents(value: unknown): ParsedPersonaComponents | undefined {
+  const checked = checkPersonaComponentsProposal(value);
+  return checked.ok ? checked.components : undefined;
 }
 
 /** Pending persona proposals kept at once (#105 review). */
@@ -520,6 +564,8 @@ export type ExtractedActionProposals = {
   persona?: PersonaProposalPayload;
   /** Its components (#125); a proposal whose components don't hold up is dropped whole. */
   personaComponents?: ParsedPersonaComponents;
+  /** Why a persona proposal was dropped for its components (#125 review), so the reply can say so. */
+  personaComponentsError?: string;
   /** At most one proposed skill per reply (#104). */
   skill?: SkillInstallPayload;
 };
@@ -529,6 +575,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
   let memory: MemoryWritePayload | undefined;
   let persona: PersonaProposalPayload | undefined;
   let personaComponents: ParsedPersonaComponents | undefined;
+  let personaComponentsError: string | undefined;
   let skill: SkillInstallPayload | undefined;
   const split = splitProposalBlocks(replyText);
   for (const { kind: fenceKind, body } of split.blocks) {
@@ -541,10 +588,13 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
       } else if (fenceKind === "persona") {
         if (!persona) {
           const base = parsePersonaProposal(parsed);
-          const components = base ? parsePersonaComponents((parsed as Record<string, unknown>).components) : undefined;
-          if (base && components) {
+          const components = base ? checkPersonaComponentsProposal((parsed as Record<string, unknown>).components) : undefined;
+          if (base && components?.ok) {
             persona = base;
-            personaComponents = components;
+            personaComponents = components.components;
+            personaComponentsError = undefined;
+          } else if (components && !components.ok) {
+            personaComponentsError ??= components.error;
           }
         }
       } else if (fenceKind === "skill") {
@@ -561,7 +611,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
       // malformed proposal blocks are dropped from the reply, never applied
     }
   }
-  return { text: split.text.trim(), memory, mutations, persona, personaComponents, skill };
+  return { text: split.text.trim(), memory, mutations, persona, personaComponents, ...(persona ? {} : { personaComponentsError }), skill };
 }
 
 /** Back-compat single-memory-proposal shape (issue #21 callers/tests). */
@@ -637,32 +687,48 @@ export function applyActionProposalDiscipline(params: {
   // At most a few persona proposals wait at once: the instruction is on every
   // owner turn, so an agent that keeps proposing can't flood Approvals.
   const store = params.store ?? new ApprovalStore();
-  const agentPending = (kind: ProposedActionKind) =>
-    store.pending().filter((action) => action.kind === kind && (action.agentId ?? "default") === (params.agentId ?? "default")).length;
+  const pending = store.pending();
+  const mine = (action: ProposedAction) => (action.agentId ?? "default") === (params.agentId ?? "default");
+  // A component card counts only while its persona card is still live: one
+  // left under a rejected persona can't be approved and is rejected when
+  // tried, so it doesn't hold a place (#125 review).
+  const liveComponent = (action: ProposedAction) => {
+    if (!action.parentApprovalId) return false;
+    const parent = store.get(action.parentApprovalId);
+    return parent !== undefined && parent.status !== "rejected";
+  };
+  const pendingPersonas = pending.filter((action) => action.kind === "persona_create" && mine(action)).length;
+  // Only component cards count toward the component caps: a plain skill
+  // proposal (#104) never does (#125 review).
+  const pendingComponents = (kind: ProposedActionKind) => pending.filter((action) => action.kind === kind && mine(action) && liveComponent(action)).length;
   const components = extracted.personaComponents;
+  const overCap = (count: number, kind: ProposedActionKind) => count > 0 && count + pendingComponents(kind) > MAX_PENDING_COMPONENTS;
   // A persona proposal and each of its new components wait on their own
-  // cards; if any kind is at its cap, the whole proposal is dropped (#125).
+  // cards; if any kind it brings is at its cap, the whole proposal is dropped (#125).
   const capped = Boolean(params.allowPersona && extracted.persona) && (
-    agentPending("persona_create") >= MAX_PENDING_PERSONAS
-    || (components?.skills.length ?? 0) + agentPending("skill_install") > MAX_PENDING_COMPONENTS
-    || (components?.workflows.length ?? 0) + agentPending("workflow_create") > MAX_PENDING_COMPONENTS
-    || (components?.knowledgebases.length ?? 0) + agentPending("persona_kb_create") > MAX_PENDING_COMPONENTS
+    pendingPersonas >= MAX_PENDING_PERSONAS
+    || overCap(components?.skills.length ?? 0, "skill_install")
+    || overCap(components?.workflows.length ?? 0, "workflow_create")
+    || overCap(components?.knowledgebases.length ?? 0, "persona_kb_create")
   );
   const persona = params.allowPersona && !capped ? extracted.persona : undefined;
   const skill = params.allowSkill ? extracted.skill : undefined;
   // A dropped proposal is said, not swallowed: the owner reads why in the reply.
+  const refused = params.allowPersona ? extracted.personaComponentsError : undefined;
   const cappedNote = capped
     ? `\n\n(The persona proposal wasn't saved: too many persona proposals, or proposed skills, workflows or knowledge bases, are already waiting on the Approvals page. Approve or reject those first.)`
-    : "";
-  const cappedEvents = capped && params.sessionKey
+    : refused
+      ? `\n\n(The persona proposal wasn't saved, and nothing was put up for approval: ${refused}.)`
+      : "";
+  const cappedEvents = (capped || refused) && params.sessionKey
     ? [appendTranscriptEntry({
         sessionKey: params.sessionKey,
         agentId: params.agentId ?? "default",
         role: "event",
-        text: "persona proposal dropped: too many proposals already pending",
+        text: capped ? "persona proposal dropped: too many proposals already pending" : `persona proposal dropped: ${refused}`,
         source: params.source,
         runId: params.runId,
-        metadata: { event: "persona_proposal_dropped", reason: "too_many_pending", origin: params.origin },
+        metadata: { event: "persona_proposal_dropped", reason: capped ? "too_many_pending" : "invalid_components", origin: params.origin },
       })]
     : [];
   if (!extracted.memory && !extracted.mutations.length && !persona && !skill) {
