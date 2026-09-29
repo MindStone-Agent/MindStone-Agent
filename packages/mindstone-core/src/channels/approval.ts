@@ -377,13 +377,32 @@ export function summaryText(text: string): string {
  * braille blank and the Hangul fillers), less the four characters real
  * writing needs, which component ids never do: the zero-width non-joiner and
  * joiner (Persian, Indic, emoji sequences), variation selectors (emoji
- * presentation) and the Mongolian vowel separator. Eight or more combining
- * marks in a row is refused too (Myanmar and Tibetan stack up to five or six).
+ * presentation) and the Mongolian vowel separator.
  */
-const SKILL_PROPOSAL_UNSAFE = /(?:(?![\u200c\u200d\u180e\ufe00-\ufe0f\u{E0100}-\u{E01EF}])(?:[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u2800\u3164\uFFA0\u115F\u1160]))|\p{M}{8,}/u;
+const SKILL_PROPOSAL_UNSAFE = /(?![\u200c\u200d\u180e\ufe00-\ufe0f\u{E0100}-\u{E01EF}])(?:[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u2800\u3164\uFFA0\u115F\u1160])/u;
+/**
+ * Those four, only where real writing puts them (#146 delta review), since
+ * each draws nothing and could carry hidden text: FE0E/FE0F right after an
+ * emoji; FE00-FE0D after Han, Myanmar or a math symbol; ideographic
+ * selectors after Han; a joiner only between two non-ASCII characters, never
+ * two in a row. Eight or more combining marks in a row, counted through
+ * joiners, is refused too (Myanmar and Tibetan stack up to five or six).
+ */
+const SKILL_PROPOSAL_HIDDEN = new RegExp([
+  String.raw`(?<!\p{Emoji})[\uFE0E\uFE0F]`,
+  String.raw`(?<![\p{Script=Han}\p{Script=Myanmar}\p{Sm}])[\uFE00-\uFE0D]`,
+  String.raw`(?<!\p{Script=Han})[\u{E0100}-\u{E01EF}]`,
+  String.raw`(?<![^\x00-\x7F])[\u200C\u200D]`,
+  String.raw`[\u200C\u200D](?![^\x00-\x7F])`,
+  String.raw`[\u200C\u200D]{2,}`,
+  String.raw`(?:\p{M}[\u200C\u200D]?){8,}`,
+].join("|"), "u");
 
 function hasUnsafeText(value: unknown): boolean {
-  if (typeof value === "string") return PROPOSAL_UNSAFE_TEXT.test(value.replace(/\r\n/g, "\n")) || SKILL_PROPOSAL_UNSAFE.test(value.replace(/\r\n/g, "\n"));
+  if (typeof value === "string") {
+    const text = value.replace(/\r\n/g, "\n");
+    return PROPOSAL_UNSAFE_TEXT.test(text) || SKILL_PROPOSAL_UNSAFE.test(text) || SKILL_PROPOSAL_HIDDEN.test(text);
+  }
   if (Array.isArray(value)) return value.some(hasUnsafeText);
   return false;
 }
@@ -674,7 +693,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
       } else if (fenceKind === "skill") {
         if (!skill) {
           skill = parseSkillProposal(parsed);
-          if (!skill) skillProposalError ??= "its fields don't hold up (an id, a one-line label and a one-line description are needed, within their limits)";
+          if (!skill) skillProposalError ??= "its fields don't hold up (an id, a one-line label and a one-line description are needed, within their limits, with no hidden or direction characters)";
         }
       } else {
         const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;

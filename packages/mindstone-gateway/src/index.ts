@@ -2407,7 +2407,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       if (!skill) {
         sendJson(res, 400, {
           ok: false,
-          error: "a skill needs an id (lowercase letters, digits, hyphens), a label and a description; goal, whenToUse, outputs, safetyNotes and instructions are optional and bounded",
+          error: "a skill needs an id (lowercase letters, digits, hyphens), a one-line label and a one-line description; goal, whenToUse, outputs, safetyNotes and instructions are optional and bounded; no field may hold control, hidden or direction characters (soft hyphens, zero-width spaces, direction marks)",
         });
         return;
       }
