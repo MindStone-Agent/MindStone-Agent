@@ -478,18 +478,18 @@ Your own changes to the stack (a GPU for Ollama, extra mounts) go in
             3 { Exit-Install "Refusing ${Given}: part of that path exists and isn't a folder." }
             default { Exit-Install "Refusing ${Given}: a symbolic link or junction in that path can't be followed." }
         }
-        $dir = $resolved.Path
+        $resolvedDir = $resolved.Path
         $homeResolved = Resolve-PhysicalDir -Path $HOME -FollowLast
         if ($homeResolved.Code -ne 0 -or -not [IO.Directory]::Exists($homeResolved.Path)) { Exit-Install "Your home folder ($HOME) can't be read." }
         $homeDir = $homeResolved.Path
-        $root = [IO.Path]::GetPathRoot($dir)
+        $root = [IO.Path]::GetPathRoot($resolvedDir)
         $homeUnder = $homeDir.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-        $dirUnder = $dir.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-        if ((Test-SamePath $dir $root) -or (Test-SamePath $dir $homeDir) -or $homeUnder.StartsWith($dirUnder, $PathComparison)) {
-            Exit-Install "Refusing to install into $Given ($dir): that is your home folder, a drive's root, or a folder that contains your home folder. Choose a folder of its own, such as `$HOME$([IO.Path]::DirectorySeparatorChar)$DefaultDirName."
+        $dirUnder = $resolvedDir.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        if ((Test-SamePath $resolvedDir $root) -or (Test-SamePath $resolvedDir $homeDir) -or $homeUnder.StartsWith($dirUnder, $PathComparison)) {
+            Exit-Install "Refusing to install into $Given ($resolvedDir): that is your home folder, a drive's root, or a folder that contains your home folder. Choose a folder of its own, such as `$HOME$([IO.Path]::DirectorySeparatorChar)$DefaultDirName."
         }
         if ($OnWindows) {
-            if ($dir.StartsWith('\\')) {
+            if ($resolvedDir.StartsWith('\\')) {
                 Exit-Install "Refusing ${Given}: it is a network folder, which Docker Desktop can't use for the stack's files. Choose a folder on this computer."
             }
             $driveType = ''
@@ -498,12 +498,12 @@ Your own changes to the stack (a GPU for Ollama, extra mounts) go in
                 Exit-Install "Refusing ${Given}: $root is a network drive, which Docker Desktop can't use for the stack's files. Choose a folder on this computer."
             }
         }
-        if ([IO.Directory]::Exists($dir) -and -not [IO.File]::Exists([IO.Path]::Combine($dir, $Marker)) -and -not (Test-LegacyStack $dir)) {
-            if (@(Get-ChildItem -LiteralPath $dir -Force | Select-Object -First 1).Count -gt 0) {
+        if ([IO.Directory]::Exists($resolvedDir) -and -not [IO.File]::Exists([IO.Path]::Combine($resolvedDir, $Marker)) -and -not (Test-LegacyStack $resolvedDir)) {
+            if (@(Get-ChildItem -LiteralPath $resolvedDir -Force | Select-Object -First 1).Count -gt 0) {
                 Exit-Install "$Given isn't empty and isn't a MindStone stack install (no $Marker file), so it was left alone. Choose a new or empty folder with -Dir."
             }
         }
-        return @{ Dir = $dir; Home = $homeDir }
+        return @{ Dir = $resolvedDir; Home = $homeDir }
     }
 
     # Create the install folder, and check it is where Resolve-InstallDir resolved it.
@@ -716,14 +716,15 @@ leaves the folder, if you added files of your own such as compose.override.yml.)
             Write-InstallLog "Stopping the MindStone stack (project $($S.Project))..."
             $code = Invoke-Compose -ArgumentList @('--profile', 'ollama', 'down', '--remove-orphans')
             if ($code -ne 0) { Exit-Install "docker compose down failed (exit code $code)." }
-            $database = "$($S.InstallDir)$([IO.Path]::DirectorySeparatorChar)data (the Console's database, uploads and logs)"
+            $dataFolder = "$($S.InstallDir)$([IO.Path]::DirectorySeparatorChar)data"
+            $kept = "the Docker volumes $($S.Project)_*, $dataFolder`n(the Console's database, uploads and logs)"
             if ($mongoInVolume) {
-                $database = "the Console's database in $($S.Project)_$MongoVolume, $($S.InstallDir)$([IO.Path]::DirectorySeparatorChar)data (its uploads and logs)"
+                $kept = "the Docker volumes $($S.Project)_* (the Console's database is in`n$($S.Project)_$MongoVolume), $dataFolder (its uploads and logs)"
             }
             Write-Host @"
 
 The MindStone stack is stopped and its containers are removed.
-Your data is kept: the Docker volumes $($S.Project)_*, $database
+Your data is kept: $kept
 and the secrets in $($S.InstallDir).
 
 Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
@@ -776,36 +777,36 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
             return $Value
         }
 
-        $mindstoneRef = Get-Setting 'MINDSTONE_REF' $Ref 'MINDSTONE_REF' 'main'
-        $consoleRef = Get-Setting 'CONSOLE_REF' $ConsoleRef 'CONSOLE_REF' 'main'
+        $agentGitRef = Get-Setting 'MINDSTONE_REF' $Ref 'MINDSTONE_REF' 'main'
+        $consoleGitRef = Get-Setting 'CONSOLE_REF' $ConsoleRef 'CONSOLE_REF' 'main'
         $consolePort = Get-Setting 'CONSOLE_PORT' '' 'CONSOLE_PORT' '3080'
         $gatewayPort = Get-Setting 'MINDSTONE_GATEWAY_PORT' '' 'MINDSTONE_GATEWAY_PORT' '19789'
         $S.Project = Get-Setting 'COMPOSE_PROJECT_NAME' '' 'MINDSTONE_PROJECT' 'mindstone-stack'
         $profiles = Get-EnvValue $S.EnvFile 'COMPOSE_PROFILES'
-        $ollamaUrl = ''
-        if ($ollamaMode -eq 'stack') { $profiles = 'ollama'; $ollamaUrl = $StackOllamaUrl }
-        if ($ollamaMode -eq 'host') { $profiles = ''; $ollamaUrl = $HostOllamaUrl }
-        if ($OllamaUrl) { $ollamaUrl = $OllamaUrl }
+        $gatewayOllamaUrl = ''
+        if ($ollamaMode -eq 'stack') { $profiles = 'ollama'; $gatewayOllamaUrl = $StackOllamaUrl }
+        if ($ollamaMode -eq 'host') { $profiles = ''; $gatewayOllamaUrl = $HostOllamaUrl }
+        if ($OllamaUrl) { $gatewayOllamaUrl = $OllamaUrl }
         $previousOllamaUrl = Get-EnvValue $S.EnvFile 'OLLAMA_BASE_URL'
-        $ollamaUrl = Get-Setting 'OLLAMA_BASE_URL' $ollamaUrl 'MINDSTONE_OLLAMA_BASE_URL' $HostOllamaUrl
+        $gatewayOllamaUrl = Get-Setting 'OLLAMA_BASE_URL' $gatewayOllamaUrl 'MINDSTONE_OLLAMA_BASE_URL' $HostOllamaUrl
 
         foreach ($port in @($consolePort, $gatewayPort)) {
             if ($port -cnotmatch '\A[0-9]{1,5}\z' -or [int]$port -lt 1 -or [int]$port -gt 65535) { Exit-Install "Not a port number: $port" }
         }
         if ($consolePort -eq $gatewayPort) { Exit-Install 'CONSOLE_PORT and MINDSTONE_GATEWAY_PORT must differ.' }
         if ($S.Project -cnotmatch '\A[a-z0-9][a-z0-9_-]*\z') { Exit-Install 'MINDSTONE_PROJECT must be lowercase letters, digits, - and _.' }
-        foreach ($gitRef in @($mindstoneRef, $consoleRef)) {
+        foreach ($gitRef in @($agentGitRef, $consoleGitRef)) {
             if ($gitRef -cnotmatch '\A[A-Za-z0-9._/-]+\z') { Exit-Install "Not a git ref: $gitRef" }
         }
         # The address the gateway container uses for Ollama.
-        if ($ollamaUrl -cnotmatch '\Ahttps?://[^/\s]+(/\S*)?\z') { Exit-Install "Not an http(s) URL for Ollama: $ollamaUrl" }
-        $ollamaHost = $ollamaUrl.Substring($ollamaUrl.IndexOf('://') + 3).Split('/')[0]
+        if ($gatewayOllamaUrl -cnotmatch '\Ahttps?://[^/\s]+(/\S*)?\z') { Exit-Install "Not an http(s) URL for Ollama: $gatewayOllamaUrl" }
+        $ollamaHost = $gatewayOllamaUrl.Substring($gatewayOllamaUrl.IndexOf('://') + 3).Split('/')[0]
         if ($ollamaHost.Contains(':')) { $ollamaHost = $ollamaHost.Substring(0, $ollamaHost.LastIndexOf(':')) }
         if ($ollamaHost -eq 'localhost' -or $ollamaHost.StartsWith('127.') -or $ollamaHost -eq '0.0.0.0' -or $ollamaHost -eq '[::1]' -or $ollamaHost -eq '[::]') {
-            Write-InstallWarning "Ollama at ${ollamaUrl}: inside the gateway container, $ollamaHost is the container itself, not this machine. Use $HostOllamaUrl for Ollama on this machine."
+            Write-InstallWarning "Ollama at ${gatewayOllamaUrl}: inside the gateway container, $ollamaHost is the container itself, not this machine. Use $HostOllamaUrl for Ollama on this machine."
         }
-        if (-not $ollamaUrl.TrimEnd('/').EndsWith('/v1')) {
-            Write-InstallWarning "Ollama at ${ollamaUrl}: the address should end in /v1 (Ollama's OpenAI-compatible API), as in $HostOllamaUrl."
+        if (-not $gatewayOllamaUrl.TrimEnd('/').EndsWith('/v1')) {
+            Write-InstallWarning "Ollama at ${gatewayOllamaUrl}: the address should end in /v1 (Ollama's OpenAI-compatible API), as in $HostOllamaUrl."
         }
 
         # ---------------------------------------------------------------------
@@ -864,8 +865,8 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
         # ---------------------------------------------------------------------
         # The install folder and its settings
         Write-InstallLog "Install dir:        $($S.InstallDir)"
-        Write-InstallLog "MindStone-Agent:    $mindstoneRef"
-        Write-InstallLog "MindStone Console:  $consoleRef"
+        Write-InstallLog "MindStone-Agent:    $agentGitRef"
+        Write-InstallLog "MindStone Console:  $consoleGitRef"
         Write-InstallLog "Console port:       127.0.0.1:$consolePort   gateway port: 127.0.0.1:$gatewayPort"
         Write-InstallLog "Compose project:    $($S.Project)"
 
@@ -893,11 +894,11 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
 
         # Compose's own settings (no secrets): read by every `docker compose` in the install dir.
         Write-EnvValue $S.EnvFile 'COMPOSE_PROJECT_NAME' $S.Project
-        Write-EnvValue $S.EnvFile 'MINDSTONE_REF' $mindstoneRef
-        Write-EnvValue $S.EnvFile 'CONSOLE_REF' $consoleRef
+        Write-EnvValue $S.EnvFile 'MINDSTONE_REF' $agentGitRef
+        Write-EnvValue $S.EnvFile 'CONSOLE_REF' $consoleGitRef
         Write-EnvValue $S.EnvFile 'CONSOLE_PORT' $consolePort
         Write-EnvValue $S.EnvFile 'MINDSTONE_GATEWAY_PORT' $gatewayPort
-        Write-EnvValue $S.EnvFile 'OLLAMA_BASE_URL' $ollamaUrl
+        Write-EnvValue $S.EnvFile 'OLLAMA_BASE_URL' $gatewayOllamaUrl
         $uid = '1000'
         $gid = '1000'
         if (-not $OnWindows) {
@@ -929,11 +930,11 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
         # ---------------------------------------------------------------------
         # Files, pinned to the refs
         Write-InstallLog "Downloading the stack's files..."
-        Save-Download "$RawMsa/$mindstoneRef/deploy/docker/compose.yml" ([IO.Path]::Combine($S.InstallDir, 'compose.yml'))
-        Save-Download "$RawConsole/$consoleRef/mindstone/librechat.yaml" ([IO.Path]::Combine($S.InstallDir, 'librechat.yaml'))
-        Save-Download "$RawConsole/$consoleRef/mindstone/.env.example" ([IO.Path]::Combine($S.InstallDir, 'console.env.example'))
+        Save-Download "$RawMsa/$agentGitRef/deploy/docker/compose.yml" ([IO.Path]::Combine($S.InstallDir, 'compose.yml'))
+        Save-Download "$RawConsole/$consoleGitRef/mindstone/librechat.yaml" ([IO.Path]::Combine($S.InstallDir, 'librechat.yaml'))
+        Save-Download "$RawConsole/$consoleGitRef/mindstone/.env.example" ([IO.Path]::Combine($S.InstallDir, 'console.env.example'))
         if ($mongoInVolume -and -not ([IO.File]::ReadAllText([IO.Path]::Combine($S.InstallDir, 'compose.yml')).Contains('MINDSTONE_MONGO_DATA'))) {
-            Exit-Install "The compose.yml of MindStone-Agent $mindstoneRef predates install-stack.ps1 (it has no MINDSTONE_MONGO_DATA). Install a newer ref with -Ref."
+            Exit-Install "The compose.yml of MindStone-Agent $agentGitRef predates install-stack.ps1 (it has no MINDSTONE_MONGO_DATA). Install a newer ref with -Ref."
         }
         $dataDir = [IO.Path]::Combine($S.InstallDir, 'data')
         foreach ($sub in @('uploads', 'logs')) { [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($dataDir, $sub)) }
@@ -1113,27 +1114,27 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
 "@
             }
         }
-        if ($profiles -like '*ollama*' -and $ollamaUrl -eq $StackOllamaUrl) {
+        if ($profiles -like '*ollama*' -and $gatewayOllamaUrl -eq $StackOllamaUrl) {
             Write-Host @"
 
-  Ollama runs in the stack (service ollama), reached by the gateway as $ollamaUrl.
+  Ollama runs in the stack (service ollama), reached by the gateway as $gatewayOllamaUrl.
   Pull a chat model with: Set-Location -LiteralPath $dirQ; docker compose exec ollama ollama pull <model>
   Back to Ollama on this machine: run the install command again with -WithoutOllama.
 "@
         } elseif ($profiles -like '*ollama*') {
             Write-Host @"
 
-  Ollama also runs in the stack (service ollama), but the gateway uses $ollamaUrl.
+  Ollama also runs in the stack (service ollama), but the gateway uses $gatewayOllamaUrl.
   To use the stack's Ollama, re-run with -WithOllama; to stop it, with -WithoutOllama.
 "@
         } else {
             Write-Host ''
-            Write-Host "  Ollama is reached by the gateway as $ollamaUrl."
+            Write-Host "  Ollama is reached by the gateway as $gatewayOllamaUrl."
         }
-        if ($previousOllamaUrl -and $previousOllamaUrl -ne $ollamaUrl) {
+        if ($previousOllamaUrl -and $previousOllamaUrl -ne $gatewayOllamaUrl) {
             Write-Host @"
   The Ollama address changed (it was $previousOllamaUrl). If setup is already
-  done, change the Ollama provider's address to $ollamaUrl in the Console
+  done, change the Ollama provider's address to $gatewayOllamaUrl in the Console
   (Settings, Your setup, model provider): chat keeps the address it was set up
   with, while memory follows the new one.
 "@
