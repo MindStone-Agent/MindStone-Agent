@@ -169,6 +169,7 @@ assert.equal(readKbVectors(dir, indexText, { id: "stub", model: "m1" }).state, "
 const failing = [
   { id: "stub", model: "m1", async embedTexts() { throw new Error("down"); } },
   { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.slice(1).map(() => [1, 0]); } },
+  { id: "stub", model: "m1", async embedTexts(texts: string[]) { return [...texts, "extra"].map(() => [1, 0]); } },
   { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.map((_, i) => (i ? [1, 0] : [1, 0, 0])); } },
   { id: "stub", model: "m1", async embedTexts(texts: string[]) { return texts.map(() => [1e39, 0]); } },
 ];
@@ -379,6 +380,7 @@ grep -q '^kb:garage:fleet.md|embedding$' <<<"${hits}" || { echo "quota: KB sourc
 set_config 'c["knowledgebases"] = {"recall": {"maxResults": 0}}'
 hits="$(chat_hits "quota off: ${SEMANTIC}")"
 if grep -q 'kb:garage' <<<"${hits}"; then echo "maxResults 0 must turn meaning off: ${hits}" >&2; exit 1; fi
+[[ "$(stub_count "quota off: ${SEMANTIC}")" == "0" ]] || { echo "maxResults 0 still embedded the question" >&2; exit 1; }
 set_config '
 c.pop("knowledgebases", None)
 c["memory"].pop("recall", None)
