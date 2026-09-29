@@ -636,6 +636,22 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     const halfway = { id: "stub", model: "m1", async embedTexts(texts: string[]) { if (calls++ >= 1) throw Object.assign(new TypeError("fetch failed"), { unavailable: true }); return texts.map(() => [1, 0, 0]); } } as any;
     await reembedStaleKnowledgebase({ kbDirs: [{ dir: spent }], embedder: halfway });
     assert.equal(readKbReembedState(join(spent, "s-kb"))!.failures, 1, "an outage after an entry counts");
+    // One entry the embedder refuses costs only its own KB (#170): that KB waits, and the next scan
+    // embeds the others. (Unlike memory, a KB's vectors are all or none, so the refused KB keeps word match.)
+    const two = mkdtempSync(join(tmpdir(), "kbvec-state-isolated-"));
+    await kb(two, "a-kb", "# A\n\n## One\n\nalpha REFUSEDTEXT\n\n## Two\n\nalpha two\n", "old");
+    await kb(two, "b-kb", "# B\n\nalpha b\n", "old");
+    const picky = { id: "stub", model: "m1", async embedTexts(texts: string[]) {
+      if (texts.some((text) => text.includes("REFUSEDTEXT"))) throw Object.assign(new Error("input is too long"), { status: 400 });
+      return texts.map(() => [1, 0, 0]);
+    } } as any;
+    const firstScan = await reembedStaleKnowledgebase({ kbDirs: [{ dir: two }], embedder: picky });
+    assert.equal(firstScan.reembedded?.kbId, "a-kb", "the first stale KB is tried first");
+    assert.equal(firstScan.reembedded?.vectors.state, "missing");
+    assert.equal(readKbReembedState(join(two, "a-kb"))?.failures, 1, "its refusal counts");
+    const secondScan = await reembedStaleKnowledgebase({ kbDirs: [{ dir: two }], embedder: picky });
+    assert.equal(secondScan.reembedded?.kbId, "b-kb", "the next scan goes on to the other KB");
+    assert.equal(secondScan.reembedded?.vectors.state, "ready", "and embeds it");
   } finally {
     Date.now = realNow;
   }

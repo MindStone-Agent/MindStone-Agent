@@ -57,6 +57,8 @@ import {
   writeMindStoneConfig,
   probeMemoryEmbeddingProvider,
   createMemoryEmbeddingProvider,
+  memoryEmbeddingSpec,
+  sqliteMemoryEmbeddingMix,
   resolveMemoryEmbeddingProviderConfig,
   KB_EMBED_LIMITS,
   resolveConfigPath,
@@ -261,9 +263,17 @@ function printJson(value: unknown): void {
 }
 
 function printMemoryStatus(options: { json?: boolean } = {}): void {
-  const stats = getSqliteMemoryIndexStats(runtimePathsFromEnv());
+  const paths = runtimePathsFromEnv();
+  const stats = getSqliteMemoryIndexStats(paths);
+  // For the configured embedding model: how many chunks it refused MEMORY_EMBED_SKIP_AFTER times
+  // and are found by their words only (#170). Left out when no model is configured.
+  const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
+  const provider = loaded.error ? undefined : createMemoryEmbeddingProvider(loaded.config);
+  const embeddingModel = provider && stats.present && !stats.error
+    ? { spec: memoryEmbeddingSpec(provider), skippedChunks: sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(provider), paths).skipped }
+    : undefined;
   if (options.json) {
-    printJson(stats);
+    printJson(embeddingModel ? { ...stats, embeddingModel } : stats);
     return;
   }
   output.write(`${gold("🔶 MindStone memory status")}\n\n`);
@@ -274,6 +284,9 @@ function printMemoryStatus(options: { json?: boolean } = {}): void {
       `Sources: ${stats.sources}`,
       `Chunks: ${stats.chunks}`,
       `Embedded chunks: ${stats.embeddedChunks}`,
+      embeddingModel
+        ? `Chunks ${embeddingModel.spec} can't embed (found by their words only): ${embeddingModel.skippedChunks}`
+        : undefined,
       `Duplicate text chunks: ${stats.duplicateTextChunks}`,
       `Vector backend: ${stats.vectorBackend}`,
       `sqlite-vec available: ${stats.sqliteVec.available}`,
@@ -357,6 +370,7 @@ async function runMemoryCommand(argv: string[]): Promise<void> {
         `Embedding provider: ${embeddingResult.providerId}:${embeddingResult.model}`,
         `Chunks considered for embedding: ${embeddingResult.chunksConsidered}`,
         `Chunks embedded: ${embeddingResult.chunksEmbedded}`,
+        `Chunks the embedder refused: ${embeddingResult.chunksRejected}`,
         embeddingResult.dimensions ? `Embedding dimensions: ${embeddingResult.dimensions}` : "Embedding dimensions: n/a",
       );
     }

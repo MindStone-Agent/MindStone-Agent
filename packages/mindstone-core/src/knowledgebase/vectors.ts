@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { memoryEmbeddingSpec, type MemoryEmbeddingProvider } from "../memory/embedding.js";
+import { memoryEmbeddingSpec, type MemoryEmbeddingProvider, embeddingFailureCause } from "../memory/embedding.js";
 import type { MindStoneKbIndexEntry, MindStoneKbVectorsStatus } from "./types.js";
 
 /**
@@ -130,16 +130,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 class KbEmbedTimeout extends Error {}
 class KbZeroVector extends Error {}
 
-/** Why an embed request failed (#158), from the error the embedding provider threw. */
+/** Why an embed request failed (#158), from the error the embedding provider threw; a KB's own time limit is unavailable too. */
 function embedFailureCause(error: unknown): KbEmbedFailureCause {
-  const { status, unavailable } = (error ?? {}) as { status?: unknown; unavailable?: unknown };
-  if (status === 429) return "rate-limited";
-  // A 5xx, a request timeout, or a key, permission or model the embedder doesn't have: nothing about the text.
-  if (typeof status === "number") return status >= 500 || [401, 403, 404, 408].includes(status) ? "unavailable" : "rejected";
-  // Not reached (the provider marks it), not answered in time, or not usable as configured. Anything
-  // else, a reply it couldn't use included, is the embedder's work done, so it counts (#158 review).
-  if (unavailable === true || error instanceof KbEmbedTimeout || isAbort(error)) return "unavailable";
-  return "rejected";
+  if (error instanceof KbEmbedTimeout) return "unavailable";
+  return embeddingFailureCause(error);
 }
 
 /** The re-embed state beside a KB's vectors, if it is a small file (never a link for a private KB). */

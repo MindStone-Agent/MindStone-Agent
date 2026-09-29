@@ -46,6 +46,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  MEMORY_EMBED_SKIP_AFTER,
   MEMORY_REEMBED_BATCH,
   MEMORY_REEMBED_PER_TURN,
   indexSqliteMemoryTurn,
@@ -284,6 +285,82 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   if (texts.includes(next[0]!.text) || texts.includes(next[1]!.text)) fail("a chunk rewritten or removed while the run waited was sent");
   if (!texts.includes(next[2]!.text) || !texts.includes(next[3]!.text)) fail(`control: the chunks left alone should be sent: ${texts.length} sent`);
 }
+// One chunk the embedder refuses doesn't stop the rest (#170): the refused request's chunks go one
+// at a time, the refused one is recorded and goes last, and after MEMORY_EMBED_SKIP_AFTER refusals it
+// isn't sent to that model again while its text is the same. An embedder that is down still stops a run.
+{
+  const setup = new DatabaseSync(dbPath);
+  setup.prepare("UPDATE memory_chunks SET embedding_spec = 'stub:a' WHERE embedding_json IS NOT NULL").run();
+  setup.prepare("INSERT INTO memory_sources (id, kind, path, title, timestamp, content_hash, metadata_json, updated_at) VALUES ('refused', 'memory', NULL, NULL, NULL, 'refused-hash', '{}', '2099-01-01T00:00:00.000Z')").run();
+  setup.prepare("INSERT INTO memory_chunks (chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, embedding_spec, metadata_json, updated_at) VALUES ('refused#0', 'refused', 'memory', NULL, NULL, 0, 'an old note holding REFUSEDTEXT', 8, '[0,1,0]', 'stub:a', '{}', '2099-01-01T00:00:00.000Z')").run();
+  setup.close();
+  const sent: string[][] = [];
+  const P = { id: "stub", model: "p", async embedTexts(texts: string[]) {
+    sent.push(texts);
+    if (texts.some((text) => text.includes("REFUSEDTEXT"))) throw Object.assign(new Error("input is too long for the context"), { status: 400 });
+    return B.embedTexts(texts);
+  } };
+  const refusedSends = () => sent.filter((texts) => texts.some((text) => text.includes("REFUSEDTEXT"))).length;
+  const rejection = () => {
+    const db = new DatabaseSync(dbPath);
+    const row = db.prepare("SELECT failures, reason FROM memory_embed_rejections WHERE chunk_id = 'refused#0' AND spec = 'stub:p'").get() as { failures: number; reason: string } | undefined;
+    db.close();
+    return row;
+  };
+  // The paced run: the refused chunk is the newest, so it heads the first request of 4.
+  const gates: string[] = [];
+  const paced = await reembedSqliteMemoryOtherModel({ paths, provider: P, limit: 8, beforeBatch: async () => { gates.push("gate"); } });
+  if (paced.chunksEmbedded !== 7 || paced.chunksRejected !== 1) fail(`one refused chunk should cost only itself: ${JSON.stringify(paced)}`);
+  if (refusedSends() !== 2) fail(`the refused request, then the refused chunk alone: ${refusedSends()} sends`);
+  if (sent.some((texts) => texts.length > 1 && texts.some((text) => text.includes("REFUSEDTEXT")) && texts.length !== MEMORY_REEMBED_BATCH)) fail("the refused request should be the whole first batch");
+  // The gate before each request, the single ones included: 1 (refused), 4 (one at a time), 1 (second request).
+  if (gates.length !== 6) fail(`beforeBatch should run before every request, one at a time included: ${gates.length}`);
+  const first = rejection();
+  if (first?.failures !== 1 || !/too long/.test(first.reason)) fail(`the refusal should be recorded with its reason: ${JSON.stringify(first)}`);
+  // The next run starts with the others: the refused chunk goes last, so with thousands left it isn't sent.
+  sent.length = 0;
+  const next = await reembedSqliteMemoryOtherModel({ paths, provider: P, limit: 8 });
+  if (next.chunksEmbedded !== 8 || refusedSends() !== 0) fail(`a chunk refused before should go last: ${JSON.stringify(next)}, ${refusedSends()} sends`);
+  // A whole backfill retries it; after MEMORY_EMBED_SKIP_AFTER refusals it is skipped for that model.
+  for (let run = 2; run <= MEMORY_EMBED_SKIP_AFTER; run += 1) {
+    const whole = await backfillSqliteMemoryEmbeddings({ paths, provider: P });
+    if (whole.chunksRejected !== 1) fail(`backfill ${run} should be refused on that chunk alone: ${JSON.stringify(whole)}`);
+  }
+  if (rejection()?.failures !== MEMORY_EMBED_SKIP_AFTER) fail(`refusals should reach ${MEMORY_EMBED_SKIP_AFTER}: ${JSON.stringify(rejection())}`);
+  const mix = sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(P), paths);
+  if (mix.skipped !== 1 || mix.otherModel !== 1) fail(`the refused chunk should count as skipped (and still another model's): ${JSON.stringify(mix)}`);
+  sent.length = 0;
+  const after = await backfillSqliteMemoryEmbeddings({ paths, provider: P });
+  if (refusedSends() !== 0 || after.chunksConsidered !== 0) fail(`a skipped chunk shouldn't be sent again: ${JSON.stringify(after)}, ${refusedSends()} sends`);
+  // Another model hasn't refused it: skipped only for the model that refused it.
+  if (sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(C), paths).skipped !== 0) fail("a chunk skipped for one model shouldn't count as skipped for another");
+  // --force sends everything, the skipped chunk included.
+  sent.length = 0;
+  await backfillSqliteMemoryEmbeddings({ paths, provider: P, force: true });
+  if (refusedSends() === 0) fail("--force should send a skipped chunk too");
+  // A new text is tried afresh.
+  const edit = new DatabaseSync(dbPath);
+  edit.prepare("UPDATE memory_chunks SET text = 'an old note holding REFUSEDTEXT, edited' WHERE chunk_id = 'refused#0'").run();
+  edit.close();
+  if (sqliteMemoryEmbeddingMix(memoryEmbeddingSpec(P), paths).skipped !== 0) fail("a chunk whose text changed shouldn't count as skipped");
+  sent.length = 0;
+  await backfillSqliteMemoryEmbeddings({ paths, provider: P });
+  if (refusedSends() !== 1 || rejection()?.failures !== 1) fail(`a changed text should be tried again and counted afresh: ${refusedSends()} sends, ${JSON.stringify(rejection())}`);
+  // An embedder that is down stops the run, as before, and records no refusal.
+  const other = new DatabaseSync(dbPath);
+  other.prepare("UPDATE memory_chunks SET embedding_spec = 'stub:a' WHERE chunk_id IN (SELECT chunk_id FROM memory_chunks WHERE chunk_id != 'refused#0' ORDER BY updated_at DESC LIMIT 4)").run();
+  const rejectionsBefore = (other.prepare("SELECT count(*) AS n FROM memory_embed_rejections").get() as { n: number }).n;
+  other.close();
+  const down = { id: "stub", model: "p", async embedTexts() { throw Object.assign(new Error("service unavailable"), { status: 503 }); } };
+  const outage = await backfillSqliteMemoryEmbeddings({ paths, provider: down }).then(() => undefined, (error: unknown) => error);
+  if (!(outage instanceof Error)) fail("an embedder that is down should still stop the run");
+  const count = new DatabaseSync(dbPath);
+  const rejectionsAfter = (count.prepare("SELECT count(*) AS n FROM memory_embed_rejections").get() as { n: number }).n;
+  count.prepare("DELETE FROM memory_chunks WHERE chunk_id = 'refused#0'").run();
+  count.prepare("DELETE FROM memory_sources WHERE id = 'refused'").run();
+  count.close();
+  if (rejectionsAfter !== rejectionsBefore) fail(`an outage shouldn't be recorded as a refusal: ${rejectionsBefore} -> ${rejectionsAfter}`);
+}
 console.log(`recall index: ${total} chunks, switching models checked`);
 TS
 
@@ -302,6 +379,12 @@ createServer((req, res) => {
     const input = Array.isArray(body.input) ? body.input : [body.input];
     const request = { model: body.model, input, t: Date.now() };
     state.requests.push(request);
+    if (state.mode === "reembed503" && !input.some((text) => String(text).includes("switch"))) {
+      request.done = Date.now();
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "service unavailable" } }));
+      return;
+    }
     if (input.some((text) => String(text).includes("POISON-CHUNK"))) {
       request.done = Date.now();
       res.writeHead(400, { "content-type": "application/json" });
@@ -525,8 +608,9 @@ addr_run=$(( $(reembed_chunks 0 model-e) - before_addr ))
 echo "a run stopped when the endpoint address changed after ${addr_run} chunks"
 
 # --- 4. Another model's chunk the new embedder refuses never costs a turn its own vectors (Hearth's
-# #167 review, #155 item 2): the turn's update leaves other models' chunks to the paced run, and a
-# run that fails is left alone for a while (a minute), so the turns right after it don't send it again.
+# #167 review, #155 item 2): the turn's update leaves other models' chunks to the paced run. That run
+# sends the refused request's chunks one at a time and goes on (#170), and a run that fails (the
+# embedder down) is left alone for a while (a minute), so the turns right after it don't retry it.
 STUB_PORT="${STUB_PORT}" python3 - <<'PY'
 import json, os, pathlib
 p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
@@ -561,17 +645,61 @@ TS
 for _ in $(seq 1 20); do [[ "$(tokens_embedded)" == yes ]] && break; sleep 0.5; done
 state="$(tokens_embedded)"
 [[ "${state}" == yes ]] || { echo "the turn's own chunks weren't embedded because another model's chunk was refused: ${state}" >&2; exit 1; }
-# Control: the paced run did try the refused chunk (so it was in reach), exactly once.
-for _ in $(seq 1 20); do [[ "$(poison_sent)" -gt 0 ]] && break; sleep 0.5; done
+# The paced run sent the refused chunk twice (in its request of 4, then alone) and went on (#170).
+for _ in $(seq 1 20); do [[ "$(poison_sent)" -ge 2 ]] && break; sleep 0.5; done
 first_poison="$(poison_sent)"
-[[ "${first_poison}" == 1 ]] || { echo "control: the paced run should have sent the refused chunk once: ${first_poison}" >&2; exit 1; }
-# The two turns right after the failed run don't send the refused chunk again (the pause is a
-# minute; this covers the next few seconds of it).
+[[ "${first_poison}" == 2 ]] || { echo "the paced run should send the refused chunk in its request, then alone: ${first_poison}" >&2; exit 1; }
+model_f_others() { npx tsx - <<'TS'
+import { DatabaseSync } from "node:sqlite";
+import { runtimePathsFromEnv, sqliteMemoryDatabasePath } from "./packages/mindstone-core/src/index.ts";
+const db = new DatabaseSync(sqliteMemoryDatabasePath(runtimePathsFromEnv()));
+const row = db.prepare("SELECT count(*) AS n FROM memory_chunks WHERE embedding_spec = 'ollama:model-f' AND text NOT LIKE '%switch%'").get() as { n: number };
+db.close();
+console.log(Number(row.n));
+TS
+}
+for _ in $(seq 1 20); do [[ "$(model_f_others)" -ge 3 ]] && break; sleep 0.5; done
+[[ "$(model_f_others)" -ge 3 ]] || { echo "the paced run stopped at the refused chunk instead of embedding the rest: $(model_f_others)" >&2; exit 1; }
+# The next runs go on with the others: the refused chunk goes last, so it isn't sent again yet.
+progress_before="$(model_f_others)"
+chat "a switch question after the refused chunk" >/dev/null
+for _ in $(seq 1 20); do [[ "$(model_f_others)" -gt "${progress_before}" ]] && break; sleep 0.5; done
+[[ "$(model_f_others)" -gt "${progress_before}" ]] || { echo "the next run made no progress after a refused chunk" >&2; exit 1; }
+[[ "$(poison_sent)" == 2 ]] || { echo "the refused chunk should go last, not head the next run: $(poison_sent) sends" >&2; exit 1; }
+echo "a refused old chunk cost only itself: the turn and the runs went on"
+# A run that fails (the embedder down for everything but the turn's own chunks) is left alone: the two
+# turns right after it don't retry it (the pause is a minute; this covers the next few seconds).
+reembed_sent() { node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>console.log(s.requests.filter((q)=>q.model === "model-f" && !q.input.some((t)=>String(t).includes("switch"))).length))' "${STUB}/_test/state"; }
+curl -s -X POST -d '{"mode":"reembed503"}' "${STUB}/_test/mode" >/dev/null
+before_down="$(reembed_sent)"
+chat "a switch question while the embedder is down for the rest" >/dev/null
+for _ in $(seq 1 20); do [[ "$(reembed_sent)" -gt "${before_down}" ]] && break; sleep 0.5; done
+failed_at="$(reembed_sent)"
+[[ "${failed_at}" -gt "${before_down}" ]] || { echo "control: no run was tried while the embedder was down" >&2; exit 1; }
+sleep 1
 chat "a switch question right after the failed run" >/dev/null
 sleep 1
 chat "another switch question right after the failed run" >/dev/null
 sleep 2
-[[ "$(poison_sent)" == "${first_poison}" ]] || { echo "the refused chunk was sent again by the turns right after the failed run: $(poison_sent) requests, ${first_poison} before" >&2; exit 1; }
-echo "a refused old chunk left the turn's vectors alone and the next turns didn't send it again"
+[[ "$(reembed_sent)" == "${failed_at}" ]] || { echo "the turns right after a failed run retried it: $(reembed_sent) requests, ${failed_at} after the failure" >&2; exit 1; }
+curl -s -X POST -d '{"mode":"ok"}' "${STUB}/_test/mode" >/dev/null
+echo "a failed run wasn't retried by the turns right after it"
+# The count of chunks a model can't embed is reported (#170): the memory check and memory status.
+# The refused chunk has 2 refusals so far; make it the last one of MEMORY_EMBED_SKIP_AFTER.
+npx tsx - <<'TS'
+import { DatabaseSync } from "node:sqlite";
+import { MEMORY_EMBED_SKIP_AFTER, runtimePathsFromEnv, sqliteMemoryDatabasePath } from "./packages/mindstone-core/src/index.ts";
+const db = new DatabaseSync(sqliteMemoryDatabasePath(runtimePathsFromEnv()));
+const changed = db.prepare("UPDATE memory_embed_rejections SET failures = ? WHERE chunk_id = 'poison#0' AND spec = 'ollama:model-f'").run(MEMORY_EMBED_SKIP_AFTER);
+db.close();
+if (Number(changed.changes) !== 1) { console.error("control: the paced run recorded no refusal for the refused chunk"); process.exit(1); }
+TS
+[[ "$(post /admin/memory/check '{"embeddingProvider":"ollama:model-f"}')" == 200 ]] || { echo "checking model-f failed: $(cat "${BODY}")" >&2; exit 1; }
+judge "the memory check should count the chunk model-f can't embed" 'b.ok === true && b.index?.skipped === 1'
+[[ "$(post /admin/memory/check '{"embeddingProvider":"ollama:model-a"}')" == 200 ]] || { echo "checking model-a failed: $(cat "${BODY}")" >&2; exit 1; }
+judge "a chunk model-f refused isn't skipped for model-a" 'b.ok === true && b.index?.skipped === 0'
+./scripts/mindstone memory status --json > "${BODY}"
+judge "memory status should report the chunk the configured model can't embed" 'b.embeddingModel?.spec === "ollama:model-f" && b.embeddingModel?.skippedChunks === 1'
+echo "the count of chunks a model can't embed is reported"
 
 echo "Memory embedding model switch smoke test passed."
