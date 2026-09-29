@@ -75,11 +75,13 @@ With no persona active, nothing changes.
   ids are `pkb:<persona-id>:<kb-id>:<source>`, so a private and a global KB
   with the same id stay apart. They are the persona's own files: a persona
   folder, `knowledgebases` folder, KB folder, `kb.json`, `index.json` or
-  `sources` that is a link is not used, and ingesting one refuses linked
-  source files and folder sources outside it. Manage them with `mindstone kb … --persona <id>`
+  `sources` that is a symbolic link is not used, and ingesting one refuses
+  linked source files and folder sources outside it. Manage them with `mindstone kb … --persona <id>`
   ([KNOWLEDGEBASES.md](KNOWLEDGEBASES.md)). "Private" is a recall rule, not a
-  security boundary: anything a reply quotes lands in the transcript, and the
-  agent's file tools (off by default) can read any file it can reach.
+  security boundary: anything a reply quotes lands in the transcript, the
+  agent's file tools (off by default) can read any file it can reach, and
+  anyone who can write the data folder can place content anywhere (hard
+  links, or a global KB whose files point at a private one).
 - **Workflows.** Every workflow in `workflows.json` is a candidate, in order;
   the first to reach a decision is used, and a gate with `onFail: "stop"`
   ends the selection ([WORKFLOWS.md](WORKFLOWS.md)). `workflows.active` and
@@ -89,7 +91,8 @@ With no persona active, nothing changes.
   components apply. A step's `skills` narrow the skill set. Its
   `knowledgebases` narrow global collections and private KBs each on its own:
   a kind is narrowed only if the step names one of its KBs, so naming a
-  private KB never turns global recall off. When a persona named by the
+  private KB never turns global recall off. A step id that matches no KB
+  narrows nothing, and the turn records it (`stepKnowledgebasesUnknown`). When a persona named by the
   request answers instead of the one a step routed to, that step doesn't
   narrow it. With no persona active, a step's lists are only logged, as
   before.
@@ -98,8 +101,9 @@ With no persona active, nothing changes.
   in the prompt, any listed skill that is missing, its global KB list (or
   `all`), a step's KB list, and whether its own private KBs were searched.
   Like `personaContext`, it is left out of the entries a non-owner's response
-  returns. The Console's Skills page marks a skill the active persona leaves
-  out as not in the prompt.
+  returns. The Console's Skills page marks a skill the persona set in
+  `personas.active` leaves out as not in the prompt (route rules and
+  workflows aren't reflected there).
 
 ## Behavior notes
 

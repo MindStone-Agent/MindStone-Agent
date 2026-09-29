@@ -116,6 +116,8 @@ import "./connectors/calendar.js";
 import {
   loadMindStonePersona,
   loadRoutePersonaContextById,
+  unknownKnowledgebaseIds,
+  knowledgebasesDirFromConfig,
   decisionForAnsweringPersona,
   personaComponentsSummary,
   privateKnowledgebasesAllowed,
@@ -1459,6 +1461,18 @@ async function runConfiguredRoute(input: {
       allowSkill: input.audience === "owner",
     });
 
+    // Which of the answering persona's components were in play (#125). A
+    // step's KB ids that match nothing are named; on a turn without recall
+    // (a non-owner's) there is nothing to match, so none are.
+    const personaComponents = turnComponents.personaId
+      ? personaComponentsSummary(
+          turnComponents,
+          route.skills,
+          privateKnowledgebasesAllowed(input.audience)
+            ? unknownKnowledgebaseIds(turnComponents.stepKnowledgebases, [knowledgebasesDirFromConfig(input.config), turnComponents.privateKnowledgebases?.dir])
+            : undefined,
+        )
+      : undefined;
     const assistantEntry = appendTranscriptEntry({
       sessionKey: input.sessionKey,
       agentId: input.agentId,
@@ -1475,8 +1489,7 @@ async function runConfiguredRoute(input: {
         runner: route.runner,
         // Which persona answered (#105): the Console's transcripts say so per turn.
         ...(route.personaContext ? { personaContext: route.personaContext } : {}),
-        // Which of its components were in play (#125).
-        ...(turnComponents.personaId ? { personaComponents: personaComponentsSummary(turnComponents, route.skills) } : {}),
+        ...(personaComponents ? { personaComponents } : {}),
         // What recall put in this turn's prompt (#106); the chunks are on the memory_recall_injected event.
         ...(route.memoryRecall
           ? {
@@ -1506,7 +1519,7 @@ async function runConfiguredRoute(input: {
         runner: route.runner,
         identityContext: route.identityContext,
         personaContext: route.personaContext,
-        ...(turnComponents.personaId ? { personaComponents: personaComponentsSummary(turnComponents, route.skills) } : {}),
+        ...(personaComponents ? { personaComponents } : {}),
         workflow: workflowOutcome
           ? { workflowId: workflowOutcome.workflowId, reason: workflowOutcome.reason, failed: workflowOutcome.failed, decision: workflowOutcome.decision, ...(workflowOutcome.tried ? { tried: workflowOutcome.tried } : {}) }
           : undefined,

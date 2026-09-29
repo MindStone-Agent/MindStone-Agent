@@ -169,6 +169,16 @@ export function privateKnowledgebaseLinkError(kbDir: string, kbId: string): stri
   return undefined;
 }
 
+/**
+ * A workflow step's KB ids that match no KB in any of these folders (#125).
+ * They narrow nothing, so the turn records them for the step's author.
+ */
+export function unknownKnowledgebaseIds(ids: string[] | undefined, kbDirs: Array<string | undefined>): string[] {
+  if (!ids?.length) return [];
+  const known = new Set(kbDirs.flatMap((dir) => (dir ? discoverMindStoneKnowledgebases(dir).map((summary) => summary.id) : [])));
+  return ids.filter((id) => !known.has(id));
+}
+
 export type IngestKnowledgebaseResult =
   | { ok: true; kbId: string; indexPath: string; entryCount: number; sourceCount: number }
   | { ok: false; kbId: string; error: string };

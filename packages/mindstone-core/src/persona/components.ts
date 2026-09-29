@@ -75,7 +75,7 @@ function narrow(base: string[] | undefined, step: string[] | undefined): string[
 }
 
 /** A real directory, not a link (checked on the last path part). */
-function isRealDirectory(path: string): boolean {
+export function isRealDirectory(path: string): boolean {
   try {
     return lstatSync(path).isDirectory();
   } catch {
@@ -140,6 +140,8 @@ export function decisionForAnsweringPersona<T extends { personaId?: string }>(
 export function personaComponentsSummary(
   components: MindStoneTurnComponents,
   skills?: { inPrompt: string[]; missing?: string[] },
+  /** A step's KB ids that match no global or private KB: they narrow nothing. */
+  unknownStepKnowledgebases?: string[],
 ): Record<string, unknown> {
   return {
     personaId: components.personaId,
@@ -148,6 +150,7 @@ export function personaComponentsSummary(
     ...(skills?.missing?.length ? { skillsMissing: skills.missing } : {}),
     globalKnowledgebases: components.globalKnowledgebases ?? "all",
     ...(components.stepKnowledgebases ? { stepKnowledgebases: components.stepKnowledgebases } : {}),
+    ...(unknownStepKnowledgebases?.length ? { stepKnowledgebasesUnknown: unknownStepKnowledgebases } : {}),
     privateKnowledgebases: components.privateKnowledgebases ? "own" : "none",
   };
 }

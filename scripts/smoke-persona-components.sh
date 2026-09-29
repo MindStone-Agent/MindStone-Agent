@@ -120,7 +120,7 @@ workflow("wf-one", [{"id": "always", "kind": "route"}])
 # "notes" plus the global "global-other").
 workflow("wf-route", [{"id": "hand-off", "kind": "route", "personaId": "persona-two", "skills": ["beta-skill"], "knowledgebases": ["notes", "global-other"]}])
 workflow("wf-narrow", [{"id": "narrow", "kind": "route", "skills": ["beta-skill"], "knowledgebases": ["global-other"]}])
-workflow("wf-private-only", [{"id": "mine-only", "kind": "route", "knowledgebases": ["mine"]}])
+workflow("wf-private-only", [{"id": "mine-only", "kind": "route", "knowledgebases": ["mine", "no-such-kb"]}])
 workflow("wf-stop", [{"id": "blocker", "kind": "gate", "gate": {"condition": {"messagePrefix": "zzz-never"}}, "onFail": "stop"}, {"id": "after", "kind": "route"}])
 PY
 
@@ -152,6 +152,7 @@ refused 'Persona "no-such-persona" not found' kb search --persona no-such-person
 refused "Not a knowledge base id" kb search --persona persona-one ../../knowledgebases/global-other q
 refused "a link there is not used" kb ingest --persona persona-link notes
 refused "stolen/index.json is a link" kb search --persona persona-one stolen q
+refused "a link there is not used" kb search --persona persona-alias notes q
 refused "is a link; a persona's knowledge base must be its own files" kb ingest --persona persona-two linky
 echo "cli ok"
 
@@ -308,6 +309,8 @@ set_config persona-five
 chat admin conv-five
 expect conv-five present "PFIVE-7108" "GATTACHED-7101" "GOTHER-7102"
 expect conv-five absent "POTHER-7109"
+conversation_entries conv-five
+entries_check "persona-five: the step's unknown KB id was not recorded" 'JSON.stringify(a.personaComponents?.stepKnowledgebasesUnknown) === JSON.stringify(["no-such-kb"])'
 echo "step narrowing ok"
 
 # --- 7. A stop gate ends the selection: wf-one, listed after it, is never tried.

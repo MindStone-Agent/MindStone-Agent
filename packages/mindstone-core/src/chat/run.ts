@@ -8,7 +8,7 @@ import {
   isAutoRecallEnabled,
   selectMemoryRecallProvider,
 } from "../memory/index.js";
-import { discoverKnowledgebaseRecallDocuments } from "../knowledgebase/index.js";
+import { discoverKnowledgebaseRecallDocuments, knowledgebasesDirFromConfig, unknownKnowledgebaseIds } from "../knowledgebase/index.js";
 import { providerDiagnosticsFromChatResult, type MindStoneModelInfo, type MindStoneModelProvider } from "../provider/index.js";
 import { readCurrentHandoff } from "../lifecycle/index.js";
 import { runMindStoneRoute } from "../routing/run.js";
@@ -756,7 +756,15 @@ export async function runMindStoneChatTurn(input: MindStoneChatTurnInput): Promi
       runner: route.runner,
       providerDiagnostics: providerDiagnosticsFromChatResult(route.result),
       // Which of the answering persona's components were in play (#125).
-      ...(turnComponents.personaId ? { personaComponents: personaComponentsSummary(turnComponents, route.skills) } : {}),
+      ...(turnComponents.personaId
+        ? {
+            personaComponents: personaComponentsSummary(
+              turnComponents,
+              route.skills,
+              unknownKnowledgebaseIds(turnComponents.stepKnowledgebases, [knowledgebasesDirFromConfig(input.config), turnComponents.privateKnowledgebases?.dir]),
+            ),
+          }
+        : {}),
       ...(input.scope ? { scope: input.scope } : {}),
     },
   });
