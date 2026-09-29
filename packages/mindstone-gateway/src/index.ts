@@ -3289,7 +3289,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
       return;
     }
     const candidate: MindStoneConfig = { ...loaded.config, memory: { ...loaded.config?.memory, embeddingProvider: spec } };
-    const probe = await withTimeout(probeMemoryEmbeddingProvider(candidate), MEMORY_CHECK_MS, undefined);
+    const probe = await withTimeout(probeMemoryEmbeddingProvider(candidate, process.env, { timeoutMs: MEMORY_CHECK_EMBED_MS }), MEMORY_CHECK_MS, undefined);
     const ok = Boolean(probe && !probe.error && probe.dimensions);
     const error = !probe ? `no answer within ${MEMORY_CHECK_MS / 1000} s` : probe.error ?? (probe.dimensions ? undefined : "the provider returned no embedding");
     const missingModel = !ok && spec.startsWith("ollama:") && /not found|pull/i.test(error ?? "");
@@ -4142,7 +4142,13 @@ const EMBEDDING_SPEC = /^(ollama|openai|openai-compatible|enterprise-azure|enter
  * `..`, so nothing is pulled from another registry.
  */
 const OLLAMA_MODEL_NAME = /^(?:[a-z0-9][a-z0-9_-]{0,63}\/)?[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9_-]+)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,63})?$/;
-const MEMORY_CHECK_MS = 20_000;
+/**
+ * The memory check's own embed may load the model first (#140: 13 s for
+ * mxbai-embed-large), so it gets 45 s, and the check 50 s; the Console's
+ * proxy waits 55 s, under a front proxy's usual 60 s.
+ */
+const MEMORY_CHECK_EMBED_MS = 45_000;
+const MEMORY_CHECK_MS = 50_000;
 const OLLAMA_PULL_MS = 15 * 60_000;
 let ollamaPullRunning = false;
 /** The Ollama model the last memory check reported missing: the only one a pull may fetch (#111 review). */
@@ -4338,7 +4344,8 @@ function readAdminUserFile(path: string): { ok: true; content: Buffer } | { ok: 
   const refused = { ok: false as const, error: "USER.md isn't a plain file with one name, so it can't be read or changed here" };
   let fd: number | undefined;
   try {
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    // O_NONBLOCK: a FIFO put there meanwhile can't hold the event loop (#140 review).
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.nlink !== 1) return refused;
     if (stat.size > USER_MD_READ_LIMIT) return { ok: false, error: `USER.md is larger than ${USER_MD_READ_LIMIT / 1024 / 1024} MiB, so it can't be read or changed here` };

@@ -62,7 +62,7 @@ const stub = (model: string, size: number) => ({
   async embedTexts(texts: string[]) {
     return texts.map((text) => {
       const v = new Array(size).fill(0);
-      v[/lighthouse/i.test(text) ? 0 : 1] = 1;
+      v[/lighthouse/i.test(text) ? 0 : /zebraword/i.test(text) ? 2 : 1] = 1;
       return v;
     });
   },
@@ -158,6 +158,33 @@ if (JSON.stringify(specs()) !== JSON.stringify(["stub:b"])) fail(`re-indexing sh
   if (mix.otherModel !== total) fail(`unrecorded vectors should count as another model's: ${JSON.stringify(mix)}`);
   const redo = await backfillSqliteMemoryEmbeddings({ paths, provider: B });
   if (redo.chunksEmbedded !== total) fail(`unrecorded vectors should be embedded again: ${JSON.stringify(redo)}`);
+}
+// A large index (over recall's 5000-row window): re-embedding every chunk, newest first as the
+// per-turn backfill does, must not make old chunks look new. The newest one is still recalled.
+{
+  const db = new DatabaseSync(dbPath);
+  const insert = db.prepare(`INSERT INTO memory_chunks (chunk_id, source_id, kind, path, title, ordinal, text, token_estimate, embedding_json, embedding_spec, metadata_json, updated_at)
+    VALUES (?, ?, 'memory', NULL, NULL, 0, ?, 8, '[0,1,0]', NULL, '{}', ?)`);
+  const source = db.prepare("INSERT INTO memory_sources (id, kind, path, title, timestamp, content_hash, metadata_json, updated_at) VALUES (?, 'memory', NULL, NULL, NULL, ?, '{}', ?)");
+  db.exec("BEGIN");
+  for (let i = 0; i < 5200; i += 1) {
+    const at = new Date(Date.UTC(2020, 0, 1) + i * 60_000).toISOString();
+    source.run(`bulk:${i}`, `hash-${i}`, at);
+    insert.run(`bulk:${i}#0`, `bulk:${i}`, i === 5199 ? "the newest note mentions zebraword" : `an older note number ${i}`, at);
+  }
+  db.exec("COMMIT");
+  const before = (db.prepare("SELECT updated_at AS at FROM memory_chunks WHERE chunk_id = 'bulk:5199#0'").get() as { at: string }).at;
+  db.close();
+  const redo = await backfillSqliteMemoryEmbeddings({ paths, provider: B, newestFirst: true });
+  if (redo.chunksEmbedded < 5200) fail(`the bulk chunks should be re-embedded: ${JSON.stringify(redo)}`);
+  const check = new DatabaseSync(dbPath);
+  const after = (check.prepare("SELECT updated_at AS at, embedding_spec AS spec FROM memory_chunks WHERE chunk_id = 'bulk:5199#0'").get() as { at: string; spec: string });
+  check.close();
+  if (after.at !== before || after.spec !== "stub:b") fail(`re-embedding should keep a chunk's time and record the model: ${before} -> ${JSON.stringify(after)}`);
+  const hits = await new SqliteMemoryRecallProvider({ databasePath: dbPath, embeddingProvider: B }).search({ text: "zebraword", limit: 4 });
+  if (!hits.some((hit) => hit.text.includes("zebraword") && hit.metadata?.recallMode === "embedding")) {
+    fail(`after re-embedding a large index, the newest chunk should still be recalled by its vector: ${JSON.stringify(hits.map((h) => [h.metadata?.recallMode, h.text.slice(0, 30)]))}`);
+  }
 }
 console.log(`recall index: ${total} chunks, switching models checked`);
 TS

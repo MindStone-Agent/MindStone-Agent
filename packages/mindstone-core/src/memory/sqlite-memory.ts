@@ -733,7 +733,9 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
   const batchSize = Math.max(1, options.batchSize ?? 16);
   let chunksEmbedded = 0;
   let dimensions: number | undefined;
-  const update = db.prepare("UPDATE memory_chunks SET embedding_json = ?, embedding_spec = ?, updated_at = ? WHERE chunk_id = ?");
+  // updated_at is left alone: an embedding isn't a change to the chunk, and recall ranks its window by
+  // it, so re-embedding a whole index (after a model switch) must not turn old chats into new ones (#140 review).
+  const update = db.prepare("UPDATE memory_chunks SET embedding_json = ?, embedding_spec = ? WHERE chunk_id = ?");
 
   try {
     for (let offset = 0; offset < rows.length; offset += batchSize) {
@@ -746,7 +748,7 @@ export async function backfillSqliteMemoryEmbeddings(options: SqliteMemoryEmbedd
       try {
         embeddings.forEach((embedding, index) => {
           dimensions ??= embedding.length;
-          update.run(JSON.stringify(embedding), spec, new Date().toISOString(), batch[index].chunk_id);
+          update.run(JSON.stringify(embedding), spec, batch[index].chunk_id);
           chunksEmbedded += 1;
         });
         db.exec("COMMIT");

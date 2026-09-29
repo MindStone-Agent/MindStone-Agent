@@ -187,14 +187,22 @@ export function createMemoryEmbeddingProvider(
   return resolved ? new OpenAiCompatibleEmbeddingProvider(resolved) : undefined;
 }
 
+/**
+ * One live embed with the configured provider. `timeoutMs` raises the embed
+ * timeout for this probe only (never lowers it): the first embed after a
+ * model loads can take longer than a chat's (#140: mxbai-embed-large took
+ * about 13 s to load, past the 10 s default).
+ */
 export async function probeMemoryEmbeddingProvider(
   config?: MindStoneConfig,
   env: NodeJS.ProcessEnv = process.env,
+  options: { timeoutMs?: number } = {},
 ): Promise<MemoryEmbeddingProbeResult | undefined> {
   const resolved = resolveMemoryEmbeddingProviderConfig(config, env);
   if (!resolved) return undefined;
   try {
-    const provider = new OpenAiCompatibleEmbeddingProvider(resolved);
+    const timeoutMs = Math.max(resolved.timeoutMs ?? 10_000, options.timeoutMs ?? 0);
+    const provider = new OpenAiCompatibleEmbeddingProvider({ ...resolved, timeoutMs });
     const [embedding] = await provider.embedTexts(["MindStone embedding health check"]);
     return {
       providerId: resolved.id,
