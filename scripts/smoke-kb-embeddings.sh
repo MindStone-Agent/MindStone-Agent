@@ -765,7 +765,10 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     starts.delete("turn");
     await waiting;
     starts.set("hung", Date.now() - KB_REEMBED_LIMITS.turnWaitMs - 1);
-    await waitWhileTurnsRun(() => starts.values(), 5);
+    await Promise.race([
+      waitWhileTurnsRun(() => starts.values(), 5),
+      new Promise((_resolve, reject) => setTimeout(() => reject(new Error("a turn past turnWaitMs still held the re-embed")), 1000)),
+    ]);
   }
   // A state whose reason has control or direction characters isn't read.
   for (const reason of ["x\u001b[2Jy", "x\u202Ey"]) {
@@ -1243,6 +1246,14 @@ WAITING="$(node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1
 node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if ((b.knowledgebases??[]).some((k)=>k.reembed)) { console.error("a reset KB still shows its state: " + JSON.stringify(b.knowledgebases)); process.exit(1); }' "${BODY}"
 grep -q '"action":"kb_reembed_reset"' "${DATA}/admin/audit.jsonl" || { echo "the reset wasn't audited" >&2; exit 1; }
 [[ "$(call POST /admin/knowledgebases/no-such-kb/reembed '{}')" == 404 ]] || { echo "resetting a KB that doesn't exist: $(cat "${BODY}")" >&2; exit 1; }
+# A shared KB's id is its folder's name, capitals, underscores and dots included.
+mkdir -p "${DATA}/knowledgebases/HR_Hand.book"
+printf '{"name":"HR"}' > "${DATA}/knowledgebases/HR_Hand.book/kb.json"
+printf '{"version":1,"spec":"x:y","failures":1,"nextAttemptAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-01T00:00:00.000Z"}' > "${DATA}/knowledgebases/HR_Hand.book/reembed.json"
+[[ "$(call POST /admin/knowledgebases/HR_Hand.book/reembed '{}')" == 200 ]] || { echo "reset a KB whose folder name has capitals and dots: $(cat "${BODY}")" >&2; exit 1; }
+[[ ! -e "${DATA}/knowledgebases/HR_Hand.book/reembed.json" ]] || { echo "the reset left its state" >&2; exit 1; }
+[[ "$(call POST /admin/knowledgebases/.hidden/reembed '{}')" == 404 ]] || { echo "a dot folder must not be reset: $(cat "${BODY}")" >&2; exit 1; }
+rm -rf "${DATA}/knowledgebases/HR_Hand.book"
 # A persona's KB: a reembed.json that is a link isn't read for its list; a real one is, and resets.
 SPEC="$(node -e 'const l=require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n").map((x)=>JSON.parse(x)).filter((e)=>e.action==="kb_reembedded"); process.stdout.write(l.pop().embeddingProvider)' "${DATA}/admin/audit.jsonl")"
 BEDS="${DATA}/personas/grower/knowledgebases/beds"

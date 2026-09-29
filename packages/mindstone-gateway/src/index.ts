@@ -2802,7 +2802,8 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     });
     return;
   }
-  const globalKbReembedMatch = /^\/admin\/knowledgebases\/([a-z0-9][a-z0-9-]{0,39})\/reembed$/.exec(url.pathname);
+  // A shared KB's id is its folder's name (#158 review): any name but a dot folder, one path segment.
+  const globalKbReembedMatch = /^\/admin\/knowledgebases\/([A-Za-z0-9_-][A-Za-z0-9._-]{0,127})\/reembed$/.exec(url.pathname);
   if (req.method === "POST" && globalKbReembedMatch) {
     // Try again after a give-up (#158 review): clears the KB's re-embed state,
     // so the next owner chat embeds it again. The Console's retry; the CLI's is `kb ingest`.
