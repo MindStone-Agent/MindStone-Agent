@@ -744,7 +744,7 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
       // Only the turn's own chunks here: this is what the next turn waits for (#157).
       const indexed = await indexSqliteMemoryTurn({ transcriptFile, config, otherModelLimit: 0 });
       if (indexed.chunksRejected > 0) {
-        console.warn(`[mindstone] the embedding model refused ${indexed.chunksRejected} memory chunks in this turn's index update; they are found by their words until embedded, and after ${MEMORY_EMBED_SKIP_AFTER} refusals at least 10 minutes apart one is skipped for a day (see mindstone memory status) (#170)`);
+        console.warn(`[mindstone] the embedding model refused ${indexed.chunksRejected} memory chunks in this turn's index update; they are found by their words until embedded, and after ${MEMORY_EMBED_SKIP_AFTER} refusals at least 10 minutes apart one is skipped, and tried again a day later (see mindstone memory status) (#170)`);
       }
       recallIndexFailedAt = 0;
       queueMemoryReembed(config);
@@ -798,7 +798,7 @@ function queueMemoryReembed(config: MindStoneConfig | undefined): void {
       },
     });
     if (result.chunksRejected > 0) {
-      console.warn(`[mindstone] the embedding model refused ${result.chunksRejected} memory chunks while embedding them again; after ${MEMORY_EMBED_SKIP_AFTER} refusals at least 10 minutes apart a chunk is skipped for a day (see mindstone memory status) (#170)`);
+      console.warn(`[mindstone] the embedding model refused ${result.chunksRejected} memory chunks while embedding them again; after ${MEMORY_EMBED_SKIP_AFTER} refusals at least 10 minutes apart a chunk is skipped, and tried again a day later (see mindstone memory status) (#170)`);
     }
     memoryReembedFailedAt = 0;
   })()

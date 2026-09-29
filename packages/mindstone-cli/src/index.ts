@@ -290,7 +290,7 @@ function printMemoryStatus(options: { json?: boolean } = {}): void {
       `Chunks: ${stats.chunks}`,
       `Embedded chunks: ${stats.embeddedChunks}`,
       embeddingModel
-        ? `Chunks ${embeddingModel.spec} refused 3 times, skipped for a day (found by their words): ${embeddingModel.skippedChunks}`
+        ? `Chunks ${embeddingModel.spec} refused 3 or more times, skipped (found by their words, tried again a day after): ${embeddingModel.skippedChunks}`
         : undefined,
       `Duplicate text chunks: ${stats.duplicateTextChunks}`,
       `Vector backend: ${stats.vectorBackend}`,
