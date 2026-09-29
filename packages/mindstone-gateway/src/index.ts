@@ -3492,37 +3492,60 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     // A client that gives up frees the slot: the download is stopped.
     const clientGone = new AbortController();
     res.on("close", () => clientGone.abort());
+    // The headers now, and a newline every OLLAMA_PULL_HEARTBEAT_MS until the
+    // answer (#145): a client's fetch (undici) gives up after 300 s with no
+    // headers, or with no byte of the body. The answer is the same JSON, which
+    // allows the whitespace before it.
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.flushHeaders();
+    const heartbeat = setInterval(() => {
+      if (!res.destroyed && !res.writableEnded) res.write("\n");
+    }, OLLAMA_PULL_HEARTBEAT_MS);
     let result: { ok: true } | { ok: false; error: string };
+    let answered = false;
     try {
+      // Streamed (#145): Ollama answers at once and reports progress as it
+      // goes, so the gateway's own fetch never waits 300 s for a byte either.
       const response = await fetch(`${root}/api/pull`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model, stream: false }),
+        body: JSON.stringify({ model, stream: true }),
         signal: AbortSignal.any([AbortSignal.timeout(OLLAMA_PULL_MS), clientGone.signal]),
       });
-      const text = await response.text();
-      let parsed: { status?: unknown; error?: unknown } = {};
-      try {
-        parsed = JSON.parse(text) as typeof parsed;
-      } catch {
-        // Not JSON: reported below.
+      answered = true;
+      if (response.ok) {
+        result = await readOllamaPull(response);
+      } else {
+        const text = await response.text();
+        let parsed: { error?: unknown } = {};
+        try {
+          parsed = JSON.parse(text) as typeof parsed;
+        } catch {
+          // Not JSON: reported below.
+        }
+        result = { ok: false, error: typeof parsed.error === "string" ? parsed.error : `Ollama answered ${response.status}` };
       }
-      result = response.ok && parsed.status === "success"
-        ? { ok: true }
-        : { ok: false, error: typeof parsed.error === "string" ? parsed.error : `Ollama answered ${response.status}` };
     } catch (error) {
       result = {
         ok: false,
         error: clientGone.signal.aborted
           ? "the download was stopped because the request was closed"
-          : error instanceof Error && error.name === "TimeoutError" ? "the download took too long" : "Ollama can't be reached from the gateway",
+          : error instanceof Error && error.name === "TimeoutError"
+            ? "the download took too long"
+            : answered ? "the connection to Ollama was lost during the download" : "Ollama can't be reached from the gateway",
       };
     } finally {
+      clearInterval(heartbeat);
       ollamaPullRunning = false;
     }
     if (result.ok) lastMissingOllamaModel = undefined;
-    appendAdminAudit(paths.dataDir, { userId, action: "memory_model_pulled", model, ok: result.ok });
-    sendJson(res, 200, result);
+    try {
+      appendAdminAudit(paths.dataDir, { userId, action: "memory_model_pulled", model, ok: result.ok });
+    } catch (error) {
+      // The headers are gone, so the answer ends here whatever happens (#145 review).
+      console.warn(`[mindstone] the model download wasn't audited: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!res.destroyed && !res.writableEnded) res.end(JSON.stringify(result, null, 2));
     return;
   }
 
@@ -4306,9 +4329,53 @@ const OLLAMA_MODEL_NAME = /^(?:[a-z0-9][a-z0-9_-]{0,63}\/)?[a-z0-9][a-z0-9_-]*(?
 const MEMORY_CHECK_EMBED_MS = 45_000;
 const MEMORY_CHECK_MS = 50_000;
 const OLLAMA_PULL_MS = 15 * 60_000;
+/** A pull's answer gets a newline this often while it runs, well inside a client's 300 s (#145). */
+const OLLAMA_PULL_HEARTBEAT_MS = 10_000;
+/** The longest line of a streamed pull the gateway reads: a progress report is a few hundred bytes. */
+const OLLAMA_PULL_LINE_BYTES = 64 * 1024;
 let ollamaPullRunning = false;
 /** The Ollama model the last memory check reported missing: the only one a pull may fetch (#111 review). */
 let lastMissingOllamaModel: string | undefined;
+
+/**
+ * Reads a streamed Ollama pull (#145): one JSON object a line, progress until
+ * the last, which says `success`; an `error` line ends it as a failure.
+ */
+async function readOllamaPull(response: Response): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!response.body) return { ok: false, error: `Ollama answered ${response.status} with no body` };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  let last: { status?: unknown; error?: unknown } = {};
+  const take = (line: string): void => {
+    if (!line.trim()) return;
+    try {
+      last = JSON.parse(line) as typeof last;
+    } catch {
+      last = {};
+    }
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      for (let newline = buffered.indexOf("\n"); newline >= 0; newline = buffered.indexOf("\n")) {
+        take(buffered.slice(0, newline));
+        buffered = buffered.slice(newline + 1);
+        if (typeof last.error === "string") return { ok: false, error: last.error };
+        // Done: a connection dropped after this doesn't undo the download.
+        if (last.status === "success") return { ok: true };
+      }
+      if (buffered.length > OLLAMA_PULL_LINE_BYTES) return { ok: false, error: "Ollama's answer isn't a download report" };
+    }
+    take(buffered + decoder.decode());
+  } finally {
+    reader.cancel().catch(() => undefined);
+  }
+  if (typeof last.error === "string") return { ok: false, error: last.error };
+  return last.status === "success" ? { ok: true } : { ok: false, error: "the download ended before it finished" };
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
