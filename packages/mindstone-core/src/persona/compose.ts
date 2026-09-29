@@ -263,7 +263,7 @@ export function ensurePersonaKnowledgebasesDir(personaDir: string): string {
 /** A private KB id, and a text source's name: one lowercase folder or file name. */
 export const PRIVATE_KB_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const SOURCE_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
-export const PRIVATE_KB_LIMITS = { name: 80, description: 300, text: 100_000, url: 2000, sources: 100 };
+export const PRIVATE_KB_LIMITS = { name: 80, description: 300, text: 100_000, url: 2000, sources: 100, urlSources: 10 };
 
 /** The persona's private KB folder `<kbId>`, when it and everything above it is its own (no links). */
 function privateKnowledgebaseDir(personaDir: string, kbId: string): string {
@@ -391,6 +391,10 @@ export function addPrivateKnowledgebaseSource(personaDir: string, kbId: string, 
     }
     if (current.text.includes(body.name) || current.urls.some((source) => source.id === body.name)) {
       throw new PersonaComposeError(`a source named ${body.name} already exists`, "source_exists", 409);
+    }
+    // Each is fetched at ingest, one after another, 20 s at most each: ten keep an ingest under the Console's wait.
+    if (current.urls.length >= PRIVATE_KB_LIMITS.urlSources) {
+      throw new PersonaComposeError(`a private knowledge base holds at most ${PRIVATE_KB_LIMITS.urlSources} URL sources`, "too_many_sources", 409);
     }
     const catalog = readCatalog(dir);
     const existing = Array.isArray(catalog.externalSources) ? catalog.externalSources : [];
