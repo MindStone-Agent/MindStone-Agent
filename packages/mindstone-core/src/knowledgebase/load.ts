@@ -425,8 +425,9 @@ export async function reembedStaleKnowledgebase(options: {
       if (!read) continue;
       const current = readKbVectors(loaded.kb.dir, read.text, options.embedder, { noLinks, decode: false });
       if (current.state !== "stale" || current.cause !== "model") {
-        // Embedded for this model by some other way: an earlier give-up no longer applies (#158 review).
-        if (current.state === "ready") clearKbReembedState(loaded.kb.dir);
+        // Not stale for this model any more (embedded some other way, or its vectors
+        // removed): an earlier state no longer applies (#158 review).
+        clearKbReembedState(loaded.kb.dir);
         continue;
       }
       const state = reembedState(loaded.kb.dir, spec, noLinks);
@@ -515,6 +516,25 @@ export const KB_REEMBED_LIMITS = {
 export function turnsHoldReembed(starts: Iterable<number>, now = Date.now(), waitMs = KB_REEMBED_LIMITS.turnWaitMs): boolean {
   for (const started of starts) if (now - started < waitMs) return true;
   return false;
+}
+
+/**
+ * A KB's re-embed state for the Console (#158 review): only while the KB is
+ * still stale for the install's model, the only case the gateway acts on.
+ */
+export function knowledgebaseReembedState(
+  kbDir: string,
+  kbId: string,
+  embedder: { id: string; model: string },
+  noLinks = false,
+): KbReembedState | undefined {
+  const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
+  if (!loaded.ok) return undefined;
+  const state = reembedState(loaded.kb.dir, memoryEmbeddingSpec(embedder), noLinks);
+  if (!state) return undefined;
+  const read = readKbIndexWithText(loaded.kb);
+  const current = read ? readKbVectors(loaded.kb.dir, read.text, embedder, { noLinks, decode: false }) : undefined;
+  return current?.state === "stale" && current.cause === "model" ? state : undefined;
 }
 
 /** The re-embed state that applies to a KB for `spec`, if any (#158). */

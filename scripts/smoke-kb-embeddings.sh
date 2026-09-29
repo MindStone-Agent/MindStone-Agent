@@ -124,14 +124,14 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do curl -s "${STUB}/_test/state" >/dev/null 2>&1 
 # --- 1. Unit ---
 MINDSTONE_AGENT_ROOT="${PROJECT_ROOT}" npx tsx <<'TS'
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import {
   KB_EMBED_LIMITS, KB_REEMBED_STATE_FILE, KB_VECTORS_FILE, cosineSimilarity, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbReembedState, readKbVectors, writeKbReembedState, writeKbVectors,
 } from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
-import { KB_REEMBED_LIMITS, ingestMindStoneKnowledgebase, mindStoneKbStatus, reembedState, reembedStaleKnowledgebase, turnsHoldReembed } from "./packages/mindstone-core/src/knowledgebase/load.ts";
+import { KB_REEMBED_LIMITS, ingestMindStoneKnowledgebase, knowledgebaseReembedState, mindStoneKbStatus, reembedState, reembedStaleKnowledgebase, turnsHoldReembed } from "./packages/mindstone-core/src/knowledgebase/load.ts";
 import { KnowledgebaseRecallProvider, knowledgebaseRecallSettings } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
 import { buildMemoryRecallPrompt, CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, recallMindStoneMemory, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
 import { createMemoryEmbeddingProvider, sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
@@ -655,10 +655,12 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     const root = mkdtempSync(join(tmpdir(), "kbvec-r2-pause-"));
     await kb(root, "p-kb", two, "old");
     let calls = 0;
+    let gates = 0;
     const once = { id: "stub", model: "m1", async embedTexts(texts: string[]) { calls += 1; if (calls === 2) throw Object.assign(limited(), { retryAfterMs: 3 }); return texts.map(() => [1, 0, 0]); } } as any;
-    const done = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: once, rateLimit: quick });
+    const done = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: once, rateLimit: quick, beforeBatch: async () => { gates += 1; } });
     assert.equal(done.reembedded?.vectors.state, "ready", "a 429 is a pause, then the entry again");
     assert.equal(calls, 3, "two entries, one sent twice");
+    assert.equal(gates, 3, "the resend waits for turns like every request");
   }
   // A 429 after entries were embedded, past the waits, counts: the work is lost.
   {
@@ -709,11 +711,23 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
     await kb(root, "d-kb", "# D\n\nalpha d\n", "m1");
     assert.ok(existsSync(join(root, "d-kb", KB_VECTORS_FILE)), "the ingest kept its vectors");
   }
-  // A state whose reason has control characters isn't read.
-  {
+  // A state whose reason has control or direction characters isn't read.
+  for (const reason of ["x\u001b[2Jy", "x\u202Ey"]) {
     const root = mkdtempSync(join(tmpdir(), "kbvec-r2-reason-"));
-    writeFileSync(join(root, KB_REEMBED_STATE_FILE), JSON.stringify({ version: 1, spec: "stub:m1", failures: 1, nextAttemptAt: new Date().toISOString(), reason: "x\u001b[2Jy", updatedAt: new Date().toISOString() }));
-    assert.equal(readKbReembedState(root), undefined);
+    writeFileSync(join(root, KB_REEMBED_STATE_FILE), JSON.stringify({ version: 1, spec: "stub:m1", failures: 1, nextAttemptAt: new Date().toISOString(), reason, updatedAt: new Date().toISOString() }));
+    assert.equal(readKbReembedState(root), undefined, JSON.stringify(reason));
+  }
+  // The Console sees a state only while the KB is still stale for the model; a scan clears it otherwise.
+  {
+    const root = mkdtempSync(join(tmpdir(), "kbvec-r2-shown-"));
+    await kb(root, "s-kb", "# S\n\nalpha s\n", "old");
+    const m1 = { id: "stub", model: "m1" };
+    assert.ok(writeKbReembedState(join(root, "s-kb"), { version: 1, spec: "stub:m1", failures: 5, gaveUp: true, updatedAt: new Date().toISOString() }));
+    assert.equal(knowledgebaseReembedState(root, "s-kb", m1)?.gaveUp, true, "stale for the model: shown");
+    rmSync(join(root, "s-kb", KB_VECTORS_FILE));
+    assert.equal(knowledgebaseReembedState(root, "s-kb", m1), undefined, "its vectors gone: not stale for the model, not shown");
+    await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: { ...fixed({ alpha: [1, 0, 0] }), model: "m1" } as any });
+    assert.ok(!existsSync(join(root, "s-kb", KB_REEMBED_STATE_FILE)), "and a scan clears it");
   }
   // The provider: a server it can't reach is marked; a 200 it can't use isn't; a 429's Retry-After is kept.
   {

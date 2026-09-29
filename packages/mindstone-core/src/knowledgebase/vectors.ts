@@ -153,7 +153,7 @@ export function readKbReembedState(kbDir: string, options: { noLinks?: boolean }
       || typeof state.failures !== "number" || !Number.isInteger(state.failures) || state.failures < 0
       || (state.nextAttemptAt !== undefined && (typeof state.nextAttemptAt !== "string" || Number.isNaN(Date.parse(state.nextAttemptAt))))
       || (state.gaveUp !== undefined && state.gaveUp !== true)
-      || (state.reason !== undefined && (typeof state.reason !== "string" || state.reason.length > 300 || /[\u0000-\u001f\u007f-\u009f]/.test(state.reason)))
+      || (state.reason !== undefined && (typeof state.reason !== "string" || state.reason.length > 300 || /\p{C}/u.test(state.reason)))
     ) {
       return undefined;
     }
@@ -298,6 +298,8 @@ export async function writeKbVectors(params: {
           const wait = Math.min(limit.maxMs, Math.max(limit.minMs, typeof asked === "number" ? asked : 0));
           const waitStarted = Date.now();
           await new Promise((resolve) => setTimeout(resolve, wait));
+          // The resend waits for turns like any request (#158 review).
+          await params.beforeBatch?.();
           paused += Date.now() - waitStarted;
         }
       }
@@ -310,7 +312,7 @@ export async function writeKbVectors(params: {
       cause,
       embedded: Object.keys(encoded).length,
       reason: cause === "rate-limited"
-        ? "the embedder is limiting requests (HTTP 429); tried again later"
+        ? "the embedder is limiting requests (HTTP 429)"
         : error instanceof KbZeroVector
         ? "the embedder returned an all-zero vector for an entry; check the embedding model, then re-ingest"
         : error instanceof KbEmbedTimeout
