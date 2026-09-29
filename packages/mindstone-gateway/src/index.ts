@@ -2734,7 +2734,11 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
             // ingest, so an admin ingest of it can't overlap (#125 review).
             const ingestKey = `${result.personaId}/${result.kbId}`;
             PRIVATE_KB_INGESTS.add(ingestKey);
-            const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true })
+            const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, {
+              now: new Date().toISOString(),
+              noLinks: true,
+              privateKbUrls: { allowPrivateHosts: kbPrivateHostsAllowed() },
+            })
               .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }))
               .finally(() => PRIVATE_KB_INGESTS.delete(ingestKey));
             const { kbRoot: _root, ...shown } = result;

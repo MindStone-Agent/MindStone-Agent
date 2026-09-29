@@ -1938,7 +1938,12 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
       output.write(`${result.listed ? "" : "Warning: "}${result.note[0]!.toUpperCase()}${result.note.slice(1)}.\n`);
     } else if (result.kind === "persona_kb_create") {
       // The approval has happened by now: an ingest that throws is reported like one that fails.
-      const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true })
+      // With the gateway's limits and host checks, in case a URL source was added in between (#125 review).
+      const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, {
+        now: new Date().toISOString(),
+        noLinks: true,
+        privateKbUrls: { allowPrivateHosts: kbPrivateHostsAllowed() },
+      })
         .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }));
       output.write(ingested.ok
         ? `${gold("Approved")} — private knowledge base ${result.kbId} written and ingested for persona ${result.personaId} (${ingested.entryCount} entries).\n`
