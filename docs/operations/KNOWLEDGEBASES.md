@@ -98,6 +98,18 @@ alike.
     over 256 MB. Re-ingest;
   - `unused`: vectors exist but no embedder is configured now.
 
+  **After a switch of embedding model** (#151), a KB whose vectors the old
+  model made is embedded again on its own, as memory's chunks are (#140):
+  after each owner chat through the gateway (automatic recall on), one such
+  KB, global or private, is embedded from its `index.json`, in the
+  background; its sources aren't read or fetched again. A KB of more than 512
+  entries, one whose index changed after its vectors, and a private KB being
+  ingested at that moment are left for `kb ingest` (or the next chat). Until
+  then recall finds the KB by its words. KB word-match hits are marked
+  `recallMode: "lexical"` in the recall event, as memory's are, and KB
+  vectors are matched to the install's model by the same `<provider>:<model>`
+  spec memory records.
+
   Status can't see a change of dimension under the same provider and model
   name (another server, or a model replaced under its name) without calling
   the embedder: recall then ignores the vectors (below) and status still says

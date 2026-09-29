@@ -8,7 +8,7 @@ import { runtimePathsFromEnv, type MindStoneRuntimePaths } from "../paths/runtim
 import { SCOPE_DIMENSIONS as RECALL_SCOPE_DIMENSIONS, scopeMatchesRecallFilter } from "../app-engine/types.js";
 import { connectorOwnerSenders, isOwnerDirectMessage } from "../channels/session.js";
 import type { TranscriptEntry } from "../transcript/index.js";
-import { createMemoryEmbeddingProvider, type MemoryEmbeddingProvider } from "./embedding.js";
+import { createMemoryEmbeddingProvider, memoryEmbeddingSpec, type MemoryEmbeddingProvider } from "./embedding.js";
 import { discoverFileMemoryDocuments } from "./file-memory.js";
 import { redactSecrets } from "./redact.js";
 import type { MemoryDocument, MemoryHit, MemoryQuery, MemoryRecallProvider } from "./types.js";
@@ -271,16 +271,6 @@ function initializeSchema(db: DatabaseSync): void {
   if (!columns.some((column) => column.name === "embedding_spec")) {
     db.exec("ALTER TABLE memory_chunks ADD COLUMN embedding_spec TEXT");
   }
-}
-
-/**
- * The embedding model a vector comes from, as recorded with each chunk
- * (#140): `<provider id>:<model>`. A chunk embedded by another model (or
- * before this was recorded) is embedded again by the next backfill, and until
- * then recall finds it by its words.
- */
-export function memoryEmbeddingSpec(provider: Pick<MemoryEmbeddingProvider, "id" | "model">): string {
-  return `${provider.id}:${provider.model}`;
 }
 
 /** How many chunks have a vector, and how many of those another model made (or an unrecorded one). */

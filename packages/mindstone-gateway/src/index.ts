@@ -119,6 +119,7 @@ import {
   unknownKnowledgebaseIds,
   knowledgebasesDirFromConfig,
   personaKnowledgebasesDir,
+  reembedStaleKnowledgebase,
   decisionForAnsweringPersona,
   personaComponentsSummary,
   privateKnowledgebasesAllowed,
@@ -739,6 +740,52 @@ function queueRecallIndex(config: MindStoneConfig | undefined, sessionKey: strin
     .catch((error: unknown) => {
       recallIndexFailedAt = Date.now();
       console.warn(`[mindstone] recall index update failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+}
+
+/**
+ * After an owner's turn, a KB whose vectors another embedding model made is
+ * embedded again in the background from its index (#151), as memory's chunks
+ * are by the backfill (#140). One KB at a time; a private KB being ingested
+ * is left for later. A KB over KB_REEMBED_MAX_ENTRIES keeps word match until
+ * `kb ingest`.
+ */
+let kbReembedRunning = false;
+
+function queueKnowledgebaseReembed(config: MindStoneConfig | undefined): void {
+  if (kbReembedRunning || config?.knowledgebases?.recall?.enabled === false || !isAutoRecallEnabled(config)) return;
+  const embedder = createMemoryEmbeddingProvider(config, process.env, { timeoutMs: KB_EMBED_LIMITS.requestTimeoutMs });
+  if (!embedder) return;
+  const paths = runtimePathsFromEnv();
+  const personasDir = personasDirFromConfig(config, paths);
+  const kbDirs = [
+    { dir: knowledgebasesDirFromConfig(config, paths) },
+    ...discoverMindStonePersonas(personasDir).flatMap((persona) => {
+      const dir = readablePersonaKnowledgebasesDir(persona.dir);
+      return dir ? [{ dir, personaId: persona.id }] : [];
+    }),
+  ];
+  kbReembedRunning = true;
+  void reembedStaleKnowledgebase({
+    kbDirs,
+    embedder,
+    now: new Date().toISOString(),
+    claim: ({ personaId, kbId }) => {
+      if (!personaId) return () => undefined;
+      const key = `${personaId}/${kbId}`;
+      if (PRIVATE_KB_INGESTS.has(key) || PRIVATE_KB_INGESTS.size >= MAX_PRIVATE_KB_INGESTS) return undefined;
+      PRIVATE_KB_INGESTS.add(key);
+      return () => PRIVATE_KB_INGESTS.delete(key);
+    },
+  })
+    .then((result) => {
+      if (result) console.info(`[mindstone] knowledge base ${result.personaId ? `${result.personaId}/` : ""}${result.kbId} embedded again for the new model: ${result.vectors.state}`);
+    })
+    .catch((error: unknown) => {
+      console.warn(`[mindstone] knowledge base re-embed failed: ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(() => {
+      kbReembedRunning = false;
     });
 }
 
@@ -1563,6 +1610,7 @@ async function runConfiguredRoute(input: {
     });
     runManager.complete(run.id);
     queueRecallIndex(input.config, input.sessionKey);
+    if (input.audience === "owner") queueKnowledgebaseReembed(input.config);
 
     return {
       routed: true,

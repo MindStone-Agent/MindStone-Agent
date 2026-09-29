@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { MemoryEmbeddingProvider } from "../memory/embedding.js";
+import { memoryEmbeddingSpec, type MemoryEmbeddingProvider } from "../memory/embedding.js";
 import type { MindStoneKbIndexEntry, MindStoneKbVectorsStatus } from "./types.js";
 
 /**
@@ -198,7 +198,7 @@ export async function writeKbVectors(params: {
 
 type ReadKbVectors =
   | { state: "ready"; loaded: LoadedKbVectors; count: number }
-  | { state: "missing" | "stale" | "unused"; reason: string; provider?: string; model?: string; dimension?: number };
+  | { state: "missing" | "stale" | "unused"; reason: string; provider?: string; model?: string; dimension?: number; cause?: "model" };
 
 /**
  * The vectors beside an index, if they can be used with `embedder` (the
@@ -237,8 +237,14 @@ export function readKbVectors(
   }
   const described = { provider: file.provider, model: file.model, dimension };
   if (!embedder) return { state: "unused", reason: "no embedder is configured", ...described };
-  if (file.provider !== embedder.id || file.model !== embedder.model) {
-    return { state: "stale", reason: `made with ${file.provider}:${file.model}, the install now uses ${embedder.id}:${embedder.model}; re-ingest`, ...described };
+  // The same model identity memory records with each chunk (#140, #151).
+  if (memoryEmbeddingSpec({ id: file.provider, model: file.model }) !== memoryEmbeddingSpec(embedder)) {
+    return {
+      state: "stale",
+      reason: `made with ${memoryEmbeddingSpec({ id: file.provider, model: file.model })}, the install now uses ${memoryEmbeddingSpec(embedder)}; embedded again after an owner's chat, or re-ingest`,
+      ...described,
+      cause: "model",
+    };
   }
   if (file.indexSha256 !== kbIndexDigest(indexText)) {
     return { state: "stale", reason: "the index changed after these vectors were made; re-ingest", ...described };

@@ -126,7 +126,7 @@ import { join } from "node:path";
 import {
   KB_EMBED_LIMITS, KB_VECTORS_FILE, cosineSimilarity, kbEntryEmbeddingText, kbVectorsCachedPaths, readKbVectors, writeKbVectors,
 } from "./packages/mindstone-core/src/knowledgebase/vectors.ts";
-import { ingestMindStoneKnowledgebase } from "./packages/mindstone-core/src/knowledgebase/load.ts";
+import { ingestMindStoneKnowledgebase, reembedStaleKnowledgebase } from "./packages/mindstone-core/src/knowledgebase/load.ts";
 import { KnowledgebaseRecallProvider, knowledgebaseRecallSettings } from "./packages/mindstone-core/src/knowledgebase/recall.ts";
 import { buildMemoryRecallPrompt, CombinedMemoryRecallProvider, KB_RECALL_QUOTA, isQuotaHit, recallMindStoneMemory, selectRecallHits } from "./packages/mindstone-core/src/memory/recall.ts";
 import { sharedQueryEmbedder } from "./packages/mindstone-core/src/memory/embedding.ts";
@@ -227,6 +227,7 @@ assert.equal(semantic[0].score, 1);
 assert.equal(semantic[0].text, "header\n- a1\n- a0\nfooter", "closest section first");
 assert.equal(semantic[0].metadata?.bestCitation, "a1");
 assert.ok(hits.some((h) => h.id === "kb:c" && !isQuotaHit(h)), "word match still runs");
+assert.equal(hits.find((h) => h.id === "kb:c")?.metadata?.recallMode, "lexical", "a KB word-match hit says so (#151)");
 assert.equal(queryEmbedder.calls, 1);
 // A source found by meaning and by words comes back twice; the selection keeps one copy.
 hits = await new KnowledgebaseRecallProvider(recall as any, { embedder: fixed({ question: [1, 0, 0] }), minSimilarity: 0.5 }).search({ text: "question header", limit: 8 });
@@ -424,6 +425,32 @@ assert.deepEqual(selectRecallHits([hit("m1", 0.9), hit("m2", 0.8)], 1).map((h) =
   const d = mkdtempSync(join(tmpdir(), "kbvec-fifo-"));
   execFileSync("mkfifo", [join(d, KB_VECTORS_FILE)]);
   assert.equal(readKbVectors(d, indexText, { id: "stub", model: "m1" }).state, "missing");
+}
+// After a model switch, a KB is embedded again from its index, one a call (#151): only one another
+// model made, not one whose index changed or that is too large; a claimed-out KB is left for later.
+{
+  const root = mkdtempSync(join(tmpdir(), "kbvec-reembed-"));
+  const kb = async (id: string, text: string, model: string) => {
+    mkdirSync(join(root, id, "sources"), { recursive: true });
+    writeFileSync(join(root, id, "kb.json"), JSON.stringify({ name: id }));
+    writeFileSync(join(root, id, "sources", "a.md"), text);
+    await ingestMindStoneKnowledgebase(root, id, { embedder: { ...fixed({ alpha: [1, 0, 0] }), model } as any });
+  };
+  await kb("a-big", "# A\n\n## One\n\nalpha one\n\n## Two\n\nalpha two\n", "old");
+  await kb("b-index", "# B\n\nalpha b\n", "m1");
+  writeFileSync(join(root, "b-index", "index.json"), readFileSync(join(root, "b-index", "index.json"), "utf8") + " ");
+  await kb("c-old", "# C\n\nalpha c\n", "old");
+  await kb("d-new", "# D\n\nalpha d\n", "m1");
+  const now = { ...fixed({ alpha: [1, 0, 0] }), model: "m1" } as any;
+  // a-big has 2 entries: over a limit of 1. b-index (this model) changed after its vectors. c-old: another model.
+  let result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: now, maxEntries: 1, claim: ({ kbId }) => (kbId === "c-old" ? undefined : () => undefined) });
+  assert.equal(result, undefined, "a claimed-out KB is left for later, and nothing else qualifies");
+  result = await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: now, maxEntries: 1 });
+  assert.equal(result?.kbId, "c-old");
+  assert.equal(JSON.parse(readFileSync(join(root, "c-old", KB_VECTORS_FILE), "utf8")).model, "m1");
+  assert.equal(await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: now, maxEntries: 1 }), undefined, "nothing left under the limit");
+  assert.equal((await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: now }))?.kbId, "a-big", "a-big within the default limit");
+  assert.equal(await reembedStaleKnowledgebase({ kbDirs: [{ dir: root }], embedder: now }), undefined, "a KB whose index changed under this model is left for kb ingest");
 }
 // Sections whose headings slug alike get their own ids, and so their own vectors.
 {
@@ -730,5 +757,18 @@ ${MS} approvals approve "${cli_persona}" --yes >/dev/null
 ${MS} approvals approve "${cli_kb}" --yes > "${TEMP_RUNTIME}/cli-approve.txt"
 grep -q "vectors: ready" "${TEMP_RUNTIME}/cli-approve.txt" || { echo "CLI approve-path ingest: $(cat "${TEMP_RUNTIME}/cli-approve.txt")" >&2; exit 1; }
 [[ -f "${DATA}/personas/pa-cli/knowledgebases/beds/vectors.json" ]] || { echo "the CLI's approved KB has no vectors.json" >&2; exit 1; }
+
+# After a switch of embedding model, an owner's chat through the gateway has a stale KB embedded again (#151).
+set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-b"'
+stub_mode ok
+${MS} kb status pantry --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="stale") { console.error("pantry before the chat:", JSON.stringify(s.vectors)); process.exit(1); }})'
+code="$(curl -s -o "${BODY}" -w '%{http_code}' -X POST -H "Authorization: Bearer ${KBE_TOKEN}" -H 'content-type: application/json' -d '{"text":"anything new about the garden?"}' "${BASE}/chat/send")"
+[[ "${code}" == "200" ]] || { echo "gateway chat after the switch ${code}: $(cat "${BODY}")" >&2; exit 1; }
+for _ in $(seq 1 40); do
+  grep -q '"model":"kbstub-b"' "${DATA}/knowledgebases/pantry/vectors.json" 2>/dev/null && break
+  sleep 0.5
+done
+grep -q '"model":"kbstub-b"' "${DATA}/knowledgebases/pantry/vectors.json" || { echo "the stale KB was not embedded again after the owner's chat" >&2; exit 1; }
+${MS} kb status pantry --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const s=JSON.parse(d); if (s.vectors.state!=="ready") { console.error("pantry after the chat:", JSON.stringify(s.vectors)); process.exit(1); }})'
 
 echo "KB embeddings smoke test passed."

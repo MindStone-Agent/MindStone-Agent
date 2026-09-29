@@ -365,6 +365,50 @@ export function ingestApprovedPrivateKnowledgebase(
   return ingestMindStoneKnowledgebase(kbRoot, kbId, { now: options.now, noLinks: true, textOnly: true, embedder: options.embedder });
 }
 
+/**
+ * After a switch of embedding model (#151): embed again, from its index (no
+ * source is read or fetched), the first KB whose vectors another model made,
+ * among the global collections and every persona's private KBs. One KB a
+ * call, at most `maxEntries` entries; a larger one keeps word match until
+ * `kb ingest`. `claim` lets the caller skip a KB being ingested meanwhile.
+ * A failed embed removes the old vectors, so the KB isn't tried again every
+ * turn.
+ */
+export async function reembedStaleKnowledgebase(options: {
+  kbDirs: Array<{ dir: string; personaId?: string }>;
+  embedder: MemoryEmbeddingProvider;
+  now?: string;
+  maxEntries?: number;
+  claim?: (target: { personaId?: string; kbId: string }) => (() => void) | undefined;
+}): Promise<{ kbId: string; personaId?: string; vectors: KbVectorsWriteResult } | undefined> {
+  const maxEntries = options.maxEntries ?? KB_REEMBED_MAX_ENTRIES;
+  for (const { dir, personaId } of options.kbDirs) {
+    const noLinks = personaId !== undefined;
+    for (const summary of discoverMindStoneKnowledgebases(dir)) {
+      if (summary.error || !summary.indexed || summary.entryCount > maxEntries) continue;
+      if (noLinks && privateKnowledgebaseLinkError(dir, summary.id)) continue;
+      const loaded = loadMindStoneKnowledgebase(dir, summary.id);
+      if (!loaded.ok) continue;
+      const read = readKbIndexWithText(loaded.kb);
+      if (!read) continue;
+      const current = readKbVectors(loaded.kb.dir, read.text, options.embedder, { noLinks });
+      if (current.state !== "stale" || current.cause !== "model") continue;
+      const release = options.claim ? options.claim({ personaId, kbId: summary.id }) : () => undefined;
+      if (!release) continue;
+      try {
+        const vectors = await writeKbVectors({ kbDir: loaded.kb.dir, kbId: summary.id, entries: read.index.entries, indexText: read.text, embedder: options.embedder, now: options.now });
+        return { kbId: summary.id, personaId, vectors };
+      } finally {
+        release();
+      }
+    }
+  }
+  return undefined;
+}
+
+/** The largest KB embedded again after a model switch without an explicit ingest (#151). */
+export const KB_REEMBED_MAX_ENTRIES = 512;
+
 export function readMindStoneKbIndex(kb: MindStoneKnowledgebase): MindStoneKbIndex | undefined {
   return readKbIndexWithText(kb)?.index;
 }
