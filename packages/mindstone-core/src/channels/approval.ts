@@ -356,6 +356,14 @@ function boundedList(value: unknown): string[] | undefined {
  * and tag characters (#125 review).
  */
 const PROPOSAL_UNSAFE_TEXT = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u2028\u2029\u{E0000}-\u{E007F}]/u;
+/** A name (a memory path, a mutation resource) is one line too: a line break would draw a line of its own (#125 review). */
+const PROPOSAL_UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u2028\u2029\u{E0000}-\u{E007F}]/u;
+
+/** Text for a summary line, with anything unsafe shown as \u{..}: summaries reach logs and the TUI as they are. */
+function summaryText(text: string): string {
+  return text.replace(new RegExp(PROPOSAL_UNSAFE_NAME.source, "gu"), (char) => `\\u{${char.codePointAt(0)!.toString(16)}}`);
+}
+
 function hasUnsafeText(value: unknown): boolean {
   if (typeof value === "string") return PROPOSAL_UNSAFE_TEXT.test(value.replace(/\r\n/g, "\n"));
   if (Array.isArray(value)) return value.some(hasUnsafeText);
@@ -376,7 +384,8 @@ export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undef
   // One line: the label goes into the card's summary, which list views print
   // as it is, so a line break could draw rows of its own (#125 review).
   const label = typeof record.label === "string" && /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(record.label) ? undefined : boundedText(record.label, SKILL_PROPOSAL_LIMITS.text);
-  const description = boundedText(record.description, SKILL_PROPOSAL_LIMITS.text);
+  // One line, like the label: `skill list` prints it as a row (#125 review).
+  const description = typeof record.description === "string" && /[\n\t]/.test(record.description.trim()) ? undefined : boundedText(record.description, SKILL_PROPOSAL_LIMITS.text);
   const goal = record.goal === undefined ? undefined : boundedText(record.goal, SKILL_PROPOSAL_LIMITS.text);
   const whenToUse = boundedList(record.whenToUse);
   const outputs = boundedList(record.outputs);
@@ -630,7 +639,7 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
         const content = typeof parsed?.content === "string" ? parsed.content : "";
         // A path is a file name: no control, bidi or tag characters, which
         // would reach terminals and file names as they are (#125 review).
-        if (path && content && !memory && !PROPOSAL_UNSAFE_TEXT.test(path)) memory = { path, content };
+        if (path && content && !memory && !PROPOSAL_UNSAFE_NAME.test(path)) memory = { path, content };
       } else if (fenceKind === "persona") {
         if (!persona) {
           const base = parsePersonaProposal(parsed);
@@ -651,9 +660,11 @@ export function extractActionProposals(replyText: string): ExtractedActionPropos
         }
       } else {
         const operation = parsed?.operation === "update" ? "update" : parsed?.operation === "create" ? "create" : undefined;
-        const resource = typeof parsed?.resource === "string" && parsed.resource.trim() && !PROPOSAL_UNSAFE_TEXT.test(parsed.resource) ? parsed.resource.trim() : "event";
+        const resource = typeof parsed?.resource === "string" && parsed.resource.trim() ? parsed.resource.trim() : "event";
         const data = parsed?.data && typeof parsed.data === "object" && !Array.isArray(parsed.data) ? (parsed.data as Record<string, unknown>) : undefined;
-        if (operation && data) {
+        // A resource that isn't a plain name drops the proposal: the card
+        // never shows a different resource than the agent proposed (#125 review).
+        if (operation && data && !PROPOSAL_UNSAFE_NAME.test(resource)) {
           mutations.push({ connectorId: "calendar", operation, resource, data });
         }
       }
@@ -901,7 +912,7 @@ export function applyActionProposalDiscipline(params: {
         sessionKey: params.sessionKey,
         agentId: params.agentId,
         createdAt: new Date().toISOString(),
-        summary: `${mutation.operation} ${mutation.resource} via ${mutation.connectorId}: ${JSON.stringify(mutation.data).slice(0, 80)}`,
+        summary: `${mutation.operation} ${mutation.resource} via ${mutation.connectorId}: ${summaryText(JSON.stringify(mutation.data).slice(0, 80))}`,
         mutation,
       }),
     ),

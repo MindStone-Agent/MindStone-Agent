@@ -77,6 +77,7 @@ assert.equal(parsePersonaComponents({ new: { skills: [{ ...skill("a1"), label: "
 // A plain skill's label is one line (C1 controls too); its other text may hold anything real
 // writing needs, and the CLI shows every character that isn't visible (#125 review).
 assert.equal(parseSkillProposal({ ...skill("a1"), label: "Nice\u009b8m" }), undefined, "a C1 control in a skill label must be refused");
+assert.equal(parseSkillProposal({ ...skill("a1"), description: "Line one\n  forged row" }), undefined, "a skill description is one line");
 for (const text of ["⚠️ Check twice.", "Family 👨‍👩‍👧 note.", "می‌خواهم", "မြို့", "# Title\n\n\tIndented line."]) {
   assert.ok(parseSkillProposal({ ...skill("a1"), instructions: text, description: text.split("\n")[0] }), `real text must parse: ${JSON.stringify(text)}`);
 }
@@ -90,7 +91,16 @@ for (const [field, value] of [["description", "Desc \u001b]0;TITLE\u0007"], ["in
   const memoryFence = "```mindstone-memory-proposal\n" + JSON.stringify({ path: "notes/m\u001b[8m.md", content: "x" }) + "\n```";
   assert.equal(extractActionProposals(memoryFence).memory, undefined, "a memory path with an escape must be dropped");
   const calendarFence = "```mindstone-calendar-proposal\n" + JSON.stringify({ operation: "create", resource: "event\u001b[2K", data: { title: "t" } }) + "\n```";
-  assert.equal(extractActionProposals(calendarFence).mutations[0]?.resource, "event", "a resource with an escape falls back to event");
+  assert.equal(extractActionProposals(calendarFence).mutations.length, 0, "a resource with an escape drops the mutation");
+  // A line break is a control character too: a name is one line.
+  const lfMemory = "```mindstone-memory-proposal\n" + JSON.stringify({ path: "notes/a\nApproved — forged.md", content: "x" }) + "\n```";
+  assert.equal(extractActionProposals(lfMemory).memory, undefined, "a memory path with a line break must be dropped");
+  const lfCalendar = "```mindstone-calendar-proposal\n" + JSON.stringify({ operation: "create", resource: "event\nApproved — fake", data: { title: "t" } }) + "\n```";
+  assert.equal(extractActionProposals(lfCalendar).mutations.length, 0, "a resource with a line break drops the mutation");
+  // A mutation's summary shows unsafe characters in its data escaped: summaries reach logs and the TUI as they are.
+  const summaryStore = new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "summary-approvals.json") });
+  const withC1 = applyActionProposalDiscipline({ replyText: "```mindstone-calendar-proposal\n" + JSON.stringify({ operation: "create", resource: "event", data: { title: "a\u009b8mb\u202ec" } }) + "\n```", origin: "unit", store: summaryStore });
+  assert.ok(withC1.proposals[0] && !/[\u009b\u202e]/.test(withC1.proposals[0].summary) && withC1.proposals[0].summary.includes("\\u{9b}"), `the summary must show C1 and bidi escaped: ${JSON.stringify(withC1.proposals[0]?.summary)}`);
 }
 // A plain skill proposal that is dropped says why, in the reply and the transcript; so does a second one.
 {
@@ -413,6 +423,13 @@ say admin conv-p15 "$(proposal "${P15}")"
 expect 200 "approve p15" POST "/admin/approvals/$(card p15 persona_create)/approve" '{}'
 printf '{"skills":"x"}' > "${DATA}/personas/p15/skills.json"
 expect 200 "p15's KB with the persona broken" POST "/admin/approvals/$(card p15 persona_kb_create)/approve" '{}' "doesn't load"
+# A new skill for a persona that lists no skills and no longer loads: nothing was added, and the note says so.
+P16='{"id":"p16","name":"Sixteen","voice":"x","components":{"new":{"skills":[{"id":"sixteen-skill","label":"S","description":"D","whenToUse":["w"],"outputs":["o"],"safetyNotes":["s"]}]}}}'
+say admin conv-p16 "$(proposal "${P16}")"
+expect 200 "approve p16" POST "/admin/approvals/$(card p16 persona_create)/approve" '{}'
+printf '{"workflows":"x"}' > "${DATA}/personas/p16/workflows.json"
+expect 200 "p16's skill with the persona broken" POST "/admin/approvals/$(card p16 skill_install)/approve" '{}' "lists no skills, so none was added"
+[[ ! -e "${DATA}/personas/p16/skills.json" ]] || { echo "a skills.json was written for a persona that lists none" >&2; exit 1; }
 echo "broken persona ok"
 
 # --- 7e. A card saved before labels were one line prints its summary on one line, as the persona card's child list does.

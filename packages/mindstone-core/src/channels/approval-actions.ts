@@ -82,7 +82,9 @@ function addComponentOrExplain(personaDir: string, key: "skills" | "workflows", 
     // Listed, but in a persona that doesn't load it takes effect nowhere (#125 review).
     const loads = loadMindStonePersona(dirname(personaDir), basename(personaDir));
     if (!loads.ok) {
-      return { note: `it was added to the persona's ${key}, but the persona doesn't load, so it isn't used until the persona is fixed`, listed: false };
+      return added === "all"
+        ? { note: "the persona lists no skills, so none was added; it doesn't load, so it uses no skills until it is fixed (this skill is installed and in use elsewhere)", listed: false }
+        : { note: `it was added to the persona's ${key}, but the persona doesn't load, so it isn't used there until the persona is fixed`, listed: false };
     }
     return added === "all"
       ? { note: "the persona lists no skills, so it uses every installed skill, this one included", listed: true }
@@ -91,7 +93,7 @@ function addComponentOrExplain(personaDir: string, key: "skills" | "workflows", 
     // The component is approved and written; only the list failed. Said in the
     // result, not thrown: the approve itself succeeded.
     return {
-      note: `it couldn't be added to the persona's ${key}.json (${error instanceof Error ? error.message : String(error)}); attach it in the persona editor`,
+      note: `it couldn't be added to the persona's ${key}.json (${error instanceof PersonaComposeError ? error.message : "the file couldn't be written"}); attach it in the persona editor`,
       listed: false,
     };
   }
@@ -310,7 +312,8 @@ export function approveProposedAction(
   }
   if (action.kind === "memory_write" && action.memory) {
     const safePath = sanitizeMemoryProposalPath(action.memory.path);
-    if (!safePath) throw new ApprovalActionError(`memory proposal path "${action.memory.path}" is not a safe relative path`, "unsafe_path", 422);
+    // Quoted as JSON: a path from before one-line names can't draw lines of its own.
+    if (!safePath) throw new ApprovalActionError(`memory proposal path ${JSON.stringify(action.memory.path)} is not a safe relative path`, "unsafe_path", 422);
     const target = join(options.memoryDir, safePath);
     if (existsSync(target) && !options.force) {
       throw new ApprovalActionError(
@@ -396,10 +399,13 @@ export function approveProposedAction(
     } catch (error) {
       const undone = store.undoApproval(decided.id, decided.decidedAt);
       const exists = error instanceof WorkflowWriteError && error.code === "workflow_exists";
+      const after = undone ? "the card is pending again" : "the approval could not be undone";
       throw new ApprovalActionError(
-        `${error instanceof Error ? error.message : String(error)}; ${undone ? "the card is pending again" : "the approval could not be undone"}`,
+        `${error instanceof Error ? error.message : String(error)}; ${after}`,
         exists ? "workflow_exists" : "invalid_workflow",
         exists ? 409 : 422,
+        // A filesystem error names host paths: the Console gets the gist.
+        error instanceof WorkflowWriteError ? `${error.message}; ${after}` : `the workflow could not be written; ${after}`,
       );
     }
     const joined = addComponentOrExplain(parentPersonaDir, "workflows", workflow.id);
@@ -416,10 +422,12 @@ export function approveProposedAction(
     } catch (error) {
       const undone = store.undoApproval(decided.id, decided.decidedAt);
       const exists = error instanceof PersonaComposeError && error.code === "knowledgebase_exists";
+      const after = undone ? "the card is pending again" : "the approval could not be undone";
       throw new ApprovalActionError(
-        `${error instanceof Error ? error.message : String(error)}; ${undone ? "the card is pending again" : "the approval could not be undone"}`,
+        `${error instanceof Error ? error.message : String(error)}; ${after}`,
         exists ? "knowledgebase_exists" : "invalid_knowledgebase",
         exists ? 409 : 422,
+        error instanceof PersonaComposeError ? `${error.message}; ${after}` : `the knowledge base could not be written; ${after}`,
       );
     }
     // Written, but a persona that doesn't load uses none of it (#125 review).
