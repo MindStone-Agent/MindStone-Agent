@@ -4,6 +4,9 @@
 # install-stack.sh generates its secrets once, into 600 files, without printing
 # them. `docker` and `curl` are stubbed; `docker compose config` checks the
 # compose file when Docker is installed.
+# Each check is a string that check() evals, so its variables are expanded
+# there, not where it is written.
+# shellcheck disable=SC2016,SC2034
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,6 +44,7 @@ assert.equal(c.routing.mode, "placeholder", "routing untouched");
 echo "ok: auth, chat completions and admin digest set; routing untouched"
 check "token file holds the token" '[[ "$(cat "${RT}/data/secrets/gateway-token")" == "${GW_TOKEN}" ]]'
 check "token file is 600" '[[ "$(mode "${RT}/data/secrets/gateway-token")" == 600 ]]'
+check "the runtime dir exists" '[[ -d "${RT}" ]]'
 
 # An onboarded config keeps its routing and everything else on the next start.
 node -e '

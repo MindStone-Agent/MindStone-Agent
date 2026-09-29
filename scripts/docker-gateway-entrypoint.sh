@@ -22,6 +22,9 @@ source "${SCRIPT_DIR}/env.sh"
 
 CONFIG_PATH="${MINDSTONE_AGENT_CONFIG:-${MINDSTONE_AGENT_DATA_DIR}/config.json}"
 export CONFIG_PATH
+# The image puts the data dir beside the runtime dir, not in it; the runtime dir
+# (where env.local goes) still has to exist, or `mindstone doctor` fails it.
+mkdir -p "${MINDSTONE_AGENT_RUNTIME_DIR}"
 
 "${SCRIPT_DIR}/init-runtime.sh" --if-no-config >/dev/null
 
