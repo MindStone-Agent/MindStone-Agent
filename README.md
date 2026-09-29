@@ -359,8 +359,8 @@ What differs from the bash installer:
 - The install folder is `%USERPROFILE%\.mindstone-stack` (`$HOME\.mindstone-stack`). The folder, the secrets files and `admin-password` can be read only by you (and SYSTEM): the Windows equivalent of modes 700 and 600, set with `icacls` and checked. The installer refuses a symbolic link or junction as the folder, your home folder, a drive's root, a folder that contains your home folder, and a network folder.
 - The Console's database is in the Docker volume `mindstone-stack_mongo-data`, not in `data\mongo`: MongoDB on a Windows folder shared into Docker is unreliable. `data` holds the Console's uploads and logs.
 - The commands it prints are PowerShell commands.
-- Options are PowerShell parameters (`-WithOllama`, not `--with-ollama`); a bash-style option, or any unnamed argument, stops the installer with the PowerShell spelling.
-- After creating the admin, it signs in to the Console once with the new password (never shown) and stops with the reset command if that fails.
+- Options are PowerShell parameters (`-WithOllama`, not `--with-ollama`). A bash-style `--option`, or any unnamed argument, stops the installer with the PowerShell spelling; some other misspellings get PowerShell's own "parameter cannot be found" error instead.
+- After creating the admin, it signs in to the Console once with the new password (never shown). If the Console refuses the password, it stops with the reset command; if sign-in can't be checked (no answer, or another error), it warns and finishes the install.
 - Don't run `install-stack.sh --ref <a ref from before #180>` on a folder `install-stack.ps1` made: that older `compose.yml` doesn't know the volume and would start MongoDB on an empty `data/mongo`.
 - Before starting, it also checks that Docker Desktop runs Linux containers and that Windows hasn't reserved either port (`netsh interface ipv4 show excludedportrange protocol=tcp`).
 

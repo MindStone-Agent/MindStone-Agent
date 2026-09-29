@@ -213,8 +213,12 @@ Your own changes to the stack (a GPU for Ollama, extra mounts) go in
         # [Console]::InputEncoding and writes its preamble at once: with code page
         # 65001 that is a UTF-8 BOM in front of the password. A BOM-less UTF-8 for
         # the start, then the console's own again. (.NET Core writes no preamble.)
+        # Test only, for the Windows check in PR #181: MINDSTONE_TEST_STDIN_BOM=1 lets
+        # the BOM through (5.1 skips this fix; PowerShell 7 writes the BOM that .NET
+        # Framework would), to show the sign-in check catching a changed password.
+        $letBomThrough = [Environment]::GetEnvironmentVariable('MINDSTONE_TEST_STDIN_BOM') -eq '1'
         $savedInputEncoding = $null
-        if ($PSVersionTable.PSVersion.Major -lt 6) {
+        if ($PSVersionTable.PSVersion.Major -lt 6 -and -not $letBomThrough) {
             try {
                 $savedInputEncoding = [Console]::InputEncoding
                 [Console]::InputEncoding = $Utf8NoBom
@@ -234,6 +238,7 @@ Your own changes to the stack (a GPU for Ollama, extra mounts) go in
         $errTask = $process.StandardError.ReadToEndAsync()
         if ($InputText) {
             $bytes = $Utf8NoBom.GetBytes($InputText)
+            if ($letBomThrough -and $PSVersionTable.PSVersion.Major -ge 6) { $bytes = [byte[]](@(0xEF, 0xBB, 0xBF) + $bytes) }
             try {
                 $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
                 $process.StandardInput.BaseStream.Flush()
@@ -649,8 +654,32 @@ leaves the folder, if you added files of your own such as compose.override.yml.)
             }
             return 0
         } finally {
+            # $Error can still hold the request's parameters: empty the bytes themselves.
+            if ($null -ne $body) { [Array]::Clear($body, 0, $body.Length) }
             $body = $null
         }
+    }
+
+    # Signs in to the Console once, as the admin will, so a password that didn't
+    # arrive as typed is found now. Only 404 and 422 mean the Console refused the
+    # email and password: that stops the install (no marker, so a re-run reports
+    # the account as existing). No answer or a server error is tried once more.
+    # Anything else (a timeout, 403, 429, 5xx) means sign-in couldn't be checked:
+    # a warning, and the install goes on. Returns 'ok' or 'unchecked'.
+    function Confirm-AdminSignIn([string]$Url, [string]$Email, [string]$Secret, [string]$OpenUrl, [string]$ResetCommand) {
+        $status = Test-ConsoleSignIn $Url $Email $Secret
+        if ($status -eq 0 -or $status -ge 500) {
+            Start-Sleep -Seconds 5
+            $status = Test-ConsoleSignIn $Url $Email $Secret
+        }
+        if ($status -eq 200) { return 'ok' }
+        if ($status -eq 404 -or $status -eq 422) {
+            Exit-Install "The admin account $Email was created with role ADMIN, but the Console refused its password when the installer signed in (HTTP $status), so the password didn't reach the Console as it should. Set a new one, then sign in at ${OpenUrl}: $ResetCommand"
+        }
+        $what = "HTTP $status"
+        if ($status -eq 0) { $what = 'no answer' }
+        Write-InstallWarning "The admin account $Email was created with role ADMIN, but signing in to check its password couldn't be done ($what). Sign in at $OpenUrl yourself; if the password is refused, set a new one with: $ResetCommand"
+        return 'unchecked'
     }
 
     # Whether this session can ask questions: a console that isn't redirected, and
@@ -992,6 +1021,8 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
                 Write-EnvValue $S.EnvFile 'MINDSTONE_MONGO_DATA' $MongoVolume
                 Write-EnvValue $S.EnvFile 'MINDSTONE_MONGO_USER' $MongoUser
             } else {
+                # Recorded too, so the choice holds even if the folder is emptied later.
+                Write-EnvValue $S.EnvFile 'MINDSTONE_MONGO_DATA' './data/mongo'
                 Write-InstallLog "The Console's database stays in $mongoFolder (an earlier install)."
             }
         }
@@ -1139,15 +1170,9 @@ Start it again:  Set-Location -LiteralPath $dirQ; docker compose up -d
                 if ($role -ne 'ADMIN') {
                     Exit-Install "The account $AdminEmail was created, but its role is $role, not ADMIN. Make it an admin with: $(Get-PromoteCommand $AdminEmail)"
                 }
-                # Sign in once, as the admin will, so a password that didn't arrive as
-                # typed is found now. No marker until it works: a re-run then reports
-                # the account as existing, with the reset command.
-                $status = Test-ConsoleSignIn "http://127.0.0.1:$consolePort/api/auth/login" $AdminEmail $adminSecret
+                $signIn = Confirm-AdminSignIn "http://127.0.0.1:$consolePort/api/auth/login" $AdminEmail $adminSecret "http://localhost:$consolePort" "Set-Location -LiteralPath $dirQ; docker compose exec console npm run reset-password"
                 $adminSecret = ''
-                if ($status -ne 200) {
-                    Exit-Install "The admin account $AdminEmail was created with role ADMIN, but signing in with its password failed (HTTP $status), so the password didn't reach the Console as it should. Set a new one, then sign in at http://localhost:${consolePort}: Set-Location -LiteralPath $dirQ; docker compose exec console npm run reset-password"
-                }
-                Write-InstallLog "Signed in to the Console as ${AdminEmail}: the password works."
+                if ($signIn -eq 'ok') { Write-InstallLog "Signed in to the Console as ${AdminEmail}: the password works." }
                 Write-FileAtomic $adminMarker "$AdminEmail (username $adminUsername, role ADMIN)`n"
                 Write-InstallLog "Admin account created: $AdminEmail (username $adminUsername, role ADMIN)"
             }
