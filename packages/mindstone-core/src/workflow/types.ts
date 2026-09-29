@@ -71,5 +71,7 @@ export type MindStoneWorkflowOutcome = {
   reason: string;
   decision?: MindStoneWorkflowDecision;
   failed: boolean;
+  /** The workflows tried, in order, when a persona listed more than one (#125). */
+  tried?: string[];
   events: MindStoneWorkflowEvent[];
 };

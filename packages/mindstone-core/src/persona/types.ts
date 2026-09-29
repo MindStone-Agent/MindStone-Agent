@@ -14,7 +14,11 @@ export type MindStonePersona = {
   personaMarkdown: string;
   /** safety.md body, if present — appended to the overlay prompt. */
   safetyMarkdown?: string;
-  /** Referenced capability ids from skills.json/workflows.json/knowledgebases.json (metadata for now). */
+  /**
+   * Component ids from skills.json, workflows.json and knowledgebases.json
+   * (global collections). They take effect while the persona is active (#125):
+   * see persona/components.ts. Private KBs live in the persona's folder.
+   */
   skills: string[];
   workflows: string[];
   knowledgebases: string[];

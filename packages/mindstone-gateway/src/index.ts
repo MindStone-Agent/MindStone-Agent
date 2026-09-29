@@ -114,7 +114,15 @@ import "./connectors/discord.js";
 import "./connectors/email.js";
 import "./connectors/calendar.js";
 import {
+  loadMindStonePersona,
   loadRoutePersonaContextById,
+  unknownKnowledgebaseIds,
+  knowledgebasesDirFromConfig,
+  personaKnowledgebasesDir,
+  decisionForAnsweringPersona,
+  personaComponentsSummary,
+  privateKnowledgebasesAllowed,
+  resolveTurnComponents,
   personasDirFromConfig,
   referencedPersonaIds,
   PERSONA_PROPOSAL_INSTRUCTIONS,
@@ -790,8 +798,10 @@ function consoleTurnCaller(req: IncomingMessage, input: Record<string, unknown>,
  * disk keeps it (#105 review).
  */
 function entryForAudience(entry: TranscriptEntry | undefined, audience: RouteAudience): TranscriptEntry | undefined {
-  if (!entry || audience === "owner" || !entry.metadata || !("personaContext" in entry.metadata)) return entry;
-  const { personaContext: _hidden, ...metadata } = entry.metadata;
+  if (!entry || audience === "owner" || !entry.metadata) return entry;
+  if (!("personaContext" in entry.metadata) && !("personaComponents" in entry.metadata)) return entry;
+  // Nor its skills and knowledge bases (#125).
+  const { personaContext: _hidden, personaComponents: _components, ...metadata } = entry.metadata;
   return { ...entry, metadata };
 }
 
@@ -1160,6 +1170,7 @@ async function runConfiguredRoute(input: {
   const workflowOutcome = runMindStoneWorkflow({
     config: input.config,
     workflowId: input.route?.workflowId,
+    personaId: input.route?.personaId,
     turn: {
       sessionKey: input.sessionKey,
       sourceChannel: source?.channel,
@@ -1189,6 +1200,31 @@ async function runConfiguredRoute(input: {
     const fileMemoryDocuments = discoverFileMemoryDocuments({ config: input.config });
     const runner = resolveRunner(input.config, provider, input.audience);
     const streamOptions = resolveRunnerStreamOptions(input.config);
+    // Deterministic routing authority (App Engine): request > workflow decision > config rules/active.
+    const personaResult = input.route?.personaId
+      ? loadRoutePersonaContextById({
+          config: input.config,
+          personaId: input.route.personaId,
+          reason: "forced:request",
+        })
+      : workflowOutcome?.decision?.personaId
+      ? loadRoutePersonaContextById({
+          config: input.config,
+          personaId: workflowOutcome.decision.personaId,
+          reason: `workflow:${workflowOutcome.workflowId}/step:${workflowOutcome.decision.stepId}`,
+        })
+      : resolveRoutePersonaContext({
+          config: input.config,
+          sessionKey: input.sessionKey,
+          sourceChannel: source?.channel,
+          sourceSubstrate: source?.substrate,
+        });
+    // The answering persona's skills and knowledge bases (#125).
+    const turnComponents = resolveTurnComponents({
+      persona: personaResult.persona,
+      decision: decisionForAnsweringPersona(workflowOutcome?.decision, input.route?.personaId),
+      privateAllowed: privateKnowledgebasesAllowed(input.audience),
+    });
     const { route, streamEvents } = await runGatewayRunner({
       runner,
       streamOptions,
@@ -1202,24 +1238,7 @@ async function runConfiguredRoute(input: {
           loadRouteIdentityContext({ agentId: input.agentId, config: input.config, configPath: input.configPath }),
           input.audience,
         ),
-        personaContext: (input.route?.personaId
-          ? loadRoutePersonaContextById({
-              config: input.config,
-              personaId: input.route.personaId,
-              reason: "forced:request",
-            })
-          : workflowOutcome?.decision?.personaId
-          ? loadRoutePersonaContextById({
-              config: input.config,
-              personaId: workflowOutcome.decision.personaId,
-              reason: `workflow:${workflowOutcome.workflowId}/step:${workflowOutcome.decision.stepId}`,
-            })
-          : resolveRoutePersonaContext({
-              config: input.config,
-              sessionKey: input.sessionKey,
-              sourceChannel: source?.channel,
-              sourceSubstrate: source?.substrate,
-            })).context,
+        personaContext: personaResult.context,
         contextManagement: input.config?.contextManagement,
         reservedTokens: resolveReservedPromptTokens(input.metadata),
         handoffReplay,
@@ -1231,7 +1250,12 @@ async function runConfiguredRoute(input: {
             sqlite: input.config?.memory?.vectorStore === "sqlite-vec" ? createSqliteMemoryRecallProvider({ config: input.config }) : undefined,
             localDocuments: input.config?.memory?.localDocuments,
             fileMemory: fileMemoryDocuments,
-            knowledgebases: discoverKnowledgebaseRecallDocuments({ config: input.config }),
+            knowledgebases: discoverKnowledgebaseRecallDocuments({
+              config: input.config,
+              only: turnComponents.globalKnowledgebases,
+              step: turnComponents.stepKnowledgebases,
+              private: turnComponents.privateKnowledgebases,
+            }),
           }),
           config: input.config?.memory?.recall,
           scope: input.recallScope ?? input.scope,
@@ -1253,7 +1277,7 @@ async function runConfiguredRoute(input: {
           maxPromptTokens: input.config?.memory?.index?.maxPromptTokens,
         },
         // Installed skills, and how to propose one (#104): the owner's turns only.
-        skills: { enabled: input.audience === "owner", skillsDir: skillsDirFromConfig(input.config) },
+        skills: { enabled: input.audience === "owner", skillsDir: skillsDirFromConfig(input.config), only: turnComponents.skills },
         signal: run.abortController.signal,
         metadata: input.metadata,
         runContext: {
@@ -1438,6 +1462,23 @@ async function runConfiguredRoute(input: {
       allowSkill: input.audience === "owner",
     });
 
+    // Which of the answering persona's components were in play (#125). A
+    // step's KB ids that match nothing are named; on a turn without recall
+    // (a non-owner's) there is nothing to match, so none are.
+    const personaComponents = turnComponents.personaId
+      ? personaComponentsSummary(
+          turnComponents,
+          route.skills,
+          privateKnowledgebasesAllowed(input.audience)
+            ? unknownKnowledgebaseIds(turnComponents.stepKnowledgebases, [
+                knowledgebasesDirFromConfig(input.config),
+                // The persona's own folder, even when its private KBs weren't
+                // searched (a link): an id that exists isn't a typo.
+                personaResult.persona ? personaKnowledgebasesDir(personaResult.persona.dir) : undefined,
+              ])
+            : undefined,
+        )
+      : undefined;
     const assistantEntry = appendTranscriptEntry({
       sessionKey: input.sessionKey,
       agentId: input.agentId,
@@ -1454,6 +1495,7 @@ async function runConfiguredRoute(input: {
         runner: route.runner,
         // Which persona answered (#105): the Console's transcripts say so per turn.
         ...(route.personaContext ? { personaContext: route.personaContext } : {}),
+        ...(personaComponents ? { personaComponents } : {}),
         // What recall put in this turn's prompt (#106); the chunks are on the memory_recall_injected event.
         ...(route.memoryRecall
           ? {
@@ -1483,8 +1525,9 @@ async function runConfiguredRoute(input: {
         runner: route.runner,
         identityContext: route.identityContext,
         personaContext: route.personaContext,
+        ...(personaComponents ? { personaComponents } : {}),
         workflow: workflowOutcome
-          ? { workflowId: workflowOutcome.workflowId, reason: workflowOutcome.reason, failed: workflowOutcome.failed, decision: workflowOutcome.decision }
+          ? { workflowId: workflowOutcome.workflowId, reason: workflowOutcome.reason, failed: workflowOutcome.failed, decision: workflowOutcome.decision, ...(workflowOutcome.tried ? { tried: workflowOutcome.tried } : {}) }
           : undefined,
         promptWindow: {
           mode: route.promptWindow.policy.mode,
@@ -2019,8 +2062,12 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
     // The Skill Builder (#104): built-in, installed and draft skills. Errors
     // name paths relative to the skills directory, never the host's.
     const skillsDir = skillsDirFromConfig(gateConfig.config, paths);
-    // Which installed skills the owner's prompt holds in full; the rest are over the budget.
-    const inPrompt = new Set(buildMindStoneSkillsPrompt(skillsDir).inPrompt);
+    // Which installed skills the owner's prompt holds in full; the rest are
+    // over the budget, or left out by the active persona's list (#125).
+    const activePersonaId = gateConfig.config?.personas?.active;
+    const activePersona = activePersonaId ? loadMindStonePersona(personasDirFromConfig(gateConfig.config, paths), activePersonaId) : undefined;
+    const personaSkills = activePersona?.ok && activePersona.persona.skills.length ? activePersona.persona.skills : undefined;
+    const inPrompt = new Set(buildMindStoneSkillsPrompt(skillsDir, { only: personaSkills }).inPrompt);
     const skills = discoverMindStoneSkills(skillsDir).map((skill) => ({
       id: skill.id,
       label: skill.label,

@@ -63,6 +63,13 @@ import {
   runtimePathsFromEnv,
   synthesizeMindStoneIdentityActivation,
   type AgentRunner,
+  type MindStoneConfig,
+  type MindStoneRuntimePaths,
+  isRealDirectory,
+  isSafeComponentId,
+  personaKnowledgebasesDir,
+  privateKnowledgebaseLinkError,
+  readablePersonaKnowledgebasesDir,
   type MindStoneDoctorReport,
   type MindStoneModelInfo,
   type MindStoneConfigWizardSection,
@@ -1300,14 +1307,48 @@ async function runSkillCommand(argv: string[]): Promise<void> {
   output.write(brief.markdown);
 }
 
-async function runKbCommand(argv: string[]): Promise<void> {
-  const sub = argv[3] && !argv[3].startsWith("--") ? argv[3] : "list";
-  const json = hasOption(argv, "--json");
+/**
+ * `--persona <id>` points a kb command at that persona's private knowledge
+ * bases (#125). The id must be one folder name, and the persona must exist.
+ * The flag and its value are taken out of argv, so the positional arguments
+ * stay where each subcommand reads them.
+ */
+function personaKbDir(argv: string[], config: MindStoneConfig, paths: MindStoneRuntimePaths): { argv: string[]; kbDir?: string; personaId?: string } {
+  const at = argv.indexOf("--persona");
+  if (at === -1) return { argv };
+  const personaId = argv[at + 1];
+  if (!isSafeComponentId(personaId)) throw new Error("Usage: --persona <persona-id> (letters, digits, '.', '_' and '-')");
+  const personasDir = personasDirFromConfig(config, paths);
+  const persona = loadMindStonePersona(personasDir, personaId);
+  if (!persona.ok) throw new Error(`Persona "${personaId}" not found: ${persona.error}`);
+  if (!isRealDirectory(persona.persona.dir)) {
+    throw new Error(`Persona "${personaId}" is a link to another folder; a link there is not used for its knowledge bases`);
+  }
+  const kbDir = readablePersonaKnowledgebasesDir(persona.persona.dir);
+  if (!kbDir) {
+    throw new Error(`Persona "${personaId}" has no knowledge bases folder at ${personaKnowledgebasesDir(persona.persona.dir)} (a link there is not used)`);
+  }
+  const rest = [...argv.slice(0, at), ...argv.slice(at + 2)];
+  return { argv: rest, kbDir, personaId };
+}
+
+async function runKbCommand(rawArgv: string[]): Promise<void> {
   const paths = runtimePathsFromEnv();
   const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
   if (loaded.error) throw new Error(`Config error: ${loaded.error}`);
   const config = loaded.config ?? {};
-  const kbDir = knowledgebasesDirFromConfig(config, paths);
+  const scoped = personaKbDir(rawArgv, config, paths);
+  const argv = scoped.argv;
+  const sub = argv[3] && !argv[3].startsWith("--") ? argv[3] : "list";
+  const json = hasOption(argv, "--json");
+  const kbDir = scoped.kbDir ?? knowledgebasesDirFromConfig(config, paths);
+  // A private KB id is one folder name under the persona's folder.
+  const kbArg = argv[4];
+  if (scoped.personaId && kbArg && !kbArg.startsWith("--")) {
+    if (!isSafeComponentId(kbArg)) throw new Error(`Not a knowledge base id: ${kbArg}`);
+    const linkError = privateKnowledgebaseLinkError(kbDir, kbArg);
+    if (linkError) throw new Error(linkError);
+  }
 
   if (sub === "list") {
     const kbs = discoverMindStoneKnowledgebases(kbDir);
@@ -1332,7 +1373,7 @@ async function runKbCommand(argv: string[]): Promise<void> {
   if (sub === "ingest") {
     const kbId = argv[4];
     if (!kbId || kbId.startsWith("--")) throw new Error("Usage: mindstone kb ingest <kb-id>");
-    const result = await ingestMindStoneKnowledgebase(kbDir, kbId, { now: new Date().toISOString() });
+    const result = await ingestMindStoneKnowledgebase(kbDir, kbId, { now: new Date().toISOString(), noLinks: Boolean(scoped.personaId) });
     if (!result.ok) throw new Error(result.error);
     if (json) {
       output.write(`${JSON.stringify(result, null, 2)}\n`);

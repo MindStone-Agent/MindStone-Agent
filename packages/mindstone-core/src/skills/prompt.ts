@@ -17,6 +17,10 @@ export type MindStoneSkillsPromptResult = {
   inPrompt: string[];
   /** Installed skills over the budget: only their id, label and description are in the prompt. */
   listedOnly: string[];
+  /** The active persona's skill list, when it has one (#125): only these are in the prompt. */
+  only?: string[];
+  /** Listed skills that aren't installed: skipped, and recorded here. */
+  missing?: string[];
 };
 
 /** A skill's text can't close the wrapper it sits in. */
@@ -47,7 +51,12 @@ export function renderMindStoneSkillForPrompt(artifact: MindStoneSkillArtifact, 
   return [`<skill id="${artifact.id}">`, contained(fields.join("\n")), "</skill>"].join("\n");
 }
 
-export function buildMindStoneSkillsPrompt(skillsDir: string, options: { budget?: number } = {}): MindStoneSkillsPromptResult {
+/**
+ * `only` is the active persona's skill list (#125): just those installed
+ * skills go in, and a listed skill that isn't installed is skipped and named
+ * in `missing`. Absent `only` means every installed skill, as before.
+ */
+export function buildMindStoneSkillsPrompt(skillsDir: string, options: { budget?: number; only?: string[] } = {}): MindStoneSkillsPromptResult {
   const budget = options.budget ?? SKILLS_PROMPT_BUDGET;
   // Nothing here may fail an owner's turn: an unreadable skills directory
   // means no skills this turn, and a skill that doesn't load is left out.
@@ -57,6 +66,9 @@ export function buildMindStoneSkillsPrompt(skillsDir: string, options: { budget?
   } catch {
     installed = [];
   }
+  const only = options.only ? [...new Set(options.only)] : undefined;
+  const missing = only ? only.filter((id) => !installed.some((skill) => skill.id === id)) : undefined;
+  if (only) installed = installed.filter((skill) => only.includes(skill.id));
   const full: string[] = [];
   const listed: string[] = [];
   const inPrompt: string[] = [];
@@ -77,7 +89,12 @@ export function buildMindStoneSkillsPrompt(skillsDir: string, options: { budget?
   }
   const lines = ["<mindstone-skills>"];
   if (full.length || listed.length) {
-    lines.push("Installed skills. Follow a skill's instructions when the owner's request matches it.", ...full);
+    lines.push(
+      only
+        ? "The active persona's skills. Follow a skill's instructions when the owner's request matches it."
+        : "Installed skills. Follow a skill's instructions when the owner's request matches it.",
+      ...full,
+    );
     if (listed.length) {
       lines.push(
         "These installed skills are over the prompt budget, so their instructions aren't loaded. If the owner asks for one, say so: an admin can remove other skills to make room.",
@@ -85,7 +102,7 @@ export function buildMindStoneSkillsPrompt(skillsDir: string, options: { budget?
       );
     }
   } else {
-    lines.push("No skills are installed yet.");
+    lines.push(only ? "The active persona has no installed skills." : "No skills are installed yet.");
   }
   lines.push(
     "When the owner asks you to create a skill, draft it and propose it for install by ending your reply with one fenced block, with the closing ``` on its own line:",
@@ -97,5 +114,13 @@ export function buildMindStoneSkillsPrompt(skillsDir: string, options: { budget?
     "</mindstone-skills>",
   );
   const promptText = lines.join("\n");
-  return { promptText, tokens: estimatePromptTokens(promptText), installed: installed.length, inPrompt, listedOnly };
+  return {
+    promptText,
+    tokens: estimatePromptTokens(promptText),
+    installed: installed.length,
+    inPrompt,
+    listedOnly,
+    ...(only ? { only } : {}),
+    ...(missing?.length ? { missing } : {}),
+  };
 }

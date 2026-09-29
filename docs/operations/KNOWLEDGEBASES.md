@@ -90,9 +90,23 @@ they feed the SAME deterministic ingest/index/search/recall pipeline:
   explicit `Reference material (not memory): cite sources when used.` line in
   its injected text, plus kind `kb` and the `[KB <name>]` title prefix.
 
-**Per-persona KB binding** (ticket capability): unchanged from #11/#13 —
-persona packages reference KB ids; `mindstone skill status` verifies the
-references resolve.
+**Persona knowledge bases** (#125):
+- A persona's `knowledgebases.json` lists the global collections it uses;
+  while it is active, only those are searched (none listed: all of them).
+- A persona can also own private KBs, in the same format, under
+  `personas/<id>/knowledgebases/<kb-id>/`. They are searched only while that
+  persona is active, on owner turns and tenant App Engine runs. Their recall
+  documents have ids `pkb:<persona-id>:<kb-id>:<source>` and point at
+  `mindstone kb search --persona <persona-id> <kb-id>`.
+- Every `mindstone kb` command takes `--persona <id>` to work on that
+  persona's private KBs: `kb list --persona <id>`, `kb ingest --persona <id>
+  <kb-id>`, `kb search --persona <id> <kb-id> "<query>"`, `kb status --persona
+  <id> [kb-id]`. The persona id and the KB id must each be one folder name
+  (letters, digits, `.`, `_`, `-`), the persona must exist, and a linked
+  `knowledgebases` folder, KB folder, `kb.json`, `index.json` or `sources` is
+  refused. `kb ingest --persona` also refuses linked source files and folder
+  sources; a private KB holds its own files.
+- See [PERSONAS.md](PERSONAS.md#components-at-run-time-125) for the full rule.
 
 ### Follow-on source targets (documented plan, not implemented)
 

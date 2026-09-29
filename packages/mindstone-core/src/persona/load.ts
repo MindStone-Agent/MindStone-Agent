@@ -174,6 +174,8 @@ function personaOverlayPrompt(persona: MindStonePersona, reason: string): string
 export type ResolveRoutePersonaContextResult = {
   context?: MindStoneRoutePersonaContext;
   resolution?: MindStonePersonaResolution;
+  /** The loaded persona, whose components apply to the turn (#125). */
+  persona?: MindStonePersona;
   error?: string;
 };
 
@@ -190,6 +192,7 @@ export function loadRoutePersonaContextById(params: {
   if (!loaded.ok) return { resolution, error: loaded.error };
   return {
     resolution,
+    persona: loaded.persona,
     context: {
       personaId: params.personaId,
       reason: params.reason,
@@ -218,6 +221,7 @@ export function resolveRoutePersonaContext(params: {
   }
   return {
     resolution,
+    persona: loaded.persona,
     context: {
       personaId: resolution.personaId,
       reason: resolution.reason,
