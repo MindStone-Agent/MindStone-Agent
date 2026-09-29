@@ -395,16 +395,16 @@ const SKILL_PROPOSAL_UNSAFE = /(?![\u200c\u200d\u180e\ufe00-\ufe0f\u{E0100}-\u{E
  * and the CLI shows it as \u{200d}.
  */
 const SKILL_PROPOSAL_HIDDEN = new RegExp([
-  String.raw`(?<!\p{Emoji})[︎️]`,
-  String.raw`(?<=[0-9#*])︎`,
-  String.raw`(?<=[0-9#*])️(?!⃣)`,
-  String.raw`[︁-︍\u{E0100}-\u{E01EF}]`,
-  String.raw`(?<!\p{Script=Han}|\p{Script=Myanmar}|(?![\x00-\x7F])\p{Sm})︀`,
-  String.raw`(?<![ᠠ-ᡸᢀ-ᢪ])᠎|᠎(?![ᠠ-ᡸᢀ-ᢪ])`,
-  String.raw`(?<![^\x00-\x7F])[‌‍]`,
-  String.raw`[‌‍](?![^\x00-\x7F])`,
-  String.raw`[‌‍]{2,}`,
-  String.raw`(?:\p{M}[‌‍᠎]?){8,}`,
+  String.raw`(?<!\p{Emoji})[\uFE0E\uFE0F]`,
+  String.raw`(?<=[0-9#*])\uFE0E`,
+  String.raw`(?<=[0-9#*])\uFE0F(?!\u20E3)`,
+  String.raw`[\uFE01-\uFE0D\u{E0100}-\u{E01EF}]`,
+  String.raw`(?<!\p{Script=Han}|\p{Script=Myanmar}|(?![\x00-\x7F])\p{Sm})\uFE00`,
+  String.raw`(?<![\u1820-\u1878\u1880-\u18AA])\u180E|\u180E(?![\u1820-\u1878\u1880-\u18AA])`,
+  String.raw`(?<![^\x00-\x7F])[\u200C\u200D]`,
+  String.raw`[\u200C\u200D](?![^\x00-\x7F])`,
+  String.raw`[\u200C\u200D]{2,}`,
+  String.raw`(?:\p{M}[\u200C\u200D\u180E]?){8,}`,
 ].join("|"), "u");
 
 function hasUnsafeText(value: unknown): boolean {
