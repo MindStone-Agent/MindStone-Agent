@@ -298,7 +298,7 @@ Implemented in MindStone-Agent first pass:
 - smoke test proves structured memory file recall reaches chat context
 - dependency-free SQLite memory index at `.runtime/mindstone/vectors/memory.sqlite` using Node's built-in `node:sqlite`
 - `mindstone memory backfill` indexes structured memory, journals, LOG, and existing JSONL transcript entries into SQLite chunks
-- `mindstone memory status` reports SQLite memory index status, and how many chunks the configured embedding model refused on their own three times, at least 10 minutes apart, and no longer sends (#170)
+- `mindstone memory status` reports SQLite memory index status, and how many chunks the configured embedding model refused on their own three times, at least 10 minutes apart, and skips for a day before trying them again (#170)
 - Gateway autoRecall prefers the SQLite memory index when `memory.vectorStore` is `sqlite-vec`, with file/local fallback
 - `mindstone doctor` reports SQLite memory index presence/chunk counts when `sqlite-vec` is configured
 - OpenAI-compatible embedding provider interface

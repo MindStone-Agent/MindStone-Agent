@@ -265,8 +265,8 @@ function printJson(value: unknown): void {
 function printMemoryStatus(options: { json?: boolean } = {}): void {
   const paths = runtimePathsFromEnv();
   const stats = getSqliteMemoryIndexStats(paths);
-  // For the configured embedding model: how many chunks it refused MEMORY_EMBED_SKIP_AFTER times
-  // and are found by their words only (#170). Left out when no model is configured.
+  // For the configured embedding model: how many chunks it refused MEMORY_EMBED_SKIP_AFTER times, skipped
+  // for now and found by their words (#170). Left out when no model is configured.
   const loaded = loadMindStoneConfig(resolveConfigPath(process.env, paths));
   const provider = loaded.error ? undefined : createMemoryEmbeddingProvider(loaded.config);
   let embeddingModel: { spec: string; skippedChunks: number } | undefined;
@@ -290,7 +290,7 @@ function printMemoryStatus(options: { json?: boolean } = {}): void {
       `Chunks: ${stats.chunks}`,
       `Embedded chunks: ${stats.embeddedChunks}`,
       embeddingModel
-        ? `Chunks ${embeddingModel.spec} can't embed (found by their words only): ${embeddingModel.skippedChunks}`
+        ? `Chunks ${embeddingModel.spec} refused 3 times, skipped for a day (found by their words): ${embeddingModel.skippedChunks}`
         : undefined,
       `Duplicate text chunks: ${stats.duplicateTextChunks}`,
       `Vector backend: ${stats.vectorBackend}`,
