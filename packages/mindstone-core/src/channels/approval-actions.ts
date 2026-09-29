@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { ConnectorOutboundMessage } from "./connector.js";
@@ -96,6 +96,19 @@ function addComponentOrExplain(personaDir: string, key: "skills" | "workflows", 
       note: `it couldn't be added to the persona's ${key}.json (${error instanceof PersonaComposeError ? error.message : "the file couldn't be written"}); attach it in the persona editor`,
       listed: false,
     };
+  }
+}
+
+/** The approval id an agent-proposed persona's metadata.json records, if it is a plain file that parses. */
+function personaApprovalId(personaDir: string): string | undefined {
+  const path = join(personaDir, "metadata.json");
+  try {
+    if (!lstatSync(path).isFile()) return undefined;
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    const id = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>).approvalId : undefined;
+    return typeof id === "string" ? id : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -236,6 +249,16 @@ export function approveProposedAction(
         "invalid_persona",
         409,
         `persona ${parent.persona.id} is no longer in the personas folder; nothing was written: restore it, or reject this card`,
+      );
+    }
+    // The folder must be the one that persona card wrote, not a persona made
+    // later under the same id (#146 review): its metadata.json names the card.
+    if (personaApprovalId(parentPersonaDir) !== action.parentApprovalId) {
+      throw new ApprovalActionError(
+        `persona ${parent.persona.id} at ${parentPersonaDir} is not the one approval ${action.parentApprovalId} created (it was removed and made again, or its metadata changed); nothing was written: reject this card`,
+        "invalid_persona",
+        409,
+        `persona ${parent.persona.id} is not the one approval ${action.parentApprovalId} created; nothing was written: reject this card`,
       );
     }
   }
@@ -471,7 +494,7 @@ export function approveProposedAction(
     }
     let dir: string;
     try {
-      dir = writeProposedPersona({ personasDir: options.personasDir, persona: action.persona, approvedBy: options.decidedBy, now: now() });
+      dir = writeProposedPersona({ personasDir: options.personasDir, persona: action.persona, approvedBy: options.decidedBy, now: now(), approvalId: action.id });
     } catch (error) {
       if (error instanceof PersonaExistsError) {
         throw new ApprovalActionError(`${error.message}; ask the agent for a new name, or reject this proposal`, "persona_exists", 409);

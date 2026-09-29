@@ -38,6 +38,7 @@ import {
   discoverMindStonePersonas,
   discoverMindStoneSkills,
   ingestMindStoneKnowledgebase,
+  ingestApprovedPrivateKnowledgebase,
   installMindStoneSkill,
   knowledgebasesDirFromConfig,
   workflowIdsInUse,
@@ -1183,8 +1184,9 @@ async function runSkillCommand(argv: string[]): Promise<void> {
       const marker =
         skill.source === "draft" ? gold(" ○ draft — install to approve") : skill.source === "builtin" ? dim(" · builtin") : gold(" ● installed");
       const detail = skill.error ? `broken: ${skill.error}` : skill.description ?? "";
-      output.write(`${bold(skill.id)}${skill.version ? ` v${skill.version}` : ""}${marker}\n`);
-      output.write(`${dim(`  ${detail}`)}\n\n`);
+      // Installed skills can predate the proposal checks: what they carry is shown, never acted on (#146 review).
+      output.write(`${bold(printable(skill.id))}${skill.version ? ` v${printable(skill.version)}` : ""}${marker}\n`);
+      output.write(`${dim(`  ${printable(detail)}`)}\n\n`);
     }
     return;
   }
@@ -1961,11 +1963,7 @@ async function runApprovalsCommand(argv: string[]): Promise<void> {
     } else if (result.kind === "persona_kb_create") {
       // The approval has happened by now: an ingest that throws is reported like one that fails.
       // Its text sources only: one with a URL source by now is left for `kb ingest --persona` (#125 review).
-      const ingested = await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, {
-        now: new Date().toISOString(),
-        noLinks: true,
-        textOnly: true,
-      })
+      const ingested = await ingestApprovedPrivateKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString() })
         .catch((error: unknown) => ({ ok: false as const, error: error instanceof Error ? error.message : String(error) }));
       output.write(ingested.ok
         ? `${gold("Approved")} — private knowledge base ${result.kbId} written and ingested for persona ${result.personaId} (${ingested.entryCount} entries).\n`

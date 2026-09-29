@@ -126,6 +126,8 @@ export function writeProposedPersona(params: {
   persona: PersonaProposalPayload;
   approvedBy: string;
   now: string;
+  /** The persona card's approval id: its component cards attach only to this folder (#146 review). */
+  approvalId?: string;
 }): string {
   if (!PERSONA_PROPOSAL_ID.test(params.persona.id)) throw new Error(`not a persona id: ${params.persona.id}`);
   const dir = join(params.personasDir, params.persona.id);
@@ -142,7 +144,7 @@ export function writeProposedPersona(params: {
   writeFileSync(join(dir, "PERSONA.md"), renderPersonaMarkdown(params.persona), { flag: "wx" });
   writeFileSync(
     join(dir, "metadata.json"),
-    `${JSON.stringify({ name: params.persona.name, version: "1", description: params.persona.description, createdBy: "agent", approvedBy: params.approvedBy, approvedAt: params.now }, null, 2)}\n`,
+    `${JSON.stringify({ name: params.persona.name, version: "1", description: params.persona.description, createdBy: "agent", approvedBy: params.approvedBy, approvedAt: params.now, ...(params.approvalId ? { approvalId: params.approvalId } : {}) }, null, 2)}\n`,
     { flag: "wx" },
   );
   } catch (error) {

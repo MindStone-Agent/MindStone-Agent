@@ -75,8 +75,10 @@ The agent's `mindstone-persona-proposal` can carry `components`:
     turn to or gate on a persona, its skills must be installed by then, and an
     id the config runs or a persona lists is refused. A new private KB is
     written and ingested.
-  - If the persona's folder is gone when a component is approved, it is
-    refused (`409 invalid_persona`) before anything is installed or written.
+  - If the persona's folder is gone when a component is approved, or is a
+    different persona made later under the same id (the approved persona's
+    `metadata.json` records its card's id), it is refused
+    (`409 invalid_persona`) before anything is installed or written.
     A card left waiting under a rejected persona is rejected when someone
     tries to approve it (`409 persona_rejected`); one whose persona card no
     longer exists is refused (`409 persona_missing`) and can only be rejected.

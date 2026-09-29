@@ -332,6 +332,15 @@ export async function ingestMindStoneKnowledgebase(
   return { ok: true, kbId, indexPath: kb.indexPath, entryCount: entries.length, sourceCount: sourcePaths.length + externalDocuments.length };
 }
 
+/**
+ * The ingest that follows approving an agent-proposed private KB (#125): its
+ * own files only and its text sources only, so nothing is fetched. One place
+ * for the gateway and the CLI, so neither can drop a guard (#146 review).
+ */
+export function ingestApprovedPrivateKnowledgebase(kbRoot: string, kbId: string, options: { now?: string } = {}): Promise<IngestKnowledgebaseResult> {
+  return ingestMindStoneKnowledgebase(kbRoot, kbId, { now: options.now, noLinks: true, textOnly: true });
+}
+
 export function readMindStoneKbIndex(kb: MindStoneKnowledgebase): MindStoneKbIndex | undefined {
   if (!existsSync(kb.indexPath)) return undefined;
   try {

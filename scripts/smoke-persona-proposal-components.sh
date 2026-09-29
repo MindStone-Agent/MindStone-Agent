@@ -43,8 +43,8 @@ BODY="${TEMP_RUNTIME}/body.json"
 npx tsx <<'TS'
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { applyActionProposalDiscipline, ApprovalActionError, ApprovalStore, approveProposedAction, checkApprovable, extractActionProposals, ingestMindStoneKnowledgebase, MAX_PENDING_COMPONENTS, parsePersonaComponents, parseSkillProposal, sanitizeMemoryProposalPath } from "./packages/mindstone-core/src/index.ts";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { applyActionProposalDiscipline, ApprovalActionError, ApprovalStore, approveProposedAction, checkApprovable, extractActionProposals, ingestApprovedPrivateKnowledgebase, MAX_PENDING_COMPONENTS, parsePersonaComponents, parseSkillProposal, sanitizeMemoryProposalPath } from "./packages/mindstone-core/src/index.ts";
 const route = (extra = {}) => ({ id: "s", kind: "route", ...extra });
 assert.ok(parsePersonaComponents({ skills: ["a"], new: { workflows: [{ id: "w", steps: [route()] }] } }), "a plain component list parses");
 assert.equal(parsePersonaComponents({ new: { workflows: [{ id: "w", steps: [route({ personaId: "x" })] }] } }), undefined, "a proposed workflow routing to a persona must be refused");
@@ -78,13 +78,20 @@ assert.equal(parsePersonaComponents({ new: { skills: [{ ...skill("a1"), label: "
 // writing needs, and the CLI shows every character that isn't visible (#125 review).
 assert.equal(parseSkillProposal({ ...skill("a1"), label: "Nice\u009b8m" }), undefined, "a C1 control in a skill label must be refused");
 assert.equal(parseSkillProposal({ ...skill("a1"), description: "Line one\n  forged row" }), undefined, "a skill description is one line");
-for (const text of ["⚠️ Check twice.", "Family 👨‍👩‍👧 note.", "می‌خواهم", "မြို့", "# Title\n\n\tIndented line."]) {
+for (const text of ["⚠️ Check twice.", "Family 👨‍👩‍👧 note.", "می‌خواهم", "မြို့", "မြှို့", "ᠠ\u180eᠠ", "# Title\n\n\tIndented line."]) {
   assert.ok(parseSkillProposal({ ...skill("a1"), instructions: text, description: text.split("\n")[0] }), `real text must parse: ${JSON.stringify(text)}`);
 }
 // What acts on a terminal or hides text is refused in any field: it is printed long after approval
 // (`skill list`, the TUI, logs), not only on the approval screens.
 for (const [field, value] of [["description", "Desc \u001b]0;TITLE\u0007"], ["instructions", "a\u009b8m"], ["goal", "Reads \u202eright to left"], ["outputs", ["tag\u{E0041}\u{E0042}"]], ["instructions", "one\u2028two"]]) {
   assert.equal(parseSkillProposal({ ...skill("a1"), [field]: value }), undefined, `unsafe text in a skill's ${field} must be refused`);
+}
+// The component proposals' set, less the joiners, variation selectors and U+180E (#146 review):
+// directional marks, zero-width and fillers, format and private-use characters, stacked marks.
+for (const char of ["\u200e", "\u200f", "\u061c", "\u200b", "\u2060", "\ufeff", "\u00ad", "\u3164", "\u115f", "\uffa0", "\ufff9", "\ufffb", "\ue000", "\u2062", "\u0301".repeat(8)]) {
+  for (const field of ["label", "description", "instructions"]) {
+    assert.equal(parseSkillProposal({ ...skill("a1"), [field]: `a${char}b` }), undefined, `U+${char.codePointAt(0)!.toString(16)} in a skill's ${field} must be refused`);
+  }
 }
 // A memory path or a mutation resource is a name, printed and used as it is: no such characters either.
 {
@@ -229,6 +236,36 @@ assert.equal(extractActionProposals(block({ ...base, components: { skills: ["a"]
     (error) => error instanceof ApprovalActionError && error.code === "persona_rejected");
   assert.equal(orphanStore.get(child.id)?.status, "rejected", "the orphaned card must be rejected");
 }
+// Checked again at approval (#146 review): a stored workflow card that names a persona is
+// refused, and a component attaches only to the folder its own persona card wrote.
+{
+  const root = join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "approve-time");
+  const dirs = { personasDir: join(root, "personas"), skillsDir: join(root, "skills"), workflowsDir: join(root, "workflows"), knowledgebasesDir: join(root, "kbs") };
+  for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
+  const options = { decidedBy: "unit", memoryDir: join(root, "memory"), referencedPersonaIds: new Set<string>(), referencedWorkflowIds: new Set<string>(), ...dirs };
+  const atStore = new ApprovalStore({ path: join(root, "approvals.json") });
+  const made = applyActionProposalDiscipline({ replyText: block({ ...base, id: "at1", components: { new: { workflows: [{ id: "wf-at", steps: [route()] }], privateKnowledgebases: kbs(1) } } }), origin: "unit", allowPersona: true, store: atStore });
+  const [personaCard, ...children] = made.proposals;
+  approveProposedAction(atStore, checkApprovable(atStore, personaCard.id), options);
+  assert.equal(JSON.parse(readFileSync(join(dirs.personasDir, "at1", "metadata.json"), "utf8")).approvalId, personaCard.id, "the persona records its card");
+  const workflowCard = children.find((card) => card.kind === "workflow_create")!;
+  const kbCard = children.find((card) => card.kind === "persona_kb_create")!;
+  const file = JSON.parse(readFileSync(atStore.path, "utf8"));
+  file.actions.find((action) => action.id === workflowCard.id).workflow.definition.steps[0].personaId = "someone";
+  writeFileSync(atStore.path, JSON.stringify(file));
+  assert.throws(() => approveProposedAction(atStore, checkApprovable(atStore, workflowCard.id), options),
+    (error) => error instanceof ApprovalActionError && error.code === "invalid_workflow", "a stored workflow that names a persona must be refused at approval");
+  assert.ok(!existsSync(join(dirs.workflowsDir, "wf-at")), "the refused workflow was written");
+  for (const approvalId of [undefined, "another-card"]) {
+    rmSync(join(dirs.personasDir, "at1"), { recursive: true, force: true });
+    mkdirSync(join(dirs.personasDir, "at1"));
+    writeFileSync(join(dirs.personasDir, "at1", "PERSONA.md"), "# at1\n\nAnother persona.\n");
+    writeFileSync(join(dirs.personasDir, "at1", "metadata.json"), JSON.stringify({ name: "at1", ...(approvalId ? { approvalId } : {}) }));
+    assert.throws(() => approveProposedAction(atStore, checkApprovable(atStore, kbCard.id), options),
+      (error) => error instanceof ApprovalActionError && error.code === "invalid_persona", `a card must not attach to another persona with its id (${approvalId ?? "no card"})`);
+    assert.ok(!existsSync(join(dirs.personasDir, "at1", "knowledgebases")), "a KB was written into another persona");
+  }
+}
 // Caps: past MAX_PENDING_COMPONENTS of a kind, the whole proposal is dropped, with a note.
 const store = new ApprovalStore({ path: join(process.env.MINDSTONE_AGENT_RUNTIME_DIR, "unit-approvals.json") });
 for (let i = 0; i < 3; i += 1) {
@@ -247,7 +284,8 @@ assert.match(capped.text, /wasn't saved/);
   mkdirSync(join(kbRoot, "k", "sources"), { recursive: true });
   writeFileSync(join(kbRoot, "k", "kb.json"), JSON.stringify({ name: "k", externalSources: [{ id: "web", type: "url", url: "https://example.com/doc" }] }));
   writeFileSync(join(kbRoot, "k", "sources", "a.md"), "# A\n\nText.\n");
-  const result = await ingestMindStoneKnowledgebase(kbRoot, "k", { noLinks: true, textOnly: true });
+  // The gateway and the CLI both ingest an approved KB through this one function (#146 review).
+  const result = await ingestApprovedPrivateKnowledgebase(kbRoot, "k");
   assert.equal(result.ok, false, "a text-only ingest must not fetch a URL source");
   assert.match(result.ok ? "" : result.error, /ingest it from the persona editor/);
 }
@@ -398,6 +436,14 @@ expect 409 "p9's workflow with its persona gone" POST "/admin/approvals/$(card p
 expect 409 "p9's KB with its persona gone" POST "/admin/approvals/$(card p9 persona_kb_create)/approve" '{}' invalid_persona
 [[ ! -e "${DATA}/skills/nine-skill" && ! -e "${DATA}/workflows/wf-nine" && ! -e "${DATA}/personas/p9" ]] || { echo "a component of a missing persona was written" >&2; exit 1; }
 [[ "$(status_of "$(card p9 skill_install)")" == pending ]] || { echo "a refused component card isn't pending" >&2; exit 1; }
+# A different persona made later under the same id: p9's old cards don't attach to it (#146 review).
+mkdir -p "${DATA}/personas/p9"
+printf '# p9\n\nA different persona.\n' > "${DATA}/personas/p9/PERSONA.md"
+printf '{"name":"p9"}\n' > "${DATA}/personas/p9/metadata.json"
+expect 409 "p9's KB into a different p9" POST "/admin/approvals/$(card p9 persona_kb_create)/approve" '{}' invalid_persona
+expect 409 "p9's skill into a different p9" POST "/admin/approvals/$(card p9 skill_install)/approve" '{}' invalid_persona
+[[ ! -e "${DATA}/personas/p9/knowledgebases" && ! -e "${DATA}/skills/nine-skill" ]] || { echo "a component attached to a different persona with the same id" >&2; exit 1; }
+rm -rf "${DATA}/personas/p9"
 echo "refusals ok"
 
 # --- 7b. A persona that lists no skills keeps every installed skill when its new skill is approved.
@@ -489,6 +535,13 @@ if grep -q $'\x1b\[8mHIDDEN' "${TEMP_RUNTIME}/prompt.rec" || grep -q $'\xf3\xa0\
 if grep -q $'\x1b\[8m' "${TEMP_RUNTIME}/mem-show.txt"; then echo "approvals show sent a raw escape (memory path or content)" >&2; exit 1; fi
 grep -qF 'notes/x\u{1b}[8m.md' "${TEMP_RUNTIME}/mem-show.txt" || { echo "the memory path's escape isn't shown: $(cat -v "${TEMP_RUNTIME}/mem-show.txt")" >&2; exit 1; }
 grep -qF 'u{e0041}' "${TEMP_RUNTIME}/mem-show.txt" || { echo "tag characters aren't shown: $(cat -v "${TEMP_RUNTIME}/mem-show.txt")" >&2; exit 1; }
+# `skill list` shows what an installed skill carries, never acts on it (#146 review).
+mkdir -p "${DATA}/skills/shown-skill"
+node -e 'require("fs").writeFileSync(process.argv[1], JSON.stringify({ id: "shown-skill", label: "Shown", description: "Reads \u202eright to left \u001b[31mred" }))' "${DATA}/skills/shown-skill/skill.json"
+printf '# Shown\n\nBody.\n' > "${DATA}/skills/shown-skill/SKILL.md"
+listed="$(./scripts/mindstone skill list)"
+grep -qF 'Reads \u{202e}right to left \u{1b}[31mred' <<<"${listed}" || { echo "skill list printed a description unescaped: ${listed}" >&2; exit 1; }
+rm -rf "${DATA}/skills/shown-skill"
 echo "printable summaries ok"
 
 # --- 8. A non-owner's proposal, and one whose workflow routes to a persona, are dropped whole.

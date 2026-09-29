@@ -254,6 +254,7 @@ import {
   addPrivateKnowledgebaseSource,
   ensurePersonaKnowledgebasesDir,
   ingestMindStoneKnowledgebase,
+  ingestApprovedPrivateKnowledgebase,
   KB_URL_FETCH_LIMITS,
   isSafeComponentId,
   discoverMindStoneKnowledgebases,
@@ -2739,7 +2740,7 @@ async function handleAdminRequest(req: IncomingMessage, res: ServerResponse, url
               : await (async () => {
                   PRIVATE_KB_INGESTS.add(ingestKey);
                   try {
-                    return await ingestMindStoneKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString(), noLinks: true, textOnly: true });
+                    return await ingestApprovedPrivateKnowledgebase(result.kbRoot, result.kbId, { now: new Date().toISOString() });
                   } catch (error) {
                     return { ok: false as const, error: error instanceof Error ? error.message : String(error) };
                   } finally {

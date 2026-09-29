@@ -370,8 +370,20 @@ export function summaryText(text: string): string {
   return text.replace(new RegExp(PROPOSAL_UNSAFE_NAME.source, "gu"), (char) => `\\u{${char.codePointAt(0)!.toString(16)}}`);
 }
 
+/**
+ * What a proposed skill's fields refuse (#146 review): the component
+ * proposals' set (any control, format, private-use or unassigned character
+ * but line breaks and tabs, every default-ignorable, the separators, the
+ * braille blank and the Hangul fillers), less the four characters real
+ * writing needs, which component ids never do: the zero-width non-joiner and
+ * joiner (Persian, Indic, emoji sequences), variation selectors (emoji
+ * presentation) and the Mongolian vowel separator. Eight or more combining
+ * marks in a row is refused too (Myanmar and Tibetan stack up to five or six).
+ */
+const SKILL_PROPOSAL_UNSAFE = /(?:(?![\u200c\u200d\u180e\ufe00-\ufe0f\u{E0100}-\u{E01EF}])(?:[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u2800\u3164\uFFA0\u115F\u1160]))|\p{M}{8,}/u;
+
 function hasUnsafeText(value: unknown): boolean {
-  if (typeof value === "string") return PROPOSAL_UNSAFE_TEXT.test(value.replace(/\r\n/g, "\n"));
+  if (typeof value === "string") return PROPOSAL_UNSAFE_TEXT.test(value.replace(/\r\n/g, "\n")) || SKILL_PROPOSAL_UNSAFE.test(value.replace(/\r\n/g, "\n"));
   if (Array.isArray(value)) return value.some(hasUnsafeText);
   return false;
 }
@@ -380,10 +392,10 @@ function hasUnsafeText(value: unknown): boolean {
 export function parseSkillProposal(parsed: unknown): SkillInstallPayload | undefined {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
-  // Nothing that acts on a terminal or hides text (escape sequences, C1,
-  // bidi overrides, tag characters) in any field: the text is printed in
-  // `skill list`, the TUI and logs long after it is approved. Zero-width
-  // joiners and variation selectors stay: real writing needs them (#125 review).
+  // Nothing that acts on a terminal, reorders or hides text in any field
+  // (SKILL_PROPOSAL_UNSAFE): the text is printed in `skill list`, the TUI and
+  // logs long after it is approved. Zero-width joiners and variation
+  // selectors stay: real writing needs them (#125, #146 review).
   const fields = ["id", "label", "description", "goal", "whenToUse", "outputs", "safetyNotes", "instructions"].map((key) => record[key]);
   if (fields.some((field) => hasUnsafeText(field))) return undefined;
   const id = typeof record.id === "string" && SKILL_PROPOSAL_ID.test(record.id) && record.id !== "drafts" ? record.id : undefined;
