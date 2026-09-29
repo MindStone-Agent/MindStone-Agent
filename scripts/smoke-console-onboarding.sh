@@ -157,8 +157,8 @@ pull1=$!
 sleep 0.4
 second="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${ADMIN[@]}" -d '{"model":"mxbai-embed-large"}' "${BASE}/admin/memory/pull")"
 wait "${pull1}"
-[[ "${second}" == 409 ]] || { echo "a second concurrent download should be refused as busy, got ${second}" >&2; exit 1; }
 [[ "$(cat "${TEMP_RUNTIME}/pull1.code")" == 200 && "$(field ok)" == true ]] || { echo "the first download should succeed: $(cat "${BODY}")" >&2; exit 1; }
+[[ "${second}" == 409 ]] || { echo "a second concurrent download should be refused as busy, got ${second}" >&2; exit 1; }
 # Downloaded; checking again finds it, so the download slot is cleared.
 : "downloading the model"
 expect "$(post /admin/memory/check '{"embeddingProvider":"ollama:mxbai-embed-large"}')" 200 "checking the downloaded model"
