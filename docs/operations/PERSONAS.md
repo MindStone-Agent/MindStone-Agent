@@ -53,6 +53,77 @@ Rule fields (`sessionKeyPrefix`, `sourceChannel`, `sourceSubstrate`) AND
 together within a rule. Resolution runs per turn in both the native chat/TUI
 path and all Gateway routes.
 
+## A persona the agent proposes, with its components (#125)
+
+The agent's `mindstone-persona-proposal` can carry `components`:
+- `skills`, `workflows`, `knowledgebases`: existing ones, by id. Approving the
+  persona checks they exist (`422 unknown_component` otherwise) and writes
+  them as its lists.
+- `new.skills` (up to 3), `new.workflows` (up to 3), `new.privateKnowledgebases`
+  (up to 2, each up to 5 markdown text sources): each becomes **its own
+  approval card**, linked to the persona's card.
+  - A component card can be approved only after its persona's
+    (`409 persona_pending`); rejecting the persona rejects its components
+    that are still waiting.
+  - An approved component joins its persona's list, except that a new skill
+    for a persona that lists no skills adds nothing: that persona already uses
+    every installed skill, the new one included. A new skill goes through the
+    install gate (advanced settings), and one already installed, or with a
+    built-in skill's id, is refused, force or not. Approving it installs it
+    like any skill: it is also in the prompt with no persona active, and for
+    every persona that lists no skills. A new workflow is checked strictly, can't hand the
+    turn to or gate on a persona, its skills must be installed by then, and an
+    id the config runs or a persona lists is refused. A new private KB is
+    written and ingested.
+  - If the persona's folder is gone when a component is approved, or is a
+    different persona made later under the same id (the approved persona's
+    `metadata.json` records its card's id), it is refused
+    (`409 invalid_persona`) before anything is installed or written.
+    A card left waiting under a rejected persona is rejected when someone
+    tries to approve it (`409 persona_rejected`); one whose persona card no
+    longer exists is refused (`409 persona_missing`) and can only be rejected.
+  - Some components can only be checked at approval: a new workflow whose
+    step names a skill that isn't installed by then, or whose id is already
+    taken, is refused then (`422 invalid_workflow`, `409 workflow_exists`),
+    and its card can be rejected. The persona itself is unaffected.
+  - `mindstone approvals show` prints everything a card holds: a persona's
+    listed skills, shared KBs and workflows (with their steps) and its linked
+    cards; a workflow card's `workflow.json`; a KB card's source text. The
+    approve prompt shows the same.
+- A persona proposal that doesn't hold up (its own fields, its JSON, or its
+  components) is dropped whole, and the reply says why. So is one that would
+  put a kind it brings over its pending cap (6 component cards of a kind per
+  agent whose persona isn't rejected; a plain skill proposal doesn't count).
+  Only one persona proposal per reply is put up for approval; the reply says
+  how many other persona blocks were dropped. A separate skill proposal with
+  the id of a skill the persona brings isn't saved. A skill's label is one
+  line. A persona's new components may not hold characters that can't be
+  seen. A plain skill proposal may not hold escape sequences, C1 or other
+  control characters (line breaks and tabs aside, and not those in its label
+  or description, which are one line), bidi overrides, separators or tag
+  characters; it may hold zero-width joiners and variation selectors, which
+  real writing needs. A memory write's path and a calendar mutation's
+  resource are one line with none of those either (zero-width joiners stay
+  allowed there, for Persian, Indic and emoji names; a private KB's name,
+  a persona component, refuses them); a proposal that breaks this is dropped.
+  The CLI shows invisible characters as `\u{..}` in `approvals show` and the
+  approve prompt, for drafts, memory writes and mutations too (stacked
+  combining marks are shown as they are). Every drop on an owner's turn,
+  persona or skill, is said in the reply and is a transcript event.
+  Approving a proposed KB ingests its text sources only; if a URL
+  source was added to it in between, ingest it from the persona editor. A
+  component approved into a persona that no longer loads is added to its
+  list but reported as not in use (`listed: false`); a skill for one that
+  lists no skills adds nothing. A list file of the wrong shape is never
+  rewritten: the component is reported as not added, to fix it by hand.
+  Components are refused for: invisible characters or stacked combining marks
+  in any of their text, a skill or workflow id both listed and brought as new
+  (a shared KB and a private KB may share an id: they are separate), or a new
+  skill with a built-in skill's id. Approving never activates, and a non-owner's
+  proposal is dropped.
+- The links live in the approval store (`parentApprovalId`), so a persona's
+  lists only ever hold components that exist.
+
 ## Building a persona in the Console (#125)
 
 The admin API creates and edits personas, workflows and private knowledge

@@ -7,7 +7,7 @@ import { loadMindStoneWorkflow } from "../workflow/load.js";
 import { isRealWorkflowDir } from "../workflow/validate.js";
 import { isRealDirectory, isSafeComponentId, personaKnowledgebasesDir, readablePersonaKnowledgebasesDir } from "./components.js";
 import { PERSONA_PROPOSAL_ID } from "./create.js";
-import { loadMindStonePersona } from "./load.js";
+import { capabilityList, loadMindStonePersona } from "./load.js";
 
 /**
  * Owner-built personas (#125): create and edit a persona with its component
@@ -451,4 +451,47 @@ export function addPrivateKnowledgebaseSource(
     return { kind: "url", name: body.name };
   }
   throw new PersonaComposeError('kind must be "text" or "url"', "invalid_source", 400);
+}
+
+/**
+ * Add one id to a persona's `skills.json`, `workflows.json` or
+ * `knowledgebases.json` (#125: an approved component card joins its persona).
+ * The file keeps its shape (`[...]` or `{ "<key>": [...] }`) and is replaced
+ * in one rename.
+ */
+export function addPersonaComponentId(personaDir: string, key: "skills" | "workflows" | "knowledgebases", id: string): "added" | "all" {
+  if (!isRealDirectory(personaDir)) throw new PersonaComposeError("the persona folder is missing or a link", "invalid_persona", 422);
+  const path = join(personaDir, `${key}.json`);
+  let data: unknown = [];
+  try {
+    if (lstatSync(path).isSymbolicLink()) throw new PersonaComposeError(`${key}.json is a link; edit it on disk`, "invalid_persona", 422);
+    data = JSON.parse(readFileSync(path, "utf-8"));
+  } catch (error) {
+    if (error instanceof PersonaComposeError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new PersonaComposeError(`${key}.json can't be read`, "invalid_persona", 422);
+  }
+  // Read as the persona loader reads it: a file of the wrong shape is the
+  // owner's to fix, never rewritten with only this id (#125 review).
+  const checked = capabilityList(data, key);
+  if (!Array.isArray(checked)) throw new PersonaComposeError(`${key}.json isn't a list of ids; fix the file by hand (the persona editor can't open a persona that doesn't load)`, "invalid_persona", 422);
+  const list: string[] = [...checked];
+  // No skills listed means every installed skill, this one included: writing
+  // the list would take all the others away (#125 review).
+  if (key === "skills" && list.length === 0) return "all";
+  if (!list.includes(id)) list.push(id);
+  const next = Array.isArray(data) || !data || typeof data !== "object" ? list : { ...(data as Record<string, unknown>), [key]: list };
+  replaceFile(path, `${JSON.stringify(next, null, 2)}\n`);
+  return "added";
+}
+
+/** Write a proposed private KB's text sources (#125): the KB must be new, created here. */
+export function writePrivateKnowledgebase(personaDir: string, kb: { id: string; name?: string; sources: Array<{ name: string; text: string }> }): string {
+  const created = createPrivateKnowledgebase(personaDir, { id: kb.id, name: kb.name });
+  try {
+    for (const source of kb.sources) addPrivateKnowledgebaseSource(personaDir, kb.id, { kind: "text", name: source.name, text: source.text });
+  } catch (error) {
+    rmSync(created.dir, { recursive: true, force: true });
+    throw error;
+  }
+  return created.dir;
 }

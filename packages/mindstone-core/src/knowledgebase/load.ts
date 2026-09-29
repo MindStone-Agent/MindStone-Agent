@@ -238,6 +238,12 @@ export async function ingestMindStoneKnowledgebase(
      * of `loadUrlSourceDocument`'s `privateKb` (#142 review).
      */
     privateKbUrls?: { refusedHost?: (host: string) => boolean };
+    /**
+     * An approved proposal's KB (#125): its text sources only. One that has a
+     * URL source by now (added in between) is left for an admin ingest, with
+     * its permission check and limits (#125 review).
+     */
+    textOnly?: boolean;
   } = {},
 ): Promise<IngestKnowledgebaseResult> {
   // A persona's private KB (#125, `noLinks`) is its own files: no links
@@ -249,6 +255,9 @@ export async function ingestMindStoneKnowledgebase(
   const loaded = loadMindStoneKnowledgebase(kbDir, kbId);
   if (!loaded.ok) return { ok: false, kbId, error: loaded.error };
   const kb = loaded.kb;
+  if (options.textOnly && kb.externalSources.length > 0) {
+    return { ok: false, kbId, error: "it has an external source now; ingest it from the persona editor" };
+  }
   if (options.noLinks && kb.externalSources.some((source) => source.type === "folder")) {
     return { ok: false, kbId, error: "a persona's private knowledge base can't read folders outside it; use sources/ or a URL source" };
   }
@@ -321,6 +330,15 @@ export async function ingestMindStoneKnowledgebase(
     writeFileSync(kb.indexPath, text);
   }
   return { ok: true, kbId, indexPath: kb.indexPath, entryCount: entries.length, sourceCount: sourcePaths.length + externalDocuments.length };
+}
+
+/**
+ * The ingest that follows approving an agent-proposed private KB (#125): its
+ * own files only and its text sources only, so nothing is fetched. One place
+ * for the gateway and the CLI, so neither can drop a guard (#146 review).
+ */
+export function ingestApprovedPrivateKnowledgebase(kbRoot: string, kbId: string, options: { now?: string } = {}): Promise<IngestKnowledgebaseResult> {
+  return ingestMindStoneKnowledgebase(kbRoot, kbId, { now: options.now, noLinks: true, textOnly: true });
 }
 
 export function readMindStoneKbIndex(kb: MindStoneKnowledgebase): MindStoneKbIndex | undefined {
