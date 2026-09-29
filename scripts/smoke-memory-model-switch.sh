@@ -526,7 +526,7 @@ echo "a run stopped when the endpoint address changed after ${addr_run} chunks"
 
 # --- 4. Another model's chunk the new embedder refuses never costs a turn its own vectors (Hearth's
 # #167 review, #155 item 2): the turn's update leaves other models' chunks to the paced run, and a
-# run that fails is left for a minute, not sent again after every turn.
+# run that fails is left alone for a while (a minute), so the turns right after it don't send it again.
 STUB_PORT="${STUB_PORT}" python3 - <<'PY'
 import json, os, pathlib
 p = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "config.json"
@@ -561,16 +561,17 @@ TS
 for _ in $(seq 1 20); do [[ "$(tokens_embedded)" == yes ]] && break; sleep 0.5; done
 state="$(tokens_embedded)"
 [[ "${state}" == yes ]] || { echo "the turn's own chunks weren't embedded because another model's chunk was refused: ${state}" >&2; exit 1; }
-# Control: the paced run did try the refused chunk (so it was in reach), once.
+# Control: the paced run did try the refused chunk (so it was in reach), exactly once.
 for _ in $(seq 1 20); do [[ "$(poison_sent)" -gt 0 ]] && break; sleep 0.5; done
 first_poison="$(poison_sent)"
-[[ "${first_poison}" -gt 0 ]] || { echo "control: the paced run never sent the refused chunk, so this checked nothing" >&2; exit 1; }
-# A failed run is left for a minute: two more turns don't send the refused chunk again.
+[[ "${first_poison}" == 1 ]] || { echo "control: the paced run should have sent the refused chunk once: ${first_poison}" >&2; exit 1; }
+# The two turns right after the failed run don't send the refused chunk again (the pause is a
+# minute; this covers the next few seconds of it).
 chat "a switch question right after the failed run" >/dev/null
 sleep 1
 chat "another switch question right after the failed run" >/dev/null
 sleep 2
-[[ "$(poison_sent)" == "${first_poison}" ]] || { echo "the refused chunk was sent again within a minute of the failed run: $(poison_sent) requests, ${first_poison} before" >&2; exit 1; }
-echo "a refused old chunk left the turn's vectors alone and wasn't retried within the minute"
+[[ "$(poison_sent)" == "${first_poison}" ]] || { echo "the refused chunk was sent again by the turns right after the failed run: $(poison_sent) requests, ${first_poison} before" >&2; exit 1; }
+echo "a refused old chunk left the turn's vectors alone and the next turns didn't send it again"
 
 echo "Memory embedding model switch smoke test passed."
