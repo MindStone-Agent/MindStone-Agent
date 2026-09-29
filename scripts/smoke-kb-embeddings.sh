@@ -87,7 +87,8 @@ createServer((req, res) => {
     if (req.method !== "POST" || req.url !== "/v1/embeddings") { res.writeHead(404); res.end("{}"); return; }
     const body = JSON.parse(raw);
     const input = Array.isArray(body.input) ? body.input : [body.input];
-    state.requests.push({ model: body.model, input, t: Date.now() });
+    const request = { model: body.model, input, t: Date.now() };
+    state.requests.push(request);
     if (state.mode === "fail") {
       res.writeHead(500, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "stub embedder is down" } }));
@@ -95,6 +96,7 @@ createServer((req, res) => {
     }
     const dims = state.mode === "dim5" ? 5 : 6;
     const answer = () => {
+      request.done = Date.now();
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ object: "list", model: body.model, data: input.map((text, index) => ({ object: "embedding", index, embedding: vectorFor(text, dims) })) }));
     };
@@ -865,22 +867,36 @@ library_requests_between() { node -e 'fetch(process.argv[1]).then((r)=>r.json())
 set_config 'c["memory"].pop("vectorStore", None)'
 stub_mode serial
 set_config 'c["memory"]["embeddingProvider"] = "ollama:kbstub-c"'
+# A KB already embedded with the new model, so each turn embeds its question as a real install does.
+python3 - <<'PY2'
+import json, os, pathlib
+root = pathlib.Path(os.environ["MINDSTONE_AGENT_RUNTIME_DIR"]) / "mindstone" / "knowledgebases" / "atlas"
+(root / "sources").mkdir(parents=True, exist_ok=True)
+(root / "kb.json").write_text(json.dumps({"name": "Atlas", "version": "0.1.0"}))
+(root / "sources" / "maps.md").write_text("# Maps\n\n## Coast\n\nCoastal charts of the bay.\n")
+PY2
+${MS} kb ingest atlas --json >/dev/null
 read -r member_start member_end <<<"$(chat_ms "a member's question after the switch" member)"
 grep -q '"choices"' "${BODY}" || { echo "the member's chat didn't run: $(cat "${BODY}")" >&2; exit 1; }
 sleep 3
 [[ "$(library_requests_between "${member_start}" "$(node -e 'console.log(Date.now())')")" == "0" ]] || { echo "a non-owner chat started a re-embed" >&2; exit 1; }
 chat_ms "the owner's first question after the switch" >/dev/null
 sleep 1
-windows=""
-for i in 1 2 3; do windows="${windows} $(chat_ms "owner question ${i} during the re-embed")"; sleep 0.5; done
+for i in 1 2 3; do chat_ms "owner question ${i} during the re-embed" >/dev/null; sleep 0.5; done
 grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" && { echo "the re-embed finished before the timed chats: nothing was measured" >&2; exit 1; }
-set -- ${windows}
-while [[ $# -ge 2 ]]; do
-  # No library entry is sent while a turn runs (a little slack at each edge for the HTTP round trip).
-  n="$(library_requests_between $(( $1 + 150 )) $(( $2 - 150 )))"
-  [[ "${n}" == "0" ]] || { echo "the re-embed sent ${n} entries while an owner turn ran ($1..$2)" >&2; exit 1; }
-  shift 2
-done
+# Each owner turn's query embedding, as the stub saw it: no library entry is sent while it waits,
+# and it waits behind one entry at most (150 ms here), not a batch.
+node -e 'fetch(process.argv[1]).then((r)=>r.json()).then((s)=>{
+  const library = s.requests.filter((q)=>q.input.some((t)=>t.includes("Book row")));
+  const queries = s.requests.filter((q)=>q.input.some((t)=>t.includes("during the re-embed")));
+  if (queries.length !== 3) { console.error(`expected 3 owner query embeddings, saw ${queries.length}`); process.exit(1); }
+  for (const q of queries) {
+    if (!(q.done >= q.t)) { console.error("an owner query embedding was never answered"); process.exit(1); }
+    const sent = library.filter((l)=>l.t > q.t && l.t < q.done).length;
+    if (sent) { console.error(`the re-embed sent ${sent} entries while an owner turn waited on the embedder`); process.exit(1); }
+    if (q.done - q.t > 1000) { console.error(`an owner turn waited ${q.done - q.t} ms behind the re-embed`); process.exit(1); }
+  }
+})' "${STUB}/_test/state" || exit 1
 [[ "$(library_requests_between 0 "$(node -e 'console.log(Date.now())')")" -gt 0 ]] || { echo "no re-embed request was seen at all" >&2; exit 1; }
 for _ in $(seq 1 120); do grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" && break; sleep 0.5; done
 grep -q '"model":"kbstub-c"' "${DATA}/knowledgebases/library/vectors.json" || { echo "the library KB was never embedded again" >&2; exit 1; }
