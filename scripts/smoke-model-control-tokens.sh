@@ -110,10 +110,24 @@ const googleTools = { contents: (shapes[3][1] as { contents: unknown[] }).conten
 const googleOut = hook(googleTools) as typeof googleTools;
 assert.equal(JSON.stringify(googleOut.config.tools), JSON.stringify(googleTools.config.tools), "Google's config.tools are not rewritten");
 assert.equal(googleOut.config.systemInstruction, "＜|image|＞", "the rest of Google's config is");
-const piTools = { messages: [{ role: "user", content: [{ type: "text", text: "<|image|>" }, { type: "image", data: "AAAA", mimeType: "image/png" }], toolsAdded: [{ name: "pick", description: "<|image|>", parameters: { enum: ["<|image|>"] } }] }] };
-const piOut = hook(piTools) as typeof piTools;
-assert.equal(JSON.stringify(piOut.messages[0].toolsAdded), JSON.stringify(piTools.messages[0].toolsAdded), "pi-messages toolsAdded are not rewritten");
-assert.ok(!JSON.stringify(piOut.messages[0].content).includes("<|image|>"), "the message content is");
+// Tools added mid-session: pi-messages carries them on a system message; Responses as items.
+const piTools = { messages: [
+  { role: "system", content: "<|image|>", toolsAdded: [{ name: "pick", description: "<|image|>", parameters: { enum: ["<|image|>"] } }] },
+  { role: "user", content: [{ type: "text", text: "<|image|>" }, { type: "image", data: "AAAA", mimeType: "image/png" }] },
+  { role: "assistant", content: [{ type: "tool_use", id: "t", name: "configure", input: { toolsAdded: "<|image|>", tools: "<|image|>" } }] },
+] };
+const piOut = hook(piTools) as { messages: Array<Record<string, unknown>> };
+assert.equal(JSON.stringify(piOut.messages[0].toolsAdded), JSON.stringify(piTools.messages[0].toolsAdded), "pi-messages toolsAdded on a system message are not rewritten");
+assert.equal(piOut.messages[0].content, "＜|image|＞", "that system message's text is");
+assert.ok(!JSON.stringify(piOut.messages[1].content).includes("<|image|>"), "the user content is");
+assert.equal(JSON.stringify(piOut.messages[2].content), '[{"type":"tool_use","id":"t","name":"configure","input":{"toolsAdded":"＜|image|＞","tools":"＜|image|＞"}}]', "tool-call arguments named toolsAdded or tools are rewritten");
+const responsesTools = { input: [
+  { role: "user", content: [{ type: "input_text", text: "<|image|>" }, { type: "input_image", image_url: dataUrl }] },
+  { type: "additional_tools", tools: [{ type: "function", name: "pick", description: "<|image|>", parameters: { enum: ["<|image|>"] } }] },
+] };
+const responsesOut = hook(responsesTools) as typeof responsesTools;
+assert.equal(JSON.stringify(responsesOut.input[1]), JSON.stringify(responsesTools.input[1]), "a Responses additional_tools item is not rewritten");
+assert.ok(!JSON.stringify(responsesOut.input[0]).includes("<|image|>"), "the input text is");
 console.log("helper and hook: ok");
 
 // The session guard composes with Pi's own hook (extensions' before_provider_request).

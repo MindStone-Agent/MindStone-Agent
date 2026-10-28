@@ -94,15 +94,24 @@ export function payloadCarriesImage(value: unknown, depth = 0): boolean {
 
 // Tool definitions are the caller's schemas, not conversation text: an enum or const value
 // rewritten here would come back from the model in the full-width form and fail validation.
-// They sit at the top level (`tools`, Bedrock `toolConfig`), under Google's `config`, and in
-// pi-messages' `toolsAdded` on a message.
+// They sit at the top level (`tools`, Bedrock `toolConfig`), under Google's `config`, and, for
+// tools added mid-session, as `tools`/`toolsAdded` on a system message (pi-messages, Kimi) or on a
+// Responses `additional_tools` / `tool_search_output` item. A tool-call argument that happens to
+// be named `tools` or `toolsAdded` is still rewritten.
 const TOOL_DEFINITION_KEYS = new Set(["tools", "toolConfig"]);
 const TOOL_DEFINITION_CONTAINERS = new Set(["config"]);
+const TOOL_DEFINITION_ITEMS = new Set(["additional_tools", "tool_search_output"]);
 
-function neutralizePayloadEntries(value: Record<string, unknown>, skipToolKeys: boolean): Record<string, unknown> {
+function isToolDefinitionEntry(owner: Record<string, unknown>, key: string, topLevel: boolean): boolean {
+  if (topLevel && TOOL_DEFINITION_KEYS.has(key)) return true;
+  if (key !== "tools" && key !== "toolsAdded") return false;
+  return owner.role === "system" || (typeof owner.type === "string" && TOOL_DEFINITION_ITEMS.has(owner.type));
+}
+
+function neutralizePayloadEntries(value: Record<string, unknown>, topLevel: boolean): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).map(([key, item]) => {
-    if (key === "toolsAdded" || (skipToolKeys && TOOL_DEFINITION_KEYS.has(key))) return [key, item];
-    if (skipToolKeys && TOOL_DEFINITION_CONTAINERS.has(key) && isPlainObject(item)) return [key, neutralizePayloadEntries(item, true)];
+    if (isToolDefinitionEntry(value, key, topLevel)) return [key, item];
+    if (topLevel && TOOL_DEFINITION_CONTAINERS.has(key) && isPlainObject(item)) return [key, neutralizePayloadEntries(item, true)];
     return [key, neutralizePayloadValue(item)];
   }));
 }
