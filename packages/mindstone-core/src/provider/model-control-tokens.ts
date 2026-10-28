@@ -51,10 +51,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * block the model wrote itself, makes every later request in the session fail.
  */
 function isSignedBlock(value: Record<string, unknown>): boolean {
-  return (typeof value.signature === "string" && value.signature.length > 0) // Anthropic thinking, Bedrock reasoningText
+  return (value.type === "thinking" && typeof value.signature === "string" && value.signature.length > 0) // Anthropic
+    || (value.type === "thinking" && typeof value.thinkingSignature === "string" && value.thinkingSignature.length > 0) // Pi-native (pi-messages)
     || value.type === "redacted_thinking"
+    || isPlainObject(value.reasoningContent) // Bedrock reasoningText+signature / redactedContent
     || (typeof value.thoughtSignature === "string" && value.thoughtSignature.length > 0) // Gemini parts
-    || (value.type === "reasoning" && typeof value.encrypted_content === "string"); // OpenAI Responses
+    || (value.type === "reasoning" && typeof value.encrypted_content === "string") // OpenAI Responses
+    || (typeof value.type === "string" && value.type.startsWith("reasoning.") && typeof value.signature === "string"); // OpenRouter reasoning_details
 }
 
 /**
@@ -73,10 +76,12 @@ export function neutralizeModelControlTokensDeep<T>(value: T): T {
   return value;
 }
 
-/** Whether a provider payload carries an image, in any of the wire shapes Pi's providers use. */
+/**
+ * Whether a provider payload carries an image, in any of the wire shapes Pi's providers use. Each
+ * shape has its own marker; a string that merely starts with a data URL (user text) doesn't count.
+ */
 export function payloadCarriesImage(value: unknown, depth = 0): boolean {
   if (depth > 64) return false;
-  if (typeof value === "string") return value.startsWith("data:image/");
   if (Array.isArray(value)) return value.some((item) => payloadCarriesImage(item, depth + 1));
   if (!isPlainObject(value)) return false;
   const type = value.type;
@@ -89,16 +94,34 @@ export function payloadCarriesImage(value: unknown, depth = 0): boolean {
 
 // Tool definitions are the caller's schemas, not conversation text: an enum or const value
 // rewritten here would come back from the model in the full-width form and fail validation.
+// They sit at the top level (`tools`, Bedrock `toolConfig`), under Google's `config`, and in
+// pi-messages' `toolsAdded` on a message.
 const TOOL_DEFINITION_KEYS = new Set(["tools", "toolConfig"]);
+const TOOL_DEFINITION_CONTAINERS = new Set(["config"]);
+
+function neutralizePayloadEntries(value: Record<string, unknown>, skipToolKeys: boolean): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    if (key === "toolsAdded" || (skipToolKeys && TOOL_DEFINITION_KEYS.has(key))) return [key, item];
+    if (skipToolKeys && TOOL_DEFINITION_CONTAINERS.has(key) && isPlainObject(item)) return [key, neutralizePayloadEntries(item, true)];
+    return [key, neutralizePayloadValue(item)];
+  }));
+}
+
+function neutralizePayloadValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => neutralizePayloadValue(item));
+  if (isPlainObject(value) && !isSignedBlock(value)) return neutralizePayloadEntries(value, false);
+  return neutralizeModelControlTokensDeep(value);
+}
 
 /**
  * A Pi `onPayload` / `before_provider_request` hook. A request that carries an image goes out with
  * media-placeholder tokens neutralized in its system prompt, messages, tool results and tool-call
  * arguments; tool definitions and signed blocks are left alone. A request with no image is
- * returned as it is. Only this outbound copy changes; the session keeps the original text.
+ * returned as it is. The session's stored text is not changed, but the model sees the rewritten
+ * form.
  */
 export function neutralizeProviderPayload(payload: unknown): unknown {
   if (!payloadCarriesImage(payload)) return payload;
-  if (!isPlainObject(payload)) return neutralizeModelControlTokensDeep(payload);
-  return Object.fromEntries(Object.entries(payload).map(([key, item]) => [key, TOOL_DEFINITION_KEYS.has(key) ? item : neutralizeModelControlTokensDeep(item)]));
+  if (!isPlainObject(payload)) return neutralizePayloadValue(payload);
+  return neutralizePayloadEntries(payload, true);
 }

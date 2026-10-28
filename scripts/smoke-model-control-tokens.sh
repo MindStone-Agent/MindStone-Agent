@@ -37,6 +37,7 @@ import mindstoneAgentPiAdapter from "./packages/mindstone-pi-adapter/src/index.t
 // Media placeholders are rewritten, in both shapes and any case.
 assert.equal(n("a <｜deepseek_image｜> b"), "a ＜｜deepseek_image｜＞ b");
 assert.equal(n("x <|image|> y"), "x ＜|image|＞ y");
+assert.equal(n("<｜DEEPSEEK_IMAGE｜>"), "＜｜DEEPSEEK_IMAGE｜＞", "full-width shape, any case");
 assert.equal(n("<|IMAGE_PAD|><|vision_start|><|video|><|audio_bos|><|img|>"), "＜|IMAGE_PAD|＞＜|vision_start|＞＜|video|＞＜|audio_bos|＞＜|img|＞");
 const template = "{{ '<｜deepseek_image｜>' }} ... {{ '<｜deepseek_image｜>' }}";
 assert.equal(n(template).match(/＜｜deepseek_image｜＞/g)?.length, 2, "every occurrence");
@@ -66,11 +67,18 @@ const signed = [
   { reasoningContent: { reasoningText: { text: "<|image|>", signature: "SIG" } } },
   { text: "<|image|>", thoughtSignature: "TSIG" },
   { type: "reasoning", encrypted_content: "enc", summary: [{ type: "summary_text", text: "<|image|>" }] },
+  { type: "thinking", thinking: "pi-native <|image|>", thinkingSignature: "SIGNED_pi" },
+  { type: "reasoning.text", text: "<|image|>", signature: "SIG_or" },
 ];
 const signedOut = deep(signed) as Array<Record<string, unknown>>;
 assert.equal(JSON.stringify(signedOut.slice(0, 2)), JSON.stringify(signed.slice(0, 2)), "Anthropic thinking and redacted thinking are byte-identical");
 assert.equal(JSON.stringify(signedOut[2]), JSON.stringify(signed[2]), "Bedrock signed reasoning is byte-identical");
-assert.equal(JSON.stringify(signedOut.slice(3)), JSON.stringify(signed.slice(3)), "Gemini and Responses signed parts are byte-identical");
+assert.equal(JSON.stringify(signedOut.slice(3, 5)), JSON.stringify(signed.slice(3, 5)), "Gemini and Responses signed parts are byte-identical");
+assert.equal(JSON.stringify(signedOut[5]), JSON.stringify(signed[5]), "Pi-native (pi-messages) signed thinking is byte-identical");
+assert.equal(JSON.stringify(signedOut[6]), JSON.stringify(signed[6]), "OpenRouter signed reasoning_details are byte-identical");
+// A "signature" field in tool arguments doesn't make them a signed block.
+const toolUse = deep({ type: "tool_use", id: "t1", name: "send", input: { signature: "Best, Sam", body: "template: <|image|>" } }) as { input: { body: string } };
+assert.equal(toolUse.input.body, "template: ＜|image|＞", "tool arguments with a signature field are still rewritten");
 
 // The hook: only a request that carries an image is rewritten, and never its tool definitions.
 const dataUrl = "data:image/png;base64,AAAA";
@@ -80,6 +88,9 @@ const shapes: Array<[string, unknown]> = [
   ["Anthropic", { system: "<|image|>", messages: [{ role: "user", content: [{ type: "text", text: "<|image|>" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } }] }] }],
   ["Google", { contents: [{ role: "user", parts: [{ text: "<|image|>" }, { inlineData: { mimeType: "image/png", data: "AAAA" } }] }] }],
   ["Bedrock", { messages: [{ role: "user", content: [{ text: "<|image|>" }, { image: { format: "png", source: { bytes } } }] }] }],
+  // Images that only appear inside a tool result, deeper than the shapes above.
+  ["Anthropic tool_result", { system: "<|image|>", messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: [{ type: "text", text: "<|image|>" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } }] }] }] }],
+  ["Bedrock toolResult", { messages: [{ role: "user", content: [{ text: "<|image|>" }, { toolResult: { toolUseId: "t", content: [{ json: { note: "x" } }, { image: { format: "png", source: { bytes } } }] } }] }] }],
 ];
 for (const [name, payload] of shapes) {
   assert.ok(payloadCarriesImage(payload), `${name}: the image is seen`);
@@ -89,11 +100,20 @@ for (const [name, payload] of shapes) {
 const textOnly = { system: "<|image|>", messages: [{ role: "user", content: "the template uses <|image|> and <｜deepseek_image｜>" }] };
 assert.equal(hook(textOnly), textOnly, "a request with no image is returned as it is");
 assert.ok(!payloadCarriesImage({ messages: [{ role: "user", content: "see data:image/png;base64,AAAA in the docs" }] }), "a data URL inside text is not an image");
+assert.ok(!payloadCarriesImage({ messages: [{ role: "user", content: "data:image/png;base64,AAAA" }] }), "nor is user text that starts with one");
 const withTools = { tools: [{ type: "function", function: { name: "pick", parameters: { type: "object", properties: { k: { enum: ["<|image|>"] } } } } }], toolConfig: { tools: [{ toolSpec: { name: "p", description: "<|image|>" } }] }, messages: (shapes[0][1] as { messages: unknown[] }).messages };
 const toolsOut = hook(withTools) as typeof withTools;
 assert.equal(JSON.stringify(toolsOut.tools), JSON.stringify(withTools.tools), "tool definitions are not rewritten");
 assert.equal(JSON.stringify(toolsOut.toolConfig), JSON.stringify(withTools.toolConfig), "Bedrock toolConfig is not rewritten");
 assert.ok(!JSON.stringify(toolsOut.messages).includes("<|image|>"), "the messages still are");
+const googleTools = { contents: (shapes[3][1] as { contents: unknown[] }).contents, config: { systemInstruction: "<|image|>", tools: [{ functionDeclarations: [{ name: "pick", description: "<|image|>", parameters: { type: "object", properties: { k: { enum: ["<|image|>"] } } } }] }] } };
+const googleOut = hook(googleTools) as typeof googleTools;
+assert.equal(JSON.stringify(googleOut.config.tools), JSON.stringify(googleTools.config.tools), "Google's config.tools are not rewritten");
+assert.equal(googleOut.config.systemInstruction, "＜|image|＞", "the rest of Google's config is");
+const piTools = { messages: [{ role: "user", content: [{ type: "text", text: "<|image|>" }, { type: "image", data: "AAAA", mimeType: "image/png" }], toolsAdded: [{ name: "pick", description: "<|image|>", parameters: { enum: ["<|image|>"] } }] }] };
+const piOut = hook(piTools) as typeof piTools;
+assert.equal(JSON.stringify(piOut.messages[0].toolsAdded), JSON.stringify(piTools.messages[0].toolsAdded), "pi-messages toolsAdded are not rewritten");
+assert.ok(!JSON.stringify(piOut.messages[0].content).includes("<|image|>"), "the message content is");
 console.log("helper and hook: ok");
 
 // The session guard composes with Pi's own hook (extensions' before_provider_request).
@@ -106,6 +126,10 @@ assert.ok(!JSON.stringify(markedOut).includes("<|image|>"), "and that payload is
 const passthrough = { agent: { onPayload: async () => undefined } } as { agent: { onPayload: (payload: unknown, model?: unknown) => Promise<unknown> } };
 guardPiSessionProviderPayloads(passthrough);
 assert.ok(!JSON.stringify(await passthrough.agent.onPayload(imagePayload)).includes("<|image|>"), "undefined from the prior hook keeps the original payload");
+const injecting = { agent: { onPayload: async (payload: unknown) => ({ ...(payload as object), extra: "added by an extension: <|image|>" }) } };
+guardPiSessionProviderPayloads(injecting);
+const injected = (await injecting.agent.onPayload(imagePayload)) as { extra?: string };
+assert.equal(injected.extra, "added by an extension: ＜|image|＞", "the guard runs after the prior hook, so text it adds is neutralized too");
 console.log("session guard composition: ok");
 
 // The Pi adapter (Pi's own agent) registers the same hook.
