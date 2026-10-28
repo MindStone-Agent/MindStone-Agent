@@ -9,6 +9,7 @@ import {
   listTranscriptSessions,
   loadMindStoneConfig,
   logRecallUsage,
+  neutralizeProviderPayload,
   loadMindStoneIdentity,
   loadMindStoneSkillArtifact,
   recallMindStoneMemory,
@@ -113,6 +114,7 @@ type PiExtensionApi = {
   on(event: "session_compact", handler: (event: PiSessionCompactEvent, ctx: unknown) => Promise<void> | void): void;
   on(event: "session_tree", handler: (event: PiSessionTreeEvent, ctx: unknown) => Promise<void> | void): void;
   on(event: "before_agent_start", handler: (event: PiBeforeAgentStartEvent, ctx: unknown) => Promise<PiBeforeAgentStartResult | void> | PiBeforeAgentStartResult | void): void;
+  on(event: "before_provider_request", handler: (event: { type: "before_provider_request"; payload: unknown }, ctx: unknown) => Promise<unknown> | unknown): void;
   registerCommand(
     name: string,
     command: {
@@ -718,6 +720,10 @@ async function runConfigWizardCommand(args: string, ctx: PiCommandContext): Prom
 
 export default function mindstoneAgentPiAdapter(pi: PiExtensionApi): void {
   pi.on("before_agent_start", async (event) => injectPiAdapterPromptContext(event));
+
+  // Media-placeholder tokens in text plus an image in the request fail it with a 500 on some
+  // providers (core: provider/model-control-tokens.ts). The returned payload is what Pi sends.
+  pi.on("before_provider_request", async (event) => neutralizeProviderPayload(event.payload));
 
   pi.on("session_shutdown", async (event) => {
     recordPiAdapterShutdown(event);

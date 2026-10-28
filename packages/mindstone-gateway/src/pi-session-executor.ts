@@ -3,6 +3,7 @@ import { guardEnterpriseEndpoints } from "./enterprise-redirect-guard.js";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { neutralizeProviderPayload } from "@mindstone-agent/core";
 import type { AgentCompactionInput, AgentCompactionResult, ContextManagementPolicy, MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo, MindStonePiCompactionConfig, MindStonePiResumeCapConfig } from "@mindstone-agent/core";
 import { buildMindStonePiExtensionFactories, type MindStonePiExtensionFactory } from "./pi-context-pruning-extension.js";
 import { capPiSessionManagerOnLoad, resolvePiSessionResumeCapOptions } from "./pi-session-resume-cap.js";
@@ -274,7 +275,13 @@ type PiSessionEventCapture = {
   lastAssistantText?: string;
 };
 
+/** The part of Pi's Agent this file touches: its provider-payload hook, read on every run. */
+type PiAgentLike = {
+  onPayload?: (payload: unknown, model: unknown) => unknown;
+};
+
 type PiAgentSession = {
+  agent?: PiAgentLike;
   prompt(text: string, options?: Record<string, unknown>): Promise<void>;
   compact?(customInstructions?: string): Promise<unknown>;
   abort?(): Promise<void>;
@@ -292,6 +299,23 @@ function projectRootFromEnv(): string {
 
 async function importFromProject<T>(projectRoot: string, path: string): Promise<T> {
   return import(pathToFileURL(join(projectRoot, path)).href) as Promise<T>;
+}
+
+/**
+ * Neutralize media-placeholder tokens in the chat requests this session sends when they carry an
+ * image (see model-control-tokens.ts in core). It wraps Pi's own hook, so extensions'
+ * before_provider_request handlers run first, and sees the wire format: system prompt, history,
+ * tool results and tool-call arguments. The session's stored messages are not changed. Not used
+ * for compact: Pi's summarization request doesn't call onPayload, and it sends text only.
+ */
+export function guardPiSessionProviderPayloads(session: { agent?: PiAgentLike }): void {
+  const agent = session.agent;
+  if (!agent) return;
+  const prior = agent.onPayload;
+  agent.onPayload = async (payload, model) => {
+    const next = prior ? await prior(payload, model) : undefined;
+    return neutralizeProviderPayload(next === undefined ? payload : next);
+  };
 }
 
 async function loadPiSessionModules(projectRoot: string): Promise<PiSessionModules> {
@@ -1031,6 +1055,7 @@ export class PiSessionExecutor implements MindStoneModelProvider {
         excludeTools: this.#excludeTools,
         sessionStartEvent: { type: "session_start", reason: "startup" },
       });
+      guardPiSessionProviderPayloads(session);
       try {
         assertNoUnexpectedPiBuiltinTools(session as { getAllTools?(): PiToolInfoLike[] }, this.#builtinTools);
       } catch (error) {
