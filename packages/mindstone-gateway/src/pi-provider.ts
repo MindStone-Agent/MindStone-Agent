@@ -2,6 +2,7 @@ import { chmodSync, existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { guardEnterpriseEndpoints } from "./enterprise-redirect-guard.js";
+import { neutralizeProviderPayload } from "@mindstone-agent/core";
 import type { MindStoneChatRequest, MindStoneChatResult, MindStoneModelInfo, MindStoneModelProvider, MindStoneProviderInfo } from "@mindstone-agent/core";
 
 type PiModel = {
@@ -277,6 +278,7 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
       }, {
         signal: controller.signal,
         maxTokens: 64,
+        onPayload: neutralizeProviderPayload,
       });
       const latencyMs = Date.now() - started;
       const record = (assistant ?? {}) as { stopReason?: unknown; errorMessage?: unknown };
@@ -308,6 +310,8 @@ export class PiMindStoneProvider implements MindStoneModelProvider {
     const assistant = await runtime.completeSimple(piModel, context, {
       signal: request.signal,
       sessionId: request.sessionKey,
+      // Control tokens in the text break requests that carry an image (model-control-tokens.ts).
+      onPayload: neutralizeProviderPayload,
     });
 
     return {
