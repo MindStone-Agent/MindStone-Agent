@@ -302,10 +302,11 @@ async function importFromProject<T>(projectRoot: string, path: string): Promise<
 }
 
 /**
- * Neutralize model control tokens in every provider request this session sends (see
- * model-control-tokens.ts in core). It wraps Pi's own hook, so extensions' before_provider_request
- * handlers still run first, and covers the system prompt, history, tool results and tool-call
- * arguments in the wire format. The session's stored messages are not changed.
+ * Neutralize media-placeholder tokens in the chat requests this session sends when they carry an
+ * image (see model-control-tokens.ts in core). It wraps Pi's own hook, so extensions'
+ * before_provider_request handlers run first, and sees the wire format: system prompt, history,
+ * tool results and tool-call arguments. The session's stored messages are not changed. Not used
+ * for compact: Pi's summarization request doesn't call onPayload, and it sends text only.
  */
 export function guardPiSessionProviderPayloads(session: { agent?: PiAgentLike }): void {
   const agent = session.agent;
@@ -972,7 +973,6 @@ export class PiSessionExecutor implements MindStoneModelProvider {
         excludeTools: this.#excludeTools,
         sessionStartEvent: { type: "session_start", reason: "startup" },
       });
-      guardPiSessionProviderPayloads(session);
       try {
         assertNoUnexpectedPiBuiltinTools(session as { getAllTools?(): PiToolInfoLike[] }, this.#builtinTools);
       } catch (error) {
